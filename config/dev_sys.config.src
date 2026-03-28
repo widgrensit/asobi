@@ -52,5 +52,8 @@
             refresh_ttl => 2592000
         }}
     ]},
+    {shigoto, [
+        {pool, default}
+    ]},
     {pg, [{scope, [nova_scope, arizona_pubsub, asobi_presence, asobi_chat]}]}
 ].
