@@ -12,10 +12,7 @@
         arizona_core,
         arizona_nova,
         nova_auth,
-        shigoto,
-        opentelemetry_kura,
-        opentelemetry_nova,
-        opentelemetry_shigoto
+        shigoto
     ]},
     {env, []},
     {modules, []},

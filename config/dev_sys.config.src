@@ -53,7 +53,7 @@
         }}
     ]},
     {shigoto, [
-        {pool, default}
+        {pool, asobi_repo}
     ]},
     {pg, [{scope, [nova_scope, arizona_pubsub, asobi_presence, asobi_chat]}]}
 ].
