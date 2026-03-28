@@ -15,8 +15,6 @@ jobs:
     with:
       version-file: '.tool-versions'
       enable-audit: true
-      enable-sbom: true
-      enable-sbom-scan: true
       enable-dependency-submission: true
       enable-summary: true
     secrets: inherit
