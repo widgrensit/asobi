@@ -1,0 +1,15 @@
+-sname 'asobi'
+
+-setcookie asobi_cookie
+
++K true
++A30
+
+## Enable scheduler binding for better performance
++sbt db
+
+## Increase process limit for game sessions
++P 1048576
+
+## Increase port limit
++Q 65536

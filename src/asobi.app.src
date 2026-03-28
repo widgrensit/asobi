@@ -1,0 +1,24 @@
+{application, asobi, [
+    {description, "Game backend platform built on Nova/OTP"},
+    {vsn, git},
+    {registered, []},
+    {mod, {asobi_app, []}},
+    {included_applications, []},
+    {applications, [
+        kernel,
+        stdlib,
+        nova,
+        kura,
+        arizona_core,
+        arizona_nova,
+        nova_auth,
+        shigoto,
+        opentelemetry_kura,
+        opentelemetry_nova,
+        opentelemetry_shigoto
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/widgrensit/asobi"}]}
+]}.

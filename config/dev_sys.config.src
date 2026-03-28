@@ -1,0 +1,56 @@
+[
+    {kernel, [
+        {logger_level, debug},
+        {logger, [
+            {handler, default, logger_std_h, #{
+                formatter => {nova_jsonlogger, #{
+                    map_depth => 3,
+                    term_depth => 50
+                }}
+            }}
+        ]}
+    ]},
+    {nova, [
+        {use_stacktrace, true},
+        {environment, dev},
+        {cowboy_configuration, #{
+            port => 8082
+        }},
+        {dev_mode, true},
+        {bootstrap_application, asobi},
+        {json_lib, json}
+    ]},
+    {asobi, [
+        {asobi_repo, #{
+            database => <<"asobi_dev">>,
+            hostname => <<"localhost">>,
+            port => 5432,
+            username => <<"postgres">>,
+            password => <<"postgres">>,
+            pool_size => 10
+        }},
+        {plugins, [
+            {pre_request, nova_request_plugin, #{
+                decode_json_body => true,
+                parse_qs => true
+            }},
+            {pre_request, nova_correlation_plugin, #{}},
+            {pre_request, nova_cors_plugin, #{
+                allow_origins => <<"*">>
+            }}
+        ]},
+        {game_modes, #{
+            %% Map mode names to game behaviour modules
+            %% ~"default" => my_game_module
+        }},
+        {matchmaker, #{
+            tick_interval => 1000,
+            max_wait_seconds => 60
+        }},
+        {session, #{
+            token_ttl => 900,
+            refresh_ttl => 2592000
+        }}
+    ]},
+    {pg, [{scope, [nova_scope, arizona_pubsub, asobi_presence, asobi_chat]}]}
+].

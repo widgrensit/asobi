@@ -1,0 +1,27 @@
+-module(asobi_tournament_sup).
+-behaviour(supervisor).
+
+-export([start_link/0, start_tournament/1]).
+-export([init/1]).
+
+-spec start_link() -> {ok, pid()}.
+start_link() ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+-spec start_tournament(map()) -> {ok, pid()} | {error, term()}.
+start_tournament(Tournament) ->
+    supervisor:start_child(?MODULE, [Tournament]).
+
+-spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
+init([]) ->
+    SupFlags = #{
+        strategy => simple_one_for_one,
+        intensity => 5,
+        period => 60
+    },
+    ChildSpec = #{
+        id => asobi_tournament_server,
+        start => {asobi_tournament_server, start_link, []},
+        restart => temporary
+    },
+    {ok, {SupFlags, [ChildSpec]}}.

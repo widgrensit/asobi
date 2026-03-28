@@ -1,0 +1,9 @@
+_build/
+_checkouts/
+rebar.lock
+*.beam
+*.plt
+*.o
+ebin/
+log/
+.rebar3/
