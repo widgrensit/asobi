@@ -14,13 +14,11 @@ jobs:
       pull-requests: write
     with:
       version-file: '.tool-versions'
-      enable-ct: true
       enable-audit: true
       enable-sbom: true
       enable-sbom-scan: true
       enable-dependency-submission: true
       enable-summary: true
-      extra-services-compose: 'docker-compose.yml'
     secrets: inherit
 
   notify-arena:
