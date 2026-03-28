@@ -6,14 +6,12 @@ on:
   pull_request:
     branches: [main]
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   ci:
-    name: Erlang CI
     uses: Taure/erlang-ci/.github/workflows/ci.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
     with:
       version-file: '.tool-versions'
       enable-ct: true
@@ -23,6 +21,7 @@ jobs:
       enable-dependency-submission: true
       enable-summary: true
       extra-services-compose: 'docker-compose.yml'
+    secrets: inherit
 
   notify-arena:
     name: Notify asobi-arena
