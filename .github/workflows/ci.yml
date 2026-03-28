@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ci:
+    name: Erlang CI
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@main
+    with:
+      version-file: '.tool-versions'
+      enable-ct: true
+      enable-audit: true
+      enable-sbom: true
+      enable-sbom-scan: true
+      enable-dependency-submission: true
+      enable-summary: true
+      extra-services-compose: 'docker-compose.yml'
+
+  notify-arena:
+    name: Notify asobi-arena
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Trigger asobi-arena CI
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ secrets.ARENA_DISPATCH_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: 'widgrensit',
+              repo: 'asobi-arena',
+              event_type: 'asobi-updated',
+              client_payload: {
+                sha: context.sha,
+                ref: context.ref
+              }
+            });
