@@ -19,7 +19,7 @@ auth_routes() ->
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true
             }},
-            {pre_request, nova_cors_plugin, #{allow_origins => <<"*">>}},
+            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
             {pre_request, nova_correlation_plugin, #{}}
         ],
         routes => [
@@ -38,7 +38,7 @@ api_routes() ->
                 decode_json_body => true,
                 parse_qs => true
             }},
-            {pre_request, nova_cors_plugin, #{allow_origins => <<"*">>}},
+            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
             {pre_request, nova_correlation_plugin, #{}}
         ],
         routes => [

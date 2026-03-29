@@ -31,18 +31,20 @@ init(Tournament) ->
     Now = erlang:system_time(second),
     StartSec = calendar:datetime_to_gregorian_seconds(StartAt) - 62167219200,
     EndSec = calendar:datetime_to_gregorian_seconds(EndAt) - 62167219200,
-    case StartSec > Now of
-        true ->
-            erlang:send_after((StartSec - Now) * 1000, self(), start_tournament);
-        false ->
-            self() ! start_tournament
-    end,
-    case EndSec > Now of
-        true ->
-            erlang:send_after((EndSec - Now) * 1000, self(), end_tournament);
-        false ->
-            ok
-    end,
+    _ =
+        case StartSec > Now of
+            true ->
+                erlang:send_after((StartSec - Now) * 1000, self(), start_tournament);
+            false ->
+                self() ! start_tournament
+        end,
+    _ =
+        case EndSec > Now of
+            true ->
+                erlang:send_after((EndSec - Now) * 1000, self(), end_tournament);
+            false ->
+                ok
+        end,
     {ok, _} = asobi_leaderboard_sup:start_board(BoardId),
     {ok, Tournament#{participants => [], started => false}}.
 

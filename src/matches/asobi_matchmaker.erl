@@ -4,8 +4,9 @@
 -export([start_link/0, add/2, remove/2, get_ticket/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-dialyzer({no_match, spawn_matches/2}).
+
 -define(DEFAULT_TICK, 1000).
--define(DEFAULT_MAX_WAIT, 60000).
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
@@ -48,9 +49,9 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) ->
     },
     {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}};
 handle_call({get_ticket, TicketId}, _From, #{tickets := Tickets} = State) ->
-    case maps:find(TicketId, Tickets) of
-        {ok, Ticket} -> {reply, {ok, Ticket}, State};
-        error -> {reply, {error, not_found}, State}
+    case Tickets of
+        #{TicketId := Ticket} -> {reply, {ok, Ticket}, State};
+        _ -> {reply, {error, not_found}, State}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -181,7 +182,7 @@ spawn_matches([Group | Rest], Failed) ->
                     MatchInfo = asobi_match_server:get_info(MatchPid),
                     lists:foreach(
                         fun(PlayerId) ->
-                            asobi_match_server:join(MatchPid, PlayerId),
+                            _ = asobi_match_server:join(MatchPid, PlayerId),
                             asobi_presence:send(
                                 PlayerId,
                                 {match_event, matched, #{
@@ -219,9 +220,9 @@ spawn_matches([Group | Rest], Failed) ->
 -spec resolve_game_module(binary()) -> {ok, module()} | {error, not_found}.
 resolve_game_module(Mode) ->
     Modes = application:get_env(asobi, game_modes, #{}),
-    case maps:find(Mode, Modes) of
-        {ok, Mod} -> {ok, Mod};
-        error -> {error, not_found}
+    case Modes of
+        #{Mode := Mod} -> {ok, Mod};
+        _ -> {error, not_found}
     end.
 
 -spec notify_expired([map()]) -> ok.
