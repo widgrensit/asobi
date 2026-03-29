@@ -3,8 +3,6 @@
 
 -export([
     otp_app/0,
-    init/1,
-    start/0,
     all/1,
     get/2,
     insert/1,
@@ -24,14 +22,6 @@
 -spec otp_app() -> asobi.
 otp_app() -> asobi.
 
--spec init(map()) -> map().
-init(Config) ->
-    Config#{
-        password => list_to_binary(os:getenv("ASOBI_DB_PASSWORD", "postgres"))
-    }.
-
--spec start() -> {ok, pid()} | {error, term()}.
-start() -> kura_repo_worker:start(?MODULE).
 
 -spec all(kura_query:query()) -> {ok, [map()]} | {error, term()}.
 all(Q) -> kura_repo_worker:all(?MODULE, Q).

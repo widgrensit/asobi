@@ -13,7 +13,8 @@
 all() -> [submit_and_top, rank_query, around_query, score_update].
 
 init_per_suite(Config) ->
-    application:ensure_all_started(asobi),
+    {ok, _} = application:ensure_all_started(asobi),
+
     Config.
 
 end_per_suite(Config) ->

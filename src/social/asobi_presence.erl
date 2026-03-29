@@ -48,7 +48,6 @@ online_count() ->
 
 -spec init([]) -> {ok, #{}}.
 init([]) ->
-    pg:start_link(?PG_SCOPE),
     {ok, #{}}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.

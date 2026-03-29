@@ -1,6 +1,6 @@
--sname 'asobi'
+-name asobi@${ASOBI_NODE_HOST}
 
--setcookie asobi_cookie
+-setcookie ${ERLANG_COOKIE}
 
 +K true
 +A30

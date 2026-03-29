@@ -12,7 +12,7 @@
 all() -> [ws_connect_invalid_token, ws_heartbeat, ws_unknown_type].
 
 init_per_suite(Config) ->
-    nova_test:start(asobi) ++ Config.
+    asobi_test_helpers:start(Config).
 
 end_per_suite(Config) ->
     nova_test:stop(Config).

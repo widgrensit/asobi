@@ -23,20 +23,18 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
-    Config0 = nova_test:start(asobi) ++ Config,
+    Config0 = asobi_test_helpers:start(Config),
+    U1 = asobi_test_helpers:unique_username(~"social_p1"),
+    U2 = asobi_test_helpers:unique_username(~"social_p2"),
     {ok, R1} = nova_test:post(
         ~"/api/v1/auth/register",
-        #{
-            json => #{~"username" => ~"social_p1", ~"password" => ~"testpass123"}
-        },
+        #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
     B1 = nova_test:json(R1),
     {ok, R2} = nova_test:post(
         ~"/api/v1/auth/register",
-        #{
-            json => #{~"username" => ~"social_p2", ~"password" => ~"testpass123"}
-        },
+        #{json => #{~"username" => U2, ~"password" => ~"testpass123"}},
         Config0
     ),
     B2 = nova_test:json(R2),

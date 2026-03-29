@@ -16,6 +16,8 @@ init([]) ->
         period => 60
     },
     Children = [
+        rate_limit_spec(),
+        cluster_spec(),
         player_session_sup(),
         match_sup(),
         matchmaker_spec(),
@@ -71,4 +73,16 @@ presence_spec() ->
     #{
         id => asobi_presence,
         start => {asobi_presence, start_link, []}
+    }.
+
+rate_limit_spec() ->
+    #{
+        id => asobi_rate_limit_server,
+        start => {asobi_rate_limit_server, start_link, []}
+    }.
+
+cluster_spec() ->
+    #{
+        id => asobi_cluster,
+        start => {asobi_cluster, start_link, []}
     }.

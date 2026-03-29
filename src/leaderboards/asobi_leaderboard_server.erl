@@ -125,16 +125,19 @@ entries_around(Table, Key, N) ->
     StartRank = count_before(Table, element(1, hd(Entries))) + 1,
     assign_ranks(Entries, StartRank, []).
 
-walk_back(_Table, _Key, 0) ->
-    [];
 walk_back(Table, Key, N) ->
+    walk_back(Table, Key, N, []).
+
+walk_back(_Table, _Key, 0, Acc) ->
+    Acc;
+walk_back(Table, Key, N, Acc) ->
     case ets:prev(Table, Key) of
         '$end_of_table' ->
-            [];
+            Acc;
         PrevKey ->
             {_, PlayerId} = PrevKey,
             [{_, Score}] = ets:lookup(Table, PrevKey),
-            walk_back(Table, PrevKey, N - 1) ++ [{PlayerId, Score, 0}]
+            walk_back(Table, PrevKey, N - 1, [{PlayerId, Score, 0} | Acc])
     end.
 
 walk_forward(_Table, _Key, 0) ->
@@ -165,7 +168,7 @@ flush_entries(BoardId, Table, {_NegScore, PlayerId} = Key) ->
         kura_query:where(kura_query:from(asobi_leaderboard_entry), {leaderboard_id, BoardId}),
         {player_id, PlayerId}
     ),
-    case asobi_repo:all(Q) of
+    Result = case asobi_repo:all(Q) of
         {ok, [Existing]} ->
             CS = kura_changeset:cast(
                 asobi_leaderboard_entry,
@@ -173,7 +176,7 @@ flush_entries(BoardId, Table, {_NegScore, PlayerId} = Key) ->
                 #{score => Score},
                 [score]
             ),
-            _ = asobi_repo:update(CS);
+            asobi_repo:update(CS);
         {ok, []} ->
             CS = kura_changeset:cast(
                 asobi_leaderboard_entry,
@@ -186,8 +189,18 @@ flush_entries(BoardId, Table, {_NegScore, PlayerId} = Key) ->
                 },
                 [leaderboard_id, player_id, score, sub_score]
             ),
-            _ = asobi_repo:insert(CS);
-        _ ->
-            ok
+            asobi_repo:insert(CS);
+        {error, Reason} ->
+            {error, Reason}
+    end,
+    case Result of
+        {ok, _} -> ok;
+        {error, FlushErr} ->
+            logger:error(#{
+                msg => ~"leaderboard flush failed",
+                board_id => BoardId,
+                player_id => PlayerId,
+                error => FlushErr
+            })
     end,
     flush_entries(BoardId, Table, ets:next(Table, Key)).

@@ -20,15 +20,17 @@
         {bootstrap_application, asobi},
         {json_lib, json}
     ]},
+    {kura, [
+        {repo, asobi_repo},
+        {host, "localhost"},
+        {port, 5432},
+        {database, "asobi_dev"},
+        {user, "postgres"},
+        {password, "postgres"},
+        {pool_size, 10}
+    ]},
     {asobi, [
-        {asobi_repo, #{
-            database => <<"asobi_dev">>,
-            hostname => <<"localhost">>,
-            port => 5432,
-            username => <<"postgres">>,
-            password => <<"postgres">>,
-            pool_size => 10
-        }},
+        {nova_apps, [nova_resilience]},
         {plugins, [
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
@@ -55,5 +57,21 @@
     {shigoto, [
         {pool, asobi_repo}
     ]},
-    {pg, [{scope, [nova_scope, arizona_pubsub, asobi_presence, asobi_chat]}]}
+    {nova_resilience, [
+        {dependencies, [
+            #{name => primary_db,
+              type => database,
+              adapter => kura,
+              repo => asobi_repo,
+              critical => true,
+              breaker => #{failure_threshold => 5, wait_duration => 30000},
+              bulkhead => #{max_concurrent => 25},
+              shutdown_priority => 2}
+        ]},
+        {health_check_interval, 10000},
+        {vm_checks, true},
+        {gate_enabled, false},
+        {health_prefix, ~""}
+    ]},
+    {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].

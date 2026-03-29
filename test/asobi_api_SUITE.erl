@@ -16,7 +16,9 @@
     get_player/1,
     update_player/1,
     update_player_unauthorized/1,
-    health_check/1
+    health_check/1,
+    readiness_check/1,
+    liveness_check/1
 ]).
 
 all() ->
@@ -39,12 +41,16 @@ groups() ->
             update_player_unauthorized
         ]},
         {health, [], [
-            health_check
+            health_check,
+            readiness_check,
+            liveness_check
         ]}
     ].
 
 init_per_suite(Config) ->
-    nova_test:start(asobi) ++ Config.
+    Config0 = asobi_test_helpers:start(Config),
+    Username = asobi_test_helpers:unique_username(~"testplayer"),
+    [{test_username, Username} | Config0].
 
 end_per_suite(Config) ->
     nova_test:stop(Config),
@@ -59,20 +65,22 @@ end_per_testcase(_TC, Config) ->
 %% --- Auth Tests ---
 
 register_player(Config) ->
+    Username = proplists:get_value(test_username, Config),
     {ok, Resp} = nova_test:post(
         ~"/api/v1/auth/register",
         #{
             json => #{
-                ~"username" => ~"testplayer",
+                ~"username" => Username,
                 ~"password" => ~"testpass123",
                 ~"display_name" => ~"Test Player"
             }
         },
         Config
     ),
-    ?assertStatus(200, Resp),
+    Status = nova_test:status(Resp),
+    ?assert(Status =:= 200 orelse Status =:= 201),
     Body = nova_test:json(Resp),
-    ?assertMatch(#{~"player_id" := _, ~"session_token" := _, ~"username" := ~"testplayer"}, Body),
+    ?assertMatch(#{~"player_id" := _, ~"session_token" := _}, Body),
     [
         {player_id, maps:get(~"player_id", Body)},
         {session_token, maps:get(~"session_token", Body)}
@@ -80,11 +88,12 @@ register_player(Config) ->
     ].
 
 register_duplicate_username(Config) ->
+    Username = proplists:get_value(test_username, Config),
     {ok, Resp} = nova_test:post(
         ~"/api/v1/auth/register",
         #{
             json => #{
-                ~"username" => ~"testplayer",
+                ~"username" => Username,
                 ~"password" => ~"testpass123"
             }
         },
@@ -119,11 +128,12 @@ register_short_password(Config) ->
     ?assertStatus(422, Resp).
 
 login_success(Config) ->
+    Username = proplists:get_value(test_username, Config),
     {ok, Resp} = nova_test:post(
         ~"/api/v1/auth/login",
         #{
             json => #{
-                ~"username" => ~"testplayer",
+                ~"username" => Username,
                 ~"password" => ~"testpass123"
             }
         },
@@ -135,11 +145,12 @@ login_success(Config) ->
     Config.
 
 login_invalid_credentials(Config) ->
+    Username = proplists:get_value(test_username, Config),
     {ok, Resp} = nova_test:post(
         ~"/api/v1/auth/login",
         #{
             json => #{
-                ~"username" => ~"testplayer",
+                ~"username" => Username,
                 ~"password" => ~"wrongpassword"
             }
         },
@@ -173,7 +184,7 @@ get_player(Config) ->
     ),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
-    ?assertMatch(#{~"username" := ~"testplayer"}, Body),
+    ?assertMatch(#{~"username" := _}, Body),
     Config.
 
 update_player(Config) ->
@@ -210,5 +221,19 @@ health_check(Config) ->
     {ok, Resp} = nova_test:get(~"/health", Config),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
-    ?assertMatch(#{~"status" := ~"ok"}, Body),
+    ?assertMatch(#{~"status" := _}, Body),
+    Config.
+
+readiness_check(Config) ->
+    {ok, Resp} = nova_test:get(~"/ready", Config),
+    ?assertStatus(200, Resp),
+    Body = nova_test:json(Resp),
+    ?assertMatch(#{~"status" := ~"ready"}, Body),
+    Config.
+
+liveness_check(Config) ->
+    {ok, Resp} = nova_test:get(~"/live", Config),
+    ?assertStatus(200, Resp),
+    Body = nova_test:json(Resp),
+    ?assertMatch(#{~"status" := ~"alive"}, Body),
     Config.

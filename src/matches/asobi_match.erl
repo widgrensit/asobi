@@ -21,7 +21,7 @@
     {ok, GameState1 :: term()}.
 
 -callback handle_input(PlayerId :: binary(), Input :: map(), GameState :: term()) ->
-    {ok, GameState1 :: term()}.
+    {ok, GameState1 :: term()} | {error, Reason :: term()}.
 
 -callback tick(GameState :: term()) ->
     {ok, GameState1 :: term()}
