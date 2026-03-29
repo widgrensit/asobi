@@ -10,6 +10,9 @@
             }}
         ]}
     ]},
+    {nova_auth, [
+        {pbkdf2_iterations, 100000}
+    ]},
     {nova, [
         {use_stacktrace, false},
         {environment, prod},
