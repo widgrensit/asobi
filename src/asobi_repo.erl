@@ -3,14 +3,13 @@
 
 -export([
     otp_app/0,
-    init/1,
-    start/0,
     all/1,
     get/2,
     insert/1,
     insert/2,
     update/1,
     delete/1,
+    delete/2,
     update_all/2,
     delete_all/1,
     insert_all/2,
@@ -23,15 +22,6 @@
 
 -spec otp_app() -> asobi.
 otp_app() -> asobi.
-
--spec init(map()) -> map().
-init(Config) ->
-    Config#{
-        password => list_to_binary(os:getenv("ASOBI_DB_PASSWORD", "postgres"))
-    }.
-
--spec start() -> {ok, pid()} | {error, term()}.
-start() -> kura_repo_worker:start(?MODULE).
 
 -spec all(kura_query:query()) -> {ok, [map()]} | {error, term()}.
 all(Q) -> kura_repo_worker:all(?MODULE, Q).
@@ -50,6 +40,11 @@ update(CS) -> kura_repo_worker:update(?MODULE, CS).
 
 -spec delete(kura_changeset:changeset()) -> {ok, map()} | {error, term()}.
 delete(CS) -> kura_repo_worker:delete(?MODULE, CS).
+
+-spec delete(module(), map()) -> {ok, map()} | {error, term()}.
+delete(Schema, Record) ->
+    CS = kura_changeset:cast(Schema, Record, #{}, []),
+    kura_repo_worker:delete(?MODULE, CS).
 
 -spec update_all(kura_query:query(), map()) -> {ok, non_neg_integer()}.
 update_all(Q, Updates) -> kura_repo_worker:update_all(?MODULE, Q, Updates).

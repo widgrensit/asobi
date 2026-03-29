@@ -5,7 +5,6 @@
 
 -spec start(application:start_type(), term()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
-    ok = asobi_repo:start(),
     case kura_migrator:migrate(asobi_repo) of
         {ok, Applied} ->
             logger:notice(#{msg => <<"migrations_applied">>, versions => Applied});

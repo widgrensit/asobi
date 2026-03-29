@@ -208,8 +208,17 @@ handle_leave(PlayerId, #{players := Players, game_module := Mod, game_state := G
 apply_inputs(_Mod, [], GS) ->
     GS;
 apply_inputs(Mod, [{PlayerId, Input} | Rest], GS) ->
-    {ok, GS1} = Mod:handle_input(PlayerId, Input, GS),
-    apply_inputs(Mod, Rest, GS1).
+    case Mod:handle_input(PlayerId, Input, GS) of
+        {ok, GS1} ->
+            apply_inputs(Mod, Rest, GS1);
+        {error, Reason} ->
+            logger:warning(#{
+                msg => ~"game input rejected",
+                player_id => PlayerId,
+                reason => Reason
+            }),
+            apply_inputs(Mod, Rest, GS)
+    end.
 
 broadcast_state(#{players := Players, game_module := Mod, game_state := GS}) ->
     maps:foreach(

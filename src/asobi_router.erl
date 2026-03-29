@@ -8,8 +8,7 @@ routes(_Environment) ->
     [
         auth_routes(),
         api_routes(),
-        ws_routes(),
-        health_routes()
+        ws_routes()
     ].
 
 auth_routes() ->
@@ -139,14 +138,5 @@ ws_routes() ->
         security => false,
         routes => [
             {~"/ws", asobi_ws_handler, #{protocol => ws}}
-        ]
-    }.
-
-health_routes() ->
-    #{
-        prefix => ~"",
-        security => false,
-        routes => [
-            {~"/health", fun asobi_health_controller:check/1, #{methods => [get]}}
         ]
     }.

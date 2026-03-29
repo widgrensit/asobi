@@ -21,7 +21,7 @@ consume(
         {ok, #{player_id := PlayerId, quantity := Current} = Item} ->
             case Current >= Qty of
                 true when Current =:= Qty ->
-                    _ = asobi_repo:delete(Item),
+                    _ = asobi_repo:delete(asobi_player_item, Item),
                     {json, #{success => true, remaining_quantity => 0}};
                 true ->
                     CS = kura_changeset:cast(

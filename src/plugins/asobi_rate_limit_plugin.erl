@@ -58,28 +58,24 @@ peer_ip(Req) ->
 
 -spec check_rate({binary(), binary()}, pos_integer(), pos_integer()) -> ok | rate_limited.
 check_rate(Key, Limit, Window) ->
-    ensure_table(),
     Now = erlang:system_time(millisecond),
     case ets:lookup(?ETS_TABLE, Key) of
-        [{Key, Count, WindowStart}] when (Now - WindowStart) < Window ->
-            case Count >= Limit of
+        [{Key, _Count, WindowStart}] when (Now - WindowStart) >= Window ->
+            %% Window expired — reset
+            ets:insert(?ETS_TABLE, {Key, 1, Now}),
+            ok;
+        [{Key, _Count, _WindowStart}] ->
+            %% Active window — atomically increment and check
+            NewCount = ets:update_counter(?ETS_TABLE, Key, {2, 1}),
+            case NewCount > Limit of
                 true ->
+                    %% Over limit — roll back the increment
+                    ets:update_counter(?ETS_TABLE, Key, {2, -1}),
                     rate_limited;
                 false ->
-                    ets:update_counter(?ETS_TABLE, Key, {2, 1}),
                     ok
             end;
-        _ ->
+        [] ->
             ets:insert(?ETS_TABLE, {Key, 1, Now}),
-            ok
-    end.
-
--spec ensure_table() -> ok.
-ensure_table() ->
-    case ets:whereis(?ETS_TABLE) of
-        undefined ->
-            ?ETS_TABLE = ets:new(?ETS_TABLE, [named_table, public, set, {write_concurrency, true}]),
-            ok;
-        _ ->
             ok
     end.
