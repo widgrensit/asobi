@@ -9,9 +9,8 @@
         stdlib,
         nova,
         kura,
-        arizona_core,
-        arizona_nova,
         nova_auth,
+        nova_resilience,
         shigoto
     ]},
     {env, []},

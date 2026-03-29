@@ -7,12 +7,12 @@
 -spec start_link(map()) -> {ok, pid()}.
 start_link(Tournament) ->
     TournamentId = maps:get(id, Tournament),
-    gen_server:start_link({via, {global, {?MODULE, TournamentId}}}, ?MODULE, Tournament, []).
+    gen_server:start_link({global, {?MODULE, TournamentId}}, ?MODULE, Tournament, []).
 
 -spec get_info(binary()) -> {ok, map()} | {error, not_found}.
 get_info(TournamentId) ->
     try
-        gen_server:call({via, {global, {?MODULE, TournamentId}}}, get_info)
+        gen_server:call({global, {?MODULE, TournamentId}}, get_info)
     catch
         exit:{noproc, _} -> {error, not_found}
     end.
@@ -20,7 +20,7 @@ get_info(TournamentId) ->
 -spec join(binary(), binary()) -> ok | {error, term()}.
 join(TournamentId, PlayerId) ->
     try
-        gen_server:call({via, {global, {?MODULE, TournamentId}}}, {join, PlayerId})
+        gen_server:call({global, {?MODULE, TournamentId}}, {join, PlayerId})
     catch
         exit:{noproc, _} -> {error, not_found}
     end.
@@ -31,18 +31,20 @@ init(Tournament) ->
     Now = erlang:system_time(second),
     StartSec = calendar:datetime_to_gregorian_seconds(StartAt) - 62167219200,
     EndSec = calendar:datetime_to_gregorian_seconds(EndAt) - 62167219200,
-    case StartSec > Now of
-        true ->
-            erlang:send_after((StartSec - Now) * 1000, self(), start_tournament);
-        false ->
-            self() ! start_tournament
-    end,
-    case EndSec > Now of
-        true ->
-            erlang:send_after((EndSec - Now) * 1000, self(), end_tournament);
-        false ->
-            ok
-    end,
+    _ =
+        case StartSec > Now of
+            true ->
+                erlang:send_after((StartSec - Now) * 1000, self(), start_tournament);
+            false ->
+                self() ! start_tournament
+        end,
+    _ =
+        case EndSec > Now of
+            true ->
+                erlang:send_after((EndSec - Now) * 1000, self(), end_tournament);
+            false ->
+                ok
+        end,
     {ok, _} = asobi_leaderboard_sup:start_board(BoardId),
     {ok, Tournament#{participants => [], started => false}}.
 

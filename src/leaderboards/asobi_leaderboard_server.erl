@@ -6,23 +6,23 @@
 
 -spec start_link(binary()) -> {ok, pid()}.
 start_link(BoardId) ->
-    gen_server:start_link({via, {global, {?MODULE, BoardId}}}, ?MODULE, BoardId, []).
+    gen_server:start_link({global, {?MODULE, BoardId}}, ?MODULE, BoardId, []).
 
 -spec submit(binary(), binary(), integer()) -> ok.
 submit(BoardId, PlayerId, Score) ->
-    gen_server:cast({via, {global, {?MODULE, BoardId}}}, {submit, PlayerId, Score}).
+    gen_server:cast({global, {?MODULE, BoardId}}, {submit, PlayerId, Score}).
 
 -spec top(binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
 top(BoardId, N) ->
-    gen_server:call({via, {global, {?MODULE, BoardId}}}, {top, N}).
+    gen_server:call({global, {?MODULE, BoardId}}, {top, N}).
 
 -spec rank(binary(), binary()) -> {ok, pos_integer()} | {error, not_found}.
 rank(BoardId, PlayerId) ->
-    gen_server:call({via, {global, {?MODULE, BoardId}}}, {rank, PlayerId}).
+    gen_server:call({global, {?MODULE, BoardId}}, {rank, PlayerId}).
 
 -spec around(binary(), binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
 around(BoardId, PlayerId, N) ->
-    gen_server:call({via, {global, {?MODULE, BoardId}}}, {around, PlayerId, N}).
+    gen_server:call({global, {?MODULE, BoardId}}, {around, PlayerId, N}).
 
 -spec init(binary()) -> {ok, map()}.
 init(BoardId) ->
@@ -125,16 +125,19 @@ entries_around(Table, Key, N) ->
     StartRank = count_before(Table, element(1, hd(Entries))) + 1,
     assign_ranks(Entries, StartRank, []).
 
-walk_back(_Table, _Key, 0) ->
-    [];
 walk_back(Table, Key, N) ->
+    walk_back(Table, Key, N, []).
+
+walk_back(_Table, _Key, 0, Acc) ->
+    Acc;
+walk_back(Table, Key, N, Acc) ->
     case ets:prev(Table, Key) of
         '$end_of_table' ->
-            [];
+            Acc;
         PrevKey ->
             {_, PlayerId} = PrevKey,
             [{_, Score}] = ets:lookup(Table, PrevKey),
-            walk_back(Table, PrevKey, N - 1) ++ [{PlayerId, Score, 0}]
+            walk_back(Table, PrevKey, N - 1, [{PlayerId, Score, 0} | Acc])
     end.
 
 walk_forward(_Table, _Key, 0) ->
@@ -165,29 +168,41 @@ flush_entries(BoardId, Table, {_NegScore, PlayerId} = Key) ->
         kura_query:where(kura_query:from(asobi_leaderboard_entry), {leaderboard_id, BoardId}),
         {player_id, PlayerId}
     ),
-    case asobi_repo:all(Q) of
-        {ok, [Existing]} ->
-            CS = kura_changeset:cast(
-                asobi_leaderboard_entry,
-                Existing,
-                #{score => Score},
-                [score]
-            ),
-            _ = asobi_repo:update(CS);
-        {ok, []} ->
-            CS = kura_changeset:cast(
-                asobi_leaderboard_entry,
-                #{},
-                #{
-                    leaderboard_id => BoardId,
-                    player_id => PlayerId,
-                    score => Score,
-                    sub_score => 0
-                },
-                [leaderboard_id, player_id, score, sub_score]
-            ),
-            _ = asobi_repo:insert(CS);
-        _ ->
-            ok
+    Result =
+        case asobi_repo:all(Q) of
+            {ok, [Existing]} ->
+                CS = kura_changeset:cast(
+                    asobi_leaderboard_entry,
+                    Existing,
+                    #{score => Score},
+                    [score]
+                ),
+                asobi_repo:update(CS);
+            {ok, []} ->
+                CS = kura_changeset:cast(
+                    asobi_leaderboard_entry,
+                    #{},
+                    #{
+                        leaderboard_id => BoardId,
+                        player_id => PlayerId,
+                        score => Score,
+                        sub_score => 0
+                    },
+                    [leaderboard_id, player_id, score, sub_score]
+                ),
+                asobi_repo:insert(CS);
+            {error, Reason} ->
+                {error, Reason}
+        end,
+    case Result of
+        {ok, _} ->
+            ok;
+        {error, FlushErr} ->
+            logger:error(#{
+                msg => ~"leaderboard flush failed",
+                board_id => BoardId,
+                player_id => PlayerId,
+                error => FlushErr
+            })
     end,
     flush_entries(BoardId, Table, ets:next(Table, Key)).

@@ -29,7 +29,16 @@ get_or_create_wallet(PlayerId, Currency) ->
                 },
                 [player_id, currency, balance]
             ),
-            asobi_repo:insert(CS);
+            case asobi_repo:insert(CS) of
+                {ok, _} = Ok ->
+                    Ok;
+                {error, _} ->
+                    %% Unique constraint race — another process created it first
+                    case asobi_repo:all(Q) of
+                        {ok, [Wallet]} -> {ok, Wallet};
+                        Other -> Other
+                    end
+            end;
         {error, _} = Err ->
             Err
     end.

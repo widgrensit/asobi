@@ -15,7 +15,9 @@ join(PlayerId, #{players := Players} = State) ->
 leave(PlayerId, #{players := Players} = State) ->
     {ok, State#{players => maps:remove(PlayerId, Players)}}.
 
--spec handle_input(binary(), map(), map()) -> {ok, map()}.
+-spec handle_input(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+handle_input(_PlayerId, #{~"action" := ~"invalid"}, _State) ->
+    {error, invalid_action};
 handle_input(_PlayerId, _Input, State) ->
     {ok, State}.
 

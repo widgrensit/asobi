@@ -17,7 +17,7 @@ register(#{json := #{~"username" := Username, ~"password" := Password} = Params}
         {ok, Player} ->
             {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
             init_player_stats(maps:get(id, Player)),
-            {json, #{
+            {json, 200, #{}, #{
                 player_id => maps:get(id, Player),
                 session_token => Token,
                 username => maps:get(username, Player)
@@ -33,7 +33,7 @@ login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) ->
     case nova_auth_accounts:authenticate(asobi_auth, Username, Password) of
         {ok, Player} ->
             {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
-            {json, #{
+            {json, 200, #{}, #{
                 player_id => maps:get(id, Player),
                 session_token => Token,
                 username => maps:get(username, Player)
@@ -50,7 +50,7 @@ refresh(#{json := #{~"session_token" := OldToken}} = _Req) ->
         {ok, Player} ->
             nova_auth_session:delete_session_token(asobi_auth, OldToken),
             {ok, NewToken} = nova_auth_session:generate_session_token(asobi_auth, Player),
-            {json, #{
+            {json, 200, #{}, #{
                 player_id => maps:get(id, Player),
                 session_token => NewToken
             }};

@@ -11,6 +11,7 @@ table() -> ~"group_members".
 -spec fields() -> [#kura_field{}].
 fields() ->
     [
+        #kura_field{name = id, type = uuid, primary_key = true, nullable = false},
         #kura_field{name = group_id, type = uuid, nullable = false},
         #kura_field{name = player_id, type = uuid, nullable = false},
         #kura_field{name = role, type = string, default = ~"member", nullable = false},

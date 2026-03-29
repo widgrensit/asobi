@@ -4,8 +4,9 @@
 -export([start_link/0, add/2, remove/2, get_ticket/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-dialyzer({no_match, spawn_matches/2}).
+
 -define(DEFAULT_TICK, 1000).
--define(DEFAULT_MAX_WAIT, 60000).
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
@@ -48,9 +49,9 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) ->
     },
     {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}};
 handle_call({get_ticket, TicketId}, _From, #{tickets := Tickets} = State) ->
-    case maps:find(TicketId, Tickets) of
-        {ok, Ticket} -> {reply, {ok, Ticket}, State};
-        error -> {reply, {error, not_found}, State}
+    case Tickets of
+        #{TicketId := Ticket} -> {reply, {ok, Ticket}, State};
+        _ -> {reply, {error, not_found}, State}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -65,10 +66,16 @@ handle_cast(_Msg, State) ->
 handle_info(tick, #{tickets := Tickets, tick_interval := Interval, max_wait := MaxWait} = State) ->
     Now = erlang:system_time(millisecond),
     {Matched, Expired, Remaining} = process_tickets(Tickets, Now, MaxWait),
-    spawn_matches(Matched),
+    FailedGroups = spawn_matches(Matched),
     notify_expired(Expired),
+    %% Re-queue tickets from failed match spawns
+    Remaining1 = lists:foldl(
+        fun(T, Acc) -> Acc#{maps:get(id, T) => T} end,
+        Remaining,
+        lists:flatten(FailedGroups)
+    ),
     erlang:send_after(Interval, self(), tick),
-    {noreply, State#{tickets => Remaining}};
+    {noreply, State#{tickets => Remaining1}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -152,10 +159,13 @@ skill_window(#{submitted_at := Sub}) ->
     %% Start with ±200, expand by 50 every 5 seconds
     200 + (WaitSec div 5) * 50.
 
--spec spawn_matches([[map()]]) -> ok.
-spawn_matches([]) ->
-    ok;
-spawn_matches([Group | Rest]) ->
+-spec spawn_matches([[map()]]) -> [[map()]].
+spawn_matches(Groups) ->
+    spawn_matches(Groups, []).
+
+spawn_matches([], Failed) ->
+    Failed;
+spawn_matches([Group | Rest], Failed) ->
     PlayerIds = [maps:get(player_id, T) || T <- Group],
     Mode = maps:get(mode, hd(Group)),
     case resolve_game_module(Mode) of
@@ -169,35 +179,50 @@ spawn_matches([Group | Rest]) ->
             },
             case asobi_match_sup:start_match(Config) of
                 {ok, MatchPid} ->
-                    MatchId = asobi_match_server:get_info(MatchPid),
+                    MatchInfo = asobi_match_server:get_info(MatchPid),
                     lists:foreach(
                         fun(PlayerId) ->
-                            asobi_match_server:join(MatchPid, PlayerId),
+                            _ = asobi_match_server:join(MatchPid, PlayerId),
                             asobi_presence:send(
                                 PlayerId,
                                 {match_event, matched, #{
-                                    match_id => maps:get(match_id, MatchId, undefined),
+                                    match_id => maps:get(match_id, MatchInfo, undefined),
                                     players => PlayerIds
                                 }}
                             )
                         end,
                         PlayerIds
-                    );
-                _ ->
-                    ok
+                    ),
+                    spawn_matches(Rest, Failed);
+                {error, Reason} ->
+                    logger:error(#{
+                        msg => ~"match spawn failed, re-queuing players",
+                        mode => Mode,
+                        players => PlayerIds,
+                        error => Reason
+                    }),
+                    spawn_matches(Rest, [Group | Failed])
             end;
         {error, _} ->
             logger:warning(#{msg => ~"no game module for mode", mode => Mode}),
-            ok
-    end,
-    spawn_matches(Rest).
+            lists:foreach(
+                fun(PlayerId) ->
+                    asobi_presence:send(
+                        PlayerId,
+                        {match_event, matchmaker_failed, #{reason => ~"no_game_module"}}
+                    )
+                end,
+                PlayerIds
+            ),
+            spawn_matches(Rest, Failed)
+    end.
 
 -spec resolve_game_module(binary()) -> {ok, module()} | {error, not_found}.
 resolve_game_module(Mode) ->
     Modes = application:get_env(asobi, game_modes, #{}),
-    case maps:find(Mode, Modes) of
-        {ok, Mod} -> {ok, Mod};
-        error -> {error, not_found}
+    case Modes of
+        #{Mode := Mod} -> {ok, Mod};
+        _ -> {error, not_found}
     end.
 
 -spec notify_expired([map()]) -> ok.

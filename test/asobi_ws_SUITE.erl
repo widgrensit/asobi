@@ -12,18 +12,21 @@
 all() -> [ws_connect_invalid_token, ws_heartbeat, ws_unknown_type].
 
 init_per_suite(Config) ->
-    nova_test:start(asobi) ++ Config.
+    asobi_test_helpers:start(Config).
 
 end_per_suite(Config) ->
     nova_test:stop(Config).
 
 ws_connect_invalid_token(Config) ->
     {ok, Conn} = nova_test_ws:connect(~"/ws", Config),
-    nova_test_ws:send_json(Conn, #{
-        ~"type" => ~"session.connect",
-        ~"cid" => ~"1",
-        ~"payload" => #{~"token" => ~"invalid_token"}
-    }),
+    nova_test_ws:send_json(
+        #{
+            ~"type" => ~"session.connect",
+            ~"cid" => ~"1",
+            ~"payload" => #{~"token" => ~"invalid_token"}
+        },
+        Conn
+    ),
     {ok, Resp} = nova_test_ws:recv_json(Conn),
     ?assertMatch(#{~"type" := ~"error", ~"cid" := ~"1"}, Resp),
     nova_test_ws:close(Conn),
@@ -31,10 +34,13 @@ ws_connect_invalid_token(Config) ->
 
 ws_heartbeat(Config) ->
     {ok, Conn} = nova_test_ws:connect(~"/ws", Config),
-    nova_test_ws:send_json(Conn, #{
-        ~"type" => ~"session.heartbeat",
-        ~"cid" => ~"hb1"
-    }),
+    nova_test_ws:send_json(
+        #{
+            ~"type" => ~"session.heartbeat",
+            ~"cid" => ~"hb1"
+        },
+        Conn
+    ),
     {ok, Resp} = nova_test_ws:recv_json(Conn),
     ?assertMatch(#{~"type" := ~"session.heartbeat", ~"cid" := ~"hb1"}, Resp),
     nova_test_ws:close(Conn),
@@ -42,11 +48,14 @@ ws_heartbeat(Config) ->
 
 ws_unknown_type(Config) ->
     {ok, Conn} = nova_test_ws:connect(~"/ws", Config),
-    nova_test_ws:send_json(Conn, #{
-        ~"type" => ~"nonexistent.type",
-        ~"cid" => ~"u1",
-        ~"payload" => #{}
-    }),
+    nova_test_ws:send_json(
+        #{
+            ~"type" => ~"nonexistent.type",
+            ~"cid" => ~"u1",
+            ~"payload" => #{}
+        },
+        Conn
+    ),
     {ok, Resp} = nova_test_ws:recv_json(Conn),
     ?assertMatch(#{~"type" := ~"error", ~"payload" := #{~"reason" := ~"unknown_type"}}, Resp),
     nova_test_ws:close(Conn),

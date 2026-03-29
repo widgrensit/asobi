@@ -11,6 +11,7 @@ table() -> ~"leaderboard_entries".
 -spec fields() -> [#kura_field{}].
 fields() ->
     [
+        #kura_field{name = id, type = uuid, primary_key = true, nullable = false},
         #kura_field{name = leaderboard_id, type = string, nullable = false},
         #kura_field{name = player_id, type = uuid, nullable = false},
         #kura_field{name = score, type = bigint, nullable = false},

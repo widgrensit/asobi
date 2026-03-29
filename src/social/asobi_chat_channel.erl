@@ -4,6 +4,11 @@
 -export([start_link/2, join/2, leave/2, send_message/3, get_history/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+%% nova_pubsub spec says atom() but pg accepts any term as group name
+-dialyzer({nowarn_function, [join/2, leave/2, handle_cast/2]}).
+-dialyzer({no_match, start_new_channel/1}).
+-dialyzer({nowarn_function, persist_message/4}).
+
 -define(MAX_BUFFER, 100).
 -define(REGISTRY, asobi_chat_registry).
 
@@ -95,7 +100,11 @@ handle_info(_Info, State) ->
 
 -spec terminate(term(), map()) -> ok.
 terminate(_Reason, #{channel_id := ChannelId}) ->
-    catch ets:delete(?REGISTRY, ChannelId),
+    try
+        ets:delete(?REGISTRY, ChannelId)
+    catch
+        _:_ -> ok
+    end,
     ok;
 terminate(_Reason, _State) ->
     ok.
@@ -109,7 +118,11 @@ ensure_channel(ChannelId) ->
                 true ->
                     ok;
                 false ->
-                    catch ets:delete(?REGISTRY, ChannelId),
+                    try
+                        ets:delete(?REGISTRY, ChannelId)
+                    catch
+                        _:_ -> ok
+                    end,
                     start_new_channel(ChannelId)
             end;
         error ->
@@ -132,7 +145,8 @@ lookup(ChannelId) ->
 ensure_registry() ->
     case ets:whereis(?REGISTRY) of
         undefined ->
-            ets:new(?REGISTRY, [named_table, public, set, {read_concurrency, true}]);
+            _ = ets:new(?REGISTRY, [named_table, public, set, {read_concurrency, true}]),
+            ok;
         _ ->
             ok
     end.

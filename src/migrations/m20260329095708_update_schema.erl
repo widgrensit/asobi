@@ -1,4 +1,4 @@
--module(m20260328120656_update_schema).
+-module(m20260329095708_update_schema).
 -moduledoc false.
 -behaviour(kura_migration).
 -include_lib("kura/include/kura.hrl").
@@ -23,6 +23,7 @@ up() ->
             #kura_column{name = sent_at, type = utc_datetime, nullable = false}
         ]},
         {create_table, <<"cloud_saves">>, [
+            #kura_column{name = id, type = uuid, primary_key = true, nullable = false},
             #kura_column{
                 name = player_id,
                 type = uuid,
@@ -56,6 +57,7 @@ up() ->
             #kura_column{name = updated_at, type = utc_datetime, nullable = false}
         ]},
         {create_table, <<"group_members">>, [
+            #kura_column{name = id, type = uuid, primary_key = true, nullable = false},
             #kura_column{
                 name = group_id,
                 type = uuid,
@@ -102,6 +104,7 @@ up() ->
             #kura_column{name = updated_at, type = utc_datetime, nullable = false}
         ]},
         {create_table, <<"leaderboard_entries">>, [
+            #kura_column{name = id, type = uuid, primary_key = true, nullable = false},
             #kura_column{name = leaderboard_id, type = string, nullable = false},
             #kura_column{
                 name = player_id,
@@ -204,6 +207,7 @@ up() ->
             #kura_column{name = updated_at, type = utc_datetime, nullable = false}
         ]},
         {create_table, <<"storage">>, [
+            #kura_column{name = id, type = uuid, primary_key = true, nullable = false},
             #kura_column{name = collection, type = string, nullable = false},
             #kura_column{name = key, type = string, nullable = false},
             #kura_column{
@@ -277,7 +281,16 @@ up() ->
             #kura_column{name = balance, type = integer, nullable = false, default = 0},
             #kura_column{name = inserted_at, type = utc_datetime, nullable = false},
             #kura_column{name = updated_at, type = utc_datetime, nullable = false}
-        ]}
+        ]},
+        {create_index, <<"players">>, [username], #{unique => true}},
+        {create_index, <<"wallets">>, [player_id, currency], #{unique => true}},
+        {create_index, <<"friendships">>, [player_id, friend_id], #{unique => true}},
+        {create_index, <<"cloud_saves">>, [player_id, slot], #{unique => true}},
+        {create_index, <<"storage">>, [collection, key], #{unique => true}},
+        {create_index, <<"leaderboard_entries">>, [leaderboard_id, player_id], #{unique => true}},
+        {create_index, <<"leaderboard_entries">>, [leaderboard_id, score], #{}},
+        {create_index, <<"chat_messages">>, [channel_id, sent_at], #{}},
+        {create_index, <<"notifications">>, [player_id, sent_at], #{}}
     ].
 
 -spec down() -> [kura_migration:operation()].

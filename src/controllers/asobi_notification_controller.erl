@@ -34,7 +34,7 @@ mark_read(#{bindings := #{~"id" := NotifId}, auth_data := #{player_id := PlayerI
 delete(#{bindings := #{~"id" := NotifId}, auth_data := #{player_id := PlayerId}} = _Req) ->
     case asobi_repo:get(asobi_notification, NotifId) of
         {ok, #{player_id := PlayerId} = Notif} ->
-            _ = asobi_repo:delete(Notif),
+            _ = asobi_repo:delete(asobi_notification, Notif),
             {json, #{success => true}};
         {ok, _} ->
             {status, 403};

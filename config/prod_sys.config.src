@@ -10,25 +10,30 @@
             }}
         ]}
     ]},
+    {nova_auth, [
+        {pbkdf2_iterations, 100000}
+    ]},
     {nova, [
         {use_stacktrace, false},
         {environment, prod},
         {cowboy_configuration, #{
-            port => 8080
+            port => ${ASOBI_PORT}
         }},
         {dev_mode, false},
         {bootstrap_application, asobi},
         {json_lib, json}
     ]},
+    {kura, [
+        {repo, asobi_repo},
+        {host, "${ASOBI_DB_HOST}"},
+        {port, 5432},
+        {database, "${ASOBI_DB_NAME}"},
+        {user, "${ASOBI_DB_USER}"},
+        {password, "${ASOBI_DB_PASSWORD}"},
+        {pool_size, 20}
+    ]},
     {asobi, [
-        {asobi_repo, #{
-            database => <<"${ASOBI_DB_NAME}">>,
-            hostname => <<"${ASOBI_DB_HOST}">>,
-            port => 5432,
-            username => <<"${ASOBI_DB_USER}">>,
-            password => <<"${ASOBI_DB_PASSWORD}">>,
-            pool_size => 20
-        }},
+        {nova_apps, [nova_resilience]},
         {plugins, [
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
@@ -48,5 +53,24 @@
             refresh_ttl => 2592000
         }}
     ]},
-    {pg, [{scope, [nova_scope, arizona_pubsub, asobi_presence, asobi_chat]}]}
+    {nova_resilience, [
+        {dependencies, [
+            #{name => primary_db,
+              type => database,
+              adapter => kura,
+              repo => asobi_repo,
+              critical => true,
+              breaker => #{failure_threshold => 5, wait_duration => 30000},
+              bulkhead => #{max_concurrent => 50},
+              shutdown_priority => 2}
+        ]},
+        {health_check_interval, 10000},
+        {vm_checks, true},
+        {gate_enabled, true},
+        {gate_timeout, 30000},
+        {health_prefix, ~""},
+        {shutdown_delay, 5000},
+        {shutdown_drain_timeout, 15000}
+    ]},
+    {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].
