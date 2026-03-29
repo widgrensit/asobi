@@ -10,19 +10,33 @@ start_link(BoardId) ->
 
 -spec submit(binary(), binary(), integer()) -> ok.
 submit(BoardId, PlayerId, Score) ->
+    ensure_started(BoardId),
     gen_server:cast({global, {?MODULE, BoardId}}, {submit, PlayerId, Score}).
 
 -spec top(binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
 top(BoardId, N) ->
+    ensure_started(BoardId),
     gen_server:call({global, {?MODULE, BoardId}}, {top, N}).
 
 -spec rank(binary(), binary()) -> {ok, pos_integer()} | {error, not_found}.
 rank(BoardId, PlayerId) ->
+    ensure_started(BoardId),
     gen_server:call({global, {?MODULE, BoardId}}, {rank, PlayerId}).
 
 -spec around(binary(), binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
 around(BoardId, PlayerId, N) ->
+    ensure_started(BoardId),
     gen_server:call({global, {?MODULE, BoardId}}, {around, PlayerId, N}).
+
+-spec ensure_started(binary()) -> ok.
+ensure_started(BoardId) ->
+    case global:whereis_name({?MODULE, BoardId}) of
+        undefined ->
+            _ = asobi_leaderboard_sup:start_board(BoardId),
+            ok;
+        _Pid ->
+            ok
+    end.
 
 -spec init(binary()) -> {ok, map()}.
 init(BoardId) ->

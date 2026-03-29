@@ -77,7 +77,13 @@ handle_message(
                 undefined ->
                     {ok, State};
                 MatchPid ->
-                    asobi_match_server:handle_input(MatchPid, PlayerId, Payload),
+                    InputData =
+                        case maps:get(~"data", Payload, undefined) of
+                            undefined -> Payload;
+                            Bin when is_binary(Bin) -> json:decode(Bin);
+                            Other -> Other
+                        end,
+                    asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
                     {ok, State}
             end
     catch

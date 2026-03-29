@@ -183,6 +183,7 @@ spawn_matches([Group | Rest], Failed) ->
                     lists:foreach(
                         fun(PlayerId) ->
                             _ = asobi_match_server:join(MatchPid, PlayerId),
+                            asobi_presence:send(PlayerId, {match_joined, MatchPid}),
                             asobi_presence:send(
                                 PlayerId,
                                 {match_event, matched, #{
