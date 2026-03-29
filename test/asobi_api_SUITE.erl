@@ -3,8 +3,12 @@
 -include_lib("nova_test/include/nova_test.hrl").
 
 -export([
-    all/0, groups/0, init_per_suite/1, end_per_suite/1,
-    init_per_group/2, end_per_group/2
+    all/0,
+    groups/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_group/2,
+    end_per_group/2
 ]).
 -export([
     register_player/1,

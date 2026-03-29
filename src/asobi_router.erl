@@ -140,4 +140,3 @@ ws_routes() ->
             {~"/ws", asobi_ws_handler, #{protocol => ws}}
         ]
     }.
-

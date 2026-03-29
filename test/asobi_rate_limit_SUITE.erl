@@ -31,10 +31,13 @@ end_per_testcase(_TC, _Config) ->
 allows_under_limit(_Config) ->
     Key = {~"test_ip", ~"/api/test"},
     %% Insert with limit of 5
-    lists:foreach(fun(_) ->
-        ets:insert(?ETS_TABLE, {Key, 0, erlang:system_time(millisecond)}),
-        ets:update_counter(?ETS_TABLE, Key, {2, 1})
-    end, lists:seq(1, 3)),
+    lists:foreach(
+        fun(_) ->
+            ets:insert(?ETS_TABLE, {Key, 0, erlang:system_time(millisecond)}),
+            ets:update_counter(?ETS_TABLE, Key, {2, 1})
+        end,
+        lists:seq(1, 3)
+    ),
     [{Key, Count, _}] = ets:lookup(?ETS_TABLE, Key),
     ?assert(Count =< 5).
 

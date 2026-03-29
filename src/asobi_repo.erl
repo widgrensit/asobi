@@ -23,7 +23,6 @@
 -spec otp_app() -> asobi.
 otp_app() -> asobi.
 
-
 -spec all(kura_query:query()) -> {ok, [map()]} | {error, term()}.
 all(Q) -> kura_repo_worker:all(?MODULE, Q).
 

@@ -44,7 +44,9 @@ init_per_suite(Config) ->
         ~"/api/v1/groups",
         #{
             headers => [{~"authorization", iolist_to_binary([~"Bearer ", P1Token])}],
-            json => #{~"name" => ~"Join Test Guild", ~"description" => ~"For join test", ~"open" => true}
+            json => #{
+                ~"name" => ~"Join Test Guild", ~"description" => ~"For join test", ~"open" => true
+            }
         },
         Config0
     ),

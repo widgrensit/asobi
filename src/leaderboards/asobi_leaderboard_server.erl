@@ -168,33 +168,35 @@ flush_entries(BoardId, Table, {_NegScore, PlayerId} = Key) ->
         kura_query:where(kura_query:from(asobi_leaderboard_entry), {leaderboard_id, BoardId}),
         {player_id, PlayerId}
     ),
-    Result = case asobi_repo:all(Q) of
-        {ok, [Existing]} ->
-            CS = kura_changeset:cast(
-                asobi_leaderboard_entry,
-                Existing,
-                #{score => Score},
-                [score]
-            ),
-            asobi_repo:update(CS);
-        {ok, []} ->
-            CS = kura_changeset:cast(
-                asobi_leaderboard_entry,
-                #{},
-                #{
-                    leaderboard_id => BoardId,
-                    player_id => PlayerId,
-                    score => Score,
-                    sub_score => 0
-                },
-                [leaderboard_id, player_id, score, sub_score]
-            ),
-            asobi_repo:insert(CS);
-        {error, Reason} ->
-            {error, Reason}
-    end,
+    Result =
+        case asobi_repo:all(Q) of
+            {ok, [Existing]} ->
+                CS = kura_changeset:cast(
+                    asobi_leaderboard_entry,
+                    Existing,
+                    #{score => Score},
+                    [score]
+                ),
+                asobi_repo:update(CS);
+            {ok, []} ->
+                CS = kura_changeset:cast(
+                    asobi_leaderboard_entry,
+                    #{},
+                    #{
+                        leaderboard_id => BoardId,
+                        player_id => PlayerId,
+                        score => Score,
+                        sub_score => 0
+                    },
+                    [leaderboard_id, player_id, score, sub_score]
+                ),
+                asobi_repo:insert(CS);
+            {error, Reason} ->
+                {error, Reason}
+        end,
     case Result of
-        {ok, _} -> ok;
+        {ok, _} ->
+            ok;
         {error, FlushErr} ->
             logger:error(#{
                 msg => ~"leaderboard flush failed",

@@ -90,11 +90,20 @@ concurrent_wallet_creation(Config) ->
     Currency = ~"concurrent_test",
     Self = self(),
     %% Spawn 10 processes that all try to create the same wallet
-    Pids = [spawn(fun() ->
-        Result = asobi_economy:get_or_create_wallet(PlayerId, Currency),
-        Self ! {done, self(), Result}
-    end) || _ <- lists:seq(1, 10)],
-    Results = [receive {done, P, R} -> R after 5000 -> timeout end || P <- Pids],
+    Pids = [
+        spawn(fun() ->
+            Result = asobi_economy:get_or_create_wallet(PlayerId, Currency),
+            Self ! {done, self(), Result}
+        end)
+     || _ <- lists:seq(1, 10)
+    ],
+    Results = [
+        receive
+            {done, P, R} -> R
+        after 5000 -> timeout
+        end
+     || P <- Pids
+    ],
     %% All should succeed
     lists:foreach(fun(R) -> ?assertMatch({ok, _}, R) end, Results),
     %% Should all reference the same wallet

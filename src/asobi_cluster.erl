@@ -82,7 +82,8 @@ maybe_connect(Node) when Node =:= node() ->
     ok;
 maybe_connect(Node) ->
     case lists:member(Node, nodes()) of
-        true -> ok;
+        true ->
+            ok;
         false ->
             case net_adm:ping(Node) of
                 pong ->

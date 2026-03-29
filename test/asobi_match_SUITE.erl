@@ -12,8 +12,15 @@
     match_tick_executes/1
 ]).
 
-all() -> [match_lifecycle, match_join_leave, match_full, match_waiting_timeout,
-          match_invalid_input_survives, match_tick_executes].
+all() ->
+    [
+        match_lifecycle,
+        match_join_leave,
+        match_full,
+        match_waiting_timeout,
+        match_invalid_input_survives,
+        match_tick_executes
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(asobi),
