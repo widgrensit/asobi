@@ -38,11 +38,23 @@ init_per_suite(Config) ->
         Config0
     ),
     B2 = nova_test:json(R2),
+    P1Token = maps:get(~"session_token", B1),
+    %% Pre-create a group for join_group test
+    {ok, GR} = nova_test:post(
+        ~"/api/v1/groups",
+        #{
+            headers => [{~"authorization", iolist_to_binary([~"Bearer ", P1Token])}],
+            json => #{~"name" => ~"Join Test Guild", ~"description" => ~"For join test", ~"open" => true}
+        },
+        Config0
+    ),
+    GB = nova_test:json(GR),
     [
         {player1_id, maps:get(~"player_id", B1)},
-        {player1_token, maps:get(~"session_token", B1)},
+        {player1_token, P1Token},
         {player2_id, maps:get(~"player_id", B2)},
-        {player2_token, maps:get(~"session_token", B2)}
+        {player2_token, maps:get(~"session_token", B2)},
+        {group_id, maps:get(~"id", GB)}
         | Config0
     ].
 
@@ -117,7 +129,7 @@ join_group(Config) ->
     GroupId = proplists:get_value(group_id, Config),
     {ok, Resp} = nova_test:post(
         iolist_to_binary([~"/api/v1/groups/", GroupId, ~"/join"]),
-        #{headers => auth_headers(Config, player2)},
+        #{headers => auth_headers(Config, player2), json => #{}},
         Config
     ),
     ?assertStatus(200, Resp),

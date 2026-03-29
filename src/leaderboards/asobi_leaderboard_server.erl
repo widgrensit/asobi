@@ -6,23 +6,23 @@
 
 -spec start_link(binary()) -> {ok, pid()}.
 start_link(BoardId) ->
-    gen_server:start_link({via, {global, {?MODULE, BoardId}}}, ?MODULE, BoardId, []).
+    gen_server:start_link({global, {?MODULE, BoardId}}, ?MODULE, BoardId, []).
 
 -spec submit(binary(), binary(), integer()) -> ok.
 submit(BoardId, PlayerId, Score) ->
-    gen_server:cast({via, {global, {?MODULE, BoardId}}}, {submit, PlayerId, Score}).
+    gen_server:cast({global, {?MODULE, BoardId}}, {submit, PlayerId, Score}).
 
 -spec top(binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
 top(BoardId, N) ->
-    gen_server:call({via, {global, {?MODULE, BoardId}}}, {top, N}).
+    gen_server:call({global, {?MODULE, BoardId}}, {top, N}).
 
 -spec rank(binary(), binary()) -> {ok, pos_integer()} | {error, not_found}.
 rank(BoardId, PlayerId) ->
-    gen_server:call({via, {global, {?MODULE, BoardId}}}, {rank, PlayerId}).
+    gen_server:call({global, {?MODULE, BoardId}}, {rank, PlayerId}).
 
 -spec around(binary(), binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
 around(BoardId, PlayerId, N) ->
-    gen_server:call({via, {global, {?MODULE, BoardId}}}, {around, PlayerId, N}).
+    gen_server:call({global, {?MODULE, BoardId}}, {around, PlayerId, N}).
 
 -spec init(binary()) -> {ok, map()}.
 init(BoardId) ->

@@ -10,7 +10,7 @@
 -spec start_link(binary(), binary()) -> {ok, pid()}.
 start_link(ChannelId, ChannelType) ->
     gen_server:start_link(
-        {via, {global, {?MODULE, ChannelId}}}, ?MODULE, {ChannelId, ChannelType}, []
+        {global, {?MODULE, ChannelId}}, ?MODULE, {ChannelId, ChannelType}, []
     ).
 
 -spec join(binary(), pid()) -> ok.
@@ -25,15 +25,14 @@ leave(ChannelId, Pid) ->
 
 -spec send_message(binary(), binary(), binary()) -> ok.
 send_message(ChannelId, SenderId, Content) ->
-    gen_server:cast({via, {global, {?MODULE, ChannelId}}}, {message, SenderId, Content}).
+    gen_server:cast({global, {?MODULE, ChannelId}}, {message, SenderId, Content}).
 
 -spec get_history(binary(), pos_integer()) -> [map()].
 get_history(ChannelId, Limit) ->
-    gen_server:call({via, {global, {?MODULE, ChannelId}}}, {history, Limit}).
+    gen_server:call({global, {?MODULE, ChannelId}}, {history, Limit}).
 
 -spec init({binary(), binary()}) -> {ok, map()}.
 init({ChannelId, ChannelType}) ->
-    pg:start_link(?PG_SCOPE),
     {ok, #{
         channel_id => ChannelId,
         channel_type => ChannelType,

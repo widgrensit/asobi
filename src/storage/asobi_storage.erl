@@ -11,6 +11,7 @@ table() -> ~"storage".
 -spec fields() -> [#kura_field{}].
 fields() ->
     [
+        #kura_field{name = id, type = uuid, primary_key = true, nullable = false},
         #kura_field{name = collection, type = string, nullable = false},
         #kura_field{name = key, type = string, nullable = false},
         #kura_field{name = player_id, type = uuid},

@@ -49,10 +49,11 @@ match_join_leave(Config) ->
         max_players => 4
     }),
     ok = asobi_match_server:join(Pid, ~"player1"),
+    ok = asobi_match_server:join(Pid, ~"player2"),
     asobi_match_server:leave(Pid, ~"player1"),
     timer:sleep(50),
     Info = asobi_match_server:get_info(Pid),
-    ?assertMatch(#{player_count := 0}, Info),
+    ?assertMatch(#{player_count := 1}, Info),
     Config.
 
 match_full(Config) ->

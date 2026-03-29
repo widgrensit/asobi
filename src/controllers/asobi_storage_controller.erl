@@ -52,7 +52,7 @@ put_save(
                 [player_id, slot, data, version]
             ),
             {ok, Created} = asobi_repo:insert(CS),
-            {json, Created}
+            {json, 200, #{}, Created}
     end.
 
 %% --- Generic Storage ---
@@ -126,7 +126,7 @@ put_storage(
                 [collection, key, player_id, value, version, read_perm, write_perm]
             ),
             {ok, Created} = asobi_repo:insert(CS),
-            {json, Created}
+            {json, 200, #{}, Created}
     end.
 
 -spec delete_storage(cowboy_req:req()) -> {json, map()} | {status, integer()}.
@@ -140,10 +140,10 @@ delete_storage(
     ),
     case asobi_repo:all(Q) of
         {ok, [#{write_perm := ~"owner", player_id := PlayerId} = Obj]} ->
-            _ = asobi_repo:delete(Obj),
+            _ = asobi_repo:delete(asobi_storage, Obj),
             {json, #{success => true}};
         {ok, [#{write_perm := ~"public"} = Obj]} ->
-            _ = asobi_repo:delete(Obj),
+            _ = asobi_repo:delete(asobi_storage, Obj),
             {json, #{success => true}};
         {ok, [_]} ->
             {status, 403};

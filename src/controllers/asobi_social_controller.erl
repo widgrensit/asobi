@@ -36,7 +36,7 @@ add_friend(#{json := #{~"friend_id" := FriendId}, auth_data := #{player_id := Pl
     }),
     case asobi_repo:insert(CS) of
         {ok, Friendship} ->
-            {json, Friendship};
+            {json, 200, #{}, Friendship};
         {error, CS1} ->
             {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)}}
     end.
@@ -72,7 +72,7 @@ remove_friend(
     ),
     case asobi_repo:all(Q) of
         {ok, [Friendship]} ->
-            _ = asobi_repo:delete(Friendship),
+            _ = asobi_repo:delete(asobi_friendship, Friendship),
             {json, #{success => true}};
         _ ->
             {status, 404}
@@ -104,7 +104,7 @@ create_group(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) ->
                 [group_id, player_id, role, joined_at]
             ),
             _ = asobi_repo:insert(MemberCS),
-            {json, Group};
+            {json, 200, #{}, Group};
         {error, CS1} ->
             {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)}}
     end.
@@ -131,7 +131,7 @@ join_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Player
     ),
     case asobi_repo:insert(CS) of
         {ok, _Member} ->
-            {json, #{success => true, group_id => GroupId}};
+            {json, 200, #{}, #{success => true, group_id => GroupId}};
         {error, _} ->
             {json, 409, #{}, #{error => ~"already_member"}}
     end.
@@ -144,7 +144,7 @@ leave_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Playe
     ),
     case asobi_repo:all(Q) of
         {ok, [Member]} ->
-            _ = asobi_repo:delete(Member),
+            _ = asobi_repo:delete(asobi_group_member, Member),
             {json, #{success => true}};
         _ ->
             {json, #{success => true}}

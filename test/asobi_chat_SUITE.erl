@@ -12,12 +12,10 @@
 all() -> [channel_lifecycle, message_buffer, message_broadcast].
 
 init_per_suite(Config) ->
-    {ok, _} = application:ensure_all_started(asobi),
-
-    Config.
+    asobi_test_helpers:start(Config).
 
 end_per_suite(Config) ->
-    Config.
+    nova_test:stop(Config).
 
 channel_lifecycle(Config) ->
     ChannelId = ~"test_channel_1",

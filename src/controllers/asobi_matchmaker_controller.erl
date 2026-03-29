@@ -10,7 +10,7 @@ add(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) ->
         party => maps:get(~"party", Params, [PlayerId])
     },
     {ok, TicketId} = asobi_matchmaker:add(PlayerId, MatchParams),
-    {json, #{ticket_id => TicketId, status => ~"pending"}}.
+    {json, 200, #{}, #{ticket_id => TicketId, status => ~"pending"}}.
 
 -spec remove(cowboy_req:req()) -> {json, map()}.
 remove(#{bindings := #{~"ticket_id" := TicketId}, auth_data := #{player_id := PlayerId}} = _Req) ->

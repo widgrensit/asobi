@@ -11,6 +11,7 @@ table() -> ~"cloud_saves".
 -spec fields() -> [#kura_field{}].
 fields() ->
     [
+        #kura_field{name = id, type = uuid, primary_key = true, nullable = false},
         #kura_field{name = player_id, type = uuid, nullable = false},
         #kura_field{name = slot, type = string, nullable = false},
         #kura_field{name = data, type = jsonb, default = #{}},

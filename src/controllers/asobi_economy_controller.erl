@@ -33,7 +33,7 @@ store(#{qs := Qs} = _Req) ->
 purchase(#{json := #{~"listing_id" := ListingId}, auth_data := #{player_id := PlayerId}} = _Req) ->
     case asobi_economy:purchase(PlayerId, ListingId) of
         {ok, Item} ->
-            {json, #{success => true, item => Item}};
+            {json, 200, #{}, #{success => true, item => Item}};
         {error, insufficient_funds} ->
             {json, 402, #{}, #{error => ~"insufficient_funds"}};
         {error, listing_inactive} ->

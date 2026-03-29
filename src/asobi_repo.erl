@@ -9,6 +9,7 @@
     insert/2,
     update/1,
     delete/1,
+    delete/2,
     update_all/2,
     delete_all/1,
     insert_all/2,
@@ -40,6 +41,11 @@ update(CS) -> kura_repo_worker:update(?MODULE, CS).
 
 -spec delete(kura_changeset:changeset()) -> {ok, map()} | {error, term()}.
 delete(CS) -> kura_repo_worker:delete(?MODULE, CS).
+
+-spec delete(module(), map()) -> {ok, map()} | {error, term()}.
+delete(Schema, Record) ->
+    CS = kura_changeset:cast(Schema, Record, #{}, []),
+    kura_repo_worker:delete(?MODULE, CS).
 
 -spec update_all(kura_query:query(), map()) -> {ok, non_neg_integer()}.
 update_all(Q, Updates) -> kura_repo_worker:update_all(?MODULE, Q, Updates).

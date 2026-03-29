@@ -3,7 +3,8 @@
 -include_lib("nova_test/include/nova_test.hrl").
 
 -export([
-    all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_testcase/2, end_per_testcase/2
+    all/0, groups/0, init_per_suite/1, end_per_suite/1,
+    init_per_group/2, end_per_group/2
 ]).
 -export([
     register_player/1,
@@ -50,16 +51,44 @@ groups() ->
 init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
     Username = asobi_test_helpers:unique_username(~"testplayer"),
-    [{test_username, Username} | Config0].
+    %% Pre-register a player for the players group
+    PlayerUsername = asobi_test_helpers:unique_username(~"player_test"),
+    {ok, Resp} = nova_test:post(
+        ~"/api/v1/auth/register",
+        #{json => #{~"username" => PlayerUsername, ~"password" => ~"testpass123"}},
+        Config0
+    ),
+    Body = nova_test:json(Resp),
+    [
+        {test_username, Username},
+        {player_username, PlayerUsername},
+        {player_id, maps:get(~"player_id", Body)},
+        {session_token, maps:get(~"session_token", Body)}
+        | Config0
+    ].
 
 end_per_suite(Config) ->
     nova_test:stop(Config),
     Config.
 
-init_per_testcase(_TC, Config) ->
+init_per_group(players, Config) ->
+    %% Get a fresh token since the auth group may have invalidated the old one
+    PlayerUsername = proplists:get_value(player_username, Config),
+    {ok, Resp} = nova_test:post(
+        ~"/api/v1/auth/login",
+        #{json => #{~"username" => PlayerUsername, ~"password" => ~"testpass123"}},
+        Config
+    ),
+    Body = nova_test:json(Resp),
+    [
+        {session_token, maps:get(~"session_token", Body)},
+        {player_id, maps:get(~"player_id", Body)}
+        | Config
+    ];
+init_per_group(_Group, Config) ->
     Config.
 
-end_per_testcase(_TC, Config) ->
+end_per_group(_Group, Config) ->
     Config.
 
 %% --- Auth Tests ---
@@ -77,15 +106,10 @@ register_player(Config) ->
         },
         Config
     ),
-    Status = nova_test:status(Resp),
-    ?assert(Status =:= 200 orelse Status =:= 201),
+    ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"player_id" := _, ~"session_token" := _}, Body),
-    [
-        {player_id, maps:get(~"player_id", Body)},
-        {session_token, maps:get(~"session_token", Body)}
-        | Config
-    ].
+    Config.
 
 register_duplicate_username(Config) ->
     Username = proplists:get_value(test_username, Config),
@@ -99,7 +123,8 @@ register_duplicate_username(Config) ->
         },
         Config
     ),
-    ?assertStatus(422, Resp).
+    ?assertStatus(422, Resp),
+    Config.
 
 register_short_username(Config) ->
     {ok, Resp} = nova_test:post(
@@ -112,7 +137,8 @@ register_short_username(Config) ->
         },
         Config
     ),
-    ?assertStatus(422, Resp).
+    ?assertStatus(422, Resp),
+    Config.
 
 register_short_password(Config) ->
     {ok, Resp} = nova_test:post(
@@ -125,7 +151,8 @@ register_short_password(Config) ->
         },
         Config
     ),
-    ?assertStatus(422, Resp).
+    ?assertStatus(422, Resp),
+    Config.
 
 login_success(Config) ->
     Username = proplists:get_value(test_username, Config),
@@ -156,7 +183,8 @@ login_invalid_credentials(Config) ->
         },
         Config
     ),
-    ?assertStatus(401, Resp).
+    ?assertStatus(401, Resp),
+    Config.
 
 refresh_token(Config) ->
     Token = proplists:get_value(session_token, Config),
@@ -213,7 +241,8 @@ update_player_unauthorized(Config) ->
         },
         Config
     ),
-    ?assertStatus(403, Resp).
+    ?assertStatus(403, Resp),
+    Config.
 
 %% --- Health Tests ---
 
