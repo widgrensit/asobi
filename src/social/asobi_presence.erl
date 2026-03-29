@@ -6,6 +6,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(PRESENCE_GROUP, asobi_online).
+-define(PG_SCOPE, nova_scope).
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
@@ -14,7 +15,7 @@ start_link() ->
 -spec track(binary(), pid()) -> ok.
 track(PlayerId, Pid) ->
     nova_pubsub:join(?PRESENCE_GROUP, Pid),
-    nova_pubsub:join({player, PlayerId}, Pid),
+    pg:join(?PG_SCOPE, {player, PlayerId}, Pid),
     nova_pubsub:broadcast(presence, ~"player_online", #{player_id => PlayerId}),
     ok.
 
@@ -30,14 +31,14 @@ update(PlayerId, Status) ->
 
 -spec get_status(binary()) -> online | offline.
 get_status(PlayerId) ->
-    case nova_pubsub:get_members({player, PlayerId}) of
+    case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
         [] -> offline;
         _ -> online
     end.
 
 -spec send(binary(), term()) -> ok.
 send(PlayerId, Message) ->
-    Members = nova_pubsub:get_members({player, PlayerId}),
+    Members = pg:get_members(?PG_SCOPE, {player, PlayerId}),
     lists:foreach(fun(Pid) -> Pid ! {asobi_message, Message} end, Members),
     ok.
 
