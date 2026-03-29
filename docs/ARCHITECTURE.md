@@ -1,25 +1,7 @@
-# Asobi — Game Backend Platform
+# Architecture
 
-Asobi (遊び, "play") is an open-source game backend platform built on Erlang/OTP and the Nova ecosystem. It provides authentication, player management, real-time multiplayer, matchmaking, leaderboards, virtual economy, social features, and an admin dashboard — all in a single BEAM release.
-
-Asobi is platform-agnostic: mobile, PC, console, web, and MMO. The transport layer (WebSocket + REST) works for any client. For latency-critical genres (FPS, action MMO), an optional UDP transport can be added alongside WebSocket without changing the core architecture.
-
-## Competitive Landscape
-
-Asobi targets the same space as **Nakama** (Go, Heroic Labs) and **Colyseus** (Node.js). No production-grade game backend exists on BEAM despite the platform being arguably the best fit for this workload.
-
-### Why BEAM Over Go (Nakama)
-
-| Concern | Nakama (Go) | Asobi (BEAM) |
-|---------|-------------|--------------|
-| GC impact | Stop-the-world affects ALL matches | Per-process GC — isolated per match |
-| Fault tolerance | Panic = match lost | OTP supervision — match restarts |
-| Deployment | Restart = disconnect everyone | Hot code upgrade — zero downtime |
-| Pub/sub | Requires external Redis | `pg` module — cluster-native |
-| In-memory state | External cache (Redis) | ETS — zero serialization overhead |
-| Distribution | External coordination (etcd/consul) | Distributed Erlang — built in |
-| Scheduling | Cooperative (goroutine blocks = starve) | Preemptive — fair scheduling |
-| Connection density | ~100K per node | ~500K+ per node |
+This document describes Asobi's internal architecture, supervision trees,
+data model, and protocol design.
 
 ## Stack
 
@@ -392,7 +374,7 @@ Runs periodic matching ticks via Shigoto. Query-based matching with expanding wi
 6. Tickets past max wait time → return error to player
 7. Matched tickets → spawn `asobi_match_server`, notify players
 
-**Query language** (simple, like Nakama):
+**Query language:**
 ```
 +region:eu-west mode:ranked skill:>=800 skill:<=1200
 ```
@@ -805,41 +787,42 @@ asobi/
 ```erlang
 [
     {nova, [
-        {bootstrap_application, asobi},
+        {bootstrap_application, asobi_arena},
         {environment, dev},
-        {use_sessions, true},
         {cowboy_configuration, #{
-            port => 8080
-        }}
+            port => 8084
+        }},
+        {json_lib, json}
+    ]},
+    {kura, [
+        {repo, asobi_repo},
+        {host, "localhost"},
+        {port, 5432},
+        {database, "asobi_dev"},
+        {user, "postgres"},
+        {password, "postgres"},
+        {pool_size, 10}
+    ]},
+    {shigoto, [
+        {pool, asobi_repo}
     ]},
     {asobi, [
-        {asobi_repo, #{
-            database => <<"asobi_dev">>,
-            hostname => <<"localhost">>,
-            port => 5432,
-            username => <<"postgres">>,
-            password => <<"postgres">>,
-            pool_size => 20
-        }},
-        {json_lib, json},
         {plugins, [
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
                 parse_qs => true
             }},
-            {pre_request, nova_correlation_plugin, #{}},
             {pre_request, nova_cors_plugin, #{
                 allow_origins => <<"*">>
-            }}
+            }},
+            {pre_request, nova_correlation_plugin, #{}}
         ]},
+        {game_modes, #{
+            ~"arena" => asobi_arena_game
+        }},
         {matchmaker, #{
             tick_interval => 1000,
-            max_wait_seconds => 60,
-            expansion_interval => 5000
-        }},
-        {leaderboards, #{
-            persist_interval => 30000,
-            default_size => 100
+            max_wait_seconds => 60
         }},
         {session, #{
             token_ttl => 900,
@@ -910,12 +893,3 @@ asobi/
 - Security hardening
 - Documentation + guides
 
-## Unique Selling Points
-
-1. **Zero-downtime deploys** — hot code upgrade game logic without disconnecting players
-2. **Self-healing matches** — OTP supervision restarts crashed matches
-3. **Predictable latency** — per-process GC, no global pauses
-4. **500K+ connections per node** — dramatically lower infrastructure costs
-5. **No external dependencies for state** — ETS replaces Redis, pg replaces pub/sub services
-6. **Native clustering** — distributed Erlang, no etcd/consul/Redis coordination
-7. **Full Nova ecosystem** — web framework, ORM, LiveView admin, background jobs, auth, mailer all native

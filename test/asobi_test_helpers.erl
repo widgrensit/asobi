@@ -4,15 +4,7 @@
 
 -spec start(list()) -> list().
 start(Config) ->
-    Config0 = nova_test:start(asobi) ++ Config,
-    %% Ensure pg scopes are started (may not be auto-started in test)
-    lists:foreach(fun(Scope) ->
-        case pg:start(Scope) of
-            {ok, _} -> ok;
-            {error, {already_started, _}} -> ok
-        end
-    end, [asobi_presence, asobi_chat]),
-    Config0.
+    nova_test:start(asobi) ++ Config.
 
 -spec unique_username(binary()) -> binary().
 unique_username(Prefix) ->

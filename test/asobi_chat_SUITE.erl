@@ -19,7 +19,6 @@ end_per_suite(Config) ->
 
 channel_lifecycle(Config) ->
     ChannelId = ~"test_channel_1",
-    {ok, _} = asobi_chat_sup:start_channel(ChannelId, ~"room"),
     asobi_chat_channel:join(ChannelId, self()),
     asobi_chat_channel:send_message(ChannelId, ~"sender1", ~"Hello!"),
     receive
@@ -32,7 +31,8 @@ channel_lifecycle(Config) ->
 
 message_buffer(Config) ->
     ChannelId = ~"test_channel_2",
-    {ok, _} = asobi_chat_sup:start_channel(ChannelId, ~"room"),
+    %% Ensure channel exists
+    asobi_chat_channel:join(ChannelId, self()),
     lists:foreach(
         fun(I) ->
             Content = list_to_binary("msg" ++ integer_to_list(I)),
@@ -43,11 +43,11 @@ message_buffer(Config) ->
     timer:sleep(50),
     History = asobi_chat_channel:get_history(ChannelId, 3),
     ?assertEqual(3, length(History)),
+    asobi_chat_channel:leave(ChannelId, self()),
     Config.
 
 message_broadcast(Config) ->
     ChannelId = ~"test_channel_3",
-    {ok, _} = asobi_chat_sup:start_channel(ChannelId, ~"room"),
     Self = self(),
     Listener = spawn(fun() ->
         asobi_chat_channel:join(ChannelId, self()),

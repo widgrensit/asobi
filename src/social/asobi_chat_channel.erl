@@ -4,35 +4,47 @@
 -export([start_link/2, join/2, leave/2, send_message/3, get_history/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--define(PG_SCOPE, asobi_chat).
 -define(MAX_BUFFER, 100).
+-define(REGISTRY, asobi_chat_registry).
 
 -spec start_link(binary(), binary()) -> {ok, pid()}.
 start_link(ChannelId, ChannelType) ->
-    gen_server:start_link(
-        {global, {?MODULE, ChannelId}}, ?MODULE, {ChannelId, ChannelType}, []
-    ).
+    gen_server:start_link(?MODULE, {ChannelId, ChannelType}, []).
 
 -spec join(binary(), pid()) -> ok.
 join(ChannelId, Pid) ->
-    pg:join(?PG_SCOPE, {chat, ChannelId}, Pid),
+    ensure_channel(ChannelId),
+    nova_pubsub:join({chat, ChannelId}, Pid),
     ok.
 
 -spec leave(binary(), pid()) -> ok.
 leave(ChannelId, Pid) ->
-    pg:leave(?PG_SCOPE, {chat, ChannelId}, Pid),
+    nova_pubsub:leave({chat, ChannelId}, Pid),
     ok.
 
 -spec send_message(binary(), binary(), binary()) -> ok.
 send_message(ChannelId, SenderId, Content) ->
-    gen_server:cast({global, {?MODULE, ChannelId}}, {message, SenderId, Content}).
+    ensure_channel(ChannelId),
+    case lookup(ChannelId) of
+        {ok, Pid} ->
+            gen_server:cast(Pid, {message, SenderId, Content});
+        error ->
+            ok
+    end,
+    ok.
 
 -spec get_history(binary(), pos_integer()) -> [map()].
 get_history(ChannelId, Limit) ->
-    gen_server:call({global, {?MODULE, ChannelId}}, {history, Limit}).
+    case lookup(ChannelId) of
+        {ok, Pid} -> gen_server:call(Pid, {history, Limit});
+        error -> []
+    end.
 
 -spec init({binary(), binary()}) -> {ok, map()}.
 init({ChannelId, ChannelType}) ->
+    ensure_registry(),
+    ets:insert(?REGISTRY, {ChannelId, self()}),
+    process_flag(trap_exit, true),
     {ok, #{
         channel_id => ChannelId,
         channel_type => ChannelType,
@@ -62,7 +74,7 @@ handle_cast(
         content => Content,
         sent_at => erlang:system_time(millisecond)
     },
-    Members = pg:get_members(?PG_SCOPE, {chat, ChannelId}),
+    Members = nova_pubsub:get_members({chat, ChannelId}),
     lists:foreach(
         fun(Pid) -> Pid ! {chat_message, ChannelId, Msg} end,
         Members
@@ -82,8 +94,48 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -spec terminate(term(), map()) -> ok.
+terminate(_Reason, #{channel_id := ChannelId}) ->
+    catch ets:delete(?REGISTRY, ChannelId),
+    ok;
 terminate(_Reason, _State) ->
     ok.
+
+%% --- Channel lifecycle ---
+
+ensure_channel(ChannelId) ->
+    case lookup(ChannelId) of
+        {ok, Pid} when is_pid(Pid) ->
+            case is_process_alive(Pid) of
+                true ->
+                    ok;
+                false ->
+                    catch ets:delete(?REGISTRY, ChannelId),
+                    start_new_channel(ChannelId)
+            end;
+        error ->
+            start_new_channel(ChannelId)
+    end.
+
+start_new_channel(ChannelId) ->
+    case asobi_chat_sup:start_channel(ChannelId) of
+        {ok, _Pid} -> ok;
+        {error, _} -> ok
+    end.
+
+lookup(ChannelId) ->
+    ensure_registry(),
+    case ets:lookup(?REGISTRY, ChannelId) of
+        [{_, Pid}] -> {ok, Pid};
+        [] -> error
+    end.
+
+ensure_registry() ->
+    case ets:whereis(?REGISTRY) of
+        undefined ->
+            ets:new(?REGISTRY, [named_table, public, set, {read_concurrency, true}]);
+        _ ->
+            ok
+    end.
 
 %% --- Persistence ---
 

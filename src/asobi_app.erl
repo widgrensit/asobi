@@ -5,7 +5,12 @@
 
 -spec start(application:start_type(), term()) -> {ok, pid()}.
 start(_StartType, _StartArgs) ->
-    {ok, _} = kura_migrator:migrate(asobi_repo),
+    case kura_migrator:migrate(asobi_repo) of
+        {ok, Applied} ->
+            logger:notice(#{msg => <<"migrations_applied">>, versions => Applied});
+        {error, MigErr} ->
+            logger:error(#{msg => <<"migration_failed">>, error => MigErr})
+    end,
     asobi_sup:start_link().
 
 -spec stop(term()) -> ok.
