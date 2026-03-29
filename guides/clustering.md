@@ -55,12 +55,61 @@ Not everything needs cross-node messaging:
 
 | Component | Scope | Why |
 |-----------|-------|-----|
-| **Match Server** | Single node | All players in a match connect to the same node (sticky sessions). The match process and all its players are co-located. |
+| **Match Server** | Single node | Match process lives on one node. Players migrate to that node when the match starts (see below). |
 | **Player Session** | Single node | One process per connected player, tied to the WebSocket connection. |
 | **Leaderboards (ETS)** | Single node | Hot reads from local ETS. Persisted to PostgreSQL for durability. Each node builds its own ETS cache on startup. |
 | **Chat broadcast** | Cross-node | Players in the same channel may be on different nodes. |
 | **Presence updates** | Cross-node | Friends on different nodes need to see status changes. |
 | **Notifications** | Cross-node | Target player may be on any node. |
+
+## Player Migration for Matches
+
+When the matchmaker forms a match, the matched players may be on different
+nodes. Rather than routing game traffic through PostgreSQL NOTIFY (which
+adds latency on every tick), Asobi migrates players to the node hosting the
+match server.
+
+The flow:
+
+1. Matchmaker pairs players and spawns a match server on a node
+2. Server sends `match.migrate` to each matched player with a connection
+   hint (the match node's address or a node-specific route)
+3. Client disconnects from current node and reconnects to the match node
+4. Client authenticates on the new node, player session is re-created
+5. Client joins the match — all communication is now node-local via `pg`
+6. When the match ends, client can stay on the current node or reconnect
+   to any node via the load balancer
+
+```
+Before match:
+  Node A: Player 1, Player 3
+  Node B: Player 2, Player 4
+
+Matchmaker forms match on Node A:
+
+  1. Node B players receive: {"type": "match.migrate", "payload": {"url": "ws://node-a/ws"}}
+  2. Players 2 & 4 disconnect from Node B, reconnect to Node A
+  3. All 4 players now on Node A — match runs with local pg broadcast
+
+After match:
+  Players reconnect to any node via load balancer
+```
+
+This keeps match traffic at zero extra latency (local `pg` broadcast) while
+only paying the migration cost once at match start. The reconnection takes
+a fraction of a second — well within the normal "loading match" screen time.
+
+### Load Balancer Configuration for Migration
+
+To support migration, you need a way for clients to connect to a specific
+node. Options:
+
+- **Per-node hostnames** — each node has a stable DNS name (e.g.,
+  `node-1.asobi.internal`). The `match.migrate` payload includes the hostname.
+- **Node-affinity cookie** — the match server returns a cookie value that
+  the load balancer uses to route to the correct node.
+- **Headless service (k8s)** — each pod gets a stable address via a headless
+  Service. Clients connect directly to the pod IP.
 
 ## Configuration
 
@@ -82,32 +131,29 @@ Enable the Shigoto notifier in your `sys.config`:
 The notifier opens a dedicated PostgreSQL connection for LISTEN/NOTIFY
 (separate from the query pool, since LISTEN requires a persistent connection).
 
-## Sticky Sessions
+## Load Balancer Setup
 
-WebSocket connections must be sticky — a player's connection stays on the
-same node for the lifetime of the session. Configure your load balancer:
+WebSocket connections are long-lived. The load balancer should support
+WebSocket upgrades and distribute new connections evenly across nodes.
+Sticky sessions are not required — player migration handles match
+co-location, and chat/presence use NOTIFY for cross-node delivery.
 
 **Kubernetes (Ingress):**
 
 ```yaml
 metadata:
   annotations:
-    nginx.ingress.kubernetes.io/affinity: "cookie"
-    nginx.ingress.kubernetes.io/session-cookie-name: "asobi_node"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 ```
-
-**AWS ALB:**
-
-Target group stickiness with application cookie.
 
 **HAProxy:**
 
 ```
 backend asobi
     balance roundrobin
-    cookie ASOBI_NODE insert indirect nocache
-    server node1 10.0.0.1:8080 check cookie node1
-    server node2 10.0.0.2:8080 check cookie node2
+    server node1 10.0.0.1:8080 check
+    server node2 10.0.0.2:8080 check
 ```
 
 ## Matchmaking Across Nodes
@@ -165,5 +211,5 @@ simple and ops-friendly. The latency cost (a few ms per notification) is
 negligible for chat, presence, and matchmaking events.
 
 For latency-critical use cases (match state updates at 10+ ticks/sec),
-co-locate players on the same node via sticky sessions so `pg` handles
+players are migrated to the match node at match start so `pg` handles
 the broadcast locally with no network hop.
