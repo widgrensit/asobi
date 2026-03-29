@@ -51,6 +51,9 @@ handle_cast(_Msg, State) ->
 -spec handle_info(term(), map()) -> {noreply, map()} | {stop, normal, map()}.
 handle_info({'DOWN', _Ref, process, WsPid, _Reason}, #{ws_pid := WsPid} = State) ->
     {stop, normal, State};
+handle_info({asobi_message, _} = Msg, #{ws_pid := WsPid} = State) ->
+    WsPid ! Msg,
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 

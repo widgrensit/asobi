@@ -5,8 +5,8 @@
 -export([track/2, untrack/1, update/2, get_status/1, send/2, online_count/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
--define(PG_SCOPE, asobi_presence).
 -define(PRESENCE_GROUP, asobi_online).
+-define(PG_SCOPE, nova_scope).
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
@@ -14,7 +14,7 @@ start_link() ->
 
 -spec track(binary(), pid()) -> ok.
 track(PlayerId, Pid) ->
-    pg:join(?PG_SCOPE, ?PRESENCE_GROUP, Pid),
+    nova_pubsub:join(?PRESENCE_GROUP, Pid),
     pg:join(?PG_SCOPE, {player, PlayerId}, Pid),
     nova_pubsub:broadcast(presence, ~"player_online", #{player_id => PlayerId}),
     ok.
@@ -44,11 +44,10 @@ send(PlayerId, Message) ->
 
 -spec online_count() -> non_neg_integer().
 online_count() ->
-    length(pg:get_members(?PG_SCOPE, ?PRESENCE_GROUP)).
+    length(nova_pubsub:get_members(?PRESENCE_GROUP)).
 
 -spec init([]) -> {ok, #{}}.
 init([]) ->
-    pg:start_link(?PG_SCOPE),
     {ok, #{}}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.

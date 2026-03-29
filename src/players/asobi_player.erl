@@ -16,6 +16,7 @@ fields() ->
         #kura_field{name = username, type = string, nullable = false},
         #kura_field{name = display_name, type = string},
         #kura_field{name = avatar_url, type = string},
+        #kura_field{name = password, type = string, virtual = true},
         #kura_field{name = hashed_password, type = string},
         #kura_field{name = metadata, type = jsonb, default = #{}},
         #kura_field{name = banned_at, type = utc_datetime},

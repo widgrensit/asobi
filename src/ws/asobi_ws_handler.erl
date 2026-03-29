@@ -71,15 +71,24 @@ handle_message(
 ) when
     SessionPid =/= undefined
 ->
-    #{player_id := PlayerId} = asobi_player_session:get_state(SessionPid),
-    case maps:get(match_pid, asobi_player_session:get_state(SessionPid), undefined) of
-        undefined ->
-            {ok, State};
-        MatchPid ->
-            asobi_match_server:handle_input(MatchPid, PlayerId, Payload),
-            {ok, State}
+    try asobi_player_session:get_state(SessionPid) of
+        #{player_id := PlayerId} = SState ->
+            case maps:get(match_pid, SState, undefined) of
+                undefined ->
+                    {ok, State};
+                MatchPid ->
+                    asobi_match_server:handle_input(MatchPid, PlayerId, Payload),
+                    {ok, State}
+            end
+    catch
+        exit:{noproc, _} ->
+            {ok, State#{session => undefined}}
     end;
-handle_message(#{~"type" := ~"chat.send", ~"payload" := Payload}, #{player_id := PlayerId} = State) ->
+handle_message(
+    #{~"type" := ~"chat.send", ~"payload" := Payload}, #{player_id := PlayerId} = State
+) when
+    is_binary(PlayerId)
+->
     #{~"channel_id" := ChannelId, ~"content" := Content} = Payload,
     asobi_chat_channel:send_message(ChannelId, PlayerId, Content),
     {ok, State};
@@ -123,7 +132,11 @@ handle_message(
 ) when SessionPid =/= undefined ->
     Cid = maps:get(~"cid", Msg, undefined),
     Status = maps:get(~"status", Payload, ~"online"),
-    asobi_player_session:update_presence(SessionPid, #{status => Status}),
+    try
+        asobi_player_session:update_presence(SessionPid, #{status => Status})
+    catch
+        exit:{noproc, _} -> ok
+    end,
     Reply = encode_reply(Cid, ~"presence.updated", #{status => Status}),
     {reply, {text, Reply}, State};
 handle_message(
