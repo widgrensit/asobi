@@ -57,6 +57,7 @@ discover_dns(Hostname) ->
             BaseName = node_basename(),
             lists:foreach(
                 fun(IP) ->
+                    % elp:ignore W0023 — bounded by k8s pod count
                     Node = list_to_atom(BaseName ++ "@" ++ inet:ntoa(IP)),
                     maybe_connect(Node)
                 end,
@@ -71,6 +72,7 @@ discover_epmd(Hosts) ->
     BaseName = node_basename(),
     lists:foreach(
         fun(Host) ->
+            % elp:ignore W0023 — bounded by config hosts list
             Node = list_to_atom(BaseName ++ "@" ++ atom_to_list(Host)),
             maybe_connect(Node)
         end,

@@ -5,6 +5,8 @@
 -export([get_state/1, update_presence/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-dialyzer({nowarn_function, terminate/2}).
+
 -spec start_link(binary(), pid()) -> {ok, pid()}.
 start_link(PlayerId, WsPid) ->
     gen_server:start_link(?MODULE, #{player_id => PlayerId, ws_pid => WsPid}, []).

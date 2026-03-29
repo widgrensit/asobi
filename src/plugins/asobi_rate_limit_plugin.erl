@@ -29,8 +29,10 @@ post_request(Req, _Options) ->
 -spec plugin_info() -> map().
 plugin_info() ->
     #{
-        name => ~"Rate Limiter",
+        title => ~"Rate Limiter",
         version => ~"1.0.0",
+        url => ~"https://github.com/widgrensit/asobi",
+        authors => [~"widgrensit"],
         description => ~"Token bucket rate limiting per player/IP"
     }.
 
@@ -70,7 +72,7 @@ check_rate(Key, Limit, Window) ->
             case NewCount > Limit of
                 true ->
                     %% Over limit — roll back the increment
-                    ets:update_counter(?ETS_TABLE, Key, {2, -1}),
+                    _ = ets:update_counter(?ETS_TABLE, Key, {2, -1}),
                     rate_limited;
                 false ->
                     ok

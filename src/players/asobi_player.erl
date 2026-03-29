@@ -46,7 +46,7 @@ registration_changeset(Data, Params) ->
     ]),
     CS1 = kura_changeset:validate_required(CS, [username, password]),
     CS2 = kura_changeset:validate_length(CS1, username, [{min, 3}, {max, 32}]),
-    CS3 = kura_changeset:validate_format(CS2, username, "^[a-zA-Z0-9_-]+$"),
+    CS3 = kura_changeset:validate_format(CS2, username, ~"^[a-zA-Z0-9_-]+$"),
     CS4 = kura_changeset:validate_length(CS3, password, [{min, 8}, {max, 128}]),
     hash_password(CS4).
 
