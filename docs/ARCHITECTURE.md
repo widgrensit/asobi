@@ -805,41 +805,42 @@ asobi/
 ```erlang
 [
     {nova, [
-        {bootstrap_application, asobi},
+        {bootstrap_application, asobi_arena},
         {environment, dev},
-        {use_sessions, true},
         {cowboy_configuration, #{
-            port => 8080
-        }}
+            port => 8084
+        }},
+        {json_lib, json}
+    ]},
+    {kura, [
+        {repo, asobi_repo},
+        {host, "localhost"},
+        {port, 5432},
+        {database, "asobi_dev"},
+        {user, "postgres"},
+        {password, "postgres"},
+        {pool_size, 10}
+    ]},
+    {shigoto, [
+        {pool, asobi_repo}
     ]},
     {asobi, [
-        {asobi_repo, #{
-            database => <<"asobi_dev">>,
-            hostname => <<"localhost">>,
-            port => 5432,
-            username => <<"postgres">>,
-            password => <<"postgres">>,
-            pool_size => 20
-        }},
-        {json_lib, json},
         {plugins, [
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
                 parse_qs => true
             }},
-            {pre_request, nova_correlation_plugin, #{}},
             {pre_request, nova_cors_plugin, #{
                 allow_origins => <<"*">>
-            }}
+            }},
+            {pre_request, nova_correlation_plugin, #{}}
         ]},
+        {game_modes, #{
+            ~"arena" => asobi_arena_game
+        }},
         {matchmaker, #{
             tick_interval => 1000,
-            max_wait_seconds => 60,
-            expansion_interval => 5000
-        }},
-        {leaderboards, #{
-            persist_interval => 30000,
-            default_size => 100
+            max_wait_seconds => 60
         }},
         {session, #{
             token_ttl => 900,
