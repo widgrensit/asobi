@@ -45,7 +45,7 @@ send(PlayerId, Message) ->
 
 -spec revoke_session(binary(), binary()) -> ok.
 revoke_session(PlayerId, Reason) ->
-    asobi_broadcast_worker:enqueue(~"session_revoked", #{
+    _ = asobi_broadcast_worker:enqueue(~"session_revoked", #{
         player_id => PlayerId,
         reason => Reason
     }),
