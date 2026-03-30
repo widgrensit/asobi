@@ -63,6 +63,7 @@ unlink(_Req) ->
 
 %% --- Internal ---
 
+-dialyzer([{no_match, validate_provider_token/2}, {nowarn_function, normalize_claims/2}]).
 -spec validate_provider_token(binary(), binary()) -> {ok, map()} | {error, binary()}.
 validate_provider_token(~"steam", Ticket) ->
     asobi_steam:validate_ticket(Ticket);
