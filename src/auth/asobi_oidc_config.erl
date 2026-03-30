@@ -1,5 +1,4 @@
 -module(asobi_oidc_config).
--behaviour(nova_auth_oidc).
 
 -export([config/0]).
 
