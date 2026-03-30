@@ -58,7 +58,14 @@
         }}
     ]},
     {shigoto, [
-        {pool, asobi_repo}
+        {pool, asobi_repo},
+        {poll_interval, 500},
+        {queues, [
+            {~"default", 10}
+        ]},
+        {fanout_queues, [
+            {~"broadcast", 5, #{window => 120}}
+        ]}
     ]},
     {nova_resilience, [
         {dependencies, [

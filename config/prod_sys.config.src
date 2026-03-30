@@ -72,5 +72,15 @@
         {shutdown_delay, 5000},
         {shutdown_drain_timeout, 15000}
     ]},
+    {shigoto, [
+        {pool, asobi_repo},
+        {poll_interval, 200},
+        {queues, [
+            {~"default", 10}
+        ]},
+        {fanout_queues, [
+            {~"broadcast", 5, #{window => 120}}
+        ]}
+    ]},
     {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].

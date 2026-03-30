@@ -39,6 +39,9 @@ websocket_info({chat_message, ChannelId, Msg}, State) ->
 websocket_info({asobi_message, {notification, Notif}}, State) ->
     Reply = encode_reply(undefined, ~"notification.new", Notif),
     {reply, {text, Reply}, State};
+websocket_info({session_revoked, Reason}, State) ->
+    logger:notice(#{msg => ~"session_revoked", reason => Reason}),
+    {stop, State#{session => undefined}};
 websocket_info(_Info, State) ->
     {ok, State}.
 
