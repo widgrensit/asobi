@@ -1,8 +1,9 @@
 -module(asobi_oidc_config).
+-behaviour(nova_auth_oidc).
 
 -export([config/0]).
 
--spec config() -> map().
+-spec config() -> nova_auth_oidc:oidc_config().
 config() ->
     Providers = application:get_env(asobi, oidc_providers, #{}),
     #{
