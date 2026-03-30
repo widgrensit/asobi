@@ -3,6 +3,7 @@
 
 -export([start_link/0]).
 -export([track/2, untrack/1, update/2, get_status/1, send/2, online_count/0]).
+-export([disconnect/2, revoke_session/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(PRESENCE_GROUP, asobi_online).
@@ -40,6 +41,20 @@ get_status(PlayerId) ->
 send(PlayerId, Message) ->
     Members = pg:get_members(?PG_SCOPE, {player, PlayerId}),
     lists:foreach(fun(Pid) -> Pid ! {asobi_message, Message} end, Members),
+    ok.
+
+-spec revoke_session(binary(), binary()) -> ok.
+revoke_session(PlayerId, Reason) ->
+    _ = asobi_broadcast_worker:enqueue(~"session_revoked", #{
+        player_id => PlayerId,
+        reason => Reason
+    }),
+    ok.
+
+-spec disconnect(binary(), binary()) -> ok.
+disconnect(PlayerId, Reason) ->
+    Members = pg:get_members(?PG_SCOPE, {player, PlayerId}),
+    lists:foreach(fun(Pid) -> Pid ! {session_revoked, Reason} end, Members),
     ok.
 
 -spec online_count() -> non_neg_integer().
