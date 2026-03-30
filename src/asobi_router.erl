@@ -7,6 +7,7 @@
 routes(_Environment) ->
     [
         auth_routes(),
+        iap_routes(),
         api_routes(),
         ws_routes()
     ].
@@ -25,7 +26,25 @@ auth_routes() ->
         routes => [
             {~"/register", fun asobi_auth_controller:register/1, #{methods => [post]}},
             {~"/login", fun asobi_auth_controller:login/1, #{methods => [post]}},
-            {~"/refresh", fun asobi_auth_controller:refresh/1, #{methods => [post]}}
+            {~"/refresh", fun asobi_auth_controller:refresh/1, #{methods => [post]}},
+            {~"/oauth", fun asobi_oauth_controller:authenticate/1, #{methods => [post]}}
+        ]
+    }.
+
+iap_routes() ->
+    #{
+        prefix => ~"/api/v1/iap",
+        security => fun asobi_auth_plugin:verify/1,
+        plugins => [
+            {pre_request, nova_request_plugin, #{
+                decode_json_body => true
+            }},
+            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
+            {pre_request, nova_correlation_plugin, #{}}
+        ],
+        routes => [
+            {~"/apple", fun asobi_iap_controller:verify_apple/1, #{methods => [post]}},
+            {~"/google", fun asobi_iap_controller:verify_google/1, #{methods => [post]}}
         ]
     }.
 
@@ -42,6 +61,10 @@ api_routes() ->
             {pre_request, nova_correlation_plugin, #{}}
         ],
         routes => [
+            %% Auth - Provider linking
+            {~"/auth/link", fun asobi_oauth_controller:link/1, #{methods => [post]}},
+            {~"/auth/unlink", fun asobi_oauth_controller:unlink/1, #{methods => [delete]}},
+
             %% Players
             {~"/players/:id", fun asobi_player_controller:show/1, #{methods => [get]}},
             {~"/players/:id", fun asobi_player_controller:update/1, #{methods => [put]}},
