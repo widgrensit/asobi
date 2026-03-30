@@ -41,14 +41,17 @@ submit(
 
 -spec format_entries(binary(), [{binary(), integer(), pos_integer()}]) -> [map()].
 format_entries(BoardId, Entries) ->
-    [#{
-        leaderboard_id => BoardId,
-        player_id => P,
-        score => S,
-        sub_score => 0,
-        rank => R,
-        updated_at => null
-    } || {P, S, R} <- Entries].
+    [
+        #{
+            leaderboard_id => BoardId,
+            player_id => P,
+            score => S,
+            sub_score => 0,
+            rank => R,
+            updated_at => null
+        }
+     || {P, S, R} <- Entries
+    ].
 
 -spec format_timestamp(integer()) -> binary().
 format_timestamp(Ms) ->
