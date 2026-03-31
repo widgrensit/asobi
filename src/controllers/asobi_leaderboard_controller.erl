@@ -16,7 +16,7 @@ around(#{bindings := #{~"id" := BoardId, ~"player_id" := PlayerId}, qs := Qs} = 
     Entries = asobi_leaderboard_server:around(BoardId, PlayerId, Range),
     {json, #{entries => format_entries(BoardId, Entries)}}.
 
--spec submit(cowboy_req:req()) -> {json, map()}.
+-spec submit(cowboy_req:req()) -> {json, integer(), map(), map()}.
 submit(
     #{bindings := #{~"id" := BoardId}, json := Params, auth_data := #{player_id := PlayerId}} = _Req
 ) ->
@@ -28,7 +28,7 @@ submit(
             {ok, R} -> R;
             {error, not_found} -> null
         end,
-    {json, #{
+    {json, 200, #{}, #{
         leaderboard_id => BoardId,
         player_id => PlayerId,
         score => Score,

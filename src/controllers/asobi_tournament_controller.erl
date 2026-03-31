@@ -24,11 +24,11 @@ show(#{bindings := #{~"id" := TournamentId}} = _Req) ->
     end.
 
 -spec join(cowboy_req:req()) ->
-    {json, map()} | {json, integer(), map(), map()} | {status, integer()}.
+    {json, integer(), map(), map()} | {status, integer()}.
 join(#{bindings := #{~"id" := TournamentId}, auth_data := #{player_id := PlayerId}} = _Req) ->
     case asobi_tournament_server:join(TournamentId, PlayerId) of
         ok ->
-            {json, #{success => true, tournament_id => TournamentId}};
+            {json, 200, #{}, #{success => true, tournament_id => TournamentId}};
         {error, tournament_full} ->
             {json, 409, #{}, #{error => ~"tournament_full"}};
         {error, already_joined} ->

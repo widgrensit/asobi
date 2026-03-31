@@ -136,7 +136,7 @@ join_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Player
             {json, 409, #{}, #{error => ~"already_member"}}
     end.
 
--spec leave_group(cowboy_req:req()) -> {json, map()}.
+-spec leave_group(cowboy_req:req()) -> {json, integer(), map(), map()}.
 leave_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := PlayerId}} = _Req) ->
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_group_member), {group_id, GroupId}),
@@ -145,7 +145,7 @@ leave_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Playe
     case asobi_repo:all(Q) of
         {ok, [Member]} ->
             _ = asobi_repo:delete(asobi_group_member, Member),
-            {json, #{success => true}};
+            {json, 200, #{}, #{success => true}};
         _ ->
-            {json, #{success => true}}
+            {json, 200, #{}, #{success => true}}
     end.

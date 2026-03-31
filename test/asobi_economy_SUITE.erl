@@ -37,7 +37,7 @@ init_per_suite(Config) ->
     [{player_id, PlayerId}, {session_token, Token} | Config0].
 
 end_per_suite(Config) ->
-    nova_test:stop(Config).
+    Config.
 
 get_wallets_empty(Config) ->
     Token = proplists:get_value(session_token, Config),

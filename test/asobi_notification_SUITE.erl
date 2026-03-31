@@ -50,7 +50,7 @@ init_per_suite(Config) ->
     ].
 
 end_per_suite(Config) ->
-    nova_test:stop(Config).
+    Config.
 
 auth(Config, Player) ->
     Key = list_to_atom(atom_to_list(Player) ++ "_token"),

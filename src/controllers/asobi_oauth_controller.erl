@@ -41,10 +41,9 @@ link(#{json := #{~"provider" := Provider, ~"token" := Token}, auth_data := AuthD
 link(_Req) ->
     {json, 400, #{}, #{error => ~"missing_required_fields"}}.
 
-%% DELETE /api/v1/auth/unlink
-%% Body: {"provider": "discord"}
+%% DELETE /api/v1/auth/unlink?provider=discord
 -spec unlink(cowboy_req:req()) -> {json, integer(), map(), map()}.
-unlink(#{json := #{~"provider" := Provider}, auth_data := AuthData} = _Req) ->
+unlink(#{parsed_qs := #{~"provider" := Provider}, auth_data := AuthData} = _Req) ->
     PlayerId = maps:get(player_id, AuthData),
     case find_player_identity(PlayerId, Provider) of
         {ok, Identity} ->

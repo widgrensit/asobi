@@ -116,23 +116,29 @@ purchase(PlayerId, ListingId) ->
             #{active := true, currency := Currency, price := Price, item_def_id := ItemDefId} =
                 _Listing} ->
             asobi_repo:transaction(fun() ->
-                {ok, _Wallet} = debit(PlayerId, Currency, Price, #{
-                    reason => ~"purchase",
-                    reference_type => ~"store_listing",
-                    reference_id => ListingId
-                }),
-                ItemCS = kura_changeset:cast(
-                    asobi_player_item,
-                    #{},
-                    #{
-                        item_def_id => ItemDefId,
-                        player_id => PlayerId,
-                        quantity => 1,
-                        acquired_at => calendar:universal_time()
-                    },
-                    [item_def_id, player_id, quantity, acquired_at]
-                ),
-                asobi_repo:insert(ItemCS)
+                case
+                    debit(PlayerId, Currency, Price, #{
+                        reason => ~"purchase",
+                        reference_type => ~"store_listing",
+                        reference_id => ListingId
+                    })
+                of
+                    {error, insufficient_funds} ->
+                        {error, insufficient_funds};
+                    {ok, _Wallet} ->
+                        ItemCS = kura_changeset:cast(
+                            asobi_player_item,
+                            #{},
+                            #{
+                                item_def_id => ItemDefId,
+                                player_id => PlayerId,
+                                quantity => 1,
+                                acquired_at => calendar:universal_time()
+                            },
+                            [item_def_id, player_id, quantity, acquired_at]
+                        ),
+                        asobi_repo:insert(ItemCS)
+                end
             end);
         {ok, _} ->
             {error, listing_inactive};

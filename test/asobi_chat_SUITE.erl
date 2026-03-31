@@ -15,7 +15,7 @@ init_per_suite(Config) ->
     asobi_test_helpers:start(Config).
 
 end_per_suite(Config) ->
-    nova_test:stop(Config).
+    Config.
 
 channel_lifecycle(Config) ->
     ChannelId = ~"test_channel_1",

@@ -7,6 +7,8 @@ start(Config) ->
     nova_test:start(asobi) ++ Config.
 
 -spec unique_username(binary()) -> binary().
-unique_username(Prefix) ->
-    Suffix = integer_to_binary(erlang:unique_integer([positive])),
-    <<Prefix/binary, "_", Suffix/binary>>.
+unique_username(_Prefix) ->
+    %% Use first 32 chars of a hex-encoded random value
+    Bytes = crypto:strong_rand_bytes(16),
+    Hex = binary:encode_hex(Bytes, lowercase),
+    binary:part(Hex, 0, 32).

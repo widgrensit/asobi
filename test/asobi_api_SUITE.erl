@@ -72,7 +72,6 @@ init_per_suite(Config) ->
     ].
 
 end_per_suite(Config) ->
-    nova_test:stop(Config),
     Config.
 
 init_per_group(players, Config) ->
