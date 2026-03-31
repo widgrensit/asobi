@@ -1,5 +1,8 @@
 # Asobi
 
+[![Hex.pm](https://img.shields.io/hexpm/v/asobi.svg)](https://hex.pm/packages/asobi)
+[![CI](https://github.com/widgrensit/asobi/actions/workflows/ci.yml/badge.svg)](https://github.com/widgrensit/asobi/actions/workflows/ci.yml)
+
 Open-source game backend platform built on Erlang/OTP and the [Nova](https://github.com/novaframework/nova) ecosystem.
 
 Asobi provides everything you need to build and run multiplayer games:
@@ -36,7 +39,7 @@ Add asobi as a dependency:
 
 ```erlang
 {deps, [
-    {asobi, {git, "https://github.com/widgrensit/asobi.git", {branch, "main"}}}
+    {asobi, "~> 0.1"}
 ]}.
 ```
 
@@ -151,7 +154,7 @@ The BEAM VM is uniquely suited for game backends:
 
 ## Documentation
 
-Full documentation is available via `rebar3 ex_doc`.
+Full documentation is available on [HexDocs](https://hexdocs.pm/asobi).
 
 - [Getting Started](guides/getting-started.md)
 - [REST API](guides/rest-api.md)
