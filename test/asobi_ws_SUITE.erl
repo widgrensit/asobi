@@ -15,7 +15,7 @@ init_per_suite(Config) ->
     asobi_test_helpers:start(Config).
 
 end_per_suite(Config) ->
-    nova_test:stop(Config).
+    Config.
 
 ws_connect_invalid_token(Config) ->
     {ok, Conn} = nova_test_ws:connect(~"/ws", Config),

@@ -61,7 +61,7 @@ init_per_suite(Config) ->
     ].
 
 end_per_suite(Config) ->
-    nova_test:stop(Config).
+    Config.
 
 auth_headers(Config, Player) ->
     Token = proplists:get_value(list_to_atom(atom_to_list(Player) ++ "_token"), Config),

@@ -12,7 +12,7 @@ index(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) ->
     {json, #{items => Items}}.
 
 -spec consume(cowboy_req:req()) ->
-    {json, map()} | {json, integer(), map(), map()} | {status, integer()}.
+    {json, integer(), map(), map()} | {status, integer()}.
 consume(
     #{json := #{~"item_id" := ItemId, ~"quantity" := Qty}, auth_data := #{player_id := PlayerId}} =
         _Req
@@ -22,13 +22,13 @@ consume(
             case Current >= Qty of
                 true when Current =:= Qty ->
                     _ = asobi_repo:delete(asobi_player_item, Item),
-                    {json, #{success => true, remaining_quantity => 0}};
+                    {json, 200, #{}, #{success => true, remaining_quantity => 0}};
                 true ->
                     CS = kura_changeset:cast(
                         asobi_player_item, Item, #{quantity => Current - Qty}, [quantity]
                     ),
                     {ok, Updated} = asobi_repo:update(CS),
-                    {json, #{success => true, remaining_quantity => maps:get(quantity, Updated)}};
+                    {json, 200, #{}, #{success => true, remaining_quantity => maps:get(quantity, Updated)}};
                 false ->
                     {json, 400, #{}, #{error => ~"insufficient_quantity"}}
             end;

@@ -11,7 +11,7 @@ init_per_suite(Config) ->
     asobi_test_helpers:start(Config).
 
 end_per_suite(Config) ->
-    nova_test:stop(Config).
+    Config.
 
 bench_registration(Config) ->
     N = 5,
