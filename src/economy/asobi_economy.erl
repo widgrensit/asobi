@@ -116,11 +116,13 @@ purchase(PlayerId, ListingId) ->
             #{active := true, currency := Currency, price := Price, item_def_id := ItemDefId} =
                 _Listing} ->
             asobi_repo:transaction(fun() ->
-                case debit(PlayerId, Currency, Price, #{
-                    reason => ~"purchase",
-                    reference_type => ~"store_listing",
-                    reference_id => ListingId
-                }) of
+                case
+                    debit(PlayerId, Currency, Price, #{
+                        reason => ~"purchase",
+                        reference_type => ~"store_listing",
+                        reference_id => ListingId
+                    })
+                of
                     {error, insufficient_funds} ->
                         {error, insufficient_funds};
                     {ok, _Wallet} ->

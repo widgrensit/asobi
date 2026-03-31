@@ -17,8 +17,10 @@ all() -> [{group, apple_iap}, {group, google_iap}].
 groups() ->
     [
         {apple_iap, [], [
-            apple_missing_fields, apple_not_configured,
-            apple_invalid_jws, apple_valid_jws_wrong_bundle
+            apple_missing_fields,
+            apple_not_configured,
+            apple_invalid_jws,
+            apple_valid_jws_wrong_bundle
         ]},
         {google_iap, [], [
             google_missing_fields, google_not_configured
@@ -90,11 +92,13 @@ apple_invalid_jws(Config) ->
 apple_valid_jws_wrong_bundle(Config) ->
     application:set_env(asobi, apple_bundle_id, ~"com.expected.app"),
     %% Create a valid JWS structure with wrong bundleId
-    Payload = iolist_to_binary(json:encode(#{
-        ~"bundleId" => ~"com.wrong.app",
-        ~"productId" => ~"test_product",
-        ~"transactionId" => ~"12345"
-    })),
+    Payload = iolist_to_binary(
+        json:encode(#{
+            ~"bundleId" => ~"com.wrong.app",
+            ~"productId" => ~"test_product",
+            ~"transactionId" => ~"12345"
+        })
+    ),
     PayloadB64 = base64:encode(Payload, #{mode => urlsafe, padding => false}),
     FakeJws = iolist_to_binary([~"eyJhbGciOiJSUzI1NiJ9.", PayloadB64, ~".fakesig"]),
     {ok, Resp} = nova_test:post(

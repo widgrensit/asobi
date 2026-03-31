@@ -16,8 +16,11 @@ all() -> [{group, match_api}].
 groups() ->
     [
         {match_api, [sequence], [
-            list_matches_empty, list_matches_with_records,
-            list_matches_filter_mode, show_match, show_match_not_found
+            list_matches_empty,
+            list_matches_with_records,
+            list_matches_filter_mode,
+            show_match,
+            show_match_not_found
         ]}
     ].
 

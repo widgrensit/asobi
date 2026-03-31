@@ -30,9 +30,13 @@ groups() ->
             purchase_success, purchase_insufficient_funds, purchase_inactive_listing
         ]},
         {inventory, [sequence], [
-            inventory_empty, inventory_after_purchase,
-            consume_item, consume_item_fully,
-            consume_insufficient_quantity, consume_not_found, consume_other_player
+            inventory_empty,
+            inventory_after_purchase,
+            consume_item,
+            consume_item_fully,
+            consume_insufficient_quantity,
+            consume_not_found,
+            consume_other_player
         ]}
     ].
 

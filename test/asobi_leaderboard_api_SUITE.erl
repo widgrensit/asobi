@@ -40,7 +40,9 @@ init_per_suite(Config) ->
     ),
     [{P1Id, P1Token} | _] = Players,
     %% Start a leaderboard for testing
-    BoardId = iolist_to_binary([~"test_board_", integer_to_binary(erlang:unique_integer([positive]))]),
+    BoardId = iolist_to_binary([
+        ~"test_board_", integer_to_binary(erlang:unique_integer([positive]))
+    ]),
     {ok, _} = asobi_leaderboard_sup:start_board(BoardId),
     [
         {board_id, BoardId},

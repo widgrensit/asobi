@@ -28,7 +28,9 @@ consume(
                         asobi_player_item, Item, #{quantity => Current - Qty}, [quantity]
                     ),
                     {ok, Updated} = asobi_repo:update(CS),
-                    {json, 200, #{}, #{success => true, remaining_quantity => maps:get(quantity, Updated)}};
+                    {json, 200, #{}, #{
+                        success => true, remaining_quantity => maps:get(quantity, Updated)
+                    }};
                 false ->
                     {json, 400, #{}, #{error => ~"insufficient_quantity"}}
             end;

@@ -24,9 +24,12 @@ groups() ->
             oauth_missing_fields, oauth_unsupported_provider
         ]},
         {link_unlink, [sequence], [
-            link_missing_fields, link_unsupported_provider,
-            unlink_missing_fields, unlink_not_found,
-            unlink_last_auth_method, unlink_success
+            link_missing_fields,
+            link_unsupported_provider,
+            unlink_missing_fields,
+            unlink_not_found,
+            unlink_last_auth_method,
+            unlink_success
         ]},
         {identity_db, [sequence], [
             identity_db_roundtrip, login_existing_identity
@@ -133,7 +136,9 @@ unlink_last_auth_method(Config) ->
     IdentityCS = asobi_player_identity:changeset(#{}, #{
         player_id => NoPasswordId,
         provider => ~"google",
-        provider_uid => iolist_to_binary([~"google_", integer_to_binary(erlang:unique_integer([positive]))]),
+        provider_uid => iolist_to_binary([
+            ~"google_", integer_to_binary(erlang:unique_integer([positive]))
+        ]),
         provider_email => ~"test@example.com"
     }),
     {ok, _} = asobi_repo:insert(IdentityCS),
@@ -146,7 +151,9 @@ unlink_success(Config) ->
     PlayerId = proplists:get_value(player1_id, Config),
     %% Test identity insert + delete roundtrip directly since DELETE with
     %% JSON body may not be decoded by Nova
-    ProviderUid = iolist_to_binary([~"discord_", integer_to_binary(erlang:unique_integer([positive]))]),
+    ProviderUid = iolist_to_binary([
+        ~"discord_", integer_to_binary(erlang:unique_integer([positive]))
+    ]),
     IdentityCS = asobi_player_identity:changeset(#{}, #{
         player_id => PlayerId,
         provider => ~"discord",
@@ -168,7 +175,9 @@ unlink_success(Config) ->
 
 identity_db_roundtrip(Config) ->
     PlayerId = proplists:get_value(player1_id, Config),
-    ProviderUid = iolist_to_binary([~"test_uid_", integer_to_binary(erlang:unique_integer([positive]))]),
+    ProviderUid = iolist_to_binary([
+        ~"test_uid_", integer_to_binary(erlang:unique_integer([positive]))
+    ]),
     CS = asobi_player_identity:changeset(#{}, #{
         player_id => PlayerId,
         provider => ~"apple",

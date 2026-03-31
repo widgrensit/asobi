@@ -37,7 +37,6 @@ submit(
         updated_at => format_timestamp(erlang:system_time(millisecond))
     }}.
 
-
 %% --- Internal ---
 
 -spec format_entries(binary(), [{binary(), integer(), pos_integer()}]) -> [map()].

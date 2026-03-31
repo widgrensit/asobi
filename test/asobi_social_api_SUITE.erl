@@ -47,7 +47,9 @@ init_per_suite(Config) ->
         ~"/api/v1/groups",
         #{
             headers => auth(P1Token),
-            json => #{~"name" => ~"API Test Guild", ~"description" => ~"For API tests", ~"open" => true}
+            json => #{
+                ~"name" => ~"API Test Guild", ~"description" => ~"For API tests", ~"open" => true
+            }
         },
         Config0
     ),
@@ -59,7 +61,9 @@ init_per_suite(Config) ->
         Config0
     ),
     %% Create a chat channel and send some messages
-    ChannelId = iolist_to_binary([~"test_chat_api_", integer_to_binary(erlang:unique_integer([positive]))]),
+    ChannelId = iolist_to_binary([
+        ~"test_chat_api_", integer_to_binary(erlang:unique_integer([positive]))
+    ]),
     asobi_chat_channel:join(ChannelId, self()),
     asobi_chat_channel:send_message(ChannelId, maps:get(~"player_id", B1), ~"Hello from p1"),
     asobi_chat_channel:send_message(ChannelId, maps:get(~"player_id", B2), ~"Hello from p2"),

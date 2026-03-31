@@ -18,9 +18,13 @@ all() -> [{group, tournament_api}].
 groups() ->
     [
         {tournament_api, [sequence], [
-            list_tournaments_empty, list_tournaments, show_tournament,
-            show_tournament_not_found, join_tournament,
-            join_tournament_already_joined, join_tournament_not_found
+            list_tournaments_empty,
+            list_tournaments,
+            show_tournament,
+            show_tournament_not_found,
+            join_tournament,
+            join_tournament_already_joined,
+            join_tournament_not_found
         ]}
     ].
 
@@ -36,7 +40,9 @@ init_per_suite(Config) ->
     Token = maps:get(~"session_token", B1),
     PlayerId = maps:get(~"player_id", B1),
     %% Create a tournament via DB + start it as a server
-    BoardId = iolist_to_binary([~"tourney_board_", integer_to_binary(erlang:unique_integer([positive]))]),
+    BoardId = iolist_to_binary([
+        ~"tourney_board_", integer_to_binary(erlang:unique_integer([positive]))
+    ]),
     Now = calendar:universal_time(),
     FutureEnd = calendar:gregorian_seconds_to_datetime(
         calendar:datetime_to_gregorian_seconds(Now) + 3600
