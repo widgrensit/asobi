@@ -25,7 +25,12 @@
     vote_window_ready_up_timeout/1,
     vote_window_hybrid/1,
     vote_window_hybrid_min_enforced/1,
-    vote_window_adaptive/1
+    vote_window_adaptive/1,
+    vote_supermajority_met/1,
+    vote_supermajority_not_met/1,
+    vote_frustration_accumulator/1,
+    vote_veto_tokens/1,
+    vote_veto_tokens_exhausted/1
 ]).
 
 all() ->
@@ -51,7 +56,12 @@ all() ->
         vote_window_ready_up_timeout,
         vote_window_hybrid,
         vote_window_hybrid_min_enforced,
-        vote_window_adaptive
+        vote_window_adaptive,
+        vote_supermajority_met,
+        vote_supermajority_not_met,
+        vote_frustration_accumulator,
+        vote_veto_tokens,
+        vote_veto_tokens_exhausted
     ].
 
 init_per_suite(Config) ->
@@ -550,6 +560,170 @@ vote_window_adaptive(_Config) ->
     after 5000 ->
         error(adaptive_did_not_shrink)
     end.
+
+vote_supermajority_met(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3", ~"p4"],
+        window_ms => 200,
+        require_supermajority => true,
+        supermajority => 0.75
+    }),
+    %% 3 out of 4 = 75%, meets threshold
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p3", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p4", ~"opt_b"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(vote_did_not_resolve)
+    end.
+
+vote_supermajority_not_met(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3", ~"p4"],
+        window_ms => 200,
+        require_supermajority => true,
+        supermajority => 0.75
+    }),
+    %% 2 out of 4 = 50%, below threshold
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p3", ~"opt_b"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p4", ~"opt_b"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(vote_did_not_resolve)
+    end.
+
+vote_frustration_accumulator(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = asobi_match_sup:start_match(#{
+        game_module => asobi_test_game,
+        min_players => 2,
+        max_players => 4,
+        tick_rate => 50,
+        frustration_bonus => 1.0
+    }),
+    ok = asobi_match_server:join(MatchPid, ~"p1"),
+    ok = asobi_match_server:join(MatchPid, ~"p2"),
+    ok = asobi_match_server:join(MatchPid, ~"p3"),
+    timer:sleep(100),
+    %% Vote 1: p1 loses (votes B, A wins)
+    VoteId1 = asobi_id:generate(),
+    {ok, _} = asobi_match_server:start_vote(MatchPid, #{
+        vote_id => VoteId1,
+        options => Options,
+        window_ms => 200,
+        method => ~"weighted"
+    }),
+    ok = asobi_match_server:cast_vote(MatchPid, ~"p1", VoteId1, ~"opt_b"),
+    ok = asobi_match_server:cast_vote(MatchPid, ~"p2", VoteId1, ~"opt_a"),
+    ok = asobi_match_server:cast_vote(MatchPid, ~"p3", VoteId1, ~"opt_a"),
+    timer:sleep(400),
+    %% Vote 2: p1 should now have frustration bonus weight
+    VoteId2 = asobi_id:generate(),
+    {ok, VotePid2} = asobi_match_server:start_vote(MatchPid, #{
+        vote_id => VoteId2,
+        options => Options,
+        window_ms => 5000,
+        method => ~"weighted",
+        visibility => ~"live"
+    }),
+    %% p1 has frustration=1, bonus=1.0, so weight=2.0
+    %% p2 and p3 won last time, frustration=0, weight=1.0
+    ok = asobi_match_server:cast_vote(MatchPid, ~"p1", VoteId2, ~"opt_b"),
+    ok = asobi_match_server:cast_vote(MatchPid, ~"p2", VoteId2, ~"opt_a"),
+    Info = asobi_vote_server:get_state(VotePid2),
+    %% p1 weight=2.0 for opt_b, p2 weight=1.0 for opt_a
+    ?assertMatch(#{tallies := #{~"opt_b" := 2.0, ~"opt_a" := 1.0}}, Info).
+
+vote_veto_tokens(_Config) ->
+    Options = [#{id => ~"opt_a", label => ~"A"}],
+    {ok, MatchPid} = asobi_match_sup:start_match(#{
+        game_module => asobi_test_game,
+        min_players => 2,
+        max_players => 4,
+        tick_rate => 50,
+        veto_tokens_per_player => 2
+    }),
+    ok = asobi_match_server:join(MatchPid, ~"p1"),
+    ok = asobi_match_server:join(MatchPid, ~"p2"),
+    timer:sleep(100),
+    VoteId = asobi_id:generate(),
+    {ok, _} = asobi_match_server:start_vote(MatchPid, #{
+        vote_id => VoteId,
+        options => Options,
+        window_ms => 5000,
+        veto_enabled => true
+    }),
+    %% p1 uses a veto token
+    ok = asobi_match_server:use_veto(MatchPid, ~"p1", VoteId),
+    %% Vote should be dead
+    timer:sleep(100),
+    %% Start another vote, p1 uses another token
+    VoteId2 = asobi_id:generate(),
+    {ok, _} = asobi_match_server:start_vote(MatchPid, #{
+        vote_id => VoteId2,
+        options => Options,
+        window_ms => 5000,
+        veto_enabled => true
+    }),
+    ok = asobi_match_server:use_veto(MatchPid, ~"p1", VoteId2).
+
+vote_veto_tokens_exhausted(_Config) ->
+    Options = [#{id => ~"opt_a", label => ~"A"}],
+    {ok, MatchPid} = asobi_match_sup:start_match(#{
+        game_module => asobi_test_game,
+        min_players => 2,
+        max_players => 4,
+        tick_rate => 50,
+        veto_tokens_per_player => 1
+    }),
+    ok = asobi_match_server:join(MatchPid, ~"p1"),
+    ok = asobi_match_server:join(MatchPid, ~"p2"),
+    timer:sleep(100),
+    %% Use the one token
+    VoteId1 = asobi_id:generate(),
+    {ok, _} = asobi_match_server:start_vote(MatchPid, #{
+        vote_id => VoteId1,
+        options => Options,
+        window_ms => 5000,
+        veto_enabled => true
+    }),
+    ok = asobi_match_server:use_veto(MatchPid, ~"p1", VoteId1),
+    timer:sleep(100),
+    %% Second veto should fail — no tokens left
+    VoteId2 = asobi_id:generate(),
+    {ok, _} = asobi_match_server:start_vote(MatchPid, #{
+        vote_id => VoteId2,
+        options => Options,
+        window_ms => 5000,
+        veto_enabled => true
+    }),
+    ?assertMatch({error, no_veto_tokens}, asobi_match_server:use_veto(MatchPid, ~"p1", VoteId2)).
 
 %% --- Helpers ---
 

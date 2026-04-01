@@ -186,6 +186,15 @@ For approval voting, `option_id` is a list:
 {"type": "vote.cast", "payload": {"vote_id": "...", "option_id": ["jungle", "caves"]}}
 ```
 
+### `vote.veto`
+
+Use a veto token to cancel the current vote. Requires `veto_tokens_per_player > 0`
+in match config and `veto_enabled` on the vote.
+
+```json
+{"type": "vote.veto", "payload": {"vote_id": "..."}}
+```
+
 ### `match.vote_start` (server push)
 
 A new vote has started.

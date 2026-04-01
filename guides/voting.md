@@ -304,6 +304,71 @@ When `veto_enabled` is true, any eligible voter can veto the vote. This
 immediately cancels it and notifies all players. Use sparingly — typically
 as a limited-use resource managed by the game mode.
 
+## Majority Tyranny Mitigations
+
+When the same majority always outvotes a minority, voting becomes
+frustrating. Asobi provides three configurable mitigations.
+
+### Frustration Accumulator
+
+Players who vote for the losing option accumulate frustration. On the
+next vote, their weight is boosted: `1 + frustration_count * frustration_bonus`.
+When they finally win, their frustration resets to 0.
+
+Configure at match level:
+
+```erlang
+asobi_match_sup:start_match(#{
+    game_module => MyGame,
+    frustration_bonus => 0.5  %% default 0.5, set 0 to disable
+}).
+```
+
+A player who lost 3 consecutive votes gets weight `1 + 3 * 0.5 = 2.5`,
+making their vote count 2.5x. This only applies to weighted voting or
+when frustration weights are merged (which happens automatically when
+starting votes via the match server).
+
+### Supermajority Requirement
+
+Force high-stakes votes to require a supermajority. If no option reaches
+the threshold, the result has `winner => undefined` and
+`status => "no_consensus"`.
+
+```erlang
+asobi_match_server:start_vote(MatchPid, #{
+    options => Options,
+    require_supermajority => true,
+    supermajority => 0.75  %% 75% required
+}).
+```
+
+The game mode's `vote_resolved/3` callback receives the no-consensus
+result and can decide what to do (random pick, re-vote, default option).
+
+### Veto Tokens
+
+Give players a limited number of vetoes per match. When used, the current
+vote is immediately cancelled. The game mode decides what happens next.
+
+Configure at match level:
+
+```erlang
+asobi_match_sup:start_match(#{
+    game_module => MyGame,
+    veto_tokens_per_player => 2  %% default 0 (disabled)
+}).
+```
+
+Clients use veto tokens via WebSocket:
+
+```json
+{"type": "vote.veto", "payload": {"vote_id": "..."}}
+```
+
+The match server checks token availability before forwarding to the vote
+server. Returns `{error, no_veto_tokens}` when exhausted.
+
 ## Grace Period
 
 Votes arriving within 500ms after the window closes are still accepted to
