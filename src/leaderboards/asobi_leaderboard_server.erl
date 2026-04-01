@@ -4,7 +4,7 @@
 -export([start_link/1, submit/3, top/2, rank/2, around/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--spec start_link(binary()) -> {ok, pid()}.
+-spec start_link(binary()) -> gen_server:start_ret().
 start_link(BoardId) ->
     gen_server:start_link({global, {?MODULE, BoardId}}, ?MODULE, BoardId, []).
 
@@ -13,20 +13,33 @@ submit(BoardId, PlayerId, Score) ->
     ensure_started(BoardId),
     gen_server:cast({global, {?MODULE, BoardId}}, {submit, PlayerId, Score}).
 
--spec top(binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
+-spec top(binary(), pos_integer()) -> [{binary(), number(), pos_integer()}].
 top(BoardId, N) ->
     ensure_started(BoardId),
-    gen_server:call({global, {?MODULE, BoardId}}, {top, N}).
+    case gen_server:call({global, {?MODULE, BoardId}}, {top, N}) of
+        Entries when is_list(Entries) -> validate_entries(Entries);
+        _ -> []
+    end.
 
 -spec rank(binary(), binary()) -> {ok, pos_integer()} | {error, not_found}.
 rank(BoardId, PlayerId) ->
     ensure_started(BoardId),
-    gen_server:call({global, {?MODULE, BoardId}}, {rank, PlayerId}).
+    case gen_server:call({global, {?MODULE, BoardId}}, {rank, PlayerId}) of
+        {ok, Pos} when is_integer(Pos) -> {ok, Pos};
+        {error, not_found} -> {error, not_found}
+    end.
 
--spec around(binary(), binary(), pos_integer()) -> [{binary(), integer(), pos_integer()}].
+-spec around(binary(), binary(), pos_integer()) -> [{binary(), number(), pos_integer()}].
 around(BoardId, PlayerId, N) ->
     ensure_started(BoardId),
-    gen_server:call({global, {?MODULE, BoardId}}, {around, PlayerId, N}).
+    case gen_server:call({global, {?MODULE, BoardId}}, {around, PlayerId, N}) of
+        Entries when is_list(Entries) -> validate_entries(Entries);
+        _ -> []
+    end.
+
+-spec validate_entries([term()]) -> [{binary(), number(), pos_integer()}].
+validate_entries(Entries) ->
+    [{P, S, R} || {P, S, R} <- Entries, is_binary(P), is_number(S), is_integer(R)].
 
 -spec ensure_started(binary()) -> ok.
 ensure_started(BoardId) ->
@@ -76,7 +89,9 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({submit, PlayerId, Score}, #{table := Table, player_index := Idx} = State) ->
+handle_cast({submit, PlayerId, Score}, #{table := Table, player_index := Idx} = State) when
+    is_number(Score)
+->
     case ets:lookup(Idx, PlayerId) of
         [{PlayerId, OldScore}] ->
             ets:delete(Table, {-OldScore, PlayerId});
@@ -136,7 +151,8 @@ entries_around(Table, Key, N) ->
     Self = [{PlayerId, Score, 0}],
     After = walk_forward(Table, Key, N),
     Entries = Before ++ Self ++ After,
-    StartRank = count_before(Table, element(1, hd(Entries))) + 1,
+    [FirstEntry | _] = Entries,
+    StartRank = count_before(Table, element(1, FirstEntry)) + 1,
     assign_ranks(Entries, StartRank, []).
 
 walk_back(Table, Key, N) ->

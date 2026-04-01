@@ -25,25 +25,25 @@ init_per_suite(Config) ->
     U1 = asobi_test_helpers:unique_username(~"notif_p1"),
     U2 = asobi_test_helpers:unique_username(~"notif_p2"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
     B1 = nova_test:json(R1),
     {ok, R2} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U2, ~"password" => ~"testpass123"}},
         Config0
     ),
     B2 = nova_test:json(R2),
-    PlayerId = maps:get(~"player_id", B1),
-    %% Pre-create notifications for mark_read/delete/unauthorized tests
+    #{~"player_id" := PlayerId, ~"session_token" := P1Token} = B1,
+    #{~"session_token" := P2Token} = B2,
     {ok, Notif1} = asobi_notify:send(PlayerId, ~"system", ~"Welcome", #{~"msg" => ~"hi"}),
     {ok, Notif2} = asobi_notify:send(PlayerId, ~"test", ~"Test", #{~"msg" => ~"test"}),
     [
         {player1_id, PlayerId},
-        {player1_token, maps:get(~"session_token", B1)},
-        {player2_token, maps:get(~"session_token", B2)},
+        {player1_token, P1Token},
+        {player2_token, P2Token},
         {notif_id, maps:get(id, Notif1)},
         {notif2_id, maps:get(id, Notif2)}
         | Config0
@@ -54,16 +54,16 @@ end_per_suite(Config) ->
 
 auth(Config, Player) ->
     Key = list_to_atom(atom_to_list(Player) ++ "_token"),
-    Token = proplists:get_value(Key, Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    {Key, Token} = lists:keyfind(Key, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 list_empty(_Config) ->
-    %% Tested implicitly by other tests — notifications exist after init
     ok.
 
 create_and_list(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/notifications",
+        "/api/v1/notifications",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -73,9 +73,10 @@ create_and_list(Config) ->
     Config.
 
 mark_read(Config) ->
-    NotifId = proplists:get_value(notif_id, Config),
+    {notif_id, NotifId} = lists:keyfind(notif_id, 1, Config),
+    true = is_binary(NotifId),
     {ok, Resp} = nova_test:put(
-        iolist_to_binary([~"/api/v1/notifications/", NotifId, ~"/read"]),
+        "/api/v1/notifications/" ++ binary_to_list(NotifId) ++ "/read",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -85,9 +86,10 @@ mark_read(Config) ->
     Config.
 
 delete_notification(Config) ->
-    NotifId = proplists:get_value(notif2_id, Config),
+    {notif2_id, NotifId} = lists:keyfind(notif2_id, 1, Config),
+    true = is_binary(NotifId),
     {ok, Resp} = nova_test:delete(
-        iolist_to_binary([~"/api/v1/notifications/", NotifId]),
+        "/api/v1/notifications/" ++ binary_to_list(NotifId),
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -95,9 +97,10 @@ delete_notification(Config) ->
     Config.
 
 unauthorized_access(Config) ->
-    NotifId = proplists:get_value(notif_id, Config),
+    {notif_id, NotifId} = lists:keyfind(notif_id, 1, Config),
+    true = is_binary(NotifId),
     {ok, Resp} = nova_test:put(
-        iolist_to_binary([~"/api/v1/notifications/", NotifId, ~"/read"]),
+        "/api/v1/notifications/" ++ binary_to_list(NotifId) ++ "/read",
         #{headers => auth(Config, player2)},
         Config
     ),

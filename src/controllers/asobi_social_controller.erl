@@ -1,5 +1,7 @@
 -module(asobi_social_controller).
 
+-include_lib("kura/include/kura.hrl").
+
 -export([
     friends/1,
     add_friend/1,
@@ -14,7 +16,9 @@
 %% --- Friends ---
 
 -spec friends(cowboy_req:req()) -> {json, map()}.
-friends(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) ->
+friends(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) when
+    is_binary(PlayerId), is_binary(Qs)
+->
     Params = cow_qs:parse_qs(Qs),
     Q0 = kura_query:where(kura_query:from(asobi_friendship), {player_id, PlayerId}),
     Q1 =
@@ -22,7 +26,7 @@ friends(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) ->
             undefined -> Q0;
             Status -> kura_query:where(Q0, {status, Status})
         end,
-    Limit = binary_to_integer(proplists:get_value(~"limit", Params, ~"50")),
+    Limit = qs_integer(~"limit", Params, 50),
     Q2 = kura_query:limit(Q1, Limit),
     {ok, Friendships} = asobi_repo:all(Q2),
     {json, #{friends => Friendships}}.
@@ -37,7 +41,7 @@ add_friend(#{json := #{~"friend_id" := FriendId}, auth_data := #{player_id := Pl
     case asobi_repo:insert(CS) of
         {ok, Friendship} ->
             {json, 200, #{}, Friendship};
-        {error, CS1} ->
+        {error, CS1} when is_record(CS1, kura_changeset) ->
             {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)}}
     end.
 
@@ -81,7 +85,9 @@ remove_friend(
 %% --- Groups ---
 
 -spec create_group(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-create_group(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) ->
+create_group(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) when
+    is_map(Params), is_binary(PlayerId)
+->
     GroupParams = #{
         name => maps:get(~"name", Params),
         description => maps:get(~"description", Params, undefined),
@@ -105,7 +111,7 @@ create_group(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) ->
             ),
             _ = asobi_repo:insert(MemberCS),
             {json, 200, #{}, Group};
-        {error, CS1} ->
+        {error, CS1} when is_record(CS1, kura_changeset) ->
             {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)}}
     end.
 
@@ -148,4 +154,10 @@ leave_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Playe
             {json, 200, #{}, #{success => true}};
         _ ->
             {json, 200, #{}, #{success => true}}
+    end.
+
+qs_integer(Key, Params, Default) ->
+    case proplists:get_value(Key, Params) of
+        V when is_binary(V) -> binary_to_integer(V);
+        _ -> Default
     end.

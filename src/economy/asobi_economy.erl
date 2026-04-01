@@ -36,7 +36,8 @@ get_or_create_wallet(PlayerId, Currency) ->
                     %% Unique constraint race — another process created it first
                     case asobi_repo:all(Q) of
                         {ok, [Wallet]} -> {ok, Wallet};
-                        Other -> Other
+                        {ok, _} -> {error, wallet_not_found};
+                        {error, _} = Err2 -> Err2
                     end
             end;
         {error, _} = Err ->
@@ -45,69 +46,83 @@ get_or_create_wallet(PlayerId, Currency) ->
 
 -spec grant(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
 grant(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
-    asobi_repo:transaction(fun() ->
-        {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
-        NewBalance = maps:get(balance, Wallet) + Amount,
-        WalletCS = kura_changeset:cast(asobi_wallet, Wallet, #{balance => NewBalance}, [balance]),
-        {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
-        TxCS = kura_changeset:cast(
-            asobi_transaction,
-            #{},
-            #{
-                wallet_id => maps:get(id, Wallet),
-                amount => Amount,
-                balance_after => NewBalance,
-                reason => maps:get(reason, Opts, ~"admin_grant"),
-                reference_type => maps:get(reference_type, Opts, undefined),
-                reference_id => maps:get(reference_id, Opts, undefined),
-                metadata => maps:get(metadata, Opts, #{})
-            },
-            [wallet_id, amount, balance_after, reason, reference_type, reference_id, metadata]
-        ),
-        {ok, _Tx} = asobi_repo:insert(TxCS),
-        {ok, UpdatedWallet}
-    end).
+    case
+        asobi_repo:transaction(fun() ->
+            {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
+            NewBalance = maps:get(balance, Wallet) + Amount,
+            WalletCS = kura_changeset:cast(asobi_wallet, Wallet, #{balance => NewBalance}, [balance]),
+            {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
+            TxCS = kura_changeset:cast(
+                asobi_transaction,
+                #{},
+                #{
+                    wallet_id => maps:get(id, Wallet),
+                    amount => Amount,
+                    balance_after => NewBalance,
+                    reason => maps:get(reason, Opts, ~"admin_grant"),
+                    reference_type => maps:get(reference_type, Opts, undefined),
+                    reference_id => maps:get(reference_id, Opts, undefined),
+                    metadata => maps:get(metadata, Opts, #{})
+                },
+                [wallet_id, amount, balance_after, reason, reference_type, reference_id, metadata]
+            ),
+            {ok, _Tx} = asobi_repo:insert(TxCS),
+            {ok, UpdatedWallet}
+        end)
+    of
+        {ok, W} when is_map(W) -> {ok, W};
+        {error, _} = Err -> Err;
+        _ -> {error, transaction_failed}
+    end.
 
 -spec debit(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
 debit(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
-    asobi_repo:transaction(fun() ->
-        {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
-        Balance = maps:get(balance, Wallet),
-        case Balance >= Amount of
-            false ->
-                {error, insufficient_funds};
-            true ->
-                NewBalance = Balance - Amount,
-                WalletCS = kura_changeset:cast(asobi_wallet, Wallet, #{balance => NewBalance}, [
-                    balance
-                ]),
-                {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
-                TxCS = kura_changeset:cast(
-                    asobi_transaction,
-                    #{},
-                    #{
-                        wallet_id => maps:get(id, Wallet),
-                        amount => -Amount,
-                        balance_after => NewBalance,
-                        reason => maps:get(reason, Opts, ~"purchase"),
-                        reference_type => maps:get(reference_type, Opts, undefined),
-                        reference_id => maps:get(reference_id, Opts, undefined),
-                        metadata => maps:get(metadata, Opts, #{})
-                    },
-                    [
-                        wallet_id,
-                        amount,
-                        balance_after,
-                        reason,
-                        reference_type,
-                        reference_id,
-                        metadata
-                    ]
-                ),
-                {ok, _Tx} = asobi_repo:insert(TxCS),
-                {ok, UpdatedWallet}
-        end
-    end).
+    case
+        asobi_repo:transaction(fun() ->
+            {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
+            Balance = maps:get(balance, Wallet),
+            case Balance >= Amount of
+                false ->
+                    {error, insufficient_funds};
+                true ->
+                    NewBalance = Balance - Amount,
+                    WalletCS = kura_changeset:cast(
+                        asobi_wallet, Wallet, #{balance => NewBalance}, [
+                            balance
+                        ]
+                    ),
+                    {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
+                    TxCS = kura_changeset:cast(
+                        asobi_transaction,
+                        #{},
+                        #{
+                            wallet_id => maps:get(id, Wallet),
+                            amount => -Amount,
+                            balance_after => NewBalance,
+                            reason => maps:get(reason, Opts, ~"purchase"),
+                            reference_type => maps:get(reference_type, Opts, undefined),
+                            reference_id => maps:get(reference_id, Opts, undefined),
+                            metadata => maps:get(metadata, Opts, #{})
+                        },
+                        [
+                            wallet_id,
+                            amount,
+                            balance_after,
+                            reason,
+                            reference_type,
+                            reference_id,
+                            metadata
+                        ]
+                    ),
+                    {ok, _Tx} = asobi_repo:insert(TxCS),
+                    {ok, UpdatedWallet}
+            end
+        end)
+    of
+        {ok, W} when is_map(W) -> {ok, W};
+        {error, _} = Err -> Err;
+        _ -> {error, transaction_failed}
+    end.
 
 -spec purchase(binary(), binary()) -> {ok, map()} | {error, term()}.
 purchase(PlayerId, ListingId) ->
@@ -115,31 +130,37 @@ purchase(PlayerId, ListingId) ->
         {ok,
             #{active := true, currency := Currency, price := Price, item_def_id := ItemDefId} =
                 _Listing} ->
-            asobi_repo:transaction(fun() ->
-                case
-                    debit(PlayerId, Currency, Price, #{
-                        reason => ~"purchase",
-                        reference_type => ~"store_listing",
-                        reference_id => ListingId
-                    })
-                of
-                    {error, insufficient_funds} ->
-                        {error, insufficient_funds};
-                    {ok, _Wallet} ->
-                        ItemCS = kura_changeset:cast(
-                            asobi_player_item,
-                            #{},
-                            #{
-                                item_def_id => ItemDefId,
-                                player_id => PlayerId,
-                                quantity => 1,
-                                acquired_at => calendar:universal_time()
-                            },
-                            [item_def_id, player_id, quantity, acquired_at]
-                        ),
-                        asobi_repo:insert(ItemCS)
-                end
-            end);
+            case
+                asobi_repo:transaction(fun() ->
+                    case
+                        debit(PlayerId, Currency, Price, #{
+                            reason => ~"purchase",
+                            reference_type => ~"store_listing",
+                            reference_id => ListingId
+                        })
+                    of
+                        {error, insufficient_funds} ->
+                            {error, insufficient_funds};
+                        {ok, _Wallet} ->
+                            ItemCS = kura_changeset:cast(
+                                asobi_player_item,
+                                #{},
+                                #{
+                                    item_def_id => ItemDefId,
+                                    player_id => PlayerId,
+                                    quantity => 1,
+                                    acquired_at => calendar:universal_time()
+                                },
+                                [item_def_id, player_id, quantity, acquired_at]
+                            ),
+                            asobi_repo:insert(ItemCS)
+                    end
+                end)
+            of
+                {ok, Item} when is_map(Item) -> {ok, Item};
+                {error, _} = Err -> Err;
+                _ -> {error, transaction_failed}
+            end;
         {ok, _} ->
             {error, listing_inactive};
         {error, _} = Err ->

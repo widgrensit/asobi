@@ -66,7 +66,10 @@ decode_jws_payload(JWS) ->
         [_, PayloadB64, _] ->
             try
                 Decoded = base64:decode(PayloadB64, #{mode => urlsafe, padding => false}),
-                {ok, json:decode(Decoded)}
+                case json:decode(Decoded) of
+                    M when is_map(M) -> {ok, M};
+                    _ -> {error, ~"invalid_jws_payload"}
+                end
             catch
                 _:_ -> {error, ~"invalid_jws"}
             end;
@@ -97,7 +100,7 @@ do_verify_google(PackageName, ProductId, PurchaseToken) ->
                     [{body_format, binary}]
                 )
             of
-                {ok, {{_, 200, _}, _, Body}} ->
+                {ok, {{_, 200, _}, _, Body}} when is_binary(Body) ->
                     parse_google_purchase(Body);
                 {ok, {{_, 404, _}, _, _}} ->
                     {error, ~"purchase_not_found"};
@@ -143,7 +146,7 @@ parse_google_purchase(Body) ->
 -spec google_access_token() -> {ok, binary()} | {error, binary()}.
 google_access_token() ->
     case application:get_env(asobi, google_service_account_key) of
-        {ok, KeyPath} ->
+        {ok, KeyPath} when is_binary(KeyPath) ->
             fetch_google_token(KeyPath);
         undefined ->
             {error, ~"google_iap_not_configured"}
@@ -153,9 +156,17 @@ google_access_token() ->
 fetch_google_token(KeyPath) ->
     case file:read_file(KeyPath) of
         {ok, KeyJson} ->
-            KeyData = json:decode(KeyJson),
+            KeyData =
+                case json:decode(KeyJson) of
+                    M when is_map(M) -> M;
+                    _ -> #{}
+                end,
             ClientEmail = maps:get(~"client_email", KeyData),
-            PrivateKey = maps:get(~"private_key", KeyData),
+            PrivateKey =
+                case maps:get(~"private_key", KeyData) of
+                    PK when is_binary(PK) -> PK;
+                    _ -> <<>>
+                end,
             Now = erlang:system_time(second),
             Claims = #{
                 ~"iss" => ClientEmail,
@@ -173,12 +184,16 @@ fetch_google_token(KeyPath) ->
 -spec sign_jwt(map(), binary()) -> binary().
 sign_jwt(Claims, PrivateKeyPem) ->
     Header = #{~"alg" => ~"RS256", ~"typ" => ~"JWT"},
-    HeaderB64 = base64:encode(json:encode(Header), #{mode => urlsafe, padding => false}),
-    ClaimsB64 = base64:encode(json:encode(Claims), #{mode => urlsafe, padding => false}),
+    HeaderB64 = base64:encode(iolist_to_binary(json:encode(Header)), #{
+        mode => urlsafe, padding => false
+    }),
+    ClaimsB64 = base64:encode(iolist_to_binary(json:encode(Claims)), #{
+        mode => urlsafe, padding => false
+    }),
     SignInput = <<HeaderB64/binary, ".", ClaimsB64/binary>>,
     [Entry] = public_key:pem_decode(PrivateKeyPem),
     Key = public_key:pem_entry_decode(Entry),
-    Signature = public_key:sign(SignInput, sha256, Key),
+    Signature = sign_rsa(SignInput, Key),
     SigB64 = base64:encode(Signature, #{mode => urlsafe, padding => false}),
     <<SignInput/binary, ".", SigB64/binary>>.
 
@@ -199,9 +214,9 @@ exchange_jwt_for_token(Jwt) ->
             [{body_format, binary}]
         )
     of
-        {ok, {{_, 200, _}, _, RespBody}} ->
+        {ok, {{_, 200, _}, _, RespBody}} when is_binary(RespBody) ->
             case json:decode(RespBody) of
-                #{~"access_token" := Token} -> {ok, Token};
+                #{~"access_token" := Token} when is_binary(Token) -> {ok, Token};
                 _ -> {error, ~"google_token_exchange_failed"}
             end;
         _ ->
@@ -212,11 +227,21 @@ exchange_jwt_for_token(Jwt) ->
 
 -spec apple_bundle_id() -> binary() | undefined.
 apple_bundle_id() ->
-    application:get_env(asobi, apple_bundle_id, undefined).
+    case application:get_env(asobi, apple_bundle_id, undefined) of
+        V when is_binary(V) -> V;
+        _ -> undefined
+    end.
 
 -spec google_package_name() -> binary() | undefined.
 google_package_name() ->
-    application:get_env(asobi, google_package_name, undefined).
+    case application:get_env(asobi, google_package_name, undefined) of
+        V when is_binary(V) -> V;
+        _ -> undefined
+    end.
+
+-spec sign_rsa(binary(), term()) -> binary().
+sign_rsa(Data, Key) when is_tuple(Key) ->
+    public_key:sign(Data, sha256, Key).
 
 -spec is_expired(integer() | undefined) -> boolean().
 is_expired(undefined) -> false;

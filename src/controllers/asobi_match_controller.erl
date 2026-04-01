@@ -10,7 +10,7 @@ show(#{bindings := #{~"id" := MatchId}} = _Req) ->
     end.
 
 -spec index(cowboy_req:req()) -> {json, map()}.
-index(#{qs := Qs} = _Req) ->
+index(#{qs := Qs} = _Req) when is_binary(Qs) ->
     Params = cow_qs:parse_qs(Qs),
     Q0 = kura_query:from(asobi_match_record),
     Q1 =
@@ -23,7 +23,13 @@ index(#{qs := Qs} = _Req) ->
             undefined -> Q1;
             Status -> kura_query:where(Q1, {status, Status})
         end,
-    Limit = binary_to_integer(proplists:get_value(~"limit", Params, ~"50")),
+    Limit = qs_integer(~"limit", Params, 50),
     Q3 = kura_query:limit(kura_query:order_by(Q2, [{inserted_at, desc}]), Limit),
     {ok, Records} = asobi_repo:all(Q3),
     {json, #{matches => Records}}.
+
+qs_integer(Key, Params, Default) ->
+    case proplists:get_value(Key, Params) of
+        V when is_binary(V) -> binary_to_integer(V);
+        _ -> Default
+    end.

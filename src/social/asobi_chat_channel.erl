@@ -4,27 +4,23 @@
 -export([start_link/2, join/2, leave/2, send_message/3, get_history/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
-%% nova_pubsub spec says atom() but pg accepts any term as group name
--dialyzer({nowarn_function, [join/2, leave/2, handle_cast/2]}).
--dialyzer({no_match, start_new_channel/1}).
--dialyzer({nowarn_function, persist_message/4}).
-
 -define(MAX_BUFFER, 100).
 -define(REGISTRY, asobi_chat_registry).
+-define(PG_SCOPE, nova_scope).
 
--spec start_link(binary(), binary()) -> {ok, pid()}.
+-spec start_link(binary(), binary()) -> gen_server:start_ret().
 start_link(ChannelId, ChannelType) ->
     gen_server:start_link(?MODULE, {ChannelId, ChannelType}, []).
 
 -spec join(binary(), pid()) -> ok.
 join(ChannelId, Pid) ->
     ensure_channel(ChannelId),
-    nova_pubsub:join({chat, ChannelId}, Pid),
+    pg:join(?PG_SCOPE, {chat, ChannelId}, Pid),
     ok.
 
 -spec leave(binary(), pid()) -> ok.
 leave(ChannelId, Pid) ->
-    nova_pubsub:leave({chat, ChannelId}, Pid),
+    pg:leave(?PG_SCOPE, {chat, ChannelId}, Pid),
     ok.
 
 -spec send_message(binary(), binary(), binary()) -> ok.
@@ -39,10 +35,15 @@ send_message(ChannelId, SenderId, Content) ->
     ok.
 
 -spec get_history(binary(), pos_integer()) -> [map()].
-get_history(ChannelId, Limit) ->
+get_history(ChannelId, Limit) when is_integer(Limit) ->
     case lookup(ChannelId) of
-        {ok, Pid} -> gen_server:call(Pid, {history, Limit});
-        error -> []
+        {ok, Pid} ->
+            case gen_server:call(Pid, {history, Limit}) of
+                History when is_list(History) -> [M || M <- History, is_map(M)];
+                _ -> []
+            end;
+        error ->
+            []
     end.
 
 -spec init({binary(), binary()}) -> {ok, map()}.
@@ -58,7 +59,7 @@ init({ChannelId, ChannelType}) ->
     }}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
-handle_call({history, Limit}, _From, #{buffer := Buffer} = State) ->
+handle_call({history, Limit}, _From, #{buffer := Buffer} = State) when is_integer(Limit) ->
     History = lists:sublist(Buffer, Limit),
     {reply, lists:reverse(History), State};
 handle_call(_Request, _From, State) ->
@@ -73,15 +74,15 @@ handle_cast(
         buffer := Buffer,
         buffer_size := Size
     } = State
-) ->
+) when is_binary(SenderId), is_binary(Content) ->
     Msg = #{
         sender_id => SenderId,
         content => Content,
         sent_at => erlang:system_time(millisecond)
     },
-    Members = nova_pubsub:get_members({chat, ChannelId}),
+    Members = pg:get_members(?PG_SCOPE, {chat, ChannelId}),
     lists:foreach(
-        fun(Pid) -> Pid ! {chat_message, ChannelId, Msg} end,
+        fun(Pid) when is_pid(Pid) -> Pid ! {chat_message, ChannelId, Msg} end,
         Members
     ),
     persist_message(ChannelType, ChannelId, SenderId, Content),

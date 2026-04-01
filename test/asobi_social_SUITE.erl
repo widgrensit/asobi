@@ -27,36 +27,36 @@ init_per_suite(Config) ->
     U1 = asobi_test_helpers:unique_username(~"social_p1"),
     U2 = asobi_test_helpers:unique_username(~"social_p2"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
     B1 = nova_test:json(R1),
     {ok, R2} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U2, ~"password" => ~"testpass123"}},
         Config0
     ),
     B2 = nova_test:json(R2),
-    P1Token = maps:get(~"session_token", B1),
-    %% Pre-create a group for join_group test
+    #{~"player_id" := P1Id, ~"session_token" := P1Token} = B1,
+    #{~"player_id" := P2Id, ~"session_token" := P2Token} = B2,
     {ok, GR} = nova_test:post(
-        ~"/api/v1/groups",
+        "/api/v1/groups",
         #{
-            headers => [{~"authorization", iolist_to_binary([~"Bearer ", P1Token])}],
+            headers => [{~"authorization", <<"Bearer ", P1Token/binary>>}],
             json => #{
                 ~"name" => ~"Join Test Guild", ~"description" => ~"For join test", ~"open" => true
             }
         },
         Config0
     ),
-    GB = nova_test:json(GR),
+    #{~"id" := GroupId} = nova_test:json(GR),
     [
-        {player1_id, maps:get(~"player_id", B1)},
+        {player1_id, P1Id},
         {player1_token, P1Token},
-        {player2_id, maps:get(~"player_id", B2)},
-        {player2_token, maps:get(~"session_token", B2)},
-        {group_id, maps:get(~"id", GB)}
+        {player2_id, P2Id},
+        {player2_token, P2Token},
+        {group_id, GroupId}
         | Config0
     ].
 
@@ -64,13 +64,16 @@ end_per_suite(Config) ->
     Config.
 
 auth_headers(Config, Player) ->
-    Token = proplists:get_value(list_to_atom(atom_to_list(Player) ++ "_token"), Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    Key = list_to_atom(atom_to_list(Player) ++ "_token"),
+    {Key, Token} = lists:keyfind(Key, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 send_friend_request(Config) ->
-    P2 = proplists:get_value(player2_id, Config),
+    {player2_id, P2} = lists:keyfind(player2_id, 1, Config),
+    true = is_binary(P2),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/friends",
+        "/api/v1/friends",
         #{
             headers => auth_headers(Config, player1),
             json => #{~"friend_id" => P2}
@@ -81,9 +84,10 @@ send_friend_request(Config) ->
     Config.
 
 accept_friend_request(Config) ->
-    P1 = proplists:get_value(player1_id, Config),
+    {player1_id, P1} = lists:keyfind(player1_id, 1, Config),
+    true = is_binary(P1),
     {ok, Resp} = nova_test:put(
-        iolist_to_binary([~"/api/v1/friends/", P1]),
+        "/api/v1/friends/" ++ binary_to_list(P1),
         #{
             headers => auth_headers(Config, player2),
             json => #{~"status" => ~"accepted"}
@@ -95,7 +99,7 @@ accept_friend_request(Config) ->
 
 list_friends(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/friends",
+        "/api/v1/friends",
         #{headers => auth_headers(Config, player1)},
         Config
     ),
@@ -105,9 +109,10 @@ list_friends(Config) ->
     Config.
 
 remove_friend(Config) ->
-    P2 = proplists:get_value(player2_id, Config),
+    {player2_id, P2} = lists:keyfind(player2_id, 1, Config),
+    true = is_binary(P2),
     {ok, Resp} = nova_test:delete(
-        iolist_to_binary([~"/api/v1/friends/", P2]),
+        "/api/v1/friends/" ++ binary_to_list(P2),
         #{headers => auth_headers(Config, player1)},
         Config
     ),
@@ -116,7 +121,7 @@ remove_friend(Config) ->
 
 create_group(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/groups",
+        "/api/v1/groups",
         #{
             headers => auth_headers(Config, player1),
             json => #{~"name" => ~"Test Guild", ~"description" => ~"A test guild", ~"open" => true}
@@ -124,13 +129,14 @@ create_group(Config) ->
         Config
     ),
     ?assertStatus(200, Resp),
-    Body = nova_test:json(Resp),
-    [{group_id, maps:get(~"id", Body)} | Config].
+    #{~"id" := GroupId} = nova_test:json(Resp),
+    [{group_id, GroupId} | Config].
 
 join_group(Config) ->
-    GroupId = proplists:get_value(group_id, Config),
+    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
+    true = is_binary(GroupId),
     {ok, Resp} = nova_test:post(
-        iolist_to_binary([~"/api/v1/groups/", GroupId, ~"/join"]),
+        "/api/v1/groups/" ++ binary_to_list(GroupId) ++ "/join",
         #{headers => auth_headers(Config, player2), json => #{}},
         Config
     ),

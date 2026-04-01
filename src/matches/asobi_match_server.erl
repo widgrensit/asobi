@@ -14,13 +14,16 @@
 
 %% --- Public API ---
 
--spec start_link(map()) -> {ok, pid()}.
+-spec start_link(map()) -> gen_statem:start_ret().
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
 
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
-    gen_statem:call(Pid, {join, PlayerId}).
+    case gen_statem:call(Pid, {join, PlayerId}) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -spec leave(pid(), binary()) -> ok.
 leave(Pid, PlayerId) ->
@@ -32,15 +35,24 @@ handle_input(Pid, PlayerId, Input) ->
 
 -spec get_info(pid()) -> map().
 get_info(Pid) ->
-    gen_statem:call(Pid, get_info).
+    case gen_statem:call(Pid, get_info) of
+        Info when is_map(Info) -> Info;
+        _ -> #{}
+    end.
 
 -spec pause(pid()) -> ok | {error, term()}.
 pause(Pid) ->
-    gen_statem:call(Pid, pause).
+    case gen_statem:call(Pid, pause) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -spec resume(pid()) -> ok | {error, term()}.
 resume(Pid) ->
-    gen_statem:call(Pid, resume).
+    case gen_statem:call(Pid, resume) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -spec cancel(pid()) -> ok.
 cancel(Pid) ->
@@ -48,15 +60,24 @@ cancel(Pid) ->
 
 -spec start_vote(pid(), map()) -> {ok, pid()} | {error, term()}.
 start_vote(Pid, VoteConfig) ->
-    gen_statem:call(Pid, {start_vote, VoteConfig}).
+    case gen_statem:call(Pid, {start_vote, VoteConfig}) of
+        {ok, VotePid} when is_pid(VotePid) -> {ok, VotePid};
+        {error, _} = Err -> Err
+    end.
 
 -spec cast_vote(pid(), binary(), binary(), binary()) -> ok | {error, term()}.
 cast_vote(Pid, PlayerId, VoteId, OptionId) ->
-    gen_statem:call(Pid, {cast_vote, PlayerId, VoteId, OptionId}).
+    case gen_statem:call(Pid, {cast_vote, PlayerId, VoteId, OptionId}) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -spec use_veto(pid(), binary(), binary()) -> ok | {error, term()}.
 use_veto(Pid, PlayerId, VoteId) ->
-    gen_statem:call(Pid, {use_veto, PlayerId, VoteId}).
+    case gen_statem:call(Pid, {use_veto, PlayerId, VoteId}) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -spec broadcast_event(pid(), atom(), map()) -> ok.
 broadcast_event(Pid, Event, Payload) ->
@@ -64,7 +85,7 @@ broadcast_event(Pid, Event, Payload) ->
 
 %% --- gen_statem callbacks ---
 
--spec callback_mode() -> [atom()].
+-spec callback_mode() -> gen_statem:callback_mode_result().
 callback_mode() -> [state_functions, state_enter].
 
 -spec init(map()) -> {ok, waiting, map()}.
@@ -94,7 +115,8 @@ init(Config) ->
 
 %% --- waiting state ---
 
--spec waiting(gen_statem:event_type(), term(), map()) -> gen_statem:state_enter_result(atom()).
+-spec waiting(gen_statem:event_type() | enter, term(), map()) ->
+    gen_statem:state_enter_result(atom()).
 waiting(enter, _OldState, _State) ->
     {keep_state_and_data, [{state_timeout, ?WAITING_TIMEOUT, waiting_timeout}]};
 waiting({call, From}, {join, PlayerId}, State) ->
@@ -108,7 +130,8 @@ waiting(cast, {leave, PlayerId}, State) ->
 
 %% --- running state ---
 
--spec running(gen_statem:event_type(), term(), map()) -> gen_statem:state_enter_result(atom()).
+-spec running(gen_statem:event_type() | enter, term(), map()) ->
+    gen_statem:state_enter_result(atom()).
 running(enter, _OldState, #{tick_rate := TickRate} = _State) ->
     {keep_state_and_data, [{state_timeout, TickRate, tick}]};
 running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue := Queue} = State) ->
@@ -146,21 +169,38 @@ running({call, From}, {join, PlayerId}, State) ->
     handle_join(From, PlayerId, State);
 running(
     {call, From},
-    {start_vote, VoteConfig},
+    {start_vote, VoteConfig0},
     #{
         match_id := MatchId,
         players := Players,
         vote_frustration := Frustration,
         frustration_bonus := FBonus
     } = State
-) ->
+) when is_map(VoteConfig0) ->
+    VoteConfig = VoteConfig0,
     VoteId = maps:get(vote_id, VoteConfig, asobi_id:generate()),
     PlayerIds = maps:keys(Players),
-    FrustrationWeights = maps:from_list([
-        {PId, 1 + maps:get(PId, Frustration, 0) * FBonus}
-     || PId <- PlayerIds
-    ]),
-    BaseWeights = maps:get(weights, VoteConfig, #{}),
+    FrustrationWeightsRaw = lists:foldl(
+        fun(PId, Acc) when is_map(Acc) ->
+            FVal =
+                case maps:get(PId, Frustration, 0) of
+                    N when is_number(N) -> N;
+                    _ -> 0
+                end,
+            Acc#{PId => 1 + FVal * FBonus}
+        end,
+        #{},
+        PlayerIds
+    ),
+    FrustrationWeights =
+        case FrustrationWeightsRaw of
+            FW when is_map(FW) -> FW
+        end,
+    BaseWeights =
+        case maps:get(weights, VoteConfig, #{}) of
+            BW when is_map(BW) -> BW;
+            _ -> #{}
+        end,
     MergedWeights = maps:merge(FrustrationWeights, BaseWeights),
     FullConfig = VoteConfig#{
         vote_id => VoteId,
@@ -174,7 +214,9 @@ running(
     {keep_state, State#{active_votes => Active#{VoteId => VotePid}}, [
         {reply, From, {ok, VotePid}}
     ]};
-running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
+running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) when
+    is_binary(PlayerId), is_binary(OptionId)
+->
     Active = maps:get(active_votes, State, #{}),
     case maps:get(VoteId, Active, undefined) of
         undefined ->
@@ -183,7 +225,9 @@ running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
             Result = asobi_vote_server:cast_vote(VotePid, PlayerId, OptionId),
             {keep_state_and_data, [{reply, From, Result}]}
     end;
-running({call, From}, {use_veto, PlayerId, VoteId}, #{veto_tokens := Tokens} = State) ->
+running({call, From}, {use_veto, PlayerId, VoteId}, #{veto_tokens := Tokens} = State) when
+    is_binary(PlayerId)
+->
     Active = maps:get(active_votes, State, #{}),
     Remaining = maps:get(PlayerId, Tokens, 0),
     case {maps:get(VoteId, Active, undefined), Remaining} of
@@ -221,7 +265,8 @@ running(info, {vote_vetoed, VoteId, _Template}, State) ->
 
 %% --- paused state ---
 
--spec paused(gen_statem:event_type(), term(), map()) -> gen_statem:state_enter_result(atom()).
+-spec paused(gen_statem:event_type() | enter, term(), map()) ->
+    gen_statem:state_enter_result(atom()).
 paused(enter, _OldState, _State) ->
     keep_state_and_data;
 paused({call, From}, resume, State) ->
@@ -257,7 +302,8 @@ paused(_EventType, _Event, _State) ->
 
 %% --- finished state ---
 
--spec finished(gen_statem:event_type(), term(), map()) -> gen_statem:state_enter_result(atom()).
+-spec finished(gen_statem:event_type() | enter, term(), map()) ->
+    gen_statem:state_enter_result(atom()).
 finished(enter, _OldState, State) ->
     persist_result(State),
     notify_players(finished, State),

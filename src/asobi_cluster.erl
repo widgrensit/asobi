@@ -6,7 +6,7 @@
 
 -define(DEFAULT_POLL_INTERVAL, 10000).
 
--spec start_link() -> {ok, pid()} | ignore.
+-spec start_link() -> gen_server:start_ret() | ignore.
 start_link() ->
     case application:get_env(asobi, cluster) of
         {ok, _Config} ->
@@ -17,7 +17,8 @@ start_link() ->
 
 -spec init([]) -> {ok, map()}.
 init([]) ->
-    {ok, Config} = application:get_env(asobi, cluster),
+    {ok, Config0} = application:get_env(asobi, cluster),
+    Config = ensure_map(Config0),
     Interval = maps:get(poll_interval, Config, ?DEFAULT_POLL_INTERVAL),
     self() ! discover,
     {ok, #{config => Config, poll_interval => Interval}}.
@@ -56,10 +57,15 @@ discover_dns(Hostname) ->
         {ok, IPs} ->
             BaseName = node_basename(),
             lists:foreach(
-                fun(IP) ->
-                    % elp:ignore W0023 — bounded by k8s pod count
-                    Node = list_to_atom(BaseName ++ "@" ++ inet:ntoa(IP)),
-                    maybe_connect(Node)
+                fun(IP) when is_tuple(IP) ->
+                    case inet:ntoa(IP) of
+                        Addr when is_list(Addr) ->
+                            % elp:ignore W0023 — bounded by k8s pod count
+                            Node = list_to_atom(BaseName ++ "@" ++ Addr),
+                            maybe_connect(Node);
+                        {error, _} ->
+                            ok
+                    end
                 end,
                 IPs
             );
@@ -71,7 +77,7 @@ discover_dns(Hostname) ->
 discover_epmd(Hosts) ->
     BaseName = node_basename(),
     lists:foreach(
-        fun(Host) ->
+        fun(Host) when is_atom(Host) ->
             % elp:ignore W0023 — bounded by config hosts list
             Node = list_to_atom(BaseName ++ "@" ++ atom_to_list(Host)),
             maybe_connect(Node)
@@ -97,5 +103,12 @@ maybe_connect(Node) ->
 
 -spec node_basename() -> string().
 node_basename() ->
-    [Name | _] = string:split(atom_to_list(node()), "@"),
-    Name.
+    FullName = atom_to_list(node()),
+    case string:str(FullName, "@") of
+        0 -> FullName;
+        Pos -> string:substr(FullName, 1, Pos - 1)
+    end.
+
+-spec ensure_map(term()) -> #{term() => term()}.
+ensure_map(M) when is_map(M) -> M;
+ensure_map(_) -> #{}.

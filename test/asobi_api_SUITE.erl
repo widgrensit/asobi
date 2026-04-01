@@ -55,19 +55,18 @@ groups() ->
 init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
     Username = asobi_test_helpers:unique_username(~"testplayer"),
-    %% Pre-register a player for the players group
     PlayerUsername = asobi_test_helpers:unique_username(~"player_test"),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => PlayerUsername, ~"password" => ~"testpass123"}},
         Config0
     ),
-    Body = nova_test:json(Resp),
+    #{~"player_id" := PlayerId, ~"session_token" := SessionToken} = nova_test:json(Resp),
     [
         {test_username, Username},
         {player_username, PlayerUsername},
-        {player_id, maps:get(~"player_id", Body)},
-        {session_token, maps:get(~"session_token", Body)}
+        {player_id, PlayerId},
+        {session_token, SessionToken}
         | Config0
     ].
 
@@ -75,17 +74,16 @@ end_per_suite(Config) ->
     Config.
 
 init_per_group(players, Config) ->
-    %% Get a fresh token since the auth group may have invalidated the old one
-    PlayerUsername = proplists:get_value(player_username, Config),
+    {player_username, PlayerUsername} = lists:keyfind(player_username, 1, Config),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/login",
+        "/api/v1/auth/login",
         #{json => #{~"username" => PlayerUsername, ~"password" => ~"testpass123"}},
         Config
     ),
-    Body = nova_test:json(Resp),
+    #{~"session_token" := SessionToken, ~"player_id" := PlayerId} = nova_test:json(Resp),
     [
-        {session_token, maps:get(~"session_token", Body)},
-        {player_id, maps:get(~"player_id", Body)}
+        {session_token, SessionToken},
+        {player_id, PlayerId}
         | Config
     ];
 init_per_group(_Group, Config) ->
@@ -97,9 +95,9 @@ end_per_group(_Group, Config) ->
 %% --- Auth Tests ---
 
 register_player(Config) ->
-    Username = proplists:get_value(test_username, Config),
+    {test_username, Username} = lists:keyfind(test_username, 1, Config),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{
             json => #{
                 ~"username" => Username,
@@ -115,9 +113,9 @@ register_player(Config) ->
     Config.
 
 register_duplicate_username(Config) ->
-    Username = proplists:get_value(test_username, Config),
+    {test_username, Username} = lists:keyfind(test_username, 1, Config),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{
             json => #{
                 ~"username" => Username,
@@ -131,7 +129,7 @@ register_duplicate_username(Config) ->
 
 register_short_username(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{
             json => #{
                 ~"username" => ~"ab",
@@ -145,7 +143,7 @@ register_short_username(Config) ->
 
 register_short_password(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{
             json => #{
                 ~"username" => ~"shortpwuser",
@@ -158,9 +156,9 @@ register_short_password(Config) ->
     Config.
 
 login_success(Config) ->
-    Username = proplists:get_value(test_username, Config),
+    {test_username, Username} = lists:keyfind(test_username, 1, Config),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/login",
+        "/api/v1/auth/login",
         #{
             json => #{
                 ~"username" => Username,
@@ -175,9 +173,9 @@ login_success(Config) ->
     Config.
 
 login_invalid_credentials(Config) ->
-    Username = proplists:get_value(test_username, Config),
+    {test_username, Username} = lists:keyfind(test_username, 1, Config),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/login",
+        "/api/v1/auth/login",
         #{
             json => #{
                 ~"username" => Username,
@@ -190,9 +188,9 @@ login_invalid_credentials(Config) ->
     Config.
 
 refresh_token(Config) ->
-    Token = proplists:get_value(session_token, Config),
+    {session_token, Token} = lists:keyfind(session_token, 1, Config),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/refresh",
+        "/api/v1/auth/refresh",
         #{
             json => #{~"session_token" => Token}
         },
@@ -206,11 +204,13 @@ refresh_token(Config) ->
 %% --- Player Tests ---
 
 get_player(Config) ->
-    Token = proplists:get_value(session_token, Config),
-    PlayerId = proplists:get_value(player_id, Config),
+    {session_token, Token} = lists:keyfind(session_token, 1, Config),
+    {player_id, PlayerId} = lists:keyfind(player_id, 1, Config),
+    true = is_binary(Token),
+    true = is_binary(PlayerId),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/players/", PlayerId]),
-        #{headers => [{~"authorization", iolist_to_binary([~"Bearer ", Token])}]},
+        "/api/v1/players/" ++ binary_to_list(PlayerId),
+        #{headers => [{~"authorization", <<"Bearer ", Token/binary>>}]},
         Config
     ),
     ?assertStatus(200, Resp),
@@ -219,12 +219,14 @@ get_player(Config) ->
     Config.
 
 update_player(Config) ->
-    Token = proplists:get_value(session_token, Config),
-    PlayerId = proplists:get_value(player_id, Config),
+    {session_token, Token} = lists:keyfind(session_token, 1, Config),
+    {player_id, PlayerId} = lists:keyfind(player_id, 1, Config),
+    true = is_binary(Token),
+    true = is_binary(PlayerId),
     {ok, Resp} = nova_test:put(
-        iolist_to_binary([~"/api/v1/players/", PlayerId]),
+        "/api/v1/players/" ++ binary_to_list(PlayerId),
         #{
-            headers => [{~"authorization", iolist_to_binary([~"Bearer ", Token])}],
+            headers => [{~"authorization", <<"Bearer ", Token/binary>>}],
             json => #{~"display_name" => ~"Updated Name"}
         },
         Config
@@ -235,11 +237,12 @@ update_player(Config) ->
     Config.
 
 update_player_unauthorized(Config) ->
-    Token = proplists:get_value(session_token, Config),
+    {session_token, Token} = lists:keyfind(session_token, 1, Config),
+    true = is_binary(Token),
     {ok, Resp} = nova_test:put(
-        ~"/api/v1/players/00000000-0000-0000-0000-000000000000",
+        "/api/v1/players/00000000-0000-0000-0000-000000000000",
         #{
-            headers => [{~"authorization", iolist_to_binary([~"Bearer ", Token])}],
+            headers => [{~"authorization", <<"Bearer ", Token/binary>>}],
             json => #{~"display_name" => ~"Hacked"}
         },
         Config
@@ -250,21 +253,21 @@ update_player_unauthorized(Config) ->
 %% --- Health Tests ---
 
 health_check(Config) ->
-    {ok, Resp} = nova_test:get(~"/health", Config),
+    {ok, Resp} = nova_test:get("/health", Config),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"status" := _}, Body),
     Config.
 
 readiness_check(Config) ->
-    {ok, Resp} = nova_test:get(~"/ready", Config),
+    {ok, Resp} = nova_test:get("/ready", Config),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"status" := ~"ready"}, Body),
     Config.
 
 liveness_check(Config) ->
-    {ok, Resp} = nova_test:get(~"/live", Config),
+    {ok, Resp} = nova_test:get("/live", Config),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"status" := ~"alive"}, Body),

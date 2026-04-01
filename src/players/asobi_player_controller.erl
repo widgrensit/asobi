@@ -15,7 +15,7 @@ show(#{bindings := #{~"id" := PlayerId}} = _Req) ->
     {json, map()} | {json, integer(), map(), map()} | {status, integer()}.
 update(
     #{bindings := #{~"id" := PlayerId}, json := Params, auth_data := #{player_id := AuthId}} = _Req
-) ->
+) when is_map(Params) ->
     case PlayerId =:= AuthId of
         false ->
             {status, 403};

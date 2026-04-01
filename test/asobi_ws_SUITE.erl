@@ -18,7 +18,7 @@ end_per_suite(Config) ->
     Config.
 
 ws_connect_invalid_token(Config) ->
-    {ok, Conn} = nova_test_ws:connect(~"/ws", Config),
+    {ok, Conn} = nova_test_ws:connect("/ws", Config),
     nova_test_ws:send_json(
         #{
             ~"type" => ~"session.connect",
@@ -33,7 +33,7 @@ ws_connect_invalid_token(Config) ->
     Config.
 
 ws_heartbeat(Config) ->
-    {ok, Conn} = nova_test_ws:connect(~"/ws", Config),
+    {ok, Conn} = nova_test_ws:connect("/ws", Config),
     nova_test_ws:send_json(
         #{
             ~"type" => ~"session.heartbeat",
@@ -47,7 +47,7 @@ ws_heartbeat(Config) ->
     Config.
 
 ws_unknown_type(Config) ->
-    {ok, Conn} = nova_test_ws:connect(~"/ws", Config),
+    {ok, Conn} = nova_test_ws:connect("/ws", Config),
     nova_test_ws:send_json(
         #{
             ~"type" => ~"nonexistent.type",

@@ -25,15 +25,16 @@ websocket_handle({text, Raw}, State) ->
 websocket_handle(_Frame, State) ->
     {ok, State}.
 
--spec websocket_info(term(), map()) -> {ok, map()} | {reply, {text, binary()}, map()}.
+-spec websocket_info(term(), map()) ->
+    {ok, map()} | {reply, {text, binary()}, map()} | {stop, map()}.
 websocket_info({asobi_message, {match_state, MatchState}}, State) ->
     Reply = encode_reply(undefined, ~"match.state", MatchState),
     {reply, {text, Reply}, State};
-websocket_info({asobi_message, {match_event, Event, Payload}}, State) ->
+websocket_info({asobi_message, {match_event, Event, Payload}}, State) when is_atom(Event) ->
     Type = iolist_to_binary([~"match.", atom_to_binary(Event)]),
     Reply = encode_reply(undefined, Type, Payload),
     {reply, {text, Reply}, State};
-websocket_info({chat_message, ChannelId, Msg}, State) ->
+websocket_info({chat_message, ChannelId, Msg}, State) when is_map(Msg) ->
     Reply = encode_reply(undefined, ~"chat.message", Msg#{channel_id => ChannelId}),
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {notification, Notif}}, State) ->
@@ -82,9 +83,15 @@ handle_message(
                 MatchPid ->
                     InputData =
                         case maps:get(~"data", Payload, undefined) of
-                            undefined -> Payload;
-                            Bin when is_binary(Bin) -> json:decode(Bin);
-                            Other -> Other
+                            undefined when is_map(Payload) -> Payload;
+                            Bin when is_binary(Bin) ->
+                                case json:decode(Bin) of
+                                    M when is_map(M) -> M;
+                                    _ -> #{}
+                                end;
+                            Other when is_map(Other) -> Other;
+                            _ ->
+                                #{}
                         end,
                     asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
                     {ok, State}

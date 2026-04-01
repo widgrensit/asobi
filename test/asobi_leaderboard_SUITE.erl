@@ -29,7 +29,8 @@ end_per_testcase(_TC, _Config) ->
     ok.
 
 submit_and_top(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    true = is_binary(BoardId),
     asobi_leaderboard_server:submit(BoardId, ~"alice", 100),
     asobi_leaderboard_server:submit(BoardId, ~"bob", 200),
     asobi_leaderboard_server:submit(BoardId, ~"carol", 150),
@@ -38,7 +39,8 @@ submit_and_top(Config) ->
     Config.
 
 rank_query(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    true = is_binary(BoardId),
     asobi_leaderboard_server:submit(BoardId, ~"alice", 100),
     asobi_leaderboard_server:submit(BoardId, ~"bob", 200),
     ?assertMatch({ok, 1}, asobi_leaderboard_server:rank(BoardId, ~"bob")),
@@ -47,9 +49,10 @@ rank_query(Config) ->
     Config.
 
 around_query(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    true = is_binary(BoardId),
     lists:foreach(
-        fun(I) ->
+        fun(I) when is_integer(I) ->
             Name = list_to_binary("player" ++ integer_to_list(I)),
             asobi_leaderboard_server:submit(BoardId, Name, I * 10)
         end,
@@ -60,7 +63,8 @@ around_query(Config) ->
     Config.
 
 score_update(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    true = is_binary(BoardId),
     asobi_leaderboard_server:submit(BoardId, ~"alice", 100),
     asobi_leaderboard_server:submit(BoardId, ~"alice", 200),
     Top = asobi_leaderboard_server:top(BoardId, 10),

@@ -32,14 +32,11 @@ init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
     U1 = asobi_test_helpers:unique_username(~"tourney_p1"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
-    B1 = nova_test:json(R1),
-    Token = maps:get(~"session_token", B1),
-    PlayerId = maps:get(~"player_id", B1),
-    %% Create a tournament via DB + start it as a server
+    #{~"session_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
     BoardId = iolist_to_binary([
         ~"tourney_board_", integer_to_binary(erlang:unique_integer([positive]))
     ]),
@@ -59,7 +56,6 @@ init_per_suite(Config) ->
     }),
     {ok, Tournament} = asobi_repo:insert(TournamentCS),
     TournamentId = maps:get(id, Tournament),
-    %% Start the tournament server
     {ok, _} = asobi_tournament_sup:start_tournament(Tournament),
     [
         {player1_id, PlayerId},
@@ -73,12 +69,13 @@ end_per_suite(Config) ->
     Config.
 
 auth(Config) ->
-    Token = proplists:get_value(player1_token, Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 list_tournaments_empty(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/tournaments?status=cancelled",
+        "/api/v1/tournaments?status=cancelled",
         #{headers => auth(Config)},
         Config
     ),
@@ -88,7 +85,7 @@ list_tournaments_empty(Config) ->
 
 list_tournaments(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/tournaments",
+        "/api/v1/tournaments",
         #{headers => auth(Config)},
         Config
     ),
@@ -98,9 +95,10 @@ list_tournaments(Config) ->
     Config.
 
 show_tournament(Config) ->
-    TournamentId = proplists:get_value(tournament_id, Config),
+    {tournament_id, TournamentId} = lists:keyfind(tournament_id, 1, Config),
+    true = is_binary(TournamentId),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/tournaments/", TournamentId]),
+        "/api/v1/tournaments/" ++ binary_to_list(TournamentId),
         #{headers => auth(Config)},
         Config
     ),
@@ -111,7 +109,7 @@ show_tournament(Config) ->
 
 show_tournament_not_found(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/tournaments/00000000-0000-0000-0000-000000000000",
+        "/api/v1/tournaments/00000000-0000-0000-0000-000000000000",
         #{headers => auth(Config)},
         Config
     ),
@@ -119,9 +117,10 @@ show_tournament_not_found(Config) ->
     Config.
 
 join_tournament(Config) ->
-    TournamentId = proplists:get_value(tournament_id, Config),
+    {tournament_id, TournamentId} = lists:keyfind(tournament_id, 1, Config),
+    true = is_binary(TournamentId),
     {ok, Resp} = nova_test:post(
-        iolist_to_binary([~"/api/v1/tournaments/", TournamentId, ~"/join"]),
+        "/api/v1/tournaments/" ++ binary_to_list(TournamentId) ++ "/join",
         #{headers => auth(Config), json => #{}},
         Config
     ),
@@ -130,9 +129,10 @@ join_tournament(Config) ->
     Config.
 
 join_tournament_already_joined(Config) ->
-    TournamentId = proplists:get_value(tournament_id, Config),
+    {tournament_id, TournamentId} = lists:keyfind(tournament_id, 1, Config),
+    true = is_binary(TournamentId),
     {ok, Resp} = nova_test:post(
-        iolist_to_binary([~"/api/v1/tournaments/", TournamentId, ~"/join"]),
+        "/api/v1/tournaments/" ++ binary_to_list(TournamentId) ++ "/join",
         #{headers => auth(Config), json => #{}},
         Config
     ),
@@ -141,7 +141,7 @@ join_tournament_already_joined(Config) ->
 
 join_tournament_not_found(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/tournaments/00000000-0000-0000-0000-000000000000/join",
+        "/api/v1/tournaments/00000000-0000-0000-0000-000000000000/join",
         #{headers => auth(Config), json => #{}},
         Config
     ),

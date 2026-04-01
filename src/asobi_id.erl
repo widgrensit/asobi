@@ -13,4 +13,6 @@ native time-range queries on primary keys.
 -doc "Generate a UUIDv7 as a lowercase hyphenated binary string.".
 -spec generate() -> binary().
 generate() ->
-    iolist_to_binary(jhn_uuid:gen(v7)).
+    case jhn_uuid:gen(v7) of
+        UUID when is_list(UUID) -> iolist_to_binary(UUID)
+    end.

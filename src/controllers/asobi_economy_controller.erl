@@ -3,7 +3,7 @@
 -export([wallets/1, history/1, store/1, purchase/1]).
 
 -spec wallets(cowboy_req:req()) -> {json, map()}.
-wallets(#{auth_data := #{player_id := PlayerId}} = _Req) ->
+wallets(#{auth_data := #{player_id := PlayerId}} = _Req) when is_binary(PlayerId) ->
     {ok, Wallets} = asobi_economy:get_wallets(PlayerId),
     {json, #{wallets => [maps:with([currency, balance], W) || W <- Wallets]}}.
 
@@ -11,9 +11,9 @@ wallets(#{auth_data := #{player_id := PlayerId}} = _Req) ->
 history(
     #{bindings := #{~"currency" := Currency}, auth_data := #{player_id := PlayerId}, qs := Qs} =
         _Req
-) ->
+) when is_binary(PlayerId), is_binary(Currency), is_binary(Qs) ->
     Params = cow_qs:parse_qs(Qs),
-    Limit = binary_to_integer(proplists:get_value(~"limit", Params, ~"50")),
+    Limit = qs_integer(~"limit", Params, 50),
     {ok, Transactions} = asobi_economy:get_history(PlayerId, Currency, #{limit => Limit}),
     {json, #{transactions => Transactions}}.
 
@@ -30,7 +30,9 @@ store(#{qs := Qs} = _Req) ->
     {json, #{listings => Listings}}.
 
 -spec purchase(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-purchase(#{json := #{~"listing_id" := ListingId}, auth_data := #{player_id := PlayerId}} = _Req) ->
+purchase(
+    #{json := #{~"listing_id" := ListingId}, auth_data := #{player_id := PlayerId}} = _Req
+) when is_binary(PlayerId), is_binary(ListingId) ->
     case asobi_economy:purchase(PlayerId, ListingId) of
         {ok, Item} ->
             {json, 200, #{}, #{success => true, item => Item}};
@@ -40,4 +42,10 @@ purchase(#{json := #{~"listing_id" := ListingId}, auth_data := #{player_id := Pl
             {json, 400, #{}, #{error => ~"listing_inactive"}};
         {error, _Reason} ->
             {json, 500, #{}, #{error => ~"purchase_failed"}}
+    end.
+
+qs_integer(Key, Params, Default) ->
+    case proplists:get_value(Key, Params) of
+        V when is_binary(V) -> binary_to_integer(V);
+        _ -> Default
     end.

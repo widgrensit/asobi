@@ -62,7 +62,7 @@ hash_password(CS) ->
     case kura_changeset:get_change(CS, password) of
         undefined ->
             CS;
-        Password ->
+        Password when is_binary(Password) ->
             Hashed = nova_auth_password:hash(Password),
             kura_changeset:put_change(CS, hashed_password, Hashed)
     end.

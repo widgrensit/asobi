@@ -110,7 +110,7 @@ bench_registration(Config) ->
             ]),
             {T, _} = timer:tc(fun() ->
                 nova_test:post(
-                    ~"/api/v1/auth/register",
+                    "/api/v1/auth/register",
                     #{json => #{~"username" => Username, ~"password" => ~"benchmarkpass123"}},
                     Config
                 )
@@ -147,24 +147,32 @@ bench_registration(Config) ->
 
 %% --- Internal ---
 
+-spec print_stats(binary(), [number()]) -> ok.
 print_stats(Label, Times) ->
     Sorted = lists:sort(Times),
-    Min = hd(Sorted),
+    [Min | _] = Sorted,
     Max = lists:last(Sorted),
+    true = is_number(Min),
+    true = is_number(Max),
     Med = median(Times),
     Avg = lists:sum(Times) / length(Times),
     ct:pal("  ~ts: min=~.1fms  median=~.1fms  avg=~.1fms  max=~.1fms", [
         Label, Min / 1000, Med / 1000, Avg / 1000, Max / 1000
     ]).
 
+-spec median([number()]) -> number().
 median(List) ->
     Sorted = lists:sort(List),
     Len = length(Sorted),
     case Len rem 2 of
         1 ->
-            lists:nth(Len div 2 + 1, Sorted);
+            V = lists:nth(Len div 2 + 1, Sorted),
+            true = is_number(V),
+            V;
         0 ->
             A = lists:nth(Len div 2, Sorted),
             B = lists:nth(Len div 2 + 1, Sorted),
+            true = is_number(A),
+            true = is_number(B),
             (A + B) / 2
     end.

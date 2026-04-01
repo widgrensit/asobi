@@ -4,17 +4,17 @@
 -export([start_link/0, add/2, remove/2, get_ticket/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--dialyzer({no_match, spawn_matches/2}).
-
 -define(DEFAULT_TICK, 1000).
 
--spec start_link() -> {ok, pid()}.
+-spec start_link() -> gen_server:start_ret().
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 -spec add(binary(), map()) -> {ok, binary()}.
 add(PlayerId, Params) ->
-    gen_server:call(?MODULE, {add, PlayerId, Params}).
+    case gen_server:call(?MODULE, {add, PlayerId, Params}) of
+        {ok, TicketId} when is_binary(TicketId) -> {ok, TicketId}
+    end.
 
 -spec remove(binary(), binary()) -> ok.
 remove(PlayerId, TicketId) ->
@@ -22,21 +22,33 @@ remove(PlayerId, TicketId) ->
 
 -spec get_ticket(binary()) -> {ok, map()} | {error, not_found}.
 get_ticket(TicketId) ->
-    gen_server:call(?MODULE, {get_ticket, TicketId}).
+    case gen_server:call(?MODULE, {get_ticket, TicketId}) of
+        {ok, Ticket} when is_map(Ticket) -> {ok, Ticket};
+        {error, not_found} -> {error, not_found}
+    end.
 
 -spec init([]) -> {ok, map()}.
 init([]) ->
-    Cfg = application:get_env(asobi, matchmaker, #{}),
-    TickInterval = maps:get(tick_interval, Cfg, ?DEFAULT_TICK),
+    Cfg = ensure_map(application:get_env(asobi, matchmaker, #{})),
+    TickInterval =
+        case maps:get(tick_interval, Cfg, ?DEFAULT_TICK) of
+            TI when is_integer(TI) -> TI;
+            _ -> ?DEFAULT_TICK
+        end,
     erlang:send_after(TickInterval, self(), tick),
+    MaxWaitSec =
+        case maps:get(max_wait_seconds, Cfg, 60) of
+            MW when is_integer(MW) -> MW;
+            _ -> 60
+        end,
     {ok, #{
         tickets => #{},
         tick_interval => TickInterval,
-        max_wait => maps:get(max_wait_seconds, Cfg, 60) * 1000
+        max_wait => MaxWaitSec * 1000
     }}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
-handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) ->
+handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when is_map(Params) ->
     TicketId = generate_id(),
     Ticket = #{
         id => TicketId,
@@ -68,9 +80,8 @@ handle_info(tick, #{tickets := Tickets, tick_interval := Interval, max_wait := M
     {Matched, Expired, Remaining} = process_tickets(Tickets, Now, MaxWait),
     FailedGroups = spawn_matches(Matched),
     notify_expired(Expired),
-    %% Re-queue tickets from failed match spawns
     Remaining1 = lists:foldl(
-        fun(T, Acc) -> Acc#{maps:get(id, T) => T} end,
+        fun(T, Acc) when is_map(T), is_map(Acc) -> Acc#{maps:get(id, T) => T} end,
         Remaining,
         lists:flatten(FailedGroups)
     ),
@@ -99,21 +110,39 @@ process_tickets(Tickets, Now, MaxWait) ->
     ),
     ByMode = group_by_mode(Pending),
     {Matched, Unmatched} = match_groups(ByMode),
-    Remaining = lists:foldl(
-        fun(T, Acc) -> Acc#{maps:get(id, T) => T} end,
-        #{},
-        lists:flatten(Unmatched)
+    Remaining = ensure_map(
+        lists:foldl(
+            fun(T, Acc) when is_map(T), is_map(Acc) -> Acc#{maps:get(id, T) => T} end,
+            #{},
+            lists:flatten(Unmatched)
+        )
     ),
     {Matched, Expired, Remaining}.
 
 -spec group_by_mode([map()]) -> #{binary() => [map()]}.
 group_by_mode(Tickets) ->
-    lists:foldl(
-        fun(#{mode := Mode} = T, Acc) ->
-            maps:update_with(Mode, fun(L) -> [T | L] end, [T], Acc)
+    Result = lists:foldl(
+        fun(#{mode := Mode} = Ticket, Acc) when is_map(Acc) ->
+            maps:update_with(Mode, fun(List) -> [Ticket | List] end, [Ticket], Acc)
         end,
         #{},
         Tickets
+    ),
+    case Result of
+        Map when is_map(Map) -> ensure_typed_map(Map)
+    end.
+
+-spec ensure_typed_map(map()) -> #{binary() => [map()]}.
+ensure_typed_map(Map) ->
+    maps:fold(
+        fun
+            (Key, Val, Acc) when is_binary(Key), is_list(Val) ->
+                Acc#{Key => [Entry || Entry <- Val, is_map(Entry)]};
+            (_Key, _Val, Acc) ->
+                Acc
+        end,
+        #{},
+        Map
     ).
 
 -spec match_groups(#{binary() => [map()]}) -> {[[map()]], [[map()]]}.
@@ -131,7 +160,11 @@ match_groups(ByMode) ->
 try_match(Tickets) when length(Tickets) < 2 ->
     {[], Tickets};
 try_match(Tickets) ->
-    Sorted = lists:sort(fun(A, B) -> skill(A) =< skill(B) end, Tickets),
+    Sorted = [
+        T
+     || T <- lists:sort(fun(A, B) when is_map(A), is_map(B) -> skill(A) =< skill(B) end, Tickets),
+        is_map(T)
+    ],
     match_sorted(Sorted, [], []).
 
 -spec match_sorted([map()], [[map()]], [map()]) -> {[[map()]], [map()]}.
@@ -167,7 +200,8 @@ spawn_matches([], Failed) ->
     Failed;
 spawn_matches([Group | Rest], Failed) ->
     PlayerIds = [maps:get(player_id, T) || T <- Group],
-    Mode = maps:get(mode, hd(Group)),
+    [First | _] = Group,
+    Mode = maps:get(mode, First),
     case resolve_game_module(Mode) of
         {ok, GameMod} ->
             Config = #{
@@ -178,10 +212,10 @@ spawn_matches([Group | Rest], Failed) ->
                 max_players => length(PlayerIds)
             },
             case asobi_match_sup:start_match(Config) of
-                {ok, MatchPid} ->
+                {ok, MatchPid} when is_pid(MatchPid) ->
                     MatchInfo = asobi_match_server:get_info(MatchPid),
                     lists:foreach(
-                        fun(PlayerId) ->
+                        fun(PlayerId) when is_binary(PlayerId) ->
                             _ = asobi_match_server:join(MatchPid, PlayerId),
                             asobi_presence:send(PlayerId, {match_joined, MatchPid}),
                             asobi_presence:send(
@@ -207,7 +241,7 @@ spawn_matches([Group | Rest], Failed) ->
         {error, _} ->
             logger:warning(#{msg => ~"no game module for mode", mode => Mode}),
             lists:foreach(
-                fun(PlayerId) ->
+                fun(PlayerId) when is_binary(PlayerId) ->
                     asobi_presence:send(
                         PlayerId,
                         {match_event, matchmaker_failed, #{reason => ~"no_game_module"}}
@@ -220,9 +254,9 @@ spawn_matches([Group | Rest], Failed) ->
 
 -spec resolve_game_module(binary()) -> {ok, module()} | {error, not_found}.
 resolve_game_module(Mode) ->
-    Modes = application:get_env(asobi, game_modes, #{}),
+    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
     case Modes of
-        #{Mode := Mod} -> {ok, Mod};
+        #{Mode := Mod} when is_atom(Mod) -> {ok, Mod};
         _ -> {error, not_found}
     end.
 
@@ -236,3 +270,7 @@ notify_expired([#{player_id := PlayerId, id := TicketId} | Rest]) ->
 -spec generate_id() -> binary().
 generate_id() ->
     asobi_id:generate().
+
+-spec ensure_map(term()) -> #{term() => term()}.
+ensure_map(M) when is_map(M) -> M;
+ensure_map(_) -> #{}.
