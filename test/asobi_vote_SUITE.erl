@@ -15,7 +15,12 @@
     vote_approval_method/1,
     vote_via_match_server/1,
     vote_hidden_visibility/1,
-    vote_no_votes_cast/1
+    vote_no_votes_cast/1,
+    vote_weighted_method/1,
+    vote_weighted_unequal/1,
+    vote_template_from_config/1,
+    vote_template_override/1,
+    vote_rate_limit/1
 ]).
 
 all() ->
@@ -31,7 +36,12 @@ all() ->
         vote_approval_method,
         vote_via_match_server,
         vote_hidden_visibility,
-        vote_no_votes_cast
+        vote_no_votes_cast,
+        vote_weighted_method,
+        vote_weighted_unequal,
+        vote_template_from_config,
+        vote_template_override,
+        vote_rate_limit
     ].
 
 init_per_suite(Config) ->
@@ -287,6 +297,127 @@ vote_no_votes_cast(_Config) ->
     after 2000 ->
         error(vote_did_not_expire)
     end.
+
+vote_weighted_method(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2"],
+        window_ms => 200,
+        method => ~"weighted",
+        weights => #{~"p1" => 3, ~"p2" => 1},
+        visibility => ~"live"
+    }),
+    %% p1 votes A (weight 3), p2 votes B (weight 1) — A should win
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(vote_did_not_resolve)
+    end.
+
+vote_weighted_unequal(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3"],
+        window_ms => 5000,
+        method => ~"weighted",
+        weights => #{~"p1" => 10, ~"p2" => 1, ~"p3" => 1},
+        visibility => ~"live"
+    }),
+    %% p2 and p3 vote B (total weight 2), p1 votes A (weight 10) — A wins
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p3", ~"opt_b"),
+    Info = asobi_vote_server:get_state(VotePid),
+    ?assertMatch(#{tallies := #{~"opt_a" := 10.0, ~"opt_b" := 2.0}}, Info).
+
+vote_template_from_config(_Config) ->
+    %% Set a template in app config
+    application:set_env(asobi, vote_templates, #{
+        ~"test_tmpl" => #{method => ~"approval", window_ms => 5000, visibility => ~"hidden"}
+    }),
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1"],
+        template => ~"test_tmpl"
+    }),
+    Info = asobi_vote_server:get_state(VotePid),
+    %% Should have hidden visibility from template
+    ?assertNot(maps:is_key(tallies, Info)),
+    ?assertMatch(#{method := ~"approval"}, Info),
+    application:unset_env(asobi, vote_templates).
+
+vote_template_override(_Config) ->
+    %% Template says hidden, but per-call overrides to live
+    application:set_env(asobi, vote_templates, #{
+        ~"override_tmpl" => #{method => ~"plurality", window_ms => 5000, visibility => ~"hidden"}
+    }),
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1"],
+        template => ~"override_tmpl",
+        visibility => ~"live"
+    }),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    Info = asobi_vote_server:get_state(VotePid),
+    %% Per-call override should win
+    ?assert(maps:is_key(tallies, Info)),
+    application:unset_env(asobi, vote_templates).
+
+vote_rate_limit(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1"],
+        window_ms => 5000,
+        max_revotes => 2
+    }),
+    %% First vote (count=0, no prior)
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    %% Change 1 (count=1)
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_b"),
+    %% Change 2 (count=2)
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    %% Change 3 — should be rate limited (count=2, limit=2)
+    ?assertMatch(
+        {error, rate_limited}, asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_b")
+    ).
 
 %% --- Helpers ---
 
