@@ -120,6 +120,10 @@ api_routes() ->
             %% Chat
             {~"/chat/:channel_id/history", fun asobi_chat_controller:history/1, #{methods => [get]}},
 
+            %% Votes
+            {~"/matches/:match_id/votes", fun asobi_vote_controller:index/1, #{methods => [get]}},
+            {~"/votes/:id", fun asobi_vote_controller:show/1, #{methods => [get]}},
+
             %% Tournaments
             {~"/tournaments", fun asobi_tournament_controller:index/1, #{methods => [get]}},
             {~"/tournaments/:id", fun asobi_tournament_controller:show/1, #{methods => [get]}},

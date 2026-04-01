@@ -2,6 +2,7 @@
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1]).
+-export([start_vote/2, cast_vote/4, broadcast_event/3]).
 -export([callback_mode/0, init/1, terminate/3]).
 -export([waiting/3, running/3, paused/3, finished/3]).
 
@@ -44,6 +45,18 @@ resume(Pid) ->
 -spec cancel(pid()) -> ok.
 cancel(Pid) ->
     gen_statem:cast(Pid, cancel).
+
+-spec start_vote(pid(), map()) -> {ok, pid()} | {error, term()}.
+start_vote(Pid, VoteConfig) ->
+    gen_statem:call(Pid, {start_vote, VoteConfig}).
+
+-spec cast_vote(pid(), binary(), binary(), binary()) -> ok | {error, term()}.
+cast_vote(Pid, PlayerId, VoteId, OptionId) ->
+    gen_statem:call(Pid, {cast_vote, PlayerId, VoteId, OptionId}).
+
+-spec broadcast_event(pid(), atom(), map()) -> ok.
+broadcast_event(Pid, Event, Payload) ->
+    gen_statem:cast(Pid, {broadcast_event, Event, Payload}).
 
 %% --- gen_statem callbacks ---
 
@@ -120,7 +133,47 @@ running({call, From}, resume, _State) ->
 running({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(running, State)}]};
 running({call, From}, {join, PlayerId}, State) ->
-    handle_join(From, PlayerId, State).
+    handle_join(From, PlayerId, State);
+running({call, From}, {start_vote, VoteConfig}, #{match_id := MatchId, players := Players} = State) ->
+    VoteId = maps:get(vote_id, VoteConfig, asobi_id:generate()),
+    FullConfig = VoteConfig#{
+        vote_id => VoteId,
+        match_id => MatchId,
+        match_pid => self(),
+        eligible => maps:keys(Players)
+    },
+    {ok, VotePid} = asobi_vote_sup:start_vote(FullConfig),
+    Active = maps:get(active_votes, State, #{}),
+    {keep_state, State#{active_votes => Active#{VoteId => VotePid}}, [
+        {reply, From, {ok, VotePid}}
+    ]};
+running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
+    Active = maps:get(active_votes, State, #{}),
+    case maps:get(VoteId, Active, undefined) of
+        undefined ->
+            {keep_state_and_data, [{reply, From, {error, vote_not_found}}]};
+        VotePid ->
+            Result = asobi_vote_server:cast_vote(VotePid, PlayerId, OptionId),
+            {keep_state_and_data, [{reply, From, Result}]}
+    end;
+running(cast, {broadcast_event, Event, Payload}, State) ->
+    broadcast_match_event(Event, Payload, State),
+    keep_state_and_data;
+running(
+    info, {vote_resolved, VoteId, Template, Result}, #{game_module := Mod, game_state := GS} = State
+) ->
+    Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
+    State1 = State#{active_votes => Active},
+    case erlang:function_exported(Mod, vote_resolved, 3) of
+        true ->
+            {ok, GS1} = Mod:vote_resolved(Template, Result, GS),
+            {keep_state, State1#{game_state => GS1}};
+        false ->
+            {keep_state, State1}
+    end;
+running(info, {vote_vetoed, VoteId, _Template}, State) ->
+    Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
+    {keep_state, State#{active_votes => Active}}.
 
 %% --- paused state ---
 
@@ -137,6 +190,24 @@ paused(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 paused({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(paused, State)}]};
+paused(cast, {broadcast_event, Event, Payload}, State) ->
+    broadcast_match_event(Event, Payload, State),
+    keep_state_and_data;
+paused(
+    info, {vote_resolved, VoteId, Template, Result}, #{game_module := Mod, game_state := GS} = State
+) ->
+    Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
+    State1 = State#{active_votes => Active},
+    case erlang:function_exported(Mod, vote_resolved, 3) of
+        true ->
+            {ok, GS1} = Mod:vote_resolved(Template, Result, GS),
+            {keep_state, State1#{game_state => GS1}};
+        false ->
+            {keep_state, State1}
+    end;
+paused(info, {vote_vetoed, VoteId, _Template}, State) ->
+    Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
+    {keep_state, State#{active_votes => Active}};
 paused(_EventType, _Event, _State) ->
     keep_state_and_data.
 
@@ -219,6 +290,14 @@ apply_inputs(Mod, [{PlayerId, Input} | Rest], GS) ->
             }),
             apply_inputs(Mod, Rest, GS)
     end.
+
+broadcast_match_event(Event, Payload, #{players := Players}) ->
+    maps:foreach(
+        fun(PlayerId, _Meta) ->
+            asobi_presence:send(PlayerId, {match_event, Event, Payload})
+        end,
+        Players
+    ).
 
 broadcast_state(#{players := Players, game_module := Mod, game_state := GS}) ->
     maps:foreach(

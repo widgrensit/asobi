@@ -30,4 +30,10 @@
 -callback get_state(PlayerId :: binary(), GameState :: term()) ->
     StateForPlayer :: map().
 
--optional_callbacks([tick/1]).
+-callback vote_requested(GameState :: term()) ->
+    {ok, VoteConfig :: map()} | none.
+
+-callback vote_resolved(Template :: binary(), Result :: map(), GameState :: term()) ->
+    {ok, GameState1 :: term()}.
+
+-optional_callbacks([tick/1, vote_requested/1, vote_resolved/3]).
