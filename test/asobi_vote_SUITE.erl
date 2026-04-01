@@ -20,7 +20,12 @@
     vote_weighted_unequal/1,
     vote_template_from_config/1,
     vote_template_override/1,
-    vote_rate_limit/1
+    vote_rate_limit/1,
+    vote_window_ready_up/1,
+    vote_window_ready_up_timeout/1,
+    vote_window_hybrid/1,
+    vote_window_hybrid_min_enforced/1,
+    vote_window_adaptive/1
 ]).
 
 all() ->
@@ -41,7 +46,12 @@ all() ->
         vote_weighted_unequal,
         vote_template_from_config,
         vote_template_override,
-        vote_rate_limit
+        vote_rate_limit,
+        vote_window_ready_up,
+        vote_window_ready_up_timeout,
+        vote_window_hybrid,
+        vote_window_hybrid_min_enforced,
+        vote_window_adaptive
     ].
 
 init_per_suite(Config) ->
@@ -418,6 +428,128 @@ vote_rate_limit(_Config) ->
     ?assertMatch(
         {error, rate_limited}, asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_b")
     ).
+
+vote_window_ready_up(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2"],
+        window_ms => 60000,
+        window_type => ~"ready_up"
+    }),
+    Ref = monitor(process, VotePid),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    %% Not closed yet — p2 hasn't voted
+    ?assert(is_process_alive(VotePid)),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
+    %% All voted — should close immediately
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 1000 ->
+        error(ready_up_did_not_close)
+    end.
+
+vote_window_ready_up_timeout(_Config) ->
+    Options = [#{id => ~"opt_a", label => ~"A"}],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2"],
+        window_ms => 200,
+        window_type => ~"ready_up"
+    }),
+    Ref = monitor(process, VotePid),
+    %% Only p1 votes, p2 never does — should timeout
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(ready_up_did_not_timeout)
+    end.
+
+vote_window_hybrid(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2"],
+        window_ms => 60000,
+        window_type => ~"hybrid",
+        min_window_ms => 50
+    }),
+    Ref = monitor(process, VotePid),
+    %% Wait past min window
+    timer:sleep(100),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
+    %% All voted + min elapsed — should close
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 1000 ->
+        error(hybrid_did_not_close)
+    end.
+
+vote_window_hybrid_min_enforced(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2"],
+        window_ms => 60000,
+        window_type => ~"hybrid",
+        min_window_ms => 5000
+    }),
+    %% Vote immediately (before min_window_ms)
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
+    %% All voted but min_window_ms not elapsed — should still be alive
+    timer:sleep(50),
+    ?assert(is_process_alive(VotePid)).
+
+vote_window_adaptive(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3", ~"p4"],
+        window_ms => 60000,
+        window_type => ~"adaptive",
+        supermajority => 0.75
+    }),
+    Ref = monitor(process, VotePid),
+    %% 3 out of 4 vote the same — 75% supermajority triggers shrink to 3s
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p3", ~"opt_a"),
+    %% Should resolve within ~3s (adaptive shrink), not 60s
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 5000 ->
+        error(adaptive_did_not_shrink)
+    end.
 
 %% --- Helpers ---
 

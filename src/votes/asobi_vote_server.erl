@@ -24,6 +24,9 @@ tie-breaking.
 | `vote_id`        | `binary()`     | auto-generated | Override vote ID                   |
 | `weights`        | `map()`        | `#{}`          | Voter weights for `"weighted"` method: `#{voter_id => number()}` |
 | `max_revotes`    | `pos_integer()`| `3`            | Max times a voter can change their vote |
+| `window_type`    | `binary()`     | `"fixed"`      | `"fixed"`, `"ready_up"`, `"hybrid"`, or `"adaptive"` |
+| `min_window_ms`  | `pos_integer()`| `5000`         | Minimum window for `"hybrid"` mode |
+| `supermajority`  | `float()`      | `0.75`         | Threshold for `"adaptive"` early close |
 
 ## Vote templates
 
@@ -44,6 +47,17 @@ Define reusable templates in app config. Per-call config overrides template defa
 - **Weighted**: like plurality, but each vote is multiplied by the voter's
   weight from the `weights` map. Unweighted voters default to 1.
 
+## Window types
+
+- **Fixed** (default): vote runs for exactly `window_ms`, then closes.
+- **Ready-up**: closes as soon as all eligible voters have cast a vote,
+  or when `window_ms` expires (whichever comes first).
+- **Hybrid**: like ready-up, but enforces a minimum `min_window_ms` before
+  early close is allowed. Prevents snap decisions.
+- **Adaptive**: starts with `window_ms`, but when a supermajority threshold
+  is reached, the remaining time shrinks to 3 seconds (giving others a
+  last chance). Resets if supermajority is lost.
+
 ## Grace period
 
 Late votes arriving within 500ms after the window closes are still accepted
@@ -57,6 +71,7 @@ to compensate for network latency.
 
 -define(GRACE_MS, 500).
 -define(DEFAULT_MAX_REVOTES, 3).
+-define(ADAPTIVE_SHRINK_MS, 3000).
 
 %% --- Public API ---
 
@@ -100,6 +115,9 @@ init(Config) ->
     VetoEnabled = maps:get(veto_enabled, Merged, false),
     Weights = maps:get(weights, Merged, #{}),
     MaxRevotes = maps:get(max_revotes, Merged, ?DEFAULT_MAX_REVOTES),
+    WindowType = maps:get(window_type, Merged, ~"fixed"),
+    MinWindowMs = maps:get(min_window_ms, Merged, 5000),
+    Supermajority = maps:get(supermajority, Merged, 0.75),
     MatchPid = maps:get(match_pid, Merged),
     State = #{
         vote_id => VoteId,
@@ -109,7 +127,11 @@ init(Config) ->
         options => Options,
         eligible => sets:from_list(Eligible, [{version, 2}]),
         eligible_list => Eligible,
+        eligible_count => length(Eligible),
         window_ms => WindowMs,
+        window_type => WindowType,
+        min_window_ms => MinWindowMs,
+        supermajority => Supermajority,
         method => Method,
         visibility => Visibility,
         tie_breaker => TieBreaker,
@@ -200,8 +222,68 @@ handle_cast_vote(
             VoteCounts1 = VoteCounts#{VoterId => NewCount},
             State1 = State#{votes => Votes1, vote_counts => VoteCounts1},
             maybe_broadcast_tally(State1),
-            {keep_state, State1, [{reply, From, ok}]}
+            maybe_early_close(From, State1)
     end.
+
+maybe_early_close(
+    From, #{window_type := ~"ready_up", votes := Votes, eligible_count := EC} = State
+) ->
+    case maps:size(Votes) >= EC of
+        true -> {next_state, closed, State, [{reply, From, ok}]};
+        false -> {keep_state, State, [{reply, From, ok}]}
+    end;
+maybe_early_close(
+    From,
+    #{
+        window_type := ~"hybrid",
+        votes := Votes,
+        eligible_count := EC,
+        min_window_ms := MinMs,
+        opened_at := OpenedAt
+    } = State
+) ->
+    AllVoted = maps:size(Votes) >= EC,
+    Now = erlang:system_time(millisecond),
+    MinElapsed = (Now - OpenedAt) >= MinMs,
+    case AllVoted andalso MinElapsed of
+        true -> {next_state, closed, State, [{reply, From, ok}]};
+        false -> {keep_state, State, [{reply, From, ok}]}
+    end;
+maybe_early_close(
+    From,
+    #{
+        window_type := ~"adaptive",
+        votes := Votes,
+        supermajority := Threshold,
+        options := Options,
+        method := Method,
+        weights := Weights,
+        opened_at := OpenedAt,
+        window_ms := WindowMs
+    } = State
+) ->
+    Tallies = compute_live_tallies(Method, Votes, Options, Weights),
+    TotalVotes = maps:size(Votes),
+    HasSupermajority = TotalVotes > 0 andalso check_supermajority(Tallies, TotalVotes, Threshold),
+    case HasSupermajority of
+        true ->
+            Now = erlang:system_time(millisecond),
+            Elapsed = Now - OpenedAt,
+            OriginalRemaining = max(0, WindowMs - Elapsed),
+            ShrunkRemaining = min(OriginalRemaining, ?ADAPTIVE_SHRINK_MS),
+            {keep_state, State, [
+                {reply, From, ok}, {state_timeout, ShrunkRemaining, window_expired}
+            ]};
+        false ->
+            {keep_state, State, [{reply, From, ok}]}
+    end;
+maybe_early_close(From, State) ->
+    {keep_state, State, [{reply, From, ok}]}.
+
+check_supermajority(Tallies, TotalVotes, Threshold) ->
+    MaxCount = lists:max(maps:values(Tallies)),
+    is_number(MaxCount) andalso is_number(TotalVotes) andalso TotalVotes > 0 andalso
+        MaxCount / TotalVotes >= Threshold.
 
 validate_option(OptionIds, Options) when is_list(OptionIds) ->
     OptionSet = sets:from_list([Id || #{id := Id} <- Options], [{version, 2}]),
