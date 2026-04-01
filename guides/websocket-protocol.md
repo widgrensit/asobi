@@ -170,6 +170,80 @@ Leave a chat channel.
 {"type": "chat.leave", "payload": {"channel_id": "lobby"}}
 ```
 
+## Voting
+
+### `vote.cast`
+
+Cast a vote in an active match vote.
+
+```json
+{"type": "vote.cast", "cid": "v1", "payload": {"vote_id": "...", "option_id": "jungle"}}
+```
+
+For approval voting, `option_id` is a list:
+
+```json
+{"type": "vote.cast", "payload": {"vote_id": "...", "option_id": ["jungle", "caves"]}}
+```
+
+### `match.vote_start` (server push)
+
+A new vote has started.
+
+```json
+{
+  "type": "match.vote_start",
+  "payload": {
+    "vote_id": "...",
+    "options": [{"id": "jungle", "label": "Jungle Path"}, {"id": "volcano", "label": "Volcano Path"}],
+    "window_ms": 15000,
+    "method": "plurality"
+  }
+}
+```
+
+### `match.vote_tally` (server push)
+
+Running tally update (only with `"live"` visibility).
+
+```json
+{
+  "type": "match.vote_tally",
+  "payload": {
+    "vote_id": "...",
+    "tallies": {"jungle": 2, "volcano": 1},
+    "time_remaining_ms": 8432,
+    "total_votes": 3
+  }
+}
+```
+
+### `match.vote_result` (server push)
+
+Vote closed, winner determined.
+
+```json
+{
+  "type": "match.vote_result",
+  "payload": {
+    "vote_id": "...",
+    "winner": "jungle",
+    "counts": {"jungle": 2, "volcano": 1},
+    "distribution": {"jungle": 0.666, "volcano": 0.333},
+    "total_votes": 3,
+    "turnout": 1.0
+  }
+}
+```
+
+### `match.vote_vetoed` (server push)
+
+A player vetoed the vote.
+
+```json
+{"type": "match.vote_vetoed", "payload": {"vote_id": "...", "vetoed_by": "player_id"}}
+```
+
 ## Presence
 
 ### `presence.update`

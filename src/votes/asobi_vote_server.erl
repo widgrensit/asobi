@@ -1,4 +1,39 @@
 -module(asobi_vote_server).
+-moduledoc """
+Vote lifecycle state machine.
+
+Manages a single vote instance within a match. States flow `open` -> `closed`
+(with automatic resolution on close). Supports plurality and approval voting
+methods, configurable timed windows, live or hidden tallies, veto, and
+tie-breaking.
+
+## Config keys
+
+| Key            | Type           | Default        | Description                        |
+|----------------|----------------|----------------|------------------------------------|
+| `match_id`     | `binary()`     | required       | Parent match ID                    |
+| `match_pid`    | `pid()`        | required       | Match server process               |
+| `options`      | `[map()]`      | required       | List of `#{id, label}` option maps |
+| `eligible`     | `[binary()]`   | `[]`           | Eligible voter IDs                 |
+| `window_ms`    | `pos_integer()`| `15000`        | Vote window in milliseconds        |
+| `method`       | `binary()`     | `"plurality"`  | `"plurality"` or `"approval"`      |
+| `visibility`   | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
+| `tie_breaker`  | `binary()`     | `"random"`     | `"random"` or `"first"`            |
+| `veto_enabled` | `boolean()`    | `false`        | Allow eligible voters to veto      |
+| `template`     | `binary()`     | `"default"`    | Template name for analytics        |
+| `vote_id`      | `binary()`     | auto-generated | Override vote ID                   |
+
+## Vote methods
+
+- **Plurality**: each voter picks one option, highest count wins.
+- **Approval**: each voter submits a list of approved option IDs, highest
+  approval count wins.
+
+## Grace period
+
+Late votes arriving within 500ms after the window closes are still accepted
+to compensate for network latency.
+""".
 -behaviour(gen_statem).
 
 -export([start_link/1, cast_vote/3, cast_veto/2, get_state/1]).
@@ -9,18 +44,22 @@
 
 %% --- Public API ---
 
+-doc "Start a vote server with the given config. See moduledoc for config keys.".
 -spec start_link(map()) -> {ok, pid()}.
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
 
+-doc "Cast a vote. Replaces any previous vote by the same voter during the window.".
 -spec cast_vote(pid(), binary(), binary()) -> ok | {error, term()}.
 cast_vote(Pid, VoterId, OptionId) ->
     gen_statem:call(Pid, {cast_vote, VoterId, OptionId}).
 
+-doc "Veto the vote (immediately cancels it). Only works if `veto_enabled` is true.".
 -spec cast_veto(pid(), binary()) -> ok | {error, term()}.
 cast_veto(Pid, VoterId) ->
     gen_statem:call(Pid, {veto, VoterId}).
 
+-doc "Return the current vote state including status, options, tallies (if live), and time remaining.".
 -spec get_state(pid()) -> map().
 get_state(Pid) ->
     gen_statem:call(Pid, get_state).

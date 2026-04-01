@@ -1,4 +1,10 @@
 -module(asobi_vote).
+-moduledoc """
+Kura schema for persisted vote results.
+
+Each record represents a completed vote within a match, including the options
+presented, votes cast, tallied result, and turnout statistics.
+""".
 -behaviour(kura_schema).
 -include_lib("kura/include/kura.hrl").
 

@@ -1,4 +1,5 @@
 -module(asobi_vote_sup).
+-moduledoc "Dynamic supervisor for `asobi_vote_server` processes.".
 -behaviour(supervisor).
 
 -export([start_link/0, start_vote/1]).

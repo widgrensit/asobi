@@ -1,4 +1,5 @@
 -module(asobi_vote_controller).
+-moduledoc "REST controller for vote history queries.".
 
 -export([index/1, show/1]).
 
