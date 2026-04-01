@@ -75,8 +75,8 @@ validate_provider_token(Provider, Token) ->
         unknown ->
             {error, ~"unsupported_provider"};
         ProviderAtom ->
-            try nova_auth_oidc_jwt:validate_token(asobi_oidc_config, ProviderAtom, Token) of
-                {ok, Actor} ->
+            case validate_oidc_token(ProviderAtom, Token) of
+                {ok, Actor} when is_map(Actor) ->
                     ActorClaims = maps:get(claims, Actor, Actor),
                     case ActorClaims of
                         Claims when is_map(Claims) -> {ok, normalize_claims(Provider, Claims)};
@@ -84,9 +84,17 @@ validate_provider_token(Provider, Token) ->
                     end;
                 {error, _Reason} ->
                     {error, ~"invalid_token"}
-            catch
-                _:_ -> {error, ~"invalid_token"}
             end
+    end.
+
+-spec validate_oidc_token(atom(), binary()) -> {ok, map()} | {error, term()}.
+validate_oidc_token(ProviderAtom, Token) ->
+    case
+        erlang:apply(nova_auth_oidc_jwt, validate_token, [asobi_oidc_config, ProviderAtom, Token])
+    of
+        {ok, Result} when is_map(Result) -> {ok, Result};
+        {error, _} = Err -> Err;
+        _ -> {error, unexpected_result}
     end.
 
 -spec normalize_claims(binary(), map()) -> map().
