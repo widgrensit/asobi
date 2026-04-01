@@ -96,7 +96,7 @@ vote_lifecycle_plurality(_Config) ->
         #{id => ~"opt_c", label => ~"Path C"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -119,7 +119,7 @@ vote_tie_random(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -143,7 +143,7 @@ vote_tie_random(_Config) ->
 vote_window_expires(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -160,7 +160,7 @@ vote_window_expires(_Config) ->
 vote_ineligible_voter(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -174,7 +174,7 @@ vote_ineligible_voter(_Config) ->
 vote_invalid_option(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -191,7 +191,7 @@ vote_change_during_window(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -210,7 +210,7 @@ vote_change_during_window(_Config) ->
 vote_veto(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -229,7 +229,7 @@ vote_veto(_Config) ->
 vote_veto_disabled(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -246,7 +246,7 @@ vote_approval_method(_Config) ->
         #{id => ~"opt_c", label => ~"C"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -275,6 +275,7 @@ vote_via_match_server(_Config) ->
         max_players => 4,
         tick_rate => 50
     }),
+    true = is_pid(MatchPid),
     ok = asobi_match_server:join(MatchPid, ~"p1"),
     ok = asobi_match_server:join(MatchPid, ~"p2"),
     timer:sleep(100),
@@ -299,7 +300,7 @@ vote_hidden_visibility(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -319,7 +320,7 @@ vote_no_votes_cast(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -340,7 +341,7 @@ vote_weighted_method(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -366,7 +367,7 @@ vote_weighted_unequal(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -393,7 +394,7 @@ vote_template_from_config(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -416,7 +417,7 @@ vote_template_override(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -436,7 +437,7 @@ vote_rate_limit(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -461,7 +462,7 @@ vote_window_ready_up(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -484,7 +485,7 @@ vote_window_ready_up(_Config) ->
 vote_window_ready_up_timeout(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -507,7 +508,7 @@ vote_window_hybrid(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -534,7 +535,7 @@ vote_window_hybrid_min_enforced(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -556,7 +557,7 @@ vote_window_adaptive(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -583,7 +584,7 @@ vote_supermajority_met(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -610,7 +611,7 @@ vote_supermajority_not_met(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -643,6 +644,7 @@ vote_frustration_accumulator(_Config) ->
         tick_rate => 50,
         frustration_bonus => 1.0
     }),
+    true = is_pid(MatchPid),
     ok = asobi_match_server:join(MatchPid, ~"p1"),
     ok = asobi_match_server:join(MatchPid, ~"p2"),
     ok = asobi_match_server:join(MatchPid, ~"p3"),
@@ -685,6 +687,7 @@ vote_veto_tokens(_Config) ->
         tick_rate => 50,
         veto_tokens_per_player => 2
     }),
+    true = is_pid(MatchPid),
     ok = asobi_match_server:join(MatchPid, ~"p1"),
     ok = asobi_match_server:join(MatchPid, ~"p2"),
     timer:sleep(100),
@@ -718,6 +721,7 @@ vote_veto_tokens_exhausted(_Config) ->
         tick_rate => 50,
         veto_tokens_per_player => 1
     }),
+    true = is_pid(MatchPid),
     ok = asobi_match_server:join(MatchPid, ~"p1"),
     ok = asobi_match_server:join(MatchPid, ~"p2"),
     timer:sleep(100),
@@ -748,7 +752,7 @@ vote_ranked_choice(_Config) ->
         #{id => ~"opt_c", label => ~"C"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -775,7 +779,7 @@ vote_ranked_elimination(_Config) ->
         #{id => ~"opt_c", label => ~"C"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -804,7 +808,7 @@ vote_spectator_voting(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -836,7 +840,7 @@ vote_spectator_only(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -861,7 +865,7 @@ vote_quorum_met(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -886,7 +890,7 @@ vote_quorum_not_met(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -909,7 +913,7 @@ vote_default_votes(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -932,7 +936,7 @@ vote_delegation(_Config) ->
         #{id => ~"opt_b", label => ~"B"}
     ],
     {ok, MatchPid} = start_test_match(),
-    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+    {ok, VotePid} = start_vote(#{
         match_id => asobi_id:generate(),
         match_pid => MatchPid,
         options => Options,
@@ -953,10 +957,19 @@ vote_delegation(_Config) ->
 
 %% --- Helpers ---
 
+-spec start_vote(map()) -> {ok, pid()}.
+start_vote(Config) ->
+    {ok, Pid} = start_vote(Config),
+    true = is_pid(Pid),
+    {ok, Pid}.
+
+-spec start_test_match() -> {ok, pid()}.
 start_test_match() ->
-    asobi_match_sup:start_match(#{
+    {ok, Pid} = asobi_match_sup:start_match(#{
         game_module => asobi_test_game,
         min_players => 1,
         max_players => 4,
         tick_rate => 50
-    }).
+    }),
+    true = is_pid(Pid),
+    {ok, Pid}.

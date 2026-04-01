@@ -45,18 +45,19 @@ init_per_suite(Config) ->
     U1 = asobi_test_helpers:unique_username(~"store_p1"),
     U2 = asobi_test_helpers:unique_username(~"store_p2"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
     B1 = nova_test:json(R1),
     {ok, R2} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U2, ~"password" => ~"testpass123"}},
         Config0
     ),
     B2 = nova_test:json(R2),
-    %% Create an item definition
+    #{~"player_id" := P1Id, ~"session_token" := P1Token} = B1,
+    #{~"player_id" := P2Id, ~"session_token" := P2Token} = B2,
     Suffix = integer_to_binary(erlang:unique_integer([positive])),
     ItemCS = asobi_item_def:changeset(#{}, #{
         slug => iolist_to_binary([~"test_sword_", Suffix]),
@@ -66,7 +67,6 @@ init_per_suite(Config) ->
     }),
     {ok, ItemDef} = asobi_repo:insert(ItemCS),
     ItemDefId = maps:get(id, ItemDef),
-    %% Create an active store listing
     ListingCS = asobi_store_listing:changeset(#{}, #{
         item_def_id => ItemDefId,
         currency => ~"gold",
@@ -74,7 +74,6 @@ init_per_suite(Config) ->
         active => true
     }),
     {ok, Listing} = asobi_repo:insert(ListingCS),
-    %% Create an inactive store listing
     InactiveCS = asobi_store_listing:changeset(#{}, #{
         item_def_id => ItemDefId,
         currency => ~"gold",
@@ -82,7 +81,6 @@ init_per_suite(Config) ->
         active => false
     }),
     {ok, InactiveListing} = asobi_repo:insert(InactiveCS),
-    %% Create a gems listing for filter test
     GemsCS = asobi_store_listing:changeset(#{}, #{
         item_def_id => ItemDefId,
         currency => ~"gems",
@@ -91,10 +89,10 @@ init_per_suite(Config) ->
     }),
     {ok, _GemsListing} = asobi_repo:insert(GemsCS),
     [
-        {player1_id, maps:get(~"player_id", B1)},
-        {player1_token, maps:get(~"session_token", B1)},
-        {player2_id, maps:get(~"player_id", B2)},
-        {player2_token, maps:get(~"session_token", B2)},
+        {player1_id, P1Id},
+        {player1_token, P1Token},
+        {player2_id, P2Id},
+        {player2_token, P2Token},
         {item_def_id, ItemDefId},
         {listing_id, maps:get(id, Listing)},
         {inactive_listing_id, maps:get(id, InactiveListing)}
@@ -106,15 +104,15 @@ end_per_suite(Config) ->
 
 auth(Config, Player) ->
     Key = list_to_atom(atom_to_list(Player) ++ "_token"),
-    Token = proplists:get_value(Key, Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    {Key, Token} = lists:keyfind(Key, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 %% --- Store Browse ---
 
 list_store_empty(Config) ->
-    %% Filter by a currency that has no listings
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/store?currency=nonexistent",
+        "/api/v1/store?currency=nonexistent",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -124,19 +122,18 @@ list_store_empty(Config) ->
 
 list_store_with_listings(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/store",
+        "/api/v1/store",
         #{headers => auth(Config, player1)},
         Config
     ),
     ?assertStatus(200, Resp),
     #{~"listings" := Listings} = nova_test:json(Resp),
-    %% Should have at least 2 active listings (gold + gems)
     ?assert(length(Listings) >= 2),
     Config.
 
 list_store_filter_currency(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/store?currency=gems",
+        "/api/v1/store?currency=gems",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -144,7 +141,7 @@ list_store_filter_currency(Config) ->
     #{~"listings" := Listings} = nova_test:json(Resp),
     ?assert(length(Listings) >= 1),
     lists:foreach(
-        fun(L) -> ?assertEqual(~"gems", maps:get(~"currency", L)) end,
+        fun(L) when is_map(L) -> ?assertEqual(~"gems", maps:get(~"currency", L)) end,
         Listings
     ),
     Config.
@@ -152,12 +149,13 @@ list_store_filter_currency(Config) ->
 %% --- Purchase Flow ---
 
 purchase_success(Config) ->
-    PlayerId = proplists:get_value(player1_id, Config),
-    ListingId = proplists:get_value(listing_id, Config),
-    %% Grant enough currency
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    {listing_id, ListingId} = lists:keyfind(listing_id, 1, Config),
+    true = is_binary(PlayerId),
+    true = is_binary(ListingId),
     {ok, _} = asobi_economy:grant(PlayerId, ~"gold", 1000, #{reason => ~"test_grant"}),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/store/purchase",
+        "/api/v1/store/purchase",
         #{
             headers => auth(Config, player1),
             json => #{~"listing_id" => ListingId}
@@ -166,17 +164,16 @@ purchase_success(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"success" := true} = nova_test:json(Resp),
-    %% Verify balance was debited
     {ok, Wallets} = asobi_economy:get_wallets(PlayerId),
-    GoldWallet = hd([W || W <- Wallets, maps:get(currency, W) =:= ~"gold"]),
+    [GoldWallet | _] = [W || W <- Wallets, is_map(W), maps:get(currency, W) =:= ~"gold"],
+    true = is_map(GoldWallet),
     ?assertEqual(500, maps:get(balance, GoldWallet)),
     Config.
 
 purchase_insufficient_funds(Config) ->
-    ListingId = proplists:get_value(listing_id, Config),
-    %% Player2 has no gold
+    {listing_id, ListingId} = lists:keyfind(listing_id, 1, Config),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/store/purchase",
+        "/api/v1/store/purchase",
         #{
             headers => auth(Config, player2),
             json => #{~"listing_id" => ListingId}
@@ -187,12 +184,13 @@ purchase_insufficient_funds(Config) ->
     Config.
 
 purchase_inactive_listing(Config) ->
-    PlayerId = proplists:get_value(player1_id, Config),
-    InactiveId = proplists:get_value(inactive_listing_id, Config),
-    %% Ensure player has funds
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    {inactive_listing_id, InactiveId} = lists:keyfind(inactive_listing_id, 1, Config),
+    true = is_binary(PlayerId),
+    true = is_binary(InactiveId),
     _ = asobi_economy:grant(PlayerId, ~"gold", 1000, #{reason => ~"test_grant"}),
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/store/purchase",
+        "/api/v1/store/purchase",
         #{
             headers => auth(Config, player1),
             json => #{~"listing_id" => InactiveId}
@@ -206,7 +204,7 @@ purchase_inactive_listing(Config) ->
 
 inventory_empty(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/inventory",
+        "/api/v1/inventory",
         #{headers => auth(Config, player2)},
         Config
     ),
@@ -215,21 +213,21 @@ inventory_empty(Config) ->
     Config.
 
 inventory_after_purchase(Config) ->
-    PlayerId = proplists:get_value(player1_id, Config),
-    ListingId = proplists:get_value(listing_id, Config),
-    %% Grant currency and purchase
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    {listing_id, ListingId} = lists:keyfind(listing_id, 1, Config),
+    true = is_binary(PlayerId),
+    true = is_binary(ListingId),
     {ok, _} = asobi_economy:grant(PlayerId, ~"gold", 500, #{reason => ~"test_grant"}),
     {ok, _} = nova_test:post(
-        ~"/api/v1/store/purchase",
+        "/api/v1/store/purchase",
         #{
             headers => auth(Config, player1),
             json => #{~"listing_id" => ListingId}
         },
         Config
     ),
-    %% Check inventory
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/inventory",
+        "/api/v1/inventory",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -239,37 +237,34 @@ inventory_after_purchase(Config) ->
     Config.
 
 consume_item(Config) ->
-    %% Get first item from inventory
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/inventory",
+        "/api/v1/inventory",
         #{headers => auth(Config, player1)},
         Config
     ),
     #{~"items" := [_Item | _]} = nova_test:json(Resp),
-    %% Grant another item so we have quantity > 1 for partial consume
-    PlayerId = proplists:get_value(player1_id, Config),
-    ListingId = proplists:get_value(listing_id, Config),
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    {listing_id, ListingId} = lists:keyfind(listing_id, 1, Config),
+    true = is_binary(PlayerId),
+    true = is_binary(ListingId),
     {ok, _} = asobi_economy:grant(PlayerId, ~"gold", 500, #{reason => ~"test_grant"}),
     {ok, _} = nova_test:post(
-        ~"/api/v1/store/purchase",
+        "/api/v1/store/purchase",
         #{
             headers => auth(Config, player1),
             json => #{~"listing_id" => ListingId}
         },
         Config
     ),
-    %% Get updated inventory to find an item with quantity
     {ok, Resp2} = nova_test:get(
-        ~"/api/v1/inventory",
+        "/api/v1/inventory",
         #{headers => auth(Config, player1)},
         Config
     ),
-    #{~"items" := Items2} = nova_test:json(Resp2),
-    %% Consume 1 of the first item
-    FirstItem = hd(Items2),
-    FirstItemId = maps:get(~"id", FirstItem),
+    #{~"items" := [FirstItem | _]} = nova_test:json(Resp2),
+    #{~"id" := FirstItemId} = FirstItem,
     {ok, ConsumeResp} = nova_test:post(
-        ~"/api/v1/inventory/consume",
+        "/api/v1/inventory/consume",
         #{
             headers => auth(Config, player1),
             json => #{~"item_id" => FirstItemId, ~"quantity" => 1}
@@ -281,12 +276,13 @@ consume_item(Config) ->
     [{test_item_id, FirstItemId} | Config].
 
 consume_item_fully(Config) ->
-    %% Purchase a new item so we have a fresh one with quantity=1
-    PlayerId = proplists:get_value(player1_id, Config),
-    ListingId = proplists:get_value(listing_id, Config),
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    {listing_id, ListingId} = lists:keyfind(listing_id, 1, Config),
+    true = is_binary(PlayerId),
+    true = is_binary(ListingId),
     {ok, _} = asobi_economy:grant(PlayerId, ~"gold", 500, #{reason => ~"test_grant"}),
     {ok, _} = nova_test:post(
-        ~"/api/v1/store/purchase",
+        "/api/v1/store/purchase",
         #{
             headers => auth(Config, player1),
             json => #{~"listing_id" => ListingId}
@@ -294,43 +290,39 @@ consume_item_fully(Config) ->
         Config
     ),
     {ok, InvResp} = nova_test:get(
-        ~"/api/v1/inventory",
+        "/api/v1/inventory",
         #{headers => auth(Config, player1)},
         Config
     ),
     #{~"items" := Items} = nova_test:json(InvResp),
-    %% Find an item with quantity=1
-    case [I || I <- Items, maps:get(~"quantity", I) =:= 1] of
-        [Item | _] ->
-            ItemId = maps:get(~"id", Item),
-            {ok, Resp} = nova_test:post(
-                ~"/api/v1/inventory/consume",
+    case [I || I <- Items, is_map(I), maps:get(~"quantity", I) =:= 1] of
+        [#{~"id" := ItemId} | _] ->
+            {ok, ConsumeResp} = nova_test:post(
+                "/api/v1/inventory/consume",
                 #{
                     headers => auth(Config, player1),
                     json => #{~"item_id" => ItemId, ~"quantity" => 1}
                 },
                 Config
             ),
-            ?assertStatus(200, Resp),
-            #{~"remaining_quantity" := 0} = nova_test:json(Resp);
+            ?assertStatus(200, ConsumeResp),
+            #{~"remaining_quantity" := 0} = nova_test:json(ConsumeResp);
         [] ->
-            %% All items have quantity > 1, that's ok for this test
             ok
     end,
     Config.
 
 consume_insufficient_quantity(Config) ->
     {ok, InvResp} = nova_test:get(
-        ~"/api/v1/inventory",
+        "/api/v1/inventory",
         #{headers => auth(Config, player1)},
         Config
     ),
     #{~"items" := Items} = nova_test:json(InvResp),
     case Items of
-        [Item | _] ->
-            ItemId = maps:get(~"id", Item),
+        [#{~"id" := ItemId} | _] ->
             {ok, Resp} = nova_test:post(
-                ~"/api/v1/inventory/consume",
+                "/api/v1/inventory/consume",
                 #{
                     headers => auth(Config, player1),
                     json => #{~"item_id" => ItemId, ~"quantity" => 99999}
@@ -345,7 +337,7 @@ consume_insufficient_quantity(Config) ->
 
 consume_not_found(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/inventory/consume",
+        "/api/v1/inventory/consume",
         #{
             headers => auth(Config, player1),
             json => #{~"item_id" => ~"00000000-0000-0000-0000-000000000000", ~"quantity" => 1}
@@ -356,18 +348,16 @@ consume_not_found(Config) ->
     Config.
 
 consume_other_player(Config) ->
-    %% Player2 tries to consume player1's item
     {ok, InvResp} = nova_test:get(
-        ~"/api/v1/inventory",
+        "/api/v1/inventory",
         #{headers => auth(Config, player1)},
         Config
     ),
     #{~"items" := Items} = nova_test:json(InvResp),
     case Items of
-        [Item | _] ->
-            ItemId = maps:get(~"id", Item),
+        [#{~"id" := ItemId} | _] ->
             {ok, Resp} = nova_test:post(
-                ~"/api/v1/inventory/consume",
+                "/api/v1/inventory/consume",
                 #{
                     headers => auth(Config, player2),
                     json => #{~"item_id" => ItemId, ~"quantity" => 1}

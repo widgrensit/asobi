@@ -4,15 +4,15 @@
 -export([start_link/0, start_channel/1, start_channel/2]).
 -export([init/1]).
 
--spec start_link() -> {ok, pid()}.
+-spec start_link() -> supervisor:startlink_ret().
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
--spec start_channel(binary()) -> {ok, pid()}.
+-spec start_channel(binary()) -> supervisor:startchild_ret().
 start_channel(ChannelId) ->
     start_channel(ChannelId, ~"room").
 
--spec start_channel(binary(), binary()) -> {ok, pid()}.
+-spec start_channel(binary(), binary()) -> supervisor:startchild_ret().
 start_channel(ChannelId, ChannelType) ->
     supervisor:start_child(?MODULE, [ChannelId, ChannelType]).
 

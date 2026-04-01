@@ -97,28 +97,37 @@ to compensate for network latency.
 %% --- Public API ---
 
 -doc "Start a vote server with the given config. See moduledoc for config keys.".
--spec start_link(map()) -> {ok, pid()}.
+-spec start_link(map()) -> gen_statem:start_ret().
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
 
 -doc "Cast a vote. Replaces any previous vote by the same voter during the window.".
--spec cast_vote(pid(), binary(), binary()) -> ok | {error, term()}.
+-spec cast_vote(pid(), binary(), binary() | [binary()]) -> ok | {error, term()}.
 cast_vote(Pid, VoterId, OptionId) ->
-    gen_statem:call(Pid, {cast_vote, VoterId, OptionId}).
+    case gen_statem:call(Pid, {cast_vote, VoterId, OptionId}) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -doc "Veto the vote (immediately cancels it). Only works if `veto_enabled` is true.".
 -spec cast_veto(pid(), binary()) -> ok | {error, term()}.
 cast_veto(Pid, VoterId) ->
-    gen_statem:call(Pid, {veto, VoterId}).
+    case gen_statem:call(Pid, {veto, VoterId}) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -doc "Return the current vote state including status, options, tallies (if live), and time remaining.".
 -spec get_state(pid()) -> map().
 get_state(Pid) ->
-    gen_statem:call(Pid, get_state).
+    case gen_statem:call(Pid, get_state) of
+        S when is_map(S) -> S;
+        _ -> #{}
+    end.
 
 %% --- gen_statem callbacks ---
 
--spec callback_mode() -> [atom()].
+-spec callback_mode() -> gen_statem:callback_mode_result().
 callback_mode() -> [state_functions, state_enter].
 
 -spec init(map()) -> {ok, open, map()}.
@@ -183,7 +192,7 @@ init(Config) ->
 
 %% --- open state ---
 
--spec open(gen_statem:event_type(), term(), map()) -> gen_statem:state_enter_result(atom()).
+-spec open(gen_statem:event_type() | enter, term(), map()) -> gen_statem:state_enter_result(atom()).
 open(enter, _OldState, #{window_ms := WindowMs}) ->
     {keep_state_and_data, [{state_timeout, WindowMs, window_expired}]};
 open({call, From}, {cast_vote, VoterId, OptionId}, State) ->
@@ -199,7 +208,8 @@ open(state_timeout, window_expired, State) ->
 
 %% --- closed state ---
 
--spec closed(gen_statem:event_type(), term(), map()) -> gen_statem:state_enter_result(atom()).
+-spec closed(gen_statem:event_type() | enter, term(), map()) ->
+    gen_statem:state_enter_result(atom()).
 closed(enter, _OldState, State) ->
     resolve_and_stop(State);
 closed({call, From}, {cast_vote, VoterId, OptionId}, State) ->
@@ -400,7 +410,7 @@ resolve_and_stop(
 tally(~"plurality", Votes, Options, TieBreaker, _Weights) ->
     Counts = init_counts(Options),
     Counts1 = maps:fold(
-        fun(_VoterId, OptionId, Acc) ->
+        fun(_VoterId, OptionId, Acc) when is_map(Acc) ->
             Acc#{OptionId => maps:get(OptionId, Acc, 0) + 1}
         end,
         Counts,
@@ -427,21 +437,27 @@ tally(~"plurality", Votes, Options, TieBreaker, _Weights) ->
     };
 tally(~"approval", Votes, Options, TieBreaker, _Weights) ->
     Counts = init_counts(Options),
-    Counts1 = maps:fold(
-        fun
-            (_VoterId, Approved, Acc) when is_list(Approved) ->
-                lists:foldl(
-                    fun(OptId, InnerAcc) ->
-                        InnerAcc#{OptId => maps:get(OptId, InnerAcc, 0) + 1}
-                    end,
-                    Acc,
-                    Approved
-                );
-            (_VoterId, OptionId, Acc) ->
-                Acc#{OptionId => maps:get(OptionId, Acc, 0) + 1}
-        end,
-        Counts,
-        Votes
+    Counts1 = ensure_map(
+        maps:fold(
+            fun
+                (_VoterId, Approved, Acc) when is_list(Approved), is_map(Acc) ->
+                    ensure_map(
+                        lists:foldl(
+                            fun(OptId, InnerAcc) when is_map(InnerAcc) ->
+                                Cur = get_count(OptId, InnerAcc),
+                                InnerAcc#{OptId => Cur + 1}
+                            end,
+                            Acc,
+                            Approved
+                        )
+                    );
+                (_VoterId, OptionId, Acc) when is_map(Acc) ->
+                    Cur = get_count(OptionId, Acc),
+                    Acc#{OptionId => Cur + 1}
+            end,
+            Counts,
+            Votes
+        )
     ),
     TotalVotes = maps:size(Votes),
     MaxCount = lists:max([0 | maps:values(Counts1)]),
@@ -455,7 +471,7 @@ tally(~"approval", Votes, Options, TieBreaker, _Weights) ->
 tally(~"weighted", Votes, Options, TieBreaker, Weights) ->
     Counts = init_counts_float(Options),
     Counts1 = maps:fold(
-        fun(VoterId, OptionId, Acc) ->
+        fun(VoterId, OptionId, Acc) when is_map(Acc) ->
             W = maps:get(VoterId, Weights, 1),
             Acc#{OptionId => maps:get(OptionId, Acc, 0.0) + W}
         end,
@@ -513,28 +529,45 @@ ranked_eliminate(_Votes, [], _TieBreaker) ->
     undefined;
 ranked_eliminate(Votes, Remaining, TieBreaker) ->
     RemainingSet = sets:from_list(Remaining, [{version, 2}]),
-    FirstChoices = maps:fold(
+    InitCounts = lists:foldl(fun(Id, Acc) when is_map(Acc) -> Acc#{Id => 0} end, #{}, Remaining),
+    FirstChoicesRaw = maps:fold(
         fun
-            (_VoterId, Ranking, Acc) when is_list(Ranking) ->
+            (_VoterId, Ranking, Acc) when is_list(Ranking), is_map(Acc) ->
                 case first_valid(Ranking, RemainingSet) of
                     undefined -> Acc;
-                    Choice -> Acc#{Choice => maps:get(Choice, Acc, 0) + 1}
+                    Choice -> Acc#{Choice => get_count(Choice, Acc) + 1}
                 end;
             (_VoterId, _, Acc) ->
                 Acc
         end,
-        maps:from_list([{Id, 0} || Id <- Remaining]),
+        case InitCounts of
+            IC when is_map(IC) -> IC
+        end,
         Votes
     ),
-    TotalVotes = lists:sum(maps:values(FirstChoices)),
+    FirstChoices =
+        case FirstChoicesRaw of
+            FC when is_map(FC) -> FC;
+            _ -> #{}
+        end,
+    TotalVotes = lists:sum([Val || Val <- maps:values(FirstChoices), is_number(Val)]),
     Majority = TotalVotes / 2,
-    case lists:any(fun({_Id, C}) -> C > Majority end, maps:to_list(FirstChoices)) of
+    {MaxC, MaxId} = maps:fold(
+        fun
+            (Id, Count, {BestC, _BestId}) when is_number(Count), Count > BestC -> {Count, Id};
+            (_Id, _Count, Best) -> Best
+        end,
+        {0, undefined},
+        FirstChoices
+    ),
+    case MaxC > Majority of
         true ->
-            {Winner, _} = lists:max([{C, Id} || {Id, C} <- maps:to_list(FirstChoices)]),
-            Winner;
+            MaxId;
         false ->
             MinCount = lists:min(maps:values(FirstChoices)),
-            Losers = [Id || {Id, C} <- maps:to_list(FirstChoices), C =:= MinCount],
+            Losers = maps:keys(
+                maps:filter(fun(_Id, Count) -> Count =:= MinCount end, FirstChoices)
+            ),
             Eliminated = break_tie(Losers, TieBreaker),
             ranked_eliminate(Votes, Remaining -- [Eliminated], TieBreaker)
     end.
@@ -564,15 +597,13 @@ maybe_enforce_supermajority(
 
 apply_delegation_and_defaults(Votes, EligibleList, Delegation, DefaultVotes) ->
     lists:foldl(
-        fun(PlayerId, Acc) ->
+        fun(PlayerId, Acc) when is_map(Acc) ->
             case maps:is_key(PlayerId, Acc) of
                 true ->
                     Acc;
                 false ->
-                    %% Check delegation first
                     case maps:get(PlayerId, Delegation, undefined) of
                         undefined ->
-                            %% Fall back to default vote
                             case maps:get(PlayerId, DefaultVotes, undefined) of
                                 undefined -> Acc;
                                 Default -> Acc#{PlayerId => Default}
@@ -607,22 +638,24 @@ merge_spectator_result(PlayerResult, SpectatorResult, SpectatorW, Options, TieBr
     SCounts = maps:get(counts, SpectatorResult, init_counts(Options)),
     PTotalRaw = lists:sum([V || V <- maps:values(PCounts), is_number(V)]),
     STotalRaw = lists:sum([V || V <- maps:values(SCounts), is_number(V)]),
-    MergedCounts = lists:foldl(
-        fun(#{id := Id}, Acc) ->
-            PNorm =
-                case PTotalRaw of
-                    0 -> 0.0;
-                    _ -> maps:get(Id, PCounts, 0) / PTotalRaw
-                end,
-            SNorm =
-                case STotalRaw of
-                    0 -> 0.0;
-                    _ -> maps:get(Id, SCounts, 0) / STotalRaw
-                end,
-            Acc#{Id => PNorm * PlayerW + SNorm * SpectatorW}
-        end,
-        #{},
-        Options
+    MergedCounts = ensure_map(
+        lists:foldl(
+            fun(#{id := Id}, Acc) when is_map(Acc) ->
+                PNorm =
+                    case PTotalRaw of
+                        0 -> 0.0;
+                        _ -> maps:get(Id, PCounts, 0) / PTotalRaw
+                    end,
+                SNorm =
+                    case STotalRaw of
+                        0 -> 0.0;
+                        _ -> maps:get(Id, SCounts, 0) / STotalRaw
+                    end,
+                Acc#{Id => PNorm * PlayerW + SNorm * SpectatorW}
+            end,
+            #{},
+            Options
+        )
     ),
     MaxScore = lists:max([0.0 | maps:values(MergedCounts)]),
     Winners = maps:keys(maps:filter(fun(_Id, S) -> S =:= MaxScore end, MergedCounts)),
@@ -638,16 +671,27 @@ merge_spectator_result(PlayerResult, SpectatorResult, SpectatorW, Options, TieBr
     }.
 
 init_counts(Options) ->
-    lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0} end, #{}, Options).
+    lists:foldl(fun(#{id := Id}, Acc) when is_map(Acc) -> Acc#{Id => 0} end, #{}, Options).
 
 init_counts_float(Options) ->
-    lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0.0} end, #{}, Options).
+    lists:foldl(fun(#{id := Id}, Acc) when is_map(Acc) -> Acc#{Id => 0.0} end, #{}, Options).
 
 merge_template(Template, Config) ->
-    Templates = application:get_env(asobi, vote_templates, #{}),
+    Templates = ensure_map(application:get_env(asobi, vote_templates, #{})),
     case Templates of
-        #{Template := Defaults} -> maps:merge(Defaults, Config);
+        #{Template := Defaults} when is_map(Defaults) -> maps:merge(Defaults, Config);
         _ -> Config
+    end.
+
+-spec ensure_map(term()) -> #{term() => term()}.
+ensure_map(M) when is_map(M) -> M;
+ensure_map(_) -> #{}.
+
+-spec get_count(term(), map()) -> number().
+get_count(Key, Map) ->
+    case maps:get(Key, Map, 0) of
+        N when is_number(N) -> N;
+        _ -> 0
     end.
 
 break_tie([Single], _TieBreaker) ->
@@ -830,15 +874,17 @@ external_state(Status, #{
 compute_live_tallies(~"ranked", Votes, Options, _Weights) ->
     maps:fold(
         fun
-            (_VoterId, [First | _], Acc) -> Acc#{First => maps:get(First, Acc, 0) + 1};
-            (_VoterId, _, Acc) -> Acc
+            (_VoterId, [First | _], Acc) when is_map(Acc) ->
+                Acc#{First => maps:get(First, Acc, 0) + 1};
+            (_VoterId, _, Acc) ->
+                Acc
         end,
         init_counts(Options),
         Votes
     );
 compute_live_tallies(~"weighted", Votes, Options, Weights) ->
     maps:fold(
-        fun(VoterId, OptionId, Acc) ->
+        fun(VoterId, OptionId, Acc) when is_map(Acc) ->
             W = maps:get(VoterId, Weights, 1),
             Acc#{OptionId => maps:get(OptionId, Acc, 0.0) + W}
         end,
@@ -847,7 +893,7 @@ compute_live_tallies(~"weighted", Votes, Options, Weights) ->
     );
 compute_live_tallies(_Method, Votes, Options, _Weights) ->
     maps:fold(
-        fun(_VoterId, OptionId, Acc) ->
+        fun(_VoterId, OptionId, Acc) when is_map(Acc) ->
             Acc#{OptionId => maps:get(OptionId, Acc, 0) + 1}
         end,
         init_counts(Options),

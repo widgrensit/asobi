@@ -16,14 +16,14 @@ init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
     U1 = asobi_test_helpers:unique_username(~"mm_api"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
-    B1 = nova_test:json(R1),
+    #{~"player_id" := P1Id, ~"session_token" := P1Token} = nova_test:json(R1),
     [
-        {player1_id, maps:get(~"player_id", B1)},
-        {player1_token, maps:get(~"session_token", B1)}
+        {player1_id, P1Id},
+        {player1_token, P1Token}
         | Config0
     ].
 
@@ -31,12 +31,13 @@ end_per_suite(Config) ->
     Config.
 
 auth(Config) ->
-    Token = proplists:get_value(player1_token, Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 add_ticket(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/matchmaker",
+        "/api/v1/matchmaker",
         #{
             headers => auth(Config),
             json => #{~"mode" => ~"ranked", ~"properties" => #{~"skill" => 1200}}
@@ -46,37 +47,36 @@ add_ticket(Config) ->
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"ticket_id" := _, ~"status" := ~"pending"}, Body),
-    %% Clean up
-    TicketId = maps:get(~"ticket_id", Body),
+    #{~"ticket_id" := TicketId} = Body,
+    true = is_binary(TicketId),
     _ = nova_test:delete(
-        iolist_to_binary([~"/api/v1/matchmaker/", TicketId]),
+        "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
         #{headers => auth(Config)},
         Config
     ),
     Config.
 
 get_ticket(Config) ->
-    %% Create a ticket first
     {ok, AddResp} = nova_test:post(
-        ~"/api/v1/matchmaker",
+        "/api/v1/matchmaker",
         #{
             headers => auth(Config),
             json => #{~"mode" => ~"ranked"}
         },
         Config
     ),
-    TicketId = maps:get(~"ticket_id", nova_test:json(AddResp)),
+    #{~"ticket_id" := TicketId} = nova_test:json(AddResp),
+    true = is_binary(TicketId),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/matchmaker/", TicketId]),
+        "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
         #{headers => auth(Config)},
         Config
     ),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"id" := TicketId}, Body),
-    %% Clean up
     _ = nova_test:delete(
-        iolist_to_binary([~"/api/v1/matchmaker/", TicketId]),
+        "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
         #{headers => auth(Config)},
         Config
     ),
@@ -84,7 +84,7 @@ get_ticket(Config) ->
 
 get_ticket_not_found(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/matchmaker/nonexistent_ticket",
+        "/api/v1/matchmaker/nonexistent_ticket",
         #{headers => auth(Config)},
         Config
     ),
@@ -92,25 +92,24 @@ get_ticket_not_found(Config) ->
     Config.
 
 cancel_ticket(Config) ->
-    %% Create a ticket first
     {ok, AddResp} = nova_test:post(
-        ~"/api/v1/matchmaker",
+        "/api/v1/matchmaker",
         #{
             headers => auth(Config),
             json => #{~"mode" => ~"casual"}
         },
         Config
     ),
-    TicketId = maps:get(~"ticket_id", nova_test:json(AddResp)),
+    #{~"ticket_id" := TicketId} = nova_test:json(AddResp),
+    true = is_binary(TicketId),
     {ok, Resp} = nova_test:delete(
-        iolist_to_binary([~"/api/v1/matchmaker/", TicketId]),
+        "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
         #{headers => auth(Config)},
         Config
     ),
     ?assertStatus(200, Resp),
-    %% Verify it's gone
     {ok, Resp2} = nova_test:get(
-        iolist_to_binary([~"/api/v1/matchmaker/", TicketId]),
+        "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
         #{headers => auth(Config)},
         Config
     ),

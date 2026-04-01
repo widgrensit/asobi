@@ -48,22 +48,22 @@ delete(Schema, Record) ->
     CS = kura_changeset:cast(Schema, Record, #{}, []),
     kura_repo_worker:delete(?MODULE, CS).
 
--spec update_all(#kura_query{}, map()) -> {ok, non_neg_integer()}.
+-spec update_all(#kura_query{}, map()) -> {ok, non_neg_integer()} | {error, term()}.
 update_all(Q, Updates) -> kura_repo_worker:update_all(?MODULE, Q, Updates).
 
--spec delete_all(#kura_query{}) -> {ok, non_neg_integer()}.
+-spec delete_all(#kura_query{}) -> {ok, non_neg_integer()} | {error, term()}.
 delete_all(Q) -> kura_repo_worker:delete_all(?MODULE, Q).
 
--spec insert_all(module(), [map()]) -> {ok, non_neg_integer()}.
+-spec insert_all(module(), [map()]) -> {ok, non_neg_integer()} | {error, term()}.
 insert_all(Schema, Entries) -> kura_repo_worker:insert_all(?MODULE, Schema, Entries).
 
--spec exists(#kura_query{}) -> {ok, boolean()}.
+-spec exists(#kura_query{}) -> {ok, boolean()} | {error, term()}.
 exists(Q) -> kura_repo_worker:exists(?MODULE, Q).
 
 -spec reload(module(), map()) -> {ok, map()} | {error, term()}.
 reload(Schema, Record) -> kura_repo_worker:reload(?MODULE, Schema, Record).
 
--spec transaction(fun()) -> {ok, term()} | {error, term()}.
+-spec transaction(fun()) -> term().
 transaction(Fun) -> kura_repo_worker:transaction(?MODULE, Fun).
 
 -spec multi(term()) -> {ok, map()} | {error, atom(), term(), map()}.

@@ -39,7 +39,7 @@ match_lifecycle(Config) ->
         max_players => 4,
         tick_rate => 50
     }),
-    ?assert(is_pid(Pid)),
+    true = is_pid(Pid),
     Info = asobi_match_server:get_info(Pid),
     ?assertMatch(#{status := waiting, player_count := 0}, Info),
     ok = asobi_match_server:join(Pid, ~"player1"),
@@ -55,6 +55,7 @@ match_join_leave(Config) ->
         min_players => 2,
         max_players => 4
     }),
+    true = is_pid(Pid),
     ok = asobi_match_server:join(Pid, ~"player1"),
     ok = asobi_match_server:join(Pid, ~"player2"),
     asobi_match_server:leave(Pid, ~"player1"),
@@ -69,6 +70,7 @@ match_full(Config) ->
         min_players => 1,
         max_players => 2
     }),
+    true = is_pid(Pid),
     ok = asobi_match_server:join(Pid, ~"player1"),
     ok = asobi_match_server:join(Pid, ~"player2"),
     ?assertMatch({error, match_full}, asobi_match_server:join(Pid, ~"player3")),
@@ -79,6 +81,7 @@ match_waiting_timeout(_Config) ->
         game_module => asobi_test_game,
         min_players => 10
     }),
+    true = is_pid(Pid),
     Ref = monitor(process, Pid),
     ok = asobi_match_server:join(Pid, ~"player1"),
     receive
@@ -94,10 +97,10 @@ match_invalid_input_survives(_Config) ->
         max_players => 2,
         tick_rate => 50
     }),
+    true = is_pid(Pid),
     ok = asobi_match_server:join(Pid, ~"player1"),
     ok = asobi_match_server:join(Pid, ~"player2"),
     timer:sleep(100),
-    %% Send invalid input — should be rejected without crashing
     asobi_match_server:handle_input(Pid, ~"player1", #{~"action" => ~"invalid"}),
     timer:sleep(100),
     %% Match should still be running
@@ -111,6 +114,7 @@ match_tick_executes(_Config) ->
         max_players => 2,
         tick_rate => 50
     }),
+    true = is_pid(Pid),
     ok = asobi_match_server:join(Pid, ~"player1"),
     timer:sleep(300),
     Info = asobi_match_server:get_info(Pid),

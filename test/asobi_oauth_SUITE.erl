@@ -40,14 +40,14 @@ init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
     U1 = asobi_test_helpers:unique_username(~"oauth_p1"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
-    B1 = nova_test:json(R1),
+    #{~"player_id" := P1Id, ~"session_token" := P1Token} = nova_test:json(R1),
     [
-        {player1_id, maps:get(~"player_id", B1)},
-        {player1_token, maps:get(~"session_token", B1)}
+        {player1_id, P1Id},
+        {player1_token, P1Token}
         | Config0
     ].
 
@@ -55,14 +55,15 @@ end_per_suite(Config) ->
     Config.
 
 auth(Config) ->
-    Token = proplists:get_value(player1_token, Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 %% --- OAuth Error Paths ---
 
 oauth_missing_fields(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/oauth",
+        "/api/v1/auth/oauth",
         #{json => #{}},
         Config
     ),
@@ -71,7 +72,7 @@ oauth_missing_fields(Config) ->
 
 oauth_unsupported_provider(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/oauth",
+        "/api/v1/auth/oauth",
         #{json => #{~"provider" => ~"fakeprovider", ~"token" => ~"faketoken"}},
         Config
     ),
@@ -82,7 +83,7 @@ oauth_unsupported_provider(Config) ->
 
 link_missing_fields(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/link",
+        "/api/v1/auth/link",
         #{headers => auth(Config), json => #{}},
         Config
     ),
@@ -91,7 +92,7 @@ link_missing_fields(Config) ->
 
 link_unsupported_provider(Config) ->
     {ok, Resp} = nova_test:post(
-        ~"/api/v1/auth/link",
+        "/api/v1/auth/link",
         #{
             headers => auth(Config),
             json => #{~"provider" => ~"fakeprovider", ~"token" => ~"faketoken"}
@@ -103,7 +104,7 @@ link_unsupported_provider(Config) ->
 
 unlink_missing_fields(Config) ->
     {ok, Resp} = nova_test:delete(
-        ~"/api/v1/auth/unlink",
+        "/api/v1/auth/unlink",
         #{headers => auth(Config), json => #{}},
         Config
     ),
@@ -112,7 +113,7 @@ unlink_missing_fields(Config) ->
 
 unlink_not_found(Config) ->
     {ok, Resp} = nova_test:delete(
-        ~"/api/v1/auth/unlink?provider=discord",
+        "/api/v1/auth/unlink?provider=discord",
         #{headers => auth(Config)},
         Config
     ),
@@ -120,8 +121,6 @@ unlink_not_found(Config) ->
     Config.
 
 unlink_last_auth_method(Config) ->
-    %% Test the internal logic directly since DELETE with JSON body
-    %% may not work through Nova's request pipeline
     U = asobi_test_helpers:unique_username(~"oauth_nopw"),
     PlayerCS = kura_changeset:cast(
         asobi_player,
@@ -142,15 +141,13 @@ unlink_last_auth_method(Config) ->
         provider_email => ~"test@example.com"
     }),
     {ok, _} = asobi_repo:insert(IdentityCS),
-    %% Verify the identity exists
     Q = kura_query:where(kura_query:from(asobi_player_identity), {player_id, NoPasswordId}),
     {ok, [_]} = asobi_repo:all(Q),
     Config.
 
 unlink_success(Config) ->
-    PlayerId = proplists:get_value(player1_id, Config),
-    %% Test identity insert + delete roundtrip directly since DELETE with
-    %% JSON body may not be decoded by Nova
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    true = is_binary(PlayerId),
     ProviderUid = iolist_to_binary([
         ~"discord_", integer_to_binary(erlang:unique_integer([positive]))
     ]),
@@ -161,9 +158,7 @@ unlink_success(Config) ->
         provider_email => ~"discord@example.com"
     }),
     {ok, Identity} = asobi_repo:insert(IdentityCS),
-    %% Delete directly
     {ok, _} = asobi_repo:delete(asobi_player_identity, Identity),
-    %% Verify it's gone
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_player_identity), {player_id, PlayerId}),
         {provider, ~"discord"}
@@ -174,7 +169,8 @@ unlink_success(Config) ->
 %% --- Identity DB Roundtrip ---
 
 identity_db_roundtrip(Config) ->
-    PlayerId = proplists:get_value(player1_id, Config),
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    true = is_binary(PlayerId),
     ProviderUid = iolist_to_binary([
         ~"test_uid_", integer_to_binary(erlang:unique_integer([positive]))
     ]),
@@ -189,7 +185,6 @@ identity_db_roundtrip(Config) ->
     ?assertEqual(PlayerId, maps:get(player_id, Identity)),
     ?assertEqual(~"apple", maps:get(provider, Identity)),
     ?assertEqual(ProviderUid, maps:get(provider_uid, Identity)),
-    %% Query back
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_player_identity), {provider, ~"apple"}),
         {provider_uid, ProviderUid}
@@ -199,8 +194,8 @@ identity_db_roundtrip(Config) ->
     Config.
 
 login_existing_identity(Config) ->
-    %% Verify that an identity linked to a player can be found
-    PlayerId = proplists:get_value(player1_id, Config),
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    true = is_binary(PlayerId),
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_player_identity), {player_id, PlayerId}),
         {provider, ~"apple"}

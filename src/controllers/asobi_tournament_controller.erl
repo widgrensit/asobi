@@ -3,7 +3,7 @@
 -export([index/1, show/1, join/1]).
 
 -spec index(cowboy_req:req()) -> {json, map()}.
-index(#{qs := Qs} = _Req) ->
+index(#{qs := Qs} = _Req) when is_binary(Qs) ->
     Params = cow_qs:parse_qs(Qs),
     Q0 = kura_query:from(asobi_tournament),
     Q1 =
@@ -11,7 +11,7 @@ index(#{qs := Qs} = _Req) ->
             undefined -> Q0;
             Status -> kura_query:where(Q0, {status, Status})
         end,
-    Limit = binary_to_integer(proplists:get_value(~"limit", Params, ~"50")),
+    Limit = qs_integer(~"limit", Params, 50),
     Q2 = kura_query:limit(kura_query:order_by(Q1, [{start_at, asc}]), Limit),
     {ok, Tournaments} = asobi_repo:all(Q2),
     {json, #{tournaments => Tournaments}}.
@@ -25,7 +25,9 @@ show(#{bindings := #{~"id" := TournamentId}} = _Req) ->
 
 -spec join(cowboy_req:req()) ->
     {json, integer(), map(), map()} | {status, integer()}.
-join(#{bindings := #{~"id" := TournamentId}, auth_data := #{player_id := PlayerId}} = _Req) ->
+join(#{bindings := #{~"id" := TournamentId}, auth_data := #{player_id := PlayerId}} = _Req) when
+    is_binary(TournamentId), is_binary(PlayerId)
+->
     case asobi_tournament_server:join(TournamentId, PlayerId) of
         ok ->
             {json, 200, #{}, #{success => true, tournament_id => TournamentId}};
@@ -35,4 +37,10 @@ join(#{bindings := #{~"id" := TournamentId}, auth_data := #{player_id := PlayerI
             {json, 409, #{}, #{error => ~"already_joined"}};
         {error, not_found} ->
             {status, 404}
+    end.
+
+qs_integer(Key, Params, Default) ->
+    case proplists:get_value(Key, Params) of
+        V when is_binary(V) -> binary_to_integer(V);
+        _ -> Default
     end.

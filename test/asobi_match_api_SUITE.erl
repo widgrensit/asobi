@@ -28,14 +28,11 @@ init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
     U1 = asobi_test_helpers:unique_username(~"match_api"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
-    B1 = nova_test:json(R1),
-    Token = maps:get(~"session_token", B1),
-    PlayerId = maps:get(~"player_id", B1),
-    %% Insert some match records directly
+    #{~"session_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
     Record1CS = kura_changeset:cast(
         asobi_match_record,
         #{},
@@ -75,13 +72,13 @@ end_per_suite(Config) ->
     Config.
 
 auth(Config) ->
-    Token = proplists:get_value(player1_token, Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 list_matches_empty(Config) ->
-    %% Filter by a mode with no matches
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/matches?mode=nonexistent_mode",
+        "/api/v1/matches?mode=nonexistent_mode",
         #{headers => auth(Config)},
         Config
     ),
@@ -91,7 +88,7 @@ list_matches_empty(Config) ->
 
 list_matches_with_records(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/matches",
+        "/api/v1/matches",
         #{headers => auth(Config)},
         Config
     ),
@@ -102,7 +99,7 @@ list_matches_with_records(Config) ->
 
 list_matches_filter_mode(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/matches?mode=arena",
+        "/api/v1/matches?mode=arena",
         #{headers => auth(Config)},
         Config
     ),
@@ -112,9 +109,10 @@ list_matches_filter_mode(Config) ->
     Config.
 
 show_match(Config) ->
-    MatchId = proplists:get_value(match_id, Config),
+    {match_id, MatchId} = lists:keyfind(match_id, 1, Config),
+    true = is_binary(MatchId),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/matches/", MatchId]),
+        "/api/v1/matches/" ++ binary_to_list(MatchId),
         #{headers => auth(Config)},
         Config
     ),
@@ -125,7 +123,7 @@ show_match(Config) ->
 
 show_match_not_found(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/matches/00000000-0000-0000-0000-000000000000",
+        "/api/v1/matches/00000000-0000-0000-0000-000000000000",
         #{headers => auth(Config)},
         Config
     ),

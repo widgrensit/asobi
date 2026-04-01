@@ -4,11 +4,11 @@
 -export([start_link/0, start_match/1]).
 -export([init/1]).
 
--spec start_link() -> {ok, pid()}.
+-spec start_link() -> supervisor:startlink_ret().
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
--spec start_match(map()) -> {ok, pid()}.
+-spec start_match(map()) -> supervisor:startchild_ret().
 start_match(Config) ->
     supervisor:start_child(?MODULE, [Config]).
 

@@ -4,7 +4,7 @@
 -export([start_link/1, get_info/1, join/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--spec start_link(map()) -> {ok, pid()}.
+-spec start_link(map()) -> gen_server:start_ret().
 start_link(Tournament) ->
     TournamentId = maps:get(id, Tournament),
     gen_server:start_link({global, {?MODULE, TournamentId}}, ?MODULE, Tournament, []).
@@ -12,7 +12,10 @@ start_link(Tournament) ->
 -spec get_info(binary()) -> {ok, map()} | {error, not_found}.
 get_info(TournamentId) ->
     try
-        gen_server:call({global, {?MODULE, TournamentId}}, get_info)
+        case gen_server:call({global, {?MODULE, TournamentId}}, get_info) of
+            {ok, Info} when is_map(Info) -> {ok, Info};
+            _ -> {error, not_found}
+        end
     catch
         exit:{noproc, _} -> {error, not_found}
     end.
@@ -20,7 +23,10 @@ get_info(TournamentId) ->
 -spec join(binary(), binary()) -> ok | {error, term()}.
 join(TournamentId, PlayerId) ->
     try
-        gen_server:call({global, {?MODULE, TournamentId}}, {join, PlayerId})
+        case gen_server:call({global, {?MODULE, TournamentId}}, {join, PlayerId}) of
+            ok -> ok;
+            {error, _} = Err -> Err
+        end
     catch
         exit:{noproc, _} -> {error, not_found}
     end.

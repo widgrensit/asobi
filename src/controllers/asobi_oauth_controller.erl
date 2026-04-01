@@ -5,7 +5,9 @@
 %% POST /api/v1/auth/oauth
 %% Body: {"provider": "google", "token": "<id_token>"}
 -spec authenticate(cowboy_req:req()) -> {json, integer(), map(), map()}.
-authenticate(#{json := #{~"provider" := Provider, ~"token" := Token}} = _Req) ->
+authenticate(#{json := #{~"provider" := Provider, ~"token" := Token}} = _Req) when
+    is_binary(Provider), is_binary(Token)
+->
     case validate_provider_token(Provider, Token) of
         {ok, Claims} ->
             ProviderUid = maps:get(provider_uid, Claims),
@@ -24,8 +26,10 @@ authenticate(_Req) ->
 %% POST /api/v1/auth/link
 %% Body: {"provider": "discord", "token": "<id_token>"}
 -spec link(cowboy_req:req()) -> {json, integer(), map(), map()}.
-link(#{json := #{~"provider" := Provider, ~"token" := Token}, auth_data := AuthData} = _Req) ->
-    PlayerId = maps:get(player_id, AuthData),
+link(
+    #{json := #{~"provider" := Provider, ~"token" := Token}, auth_data := #{player_id := PlayerId}} =
+        _Req
+) when is_binary(Provider), is_binary(Token), is_binary(PlayerId) ->
     case validate_provider_token(Provider, Token) of
         {ok, Claims} ->
             ProviderUid = maps:get(provider_uid, Claims),
@@ -43,8 +47,9 @@ link(_Req) ->
 
 %% DELETE /api/v1/auth/unlink?provider=discord
 -spec unlink(cowboy_req:req()) -> {json, integer(), map(), map()}.
-unlink(#{parsed_qs := #{~"provider" := Provider}, auth_data := AuthData} = _Req) ->
-    PlayerId = maps:get(player_id, AuthData),
+unlink(
+    #{parsed_qs := #{~"provider" := Provider}, auth_data := #{player_id := PlayerId}} = _Req
+) when is_binary(Provider), is_binary(PlayerId) ->
     case find_player_identity(PlayerId, Provider) of
         {ok, Identity} ->
             case has_other_auth(PlayerId, Provider) of
@@ -62,7 +67,6 @@ unlink(_Req) ->
 
 %% --- Internal ---
 
--dialyzer([{no_match, validate_provider_token/2}, {nowarn_function, normalize_claims/2}]).
 -spec validate_provider_token(binary(), binary()) -> {ok, map()} | {error, binary()}.
 validate_provider_token(~"steam", Ticket) ->
     asobi_steam:validate_ticket(Ticket);
@@ -71,13 +75,17 @@ validate_provider_token(Provider, Token) ->
         unknown ->
             {error, ~"unsupported_provider"};
         ProviderAtom ->
-            case nova_auth_oidc_jwt:validate_token(asobi_oidc_config, ProviderAtom, Token) of
+            try nova_auth_oidc_jwt:validate_token(asobi_oidc_config, ProviderAtom, Token) of
                 {ok, Actor} ->
-                    %% Actor is a map with id and claims keys
                     ActorClaims = maps:get(claims, Actor, Actor),
-                    {ok, normalize_claims(Provider, ActorClaims)};
+                    case ActorClaims of
+                        Claims when is_map(Claims) -> {ok, normalize_claims(Provider, Claims)};
+                        _ -> {error, ~"invalid_claims"}
+                    end;
                 {error, _Reason} ->
                     {error, ~"invalid_token"}
+            catch
+                _:_ -> {error, ~"invalid_token"}
             end
     end.
 

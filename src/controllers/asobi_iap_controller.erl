@@ -5,7 +5,7 @@
 %% POST /api/v1/iap/apple
 %% Body: {"signed_transaction": "<JWS string>"}
 -spec verify_apple(cowboy_req:req()) -> {json, integer(), map(), map()}.
-verify_apple(#{json := #{~"signed_transaction" := SignedTxn}} = _Req) ->
+verify_apple(#{json := #{~"signed_transaction" := SignedTxn}} = _Req) when is_binary(SignedTxn) ->
     case asobi_iap:verify_apple(SignedTxn) of
         {ok, Result} ->
             {json, 200, #{}, Result};
@@ -18,7 +18,7 @@ verify_apple(_Req) ->
 %% POST /api/v1/iap/google
 %% Body: {"product_id": "...", "purchase_token": "..."}
 -spec verify_google(cowboy_req:req()) -> {json, integer(), map(), map()}.
-verify_google(#{json := Params} = _Req) ->
+verify_google(#{json := Params} = _Req) when is_map(Params) ->
     case asobi_iap:verify_google(Params) of
         {ok, Result} ->
             {json, 200, #{}, Result};

@@ -34,7 +34,7 @@ do_validate_ticket(ApiKey, AppId, Ticket) ->
     case
         httpc:request(get, {binary_to_list(Url), []}, [{timeout, 10000}], [{body_format, binary}])
     of
-        {ok, {{_, 200, _}, _, Body}} ->
+        {ok, {{_, 200, _}, _, Body}} when is_binary(Body) ->
             parse_auth_response(Body);
         {ok, {{_, Status, _}, _, _}} ->
             logger:warning(#{msg => ~"steam_api_error", status => Status}),
@@ -47,9 +47,11 @@ do_validate_ticket(ApiKey, AppId, Ticket) ->
 -spec parse_auth_response(binary()) -> {ok, map()} | {error, binary()}.
 parse_auth_response(Body) ->
     case json:decode(Body) of
-        #{~"response" := #{~"params" := #{~"result" := ~"OK", ~"steamid" := SteamId}}} ->
+        #{~"response" := #{~"params" := #{~"result" := ~"OK", ~"steamid" := SteamId}}} when
+            is_binary(SteamId)
+        ->
             maybe_fetch_profile(SteamId);
-        #{~"response" := #{~"error" := #{~"errordesc" := Desc}}} ->
+        #{~"response" := #{~"error" := #{~"errordesc" := Desc}}} when is_binary(Desc) ->
             {error, Desc};
         _ ->
             {error, ~"invalid_steam_response"}
@@ -89,9 +91,9 @@ fetch_player_summary(SteamId) ->
                     get, {binary_to_list(Url), []}, [{timeout, 10000}], [{body_format, binary}]
                 )
             of
-                {ok, {{_, 200, _}, _, Body}} ->
+                {ok, {{_, 200, _}, _, Body}} when is_binary(Body) ->
                     case json:decode(Body) of
-                        #{~"response" := #{~"players" := [Player | _]}} ->
+                        #{~"response" := #{~"players" := [Player | _]}} when is_map(Player) ->
                             {ok, Player};
                         _ ->
                             {error, no_players}
@@ -103,8 +105,14 @@ fetch_player_summary(SteamId) ->
 
 -spec steam_api_key() -> binary() | undefined.
 steam_api_key() ->
-    application:get_env(asobi, steam_api_key, undefined).
+    case application:get_env(asobi, steam_api_key, undefined) of
+        V when is_binary(V) -> V;
+        _ -> undefined
+    end.
 
 -spec steam_app_id() -> binary().
 steam_app_id() ->
-    application:get_env(asobi, steam_app_id, ~"0").
+    case application:get_env(asobi, steam_app_id, ~"0") of
+        V when is_binary(V) -> V;
+        _ -> ~"0"
+    end.

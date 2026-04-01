@@ -3,9 +3,11 @@
 -export([index/1, mark_read/1, delete/1]).
 
 -spec index(cowboy_req:req()) -> {json, map()}.
-index(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) ->
+index(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) when
+    is_binary(PlayerId), is_binary(Qs)
+->
     Params = cow_qs:parse_qs(Qs),
-    Limit = binary_to_integer(proplists:get_value(~"limit", Params, ~"50")),
+    Limit = qs_integer(~"limit", Params, 50),
     Q0 = kura_query:where(kura_query:from(asobi_notification), {player_id, PlayerId}),
     Q1 =
         case proplists:get_value(~"read", Params) of
@@ -40,4 +42,10 @@ delete(#{bindings := #{~"id" := NotifId}, auth_data := #{player_id := PlayerId}}
             {status, 403};
         {error, not_found} ->
             {status, 404}
+    end.
+
+qs_integer(Key, Params, Default) ->
+    case proplists:get_value(Key, Params) of
+        V when is_binary(V) -> binary_to_integer(V);
+        _ -> Default
     end.

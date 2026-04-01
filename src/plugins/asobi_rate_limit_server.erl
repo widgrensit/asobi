@@ -8,7 +8,7 @@
 -define(CLEANUP_INTERVAL, 60000).
 -define(DEFAULT_WINDOW, 60000).
 
--spec start_link() -> {ok, pid()}.
+-spec start_link() -> gen_server:start_ret().
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 

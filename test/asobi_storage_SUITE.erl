@@ -35,21 +35,23 @@ init_per_suite(Config) ->
     U1 = asobi_test_helpers:unique_username(~"storage_p1"),
     U2 = asobi_test_helpers:unique_username(~"storage_p2"),
     {ok, R1} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
     B1 = nova_test:json(R1),
     {ok, R2} = nova_test:post(
-        ~"/api/v1/auth/register",
+        "/api/v1/auth/register",
         #{json => #{~"username" => U2, ~"password" => ~"testpass123"}},
         Config0
     ),
     B2 = nova_test:json(R2),
+    #{~"player_id" := P1Id, ~"session_token" := P1Token} = B1,
+    #{~"session_token" := P2Token} = B2,
     [
-        {player1_id, maps:get(~"player_id", B1)},
-        {player1_token, maps:get(~"session_token", B1)},
-        {player2_token, maps:get(~"session_token", B2)}
+        {player1_id, P1Id},
+        {player1_token, P1Token},
+        {player2_token, P2Token}
         | Config0
     ].
 
@@ -58,14 +60,15 @@ end_per_suite(Config) ->
 
 auth(Config, Player) ->
     Key = list_to_atom(atom_to_list(Player) ++ "_token"),
-    Token = proplists:get_value(Key, Config),
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+    {Key, Token} = lists:keyfind(Key, 1, Config),
+    true = is_binary(Token),
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 %% --- Cloud Saves ---
 
 list_saves_empty(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/saves",
+        "/api/v1/saves",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -75,7 +78,7 @@ list_saves_empty(Config) ->
 
 create_save(Config) ->
     {ok, Resp} = nova_test:put(
-        ~"/api/v1/saves/slot1",
+        "/api/v1/saves/slot1",
         #{
             headers => auth(Config, player1),
             json => #{~"data" => #{~"level" => 5, ~"items" => [~"sword"]}}
@@ -89,7 +92,7 @@ create_save(Config) ->
 
 get_save(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/saves/slot1",
+        "/api/v1/saves/slot1",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -100,7 +103,7 @@ get_save(Config) ->
 
 update_save(Config) ->
     {ok, Resp} = nova_test:put(
-        ~"/api/v1/saves/slot1",
+        "/api/v1/saves/slot1",
         #{
             headers => auth(Config, player1),
             json => #{~"data" => #{~"level" => 10}, ~"version" => 1}
@@ -114,7 +117,7 @@ update_save(Config) ->
 
 save_version_conflict(Config) ->
     {ok, Resp} = nova_test:put(
-        ~"/api/v1/saves/slot1",
+        "/api/v1/saves/slot1",
         #{
             headers => auth(Config, player1),
             json => #{~"data" => #{~"level" => 99}, ~"version" => 1}
@@ -128,7 +131,7 @@ save_version_conflict(Config) ->
 
 put_storage(Config) ->
     {ok, Resp} = nova_test:put(
-        ~"/api/v1/storage/settings/theme",
+        "/api/v1/storage/settings/theme",
         #{
             headers => auth(Config, player1),
             json => #{~"value" => #{~"color" => ~"dark"}}
@@ -142,7 +145,7 @@ put_storage(Config) ->
 
 get_storage(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/storage/settings/theme",
+        "/api/v1/storage/settings/theme",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -153,7 +156,7 @@ get_storage(Config) ->
 
 list_storage(Config) ->
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/storage/settings",
+        "/api/v1/storage/settings",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -164,14 +167,13 @@ list_storage(Config) ->
 
 delete_storage(Config) ->
     {ok, Resp} = nova_test:delete(
-        ~"/api/v1/storage/settings/theme",
+        "/api/v1/storage/settings/theme",
         #{headers => auth(Config, player1)},
         Config
     ),
     ?assertStatus(200, Resp),
-    %% Verify it's gone
     {ok, Resp2} = nova_test:get(
-        ~"/api/v1/storage/settings/theme",
+        "/api/v1/storage/settings/theme",
         #{headers => auth(Config, player1)},
         Config
     ),
@@ -179,18 +181,16 @@ delete_storage(Config) ->
     Config.
 
 storage_owner_permission(Config) ->
-    %% Create as player1 with owner permission (default)
     {ok, _} = nova_test:put(
-        ~"/api/v1/storage/private/secret",
+        "/api/v1/storage/private/secret",
         #{
             headers => auth(Config, player1),
             json => #{~"value" => #{~"data" => ~"private"}}
         },
         Config
     ),
-    %% Player2 should not be able to read it
     {ok, Resp} = nova_test:get(
-        ~"/api/v1/storage/private/secret",
+        "/api/v1/storage/private/secret",
         #{headers => auth(Config, player2)},
         Config
     ),

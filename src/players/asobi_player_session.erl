@@ -5,9 +5,7 @@
 -export([get_state/1, update_presence/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--dialyzer({nowarn_function, terminate/2}).
-
--spec start_link(binary(), pid()) -> {ok, pid()}.
+-spec start_link(binary(), pid()) -> gen_server:start_ret().
 start_link(PlayerId, WsPid) ->
     gen_server:start_link(?MODULE, #{player_id => PlayerId, ws_pid => WsPid}, []).
 
@@ -17,7 +15,10 @@ stop(Pid) ->
 
 -spec get_state(pid()) -> map().
 get_state(Pid) ->
-    gen_server:call(Pid, get_state).
+    case gen_server:call(Pid, get_state) of
+        S when is_map(S) -> S;
+        _ -> #{}
+    end.
 
 -spec update_presence(pid(), map()) -> ok.
 update_presence(Pid, Status) ->
@@ -44,13 +45,13 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({update_presence, Status}, #{player_id := PlayerId} = State) ->
+handle_cast({update_presence, Status}, #{player_id := PlayerId} = State) when is_map(Status) ->
     asobi_presence:update(PlayerId, Status),
     {noreply, State#{presence => Status}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
--spec handle_info(term(), map()) -> {noreply, map()} | {stop, normal, map()}.
+-spec handle_info(term(), map()) -> {noreply, map()} | {stop, term(), map()}.
 handle_info({'DOWN', _Ref, process, WsPid, _Reason}, #{ws_pid := WsPid} = State) ->
     {stop, normal, State};
 handle_info({session_revoked, Reason}, #{ws_pid := WsPid} = State) ->
@@ -67,5 +68,5 @@ handle_info(_Info, State) ->
 -spec terminate(term(), map()) -> ok.
 terminate(_Reason, #{player_id := PlayerId, channels := Channels}) ->
     asobi_presence:untrack(PlayerId),
-    lists:foreach(fun(Ch) -> asobi_chat_channel:leave(Ch, self()) end, Channels),
+    lists:foreach(fun(Ch) when is_binary(Ch) -> asobi_chat_channel:leave(Ch, self()) end, Channels),
     ok.

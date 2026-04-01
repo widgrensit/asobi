@@ -29,7 +29,9 @@ register(_Req) ->
     {json, 400, #{}, #{error => ~"missing_required_fields"}}.
 
 -spec login(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) ->
+login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) when
+    is_binary(Username), is_binary(Password)
+->
     case nova_auth_accounts:authenticate(asobi_auth, Username, Password) of
         {ok, Player} ->
             {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
@@ -45,7 +47,7 @@ login(_Req) ->
     {json, 400, #{}, #{error => ~"missing_required_fields"}}.
 
 -spec refresh(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-refresh(#{json := #{~"session_token" := OldToken}} = _Req) ->
+refresh(#{json := #{~"session_token" := OldToken}} = _Req) when is_binary(OldToken) ->
     case nova_auth_session:get_user_by_session_token(asobi_auth, OldToken) of
         {ok, Player} ->
             nova_auth_session:delete_session_token(asobi_auth, OldToken),

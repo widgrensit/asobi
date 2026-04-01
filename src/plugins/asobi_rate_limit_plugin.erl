@@ -51,12 +51,20 @@ rate_limit_key(Req) ->
                 peer_ip(Req)
         end,
     Path = cowboy_req:path(Req),
-    {PlayerId, Path}.
+    BinId =
+        case PlayerId of
+            B when is_binary(B) -> B;
+            _ -> ~""
+        end,
+    {BinId, Path}.
 
 -spec peer_ip(cowboy_req:req()) -> binary().
 peer_ip(Req) ->
     {IP, _Port} = cowboy_req:peer(Req),
-    list_to_binary(inet:ntoa(IP)).
+    case inet:ntoa(IP) of
+        Addr when is_list(Addr) -> list_to_binary(Addr);
+        _ -> ~"unknown"
+    end.
 
 -spec check_rate({binary(), binary()}, pos_integer(), pos_integer()) -> ok | rate_limited.
 check_rate(Key, Limit, Window) ->

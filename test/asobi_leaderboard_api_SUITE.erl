@@ -22,24 +22,22 @@ groups() ->
 
 init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
-    %% Register multiple players for leaderboard tests
     Players = lists:map(
-        fun(I) ->
+        fun(I) when is_integer(I) ->
             U = asobi_test_helpers:unique_username(
                 iolist_to_binary([~"lb_p", integer_to_binary(I)])
             ),
             {ok, R} = nova_test:post(
-                ~"/api/v1/auth/register",
+                "/api/v1/auth/register",
                 #{json => #{~"username" => U, ~"password" => ~"testpass123"}},
                 Config0
             ),
-            B = nova_test:json(R),
-            {maps:get(~"player_id", B), maps:get(~"session_token", B)}
+            #{~"player_id" := PId, ~"session_token" := PToken} = nova_test:json(R),
+            {PId, PToken}
         end,
         lists:seq(1, 5)
     ),
     [{P1Id, P1Token} | _] = Players,
-    %% Start a leaderboard for testing
     BoardId = iolist_to_binary([
         ~"test_board_", integer_to_binary(erlang:unique_integer([positive]))
     ]),
@@ -55,14 +53,16 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     Config.
 
-auth(Token) ->
-    [{~"authorization", iolist_to_binary([~"Bearer ", Token])}].
+auth(Token) when is_binary(Token) ->
+    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 get_top_empty(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
-    Token = proplists:get_value(player1_token, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(BoardId),
+    true = is_binary(Token),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/leaderboards/", BoardId]),
+        "/api/v1/leaderboards/" ++ binary_to_list(BoardId),
         #{headers => auth(Token)},
         Config
     ),
@@ -71,14 +71,15 @@ get_top_empty(Config) ->
     Config.
 
 submit_score(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
-    Players = proplists:get_value(players, Config),
-    %% Submit scores for all players
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    {players, Players} = lists:keyfind(players, 1, Config),
+    true = is_binary(BoardId),
+    true = is_list(Players),
     Scores = [500, 300, 700, 100, 900],
     lists:foreach(
-        fun({{_PId, Token}, Score}) ->
+        fun({{_PId, Token}, Score}) when is_binary(Token) ->
             {ok, Resp} = nova_test:post(
-                iolist_to_binary([~"/api/v1/leaderboards/", BoardId]),
+                "/api/v1/leaderboards/" ++ binary_to_list(BoardId),
                 #{
                     headers => auth(Token),
                     json => #{~"score" => Score}
@@ -86,35 +87,37 @@ submit_score(Config) ->
                 Config
             ),
             ?assertStatus(200, Resp),
-            Body = nova_test:json(Resp),
-            ?assertEqual(Score, maps:get(~"score", Body))
+            #{~"score" := RespScore} = nova_test:json(Resp),
+            ?assertEqual(Score, RespScore)
         end,
         lists:zip(Players, Scores)
     ),
     Config.
 
 get_top(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
-    Token = proplists:get_value(player1_token, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(BoardId),
+    true = is_binary(Token),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/leaderboards/", BoardId]),
+        "/api/v1/leaderboards/" ++ binary_to_list(BoardId),
         #{headers => auth(Token)},
         Config
     ),
     ?assertStatus(200, Resp),
     #{~"entries" := Entries} = nova_test:json(Resp),
     ?assert(length(Entries) =:= 5),
-    %% First entry should have highest score
     [First | _] = Entries,
-    ?assertEqual(900, maps:get(~"score", First)),
-    ?assertEqual(1, maps:get(~"rank", First)),
+    ?assertMatch(#{~"score" := 900, ~"rank" := 1}, First),
     Config.
 
 get_top_with_limit(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
-    Token = proplists:get_value(player1_token, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(BoardId),
+    true = is_binary(Token),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/leaderboards/", BoardId, ~"?limit=3"]),
+        "/api/v1/leaderboards/" ++ binary_to_list(BoardId) ++ "?limit=3",
         #{headers => auth(Token)},
         Config
     ),
@@ -124,11 +127,15 @@ get_top_with_limit(Config) ->
     Config.
 
 get_around(Config) ->
-    BoardId = proplists:get_value(board_id, Config),
-    P1Id = proplists:get_value(player1_id, Config),
-    Token = proplists:get_value(player1_token, Config),
+    {board_id, BoardId} = lists:keyfind(board_id, 1, Config),
+    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(BoardId),
+    true = is_binary(P1Id),
+    true = is_binary(Token),
     {ok, Resp} = nova_test:get(
-        iolist_to_binary([~"/api/v1/leaderboards/", BoardId, ~"/around/", P1Id, ~"?range=2"]),
+        "/api/v1/leaderboards/" ++ binary_to_list(BoardId) ++
+            "/around/" ++ binary_to_list(P1Id) ++ "?range=2",
         #{headers => auth(Token)},
         Config
     ),

@@ -31,10 +31,9 @@ channel_lifecycle(Config) ->
 
 message_buffer(Config) ->
     ChannelId = ~"test_channel_2",
-    %% Ensure channel exists
     asobi_chat_channel:join(ChannelId, self()),
     lists:foreach(
-        fun(I) ->
+        fun(I) when is_integer(I) ->
             Content = list_to_binary("msg" ++ integer_to_list(I)),
             asobi_chat_channel:send_message(ChannelId, ~"sender", Content)
         end,

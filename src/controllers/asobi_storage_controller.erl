@@ -25,7 +25,7 @@ get_save(#{bindings := #{~"slot" := Slot}, auth_data := #{player_id := PlayerId}
 -spec put_save(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
 put_save(
     #{bindings := #{~"slot" := Slot}, json := Params, auth_data := #{player_id := PlayerId}} = _Req
-) ->
+) when is_map(Params) ->
     Data = maps:get(~"data", Params, #{}),
     ClientVersion = maps:get(~"version", Params, undefined),
     Q = kura_query:where(
@@ -81,7 +81,7 @@ put_storage(
         json := Params,
         auth_data := #{player_id := PlayerId}
     } = _Req
-) ->
+) when is_map(Params) ->
     Value = maps:get(~"value", Params, #{}),
     ReadPerm = maps:get(~"read_perm", Params, ~"owner"),
     WritePerm = maps:get(~"write_perm", Params, ~"owner"),
@@ -152,12 +152,18 @@ delete_storage(
     end.
 
 -spec list_storage(cowboy_req:req()) -> {json, map()}.
-list_storage(#{bindings := #{~"collection" := Col}, qs := Qs} = _Req) ->
+list_storage(#{bindings := #{~"collection" := Col}, qs := Qs} = _Req) when is_binary(Qs) ->
     Params = cow_qs:parse_qs(Qs),
-    Limit = binary_to_integer(proplists:get_value(~"limit", Params, ~"50")),
+    Limit = qs_integer(~"limit", Params, 50),
     Q = kura_query:limit(
         kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
         Limit
     ),
     {ok, Objects} = asobi_repo:all(Q),
     {json, #{objects => Objects}}.
+
+qs_integer(Key, Params, Default) ->
+    case proplists:get_value(Key, Params) of
+        V when is_binary(V) -> binary_to_integer(V);
+        _ -> Default
+    end.

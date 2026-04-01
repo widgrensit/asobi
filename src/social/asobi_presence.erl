@@ -9,7 +9,7 @@
 -define(PRESENCE_GROUP, asobi_online).
 -define(PG_SCOPE, nova_scope).
 
--spec start_link() -> {ok, pid()}.
+-spec start_link() -> gen_server:start_ret().
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
@@ -40,7 +40,7 @@ get_status(PlayerId) ->
 -spec send(binary(), term()) -> ok.
 send(PlayerId, Message) ->
     Members = pg:get_members(?PG_SCOPE, {player, PlayerId}),
-    lists:foreach(fun(Pid) -> Pid ! {asobi_message, Message} end, Members),
+    lists:foreach(fun(Pid) when is_pid(Pid) -> Pid ! {asobi_message, Message} end, Members),
     ok.
 
 -spec revoke_session(binary(), binary()) -> ok.
@@ -54,7 +54,7 @@ revoke_session(PlayerId, Reason) ->
 -spec disconnect(binary(), binary()) -> ok.
 disconnect(PlayerId, Reason) ->
     Members = pg:get_members(?PG_SCOPE, {player, PlayerId}),
-    lists:foreach(fun(Pid) -> Pid ! {session_revoked, Reason} end, Members),
+    lists:foreach(fun(Pid) when is_pid(Pid) -> Pid ! {session_revoked, Reason} end, Members),
     ok.
 
 -spec online_count() -> non_neg_integer().
