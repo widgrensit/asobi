@@ -182,6 +182,33 @@ handle_message(
             Reply = encode_reply(Cid, ~"match.left", #{success => true}),
             {reply, {text, Reply}, State}
     end;
+handle_message(
+    #{~"type" := ~"vote.cast", ~"payload" := Payload} = Msg,
+    #{session := SessionPid} = State
+) when SessionPid =/= undefined ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    try asobi_player_session:get_state(SessionPid) of
+        #{player_id := PlayerId} = SState ->
+            case maps:get(match_pid, SState, undefined) of
+                undefined ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => ~"not_in_match"}),
+                    {reply, {text, Reply}, State};
+                MatchPid ->
+                    VoteId = maps:get(~"vote_id", Payload),
+                    OptionId = maps:get(~"option_id", Payload),
+                    case asobi_match_server:cast_vote(MatchPid, PlayerId, VoteId, OptionId) of
+                        ok ->
+                            Reply = encode_reply(Cid, ~"vote.cast_ok", #{success => true}),
+                            {reply, {text, Reply}, State};
+                        {error, Reason} ->
+                            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+                            {reply, {text, Reply}, State}
+                    end
+            end
+    catch
+        exit:{noproc, _} ->
+            {ok, State#{session => undefined}}
+    end;
 handle_message(#{~"type" := Type} = Msg, State) ->
     Cid = maps:get(~"cid", Msg, undefined),
     Reply = encode_reply(Cid, ~"error", #{reason => ~"unknown_type", type => Type}),

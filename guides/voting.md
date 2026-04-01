@@ -1,0 +1,219 @@
+# Voting
+
+Asobi includes an in-match voting system for roguelike-style group decisions
+such as path selection, item picks, event choices, and run modifiers.
+
+## How It Works
+
+1. Game mode (or match server) starts a vote with options and a timed window
+2. Eligible players receive a `match.vote_start` event via WebSocket
+3. Players cast votes during the window
+4. When the window expires, votes are tallied and the result is broadcast
+5. The game mode receives the result via the `vote_resolved/3` callback
+
+## Starting a Vote
+
+Votes are started from a game mode callback or via the match server API:
+
+```erlang
+%% From inside a game module callback
+asobi_match_server:start_vote(MatchPid, #{
+    template => ~"path_choice",
+    options => [
+        #{id => ~"jungle", label => ~"Jungle Path"},
+        #{id => ~"volcano", label => ~"Volcano Path"},
+        #{id => ~"caves", label => ~"Ice Caves"}
+    ],
+    window_ms => 15000,
+    method => ~"plurality",
+    visibility => ~"live"
+}).
+```
+
+### Config Options
+
+| Key            | Type           | Default        | Description                        |
+|----------------|----------------|----------------|------------------------------------|
+| `options`      | `[map()]`      | required       | List of `#{id, label}` option maps |
+| `template`     | `binary()`     | `"default"`    | Template name (for analytics)      |
+| `window_ms`    | `pos_integer()`| `15000`        | Vote window in milliseconds        |
+| `method`       | `binary()`     | `"plurality"`  | `"plurality"` or `"approval"`      |
+| `visibility`   | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
+| `tie_breaker`  | `binary()`     | `"random"`     | `"random"` or `"first"`            |
+| `veto_enabled` | `boolean()`    | `false`        | Allow players to veto              |
+
+The match server automatically fills in `match_id`, `match_pid`, and
+`eligible` (all current players) when starting the vote.
+
+## Voting Methods
+
+### Plurality
+
+Each player picks exactly one option. The option with the most votes wins.
+Ties are broken by the configured `tie_breaker` strategy.
+
+### Approval
+
+Each player submits a list of all options they approve of. The option with
+the highest total approval count wins. Good for "avoid the worst option"
+scenarios.
+
+## Game Mode Integration
+
+Implement the optional `asobi_match` callbacks to react to vote results:
+
+```erlang
+-module(my_roguelike).
+-behaviour(asobi_match).
+
+%% ... init/1, join/2, leave/2, handle_input/3, get_state/2 ...
+
+vote_resolved(~"path_choice", #{winner := WinnerId}, GameState) ->
+    %% Apply the voted path to game state
+    {ok, GameState#{current_path => WinnerId}};
+vote_resolved(~"item_pick", #{winner := ItemId}, GameState) ->
+    {ok, add_item(ItemId, GameState)}.
+```
+
+Both callbacks are optional. If `vote_resolved/3` is not implemented, the
+vote still runs and broadcasts results to clients — the game mode just
+doesn't react server-side.
+
+## WebSocket Protocol
+
+### Casting a Vote (client to server)
+
+```json
+{
+  "type": "vote.cast",
+  "cid": "v1",
+  "payload": {
+    "vote_id": "...",
+    "option_id": "jungle"
+  }
+}
+```
+
+For approval voting, `option_id` is a list:
+
+```json
+{"option_id": ["jungle", "caves"]}
+```
+
+Response:
+
+```json
+{"type": "vote.cast_ok", "cid": "v1", "payload": {"success": true}}
+```
+
+Players can change their vote by sending another `vote.cast` during the
+window. The new vote replaces the previous one.
+
+### Server Push Events
+
+All vote events are broadcast to match players as `match.*` events:
+
+#### `match.vote_start`
+
+A new vote has started.
+
+```json
+{
+  "type": "match.vote_start",
+  "payload": {
+    "vote_id": "...",
+    "options": [
+      {"id": "jungle", "label": "Jungle Path"},
+      {"id": "volcano", "label": "Volcano Path"},
+      {"id": "caves", "label": "Ice Caves"}
+    ],
+    "window_ms": 15000,
+    "method": "plurality"
+  }
+}
+```
+
+#### `match.vote_tally`
+
+Running tally update (only with `"live"` visibility). Sent each time a vote
+is cast.
+
+```json
+{
+  "type": "match.vote_tally",
+  "payload": {
+    "vote_id": "...",
+    "tallies": {"jungle": 2, "volcano": 1, "caves": 0},
+    "time_remaining_ms": 8432,
+    "total_votes": 3
+  }
+}
+```
+
+#### `match.vote_result`
+
+Vote has closed and the winner is determined.
+
+```json
+{
+  "type": "match.vote_result",
+  "payload": {
+    "vote_id": "...",
+    "winner": "jungle",
+    "counts": {"jungle": 2, "volcano": 1, "caves": 0},
+    "distribution": {"jungle": 0.666, "volcano": 0.333, "caves": 0.0},
+    "total_votes": 3,
+    "turnout": 1.0
+  }
+}
+```
+
+#### `match.vote_vetoed`
+
+A player has vetoed the vote (when `veto_enabled` is true).
+
+```json
+{
+  "type": "match.vote_vetoed",
+  "payload": {
+    "vote_id": "...",
+    "vetoed_by": "player_id"
+  }
+}
+```
+
+## REST API
+
+### List votes for a match
+
+```bash
+curl http://localhost:8082/api/v1/matches/<match_id>/votes \
+  -H 'Authorization: Bearer <token>'
+```
+
+Returns the most recent 50 votes for the match, ordered by newest first.
+
+### Get a single vote
+
+```bash
+curl http://localhost:8082/api/v1/votes/<vote_id> \
+  -H 'Authorization: Bearer <token>'
+```
+
+## Visibility Modes
+
+- **`"live"`**: Running tallies are broadcast after each vote and included in
+  state queries. Creates excitement and enables strategic voting.
+- **`"hidden"`**: Tallies are not shown until the vote closes. Prevents
+  bandwagon effects. Only total vote count is visible during the window.
+
+## Veto
+
+When `veto_enabled` is true, any eligible voter can veto the vote. This
+immediately cancels it and notifies all players. Use sparingly — typically
+as a limited-use resource managed by the game mode.
+
+## Grace Period
+
+Votes arriving within 500ms after the window closes are still accepted to
+compensate for network latency.

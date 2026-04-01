@@ -92,6 +92,15 @@ GET  /api/v1/tournaments/:id           Get tournament details
 POST /api/v1/tournaments/:id/join      Join tournament
 ```
 
+## Votes
+
+```
+GET /api/v1/matches/:match_id/votes    List votes for a match (newest first, max 50)
+GET /api/v1/votes/:id                  Get a single vote with full results
+```
+
+Voting itself happens over WebSocket. See the [Voting guide](voting.md).
+
 ## Chat
 
 ```

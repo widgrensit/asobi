@@ -20,6 +20,7 @@ init([]) ->
         cluster_spec(),
         player_session_sup(),
         match_sup(),
+        vote_sup(),
         matchmaker_spec(),
         leaderboard_sup(),
         chat_sup(),
@@ -53,6 +54,13 @@ chat_sup() ->
     #{
         id => asobi_chat_sup,
         start => {asobi_chat_sup, start_link, []},
+        type => supervisor
+    }.
+
+vote_sup() ->
+    #{
+        id => asobi_vote_sup,
+        start => {asobi_vote_sup, start_link, []},
         type => supervisor
     }.
 
