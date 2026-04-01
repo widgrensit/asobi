@@ -2,7 +2,7 @@
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1]).
--export([start_vote/2, cast_vote/4, broadcast_event/3]).
+-export([start_vote/2, cast_vote/4, use_veto/3, broadcast_event/3]).
 -export([callback_mode/0, init/1, terminate/3]).
 -export([waiting/3, running/3, paused/3, finished/3]).
 
@@ -54,6 +54,10 @@ start_vote(Pid, VoteConfig) ->
 cast_vote(Pid, PlayerId, VoteId, OptionId) ->
     gen_statem:call(Pid, {cast_vote, PlayerId, VoteId, OptionId}).
 
+-spec use_veto(pid(), binary(), binary()) -> ok | {error, term()}.
+use_veto(Pid, PlayerId, VoteId) ->
+    gen_statem:call(Pid, {use_veto, PlayerId, VoteId}).
+
 -spec broadcast_event(pid(), atom(), map()) -> ok.
 broadcast_event(Pid, Event, Payload) ->
     gen_statem:cast(Pid, {broadcast_event, Event, Payload}).
@@ -69,6 +73,8 @@ init(Config) ->
     GameMod = maps:get(game_module, Config),
     GameConfig = maps:get(game_config, Config, #{}),
     {ok, GameState} = GameMod:init(GameConfig),
+    VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
+    FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
     State = #{
         match_id => MatchId,
         game_module => GameMod,
@@ -78,7 +84,11 @@ init(Config) ->
         tick_rate => maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE),
         min_players => maps:get(min_players, Config, ?DEFAULT_MIN_PLAYERS),
         max_players => maps:get(max_players, Config, ?DEFAULT_MAX_PLAYERS),
-        started_at => undefined
+        started_at => undefined,
+        vote_frustration => #{},
+        veto_tokens => #{},
+        veto_tokens_per_player => VetoTokensPerPlayer,
+        frustration_bonus => FrustrationBonus
     },
     {ok, waiting, State}.
 
@@ -134,13 +144,30 @@ running({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(running, State)}]};
 running({call, From}, {join, PlayerId}, State) ->
     handle_join(From, PlayerId, State);
-running({call, From}, {start_vote, VoteConfig}, #{match_id := MatchId, players := Players} = State) ->
+running(
+    {call, From},
+    {start_vote, VoteConfig},
+    #{
+        match_id := MatchId,
+        players := Players,
+        vote_frustration := Frustration,
+        frustration_bonus := FBonus
+    } = State
+) ->
     VoteId = maps:get(vote_id, VoteConfig, asobi_id:generate()),
+    PlayerIds = maps:keys(Players),
+    FrustrationWeights = maps:from_list([
+        {PId, 1 + maps:get(PId, Frustration, 0) * FBonus}
+     || PId <- PlayerIds
+    ]),
+    BaseWeights = maps:get(weights, VoteConfig, #{}),
+    MergedWeights = maps:merge(FrustrationWeights, BaseWeights),
     FullConfig = VoteConfig#{
         vote_id => VoteId,
         match_id => MatchId,
         match_pid => self(),
-        eligible => maps:keys(Players)
+        eligible => PlayerIds,
+        weights => MergedWeights
     },
     {ok, VotePid} = asobi_vote_sup:start_vote(FullConfig),
     Active = maps:get(active_votes, State, #{}),
@@ -156,6 +183,23 @@ running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
             Result = asobi_vote_server:cast_vote(VotePid, PlayerId, OptionId),
             {keep_state_and_data, [{reply, From, Result}]}
     end;
+running({call, From}, {use_veto, PlayerId, VoteId}, #{veto_tokens := Tokens} = State) ->
+    Active = maps:get(active_votes, State, #{}),
+    Remaining = maps:get(PlayerId, Tokens, 0),
+    case {maps:get(VoteId, Active, undefined), Remaining} of
+        {undefined, _} ->
+            {keep_state_and_data, [{reply, From, {error, vote_not_found}}]};
+        {_, 0} ->
+            {keep_state_and_data, [{reply, From, {error, no_veto_tokens}}]};
+        {VotePid, N} ->
+            case asobi_vote_server:cast_veto(VotePid, PlayerId) of
+                ok ->
+                    Tokens1 = Tokens#{PlayerId => N - 1},
+                    {keep_state, State#{veto_tokens => Tokens1}, [{reply, From, ok}]};
+                {error, _} = Err ->
+                    {keep_state_and_data, [{reply, From, Err}]}
+            end
+    end;
 running(cast, {broadcast_event, Event, Payload}, State) ->
     broadcast_match_event(Event, Payload, State),
     keep_state_and_data;
@@ -163,7 +207,7 @@ running(
     info, {vote_resolved, VoteId, Template, Result}, #{game_module := Mod, game_state := GS} = State
 ) ->
     Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
-    State1 = State#{active_votes => Active},
+    State1 = update_frustration(Result, State#{active_votes => Active}),
     case erlang:function_exported(Mod, vote_resolved, 3) of
         true ->
             {ok, GS1} = Mod:vote_resolved(Template, Result, GS),
@@ -245,7 +289,12 @@ handle_join(
                     Players1 = Players#{
                         PlayerId => #{joined_at => erlang:system_time(millisecond)}
                     },
-                    State1 = State#{players => Players1, game_state => GS1},
+                    VetoTokens = maps:get(veto_tokens, State),
+                    VetoCount = maps:get(veto_tokens_per_player, State),
+                    VetoTokens1 = VetoTokens#{PlayerId => VetoCount},
+                    State1 = State#{
+                        players => Players1, game_state => GS1, veto_tokens => VetoTokens1
+                    },
                     maybe_start(From, PlayerId, State1);
                 {error, Reason} ->
                     {keep_state_and_data, [{reply, From, {error, Reason}}]}
@@ -345,6 +394,25 @@ match_info(Status, #{match_id := MatchId, players := Players}) ->
         player_count => map_size(Players),
         players => maps:keys(Players)
     }.
+
+update_frustration(#{winner := undefined}, State) ->
+    State;
+update_frustration(
+    #{winner := Winner, votes_cast := VotesCast}, #{vote_frustration := Frustration} = State
+) ->
+    Frustration1 = maps:fold(
+        fun(PlayerId, Vote, Acc) ->
+            case Vote =:= Winner of
+                true -> maps:remove(PlayerId, Acc);
+                false -> Acc#{PlayerId => maps:get(PlayerId, Acc, 0) + 1}
+            end
+        end,
+        Frustration,
+        VotesCast
+    ),
+    State#{vote_frustration => Frustration1};
+update_frustration(_Result, State) ->
+    State.
 
 generate_id() ->
     asobi_id:generate().

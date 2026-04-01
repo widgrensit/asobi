@@ -27,6 +27,7 @@ tie-breaking.
 | `window_type`    | `binary()`     | `"fixed"`      | `"fixed"`, `"ready_up"`, `"hybrid"`, or `"adaptive"` |
 | `min_window_ms`  | `pos_integer()`| `5000`         | Minimum window for `"hybrid"` mode |
 | `supermajority`  | `float()`      | `0.75`         | Threshold for `"adaptive"` early close |
+| `require_supermajority` | `boolean()` | `false`     | If true, winner must reach `supermajority` threshold or result is no-consensus |
 
 ## Vote templates
 
@@ -118,6 +119,7 @@ init(Config) ->
     WindowType = maps:get(window_type, Merged, ~"fixed"),
     MinWindowMs = maps:get(min_window_ms, Merged, 5000),
     Supermajority = maps:get(supermajority, Merged, 0.75),
+    RequireSupermajority = maps:get(require_supermajority, Merged, false),
     MatchPid = maps:get(match_pid, Merged),
     State = #{
         vote_id => VoteId,
@@ -132,6 +134,7 @@ init(Config) ->
         window_type => WindowType,
         min_window_ms => MinWindowMs,
         supermajority => Supermajority,
+        require_supermajority => RequireSupermajority,
         method => Method,
         visibility => Visibility,
         tie_breaker => TieBreaker,
@@ -308,11 +311,14 @@ resolve_and_stop(
         options := Options,
         method := Method,
         tie_breaker := TieBreaker,
-        weights := Weights
+        weights := Weights,
+        require_supermajority := RequireSM,
+        supermajority := SMThreshold
     } =
         State
 ) ->
-    Result = tally(Method, Votes, Options, TieBreaker, Weights),
+    RawResult = tally(Method, Votes, Options, TieBreaker, Weights),
+    Result = maybe_enforce_supermajority(RawResult, RequireSM, SMThreshold),
     State1 = State#{
         result => Result,
         closed_at => erlang:system_time(millisecond)
@@ -414,6 +420,21 @@ tally(~"weighted", Votes, Options, TieBreaker, Weights) ->
 tally(_Method, Votes, Options, TieBreaker, Weights) ->
     tally(~"plurality", Votes, Options, TieBreaker, Weights).
 
+maybe_enforce_supermajority(Result, false, _Threshold) ->
+    Result;
+maybe_enforce_supermajority(#{winner := undefined} = Result, true, _Threshold) ->
+    Result;
+maybe_enforce_supermajority(
+    #{winner := Winner, counts := Counts, total_votes := TotalVotes} = Result, true, Threshold
+) ->
+    WinnerCount = maps:get(Winner, Counts, 0),
+    case TotalVotes > 0 andalso WinnerCount / TotalVotes >= Threshold of
+        true ->
+            Result;
+        false ->
+            Result#{winner => undefined, status => ~"no_consensus"}
+    end.
+
 init_counts(Options) ->
     lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0} end, #{}, Options).
 
@@ -508,9 +529,9 @@ broadcast_vote_vetoed(#{match_pid := MatchPid, vote_id := VoteId, vetoed_by := V
     asobi_match_server:broadcast_event(MatchPid, vote_vetoed, Payload).
 
 notify_match(resolved, #{
-    match_pid := MatchPid, vote_id := VoteId, template := Template, result := Result
+    match_pid := MatchPid, vote_id := VoteId, template := Template, result := Result, votes := Votes
 }) ->
-    MatchPid ! {vote_resolved, VoteId, Template, Result};
+    MatchPid ! {vote_resolved, VoteId, Template, Result#{votes_cast => Votes}};
 notify_match(vetoed, #{match_pid := MatchPid, vote_id := VoteId, template := Template}) ->
     MatchPid ! {vote_vetoed, VoteId, Template}.
 
