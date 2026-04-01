@@ -99,6 +99,50 @@ asobi_match_server:start_vote(MatchPid, #{
 }).
 ```
 
+## Window Types
+
+The `window_type` config controls when a vote closes. All types have a
+maximum `window_ms` timeout as a safety net.
+
+### Fixed (default)
+
+Vote runs for exactly `window_ms`, then closes. Simple and predictable.
+
+```erlang
+#{window_type => ~"fixed", window_ms => 15000}
+```
+
+### Ready-up
+
+Closes as soon as all eligible voters have cast a vote, or when `window_ms`
+expires. Best for small groups where everyone is engaged.
+
+```erlang
+#{window_type => ~"ready_up", window_ms => 30000}
+```
+
+### Hybrid
+
+Like ready-up, but enforces a minimum `min_window_ms` before early close.
+Prevents snap decisions while still closing early once everyone votes.
+
+```erlang
+#{window_type => ~"hybrid", window_ms => 30000, min_window_ms => 5000}
+```
+
+### Adaptive
+
+Starts with full `window_ms`, but when a supermajority threshold is reached,
+the remaining time shrinks to 3 seconds. Gives latecomers a last chance
+without forcing everyone to wait.
+
+```erlang
+#{window_type => ~"adaptive", window_ms => 20000, supermajority => 0.75}
+```
+
+If the supermajority is lost (e.g. someone changes their vote), the timer
+resets to the original remaining time.
+
 ## Rate Limiting
 
 Voters can change their vote during the window, but are limited to
