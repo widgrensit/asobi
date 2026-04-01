@@ -2,7 +2,7 @@
 
 -include_lib("nova_test/include/nova_test.hrl").
 
--export([all/0, groups/0, init_per_suite/1, end_per_suite/1]).
+-export([all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_group/2, end_per_group/2]).
 -export([
     oauth_missing_fields/1,
     oauth_unsupported_provider/1,
@@ -52,6 +52,31 @@ init_per_suite(Config) ->
     ].
 
 end_per_suite(Config) ->
+    Config.
+
+init_per_group(identity_db, Config) ->
+    %% Clean up any leftover apple identities from previous runs
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    true = is_binary(PlayerId),
+    Query = kura_query:where(
+        kura_query:where(kura_query:from(asobi_player_identity), {player_id, PlayerId}),
+        {provider, ~"apple"}
+    ),
+    case asobi_repo:all(Query) of
+        {ok, Existing} ->
+            lists:foreach(
+                fun(Ident) when is_map(Ident) -> asobi_repo:delete(asobi_player_identity, Ident)
+                end,
+                Existing
+            );
+        _ ->
+            ok
+    end,
+    Config;
+init_per_group(_Group, Config) ->
+    Config.
+
+end_per_group(_Group, Config) ->
     Config.
 
 auth(Config) ->

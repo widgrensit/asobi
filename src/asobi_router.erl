@@ -21,7 +21,8 @@ auth_routes() ->
                 decode_json_body => true
             }},
             {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
-            {pre_request, nova_correlation_plugin, #{}}
+            {pre_request, nova_correlation_plugin, #{}},
+            {pre_request, asobi_rate_limit_plugin, #{limit => 20, window => 60000}}
         ],
         routes => [
             {~"/register", fun asobi_auth_controller:register/1, #{methods => [post]}},
@@ -40,7 +41,8 @@ iap_routes() ->
                 decode_json_body => true
             }},
             {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
-            {pre_request, nova_correlation_plugin, #{}}
+            {pre_request, nova_correlation_plugin, #{}},
+            {pre_request, asobi_rate_limit_plugin, #{limit => 10, window => 60000}}
         ],
         routes => [
             {~"/apple", fun asobi_iap_controller:verify_apple/1, #{methods => [post]}},
@@ -58,7 +60,8 @@ api_routes() ->
                 parse_qs => true
             }},
             {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
-            {pre_request, nova_correlation_plugin, #{}}
+            {pre_request, nova_correlation_plugin, #{}},
+            {pre_request, asobi_rate_limit_plugin, #{limit => 100, window => 60000}}
         ],
         routes => [
             %% Auth - Provider linking

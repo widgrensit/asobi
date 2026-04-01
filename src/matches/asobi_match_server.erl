@@ -11,6 +11,7 @@
 -define(DEFAULT_MIN_PLAYERS, 2).
 -define(DEFAULT_MAX_PLAYERS, 10).
 -define(WAITING_TIMEOUT, 60000).
+-define(STATE_TABLE, asobi_match_state).
 
 %% --- Public API ---
 
@@ -88,30 +89,38 @@ broadcast_event(Pid, Event, Payload) ->
 -spec callback_mode() -> gen_statem:callback_mode_result().
 callback_mode() -> [state_functions, state_enter].
 
--spec init(map()) -> {ok, waiting, map()}.
+-spec init(map()) -> {ok, atom(), map()}.
 init(Config) ->
     MatchId = maps:get(match_id, Config, generate_id()),
-    GameMod = maps:get(game_module, Config),
-    GameConfig = maps:get(game_config, Config, #{}),
-    {ok, GameState} = GameMod:init(GameConfig),
-    VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
-    FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
-    State = #{
-        match_id => MatchId,
-        game_module => GameMod,
-        game_state => GameState,
-        players => #{},
-        input_queue => [],
-        tick_rate => maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE),
-        min_players => maps:get(min_players, Config, ?DEFAULT_MIN_PLAYERS),
-        max_players => maps:get(max_players, Config, ?DEFAULT_MAX_PLAYERS),
-        started_at => undefined,
-        vote_frustration => #{},
-        veto_tokens => #{},
-        veto_tokens_per_player => VetoTokensPerPlayer,
-        frustration_bonus => FrustrationBonus
-    },
-    {ok, waiting, State}.
+    global:register_name({asobi_match_server, MatchId}, self()),
+    case recover_state(MatchId) of
+        {ok, SavedStatus, SavedState} ->
+            logger:notice(#{msg => ~"match recovered", match_id => MatchId, status => SavedStatus}),
+            {ok, SavedStatus, SavedState};
+        none ->
+            GameMod = maps:get(game_module, Config),
+            GameConfig = maps:get(game_config, Config, #{}),
+            {ok, GameState} = GameMod:init(GameConfig),
+            VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
+            FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
+            State = #{
+                match_id => MatchId,
+                config => Config,
+                game_module => GameMod,
+                game_state => GameState,
+                players => #{},
+                input_queue => [],
+                tick_rate => maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE),
+                min_players => maps:get(min_players, Config, ?DEFAULT_MIN_PLAYERS),
+                max_players => maps:get(max_players, Config, ?DEFAULT_MAX_PLAYERS),
+                started_at => undefined,
+                vote_frustration => #{},
+                veto_tokens => #{},
+                veto_tokens_per_player => VetoTokensPerPlayer,
+                frustration_bonus => FrustrationBonus
+            },
+            {ok, waiting, State}
+    end.
 
 %% --- waiting state ---
 
@@ -132,7 +141,8 @@ waiting(cast, {leave, PlayerId}, State) ->
 
 -spec running(gen_statem:event_type() | enter, term(), map()) ->
     gen_statem:state_enter_result(atom()).
-running(enter, _OldState, #{tick_rate := TickRate} = _State) ->
+running(enter, _OldState, #{tick_rate := TickRate, match_id := MatchId} = State) ->
+    backup_state(MatchId, running, State),
     {keep_state_and_data, [{state_timeout, TickRate, tick}]};
 running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue := Queue} = State) ->
     GS1 = apply_inputs(Mod, Queue, GS),
@@ -316,7 +326,18 @@ finished(_EventType, _Event, _State) ->
     keep_state_and_data.
 
 -spec terminate(term(), atom(), map()) -> ok.
-terminate(_Reason, _StateName, _State) ->
+terminate(normal, _StateName, #{match_id := MatchId}) ->
+    clear_state_backup(MatchId),
+    global:unregister_name({asobi_match_server, MatchId}),
+    ok;
+terminate({shutdown, _}, _StateName, #{match_id := MatchId}) ->
+    clear_state_backup(MatchId),
+    global:unregister_name({asobi_match_server, MatchId}),
+    ok;
+terminate(_Reason, StateName, #{match_id := MatchId} = State) ->
+    %% Abnormal termination — save state for recovery
+    backup_state(MatchId, StateName, State),
+    global:unregister_name({asobi_match_server, MatchId}),
     ok.
 
 %% --- Internal ---
@@ -459,6 +480,35 @@ update_frustration(
     State#{vote_frustration => Frustration1};
 update_frustration(_Result, State) ->
     State.
+
+backup_state(MatchId, Status, State) ->
+    try
+        %% Strip non-serializable data (pids, active votes)
+        SafeState = maps:without([active_votes], State),
+        ets:insert(?STATE_TABLE, {MatchId, Status, SafeState})
+    catch
+        error:badarg -> ok
+    end.
+
+recover_state(MatchId) ->
+    try
+        case ets:lookup(?STATE_TABLE, MatchId) of
+            [{MatchId, Status, SavedState}] ->
+                ets:delete(?STATE_TABLE, MatchId),
+                {ok, Status, SavedState#{input_queue => [], active_votes => #{}}};
+            [] ->
+                none
+        end
+    catch
+        error:badarg -> none
+    end.
+
+clear_state_backup(MatchId) ->
+    try
+        ets:delete(?STATE_TABLE, MatchId)
+    catch
+        error:badarg -> ok
+    end.
 
 generate_id() ->
     asobi_id:generate().
