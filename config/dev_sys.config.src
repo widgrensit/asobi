@@ -48,6 +48,12 @@
             %% Map mode names to game behaviour modules
             %% ~"default" => my_game_module
         }},
+        {vote_templates, #{
+            %% Define reusable vote templates
+            %% ~"boon_pick" => #{method => ~"plurality", window_ms => 15000, visibility => ~"live"},
+            %% ~"path_choice" => #{method => ~"approval", window_ms => 20000, visibility => ~"hidden"},
+            %% ~"weighted_pick" => #{method => ~"weighted", window_ms => 15000}
+        }},
         {matchmaker, #{
             tick_interval => 1000,
             max_wait_seconds => 60

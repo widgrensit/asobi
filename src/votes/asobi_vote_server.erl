@@ -11,23 +11,38 @@ tie-breaking.
 
 | Key            | Type           | Default        | Description                        |
 |----------------|----------------|----------------|------------------------------------|
-| `match_id`     | `binary()`     | required       | Parent match ID                    |
-| `match_pid`    | `pid()`        | required       | Match server process               |
-| `options`      | `[map()]`      | required       | List of `#{id, label}` option maps |
-| `eligible`     | `[binary()]`   | `[]`           | Eligible voter IDs                 |
-| `window_ms`    | `pos_integer()`| `15000`        | Vote window in milliseconds        |
-| `method`       | `binary()`     | `"plurality"`  | `"plurality"` or `"approval"`      |
-| `visibility`   | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
-| `tie_breaker`  | `binary()`     | `"random"`     | `"random"` or `"first"`            |
-| `veto_enabled` | `boolean()`    | `false`        | Allow eligible voters to veto      |
-| `template`     | `binary()`     | `"default"`    | Template name for analytics        |
-| `vote_id`      | `binary()`     | auto-generated | Override vote ID                   |
+| `match_id`       | `binary()`     | required       | Parent match ID                    |
+| `match_pid`      | `pid()`        | required       | Match server process               |
+| `options`        | `[map()]`      | required       | List of `#{id, label}` option maps |
+| `eligible`       | `[binary()]`   | `[]`           | Eligible voter IDs                 |
+| `window_ms`      | `pos_integer()`| `15000`        | Vote window in milliseconds        |
+| `method`         | `binary()`     | `"plurality"`  | `"plurality"`, `"approval"`, or `"weighted"` |
+| `visibility`     | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
+| `tie_breaker`    | `binary()`     | `"random"`     | `"random"` or `"first"`            |
+| `veto_enabled`   | `boolean()`    | `false`        | Allow eligible voters to veto      |
+| `template`       | `binary()`     | `"default"`    | Template name (resolved from app config if defined) |
+| `vote_id`        | `binary()`     | auto-generated | Override vote ID                   |
+| `weights`        | `map()`        | `#{}`          | Voter weights for `"weighted"` method: `#{voter_id => number()}` |
+| `max_revotes`    | `pos_integer()`| `3`            | Max times a voter can change their vote |
+
+## Vote templates
+
+Define reusable templates in app config. Per-call config overrides template defaults:
+
+```erlang
+{asobi, [{vote_templates, #{
+    ~"boon_pick" => #{method => ~"plurality", window_ms => 15000, visibility => ~"live"},
+    ~"path_choice" => #{method => ~"approval", window_ms => 20000, visibility => ~"hidden"}
+}}]}
+```
 
 ## Vote methods
 
 - **Plurality**: each voter picks one option, highest count wins.
 - **Approval**: each voter submits a list of approved option IDs, highest
   approval count wins.
+- **Weighted**: like plurality, but each vote is multiplied by the voter's
+  weight from the `weights` map. Unweighted voters default to 1.
 
 ## Grace period
 
@@ -41,6 +56,7 @@ to compensate for network latency.
 -export([open/3, closed/3]).
 
 -define(GRACE_MS, 500).
+-define(DEFAULT_MAX_REVOTES, 3).
 
 %% --- Public API ---
 
@@ -71,17 +87,20 @@ callback_mode() -> [state_functions, state_enter].
 
 -spec init(map()) -> {ok, open, map()}.
 init(Config) ->
-    VoteId = maps:get(vote_id, Config, asobi_id:generate()),
-    MatchId = maps:get(match_id, Config),
     Template = maps:get(template, Config, ~"default"),
-    Options = maps:get(options, Config),
-    Eligible = maps:get(eligible, Config, []),
-    WindowMs = maps:get(window_ms, Config, 15000),
-    Method = maps:get(method, Config, ~"plurality"),
-    Visibility = maps:get(visibility, Config, ~"live"),
-    TieBreaker = maps:get(tie_breaker, Config, ~"random"),
-    VetoEnabled = maps:get(veto_enabled, Config, false),
-    MatchPid = maps:get(match_pid, Config),
+    Merged = merge_template(Template, Config),
+    VoteId = maps:get(vote_id, Merged, asobi_id:generate()),
+    MatchId = maps:get(match_id, Merged),
+    Options = maps:get(options, Merged),
+    Eligible = maps:get(eligible, Merged, []),
+    WindowMs = maps:get(window_ms, Merged, 15000),
+    Method = maps:get(method, Merged, ~"plurality"),
+    Visibility = maps:get(visibility, Merged, ~"live"),
+    TieBreaker = maps:get(tie_breaker, Merged, ~"random"),
+    VetoEnabled = maps:get(veto_enabled, Merged, false),
+    Weights = maps:get(weights, Merged, #{}),
+    MaxRevotes = maps:get(max_revotes, Merged, ?DEFAULT_MAX_REVOTES),
+    MatchPid = maps:get(match_pid, Merged),
     State = #{
         vote_id => VoteId,
         match_id => MatchId,
@@ -95,7 +114,10 @@ init(Config) ->
         visibility => Visibility,
         tie_breaker => TieBreaker,
         veto_enabled => VetoEnabled,
+        weights => Weights,
+        max_revotes => MaxRevotes,
         votes => #{},
+        vote_counts => #{},
         vetoed => false,
         opened_at => erlang:system_time(millisecond)
     },
@@ -144,18 +166,39 @@ terminate(_Reason, _StateName, _State) ->
 %% --- Internal ---
 
 handle_cast_vote(
-    From, VoterId, OptionId, #{eligible := Eligible, options := Options, votes := Votes} = State
+    From,
+    VoterId,
+    OptionId,
+    #{
+        eligible := Eligible,
+        options := Options,
+        votes := Votes,
+        vote_counts := VoteCounts,
+        max_revotes := MaxRevotes
+    } =
+        State
 ) ->
     IsEligible = sets:is_element(VoterId, Eligible),
     ValidOption = validate_option(OptionId, Options),
-    case {IsEligible, ValidOption} of
-        {false, _} ->
+    PriorCount = maps:get(VoterId, VoteCounts, 0),
+    HasPriorVote = maps:is_key(VoterId, Votes),
+    RateLimited = HasPriorVote andalso PriorCount >= MaxRevotes,
+    case {IsEligible, ValidOption, RateLimited} of
+        {false, _, _} ->
             {keep_state_and_data, [{reply, From, {error, not_eligible}}]};
-        {_, false} ->
+        {_, false, _} ->
             {keep_state_and_data, [{reply, From, {error, invalid_option}}]};
-        {true, true} ->
+        {_, _, true} ->
+            {keep_state_and_data, [{reply, From, {error, rate_limited}}]};
+        {true, true, false} ->
             Votes1 = Votes#{VoterId => OptionId},
-            State1 = State#{votes => Votes1},
+            NewCount =
+                case HasPriorVote of
+                    true -> PriorCount + 1;
+                    false -> 0
+                end,
+            VoteCounts1 = VoteCounts#{VoterId => NewCount},
+            State1 = State#{votes => Votes1, vote_counts => VoteCounts1},
             maybe_broadcast_tally(State1),
             {keep_state, State1, [{reply, From, ok}]}
     end.
@@ -178,9 +221,16 @@ handle_veto(From, VoterId, #{eligible := Eligible} = State) ->
     end.
 
 resolve_and_stop(
-    #{votes := Votes, options := Options, method := Method, tie_breaker := TieBreaker} = State
+    #{
+        votes := Votes,
+        options := Options,
+        method := Method,
+        tie_breaker := TieBreaker,
+        weights := Weights
+    } =
+        State
 ) ->
-    Result = tally(Method, Votes, Options, TieBreaker),
+    Result = tally(Method, Votes, Options, TieBreaker, Weights),
     State1 = State#{
         result => Result,
         closed_at => erlang:system_time(millisecond)
@@ -190,12 +240,8 @@ resolve_and_stop(
     _ = notify_match(resolved, State1),
     {stop, normal, State1}.
 
-tally(~"plurality", Votes, Options, TieBreaker) ->
-    Counts = lists:foldl(
-        fun(#{id := Id}, Acc) -> Acc#{Id => 0} end,
-        #{},
-        Options
-    ),
+tally(~"plurality", Votes, Options, TieBreaker, _Weights) ->
+    Counts = init_counts(Options),
     Counts1 = maps:fold(
         fun(_VoterId, OptionId, Acc) ->
             Acc#{OptionId => maps:get(OptionId, Acc, 0) + 1}
@@ -222,13 +268,8 @@ tally(~"plurality", Votes, Options, TieBreaker) ->
         distribution => Distribution,
         total_votes => TotalVotes
     };
-tally(~"approval", Votes, Options, TieBreaker) ->
-    %% In approval voting, each vote value is a list of approved option IDs
-    Counts = lists:foldl(
-        fun(#{id := Id}, Acc) -> Acc#{Id => 0} end,
-        #{},
-        Options
-    ),
+tally(~"approval", Votes, Options, TieBreaker, _Weights) ->
+    Counts = init_counts(Options),
     Counts1 = maps:fold(
         fun
             (_VoterId, Approved, Acc) when is_list(Approved) ->
@@ -254,9 +295,55 @@ tally(~"approval", Votes, Options, TieBreaker) ->
         counts => Counts1,
         total_votes => TotalVotes
     };
-tally(_Method, Votes, Options, TieBreaker) ->
-    %% Fallback to plurality
-    tally(~"plurality", Votes, Options, TieBreaker).
+tally(~"weighted", Votes, Options, TieBreaker, Weights) ->
+    Counts = init_counts_float(Options),
+    Counts1 = maps:fold(
+        fun(VoterId, OptionId, Acc) ->
+            W = maps:get(VoterId, Weights, 1),
+            Acc#{OptionId => maps:get(OptionId, Acc, 0.0) + W}
+        end,
+        Counts,
+        Votes
+    ),
+    TotalVotes = maps:size(Votes),
+    TotalWeight = maps:fold(
+        fun(_Id, W, Sum) -> Sum + W end,
+        0.0,
+        Counts1
+    ),
+    Distribution = maps:map(
+        fun(_Id, W) ->
+            case TotalWeight of
+                +0.0 -> 0.0;
+                _ -> W / TotalWeight
+            end
+        end,
+        Counts1
+    ),
+    MaxCount = lists:max([0.0 | maps:values(Counts1)]),
+    Winners = maps:keys(maps:filter(fun(_Id, C) -> C =:= MaxCount end, Counts1)),
+    Winner = break_tie(Winners, TieBreaker),
+    #{
+        winner => Winner,
+        counts => Counts1,
+        distribution => Distribution,
+        total_votes => TotalVotes
+    };
+tally(_Method, Votes, Options, TieBreaker, Weights) ->
+    tally(~"plurality", Votes, Options, TieBreaker, Weights).
+
+init_counts(Options) ->
+    lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0} end, #{}, Options).
+
+init_counts_float(Options) ->
+    lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0.0} end, #{}, Options).
+
+merge_template(Template, Config) ->
+    Templates = application:get_env(asobi, vote_templates, #{}),
+    case Templates of
+        #{Template := Defaults} -> maps:merge(Defaults, Config);
+        _ -> Config
+    end.
 
 break_tie([Single], _TieBreaker) ->
     Single;
@@ -294,18 +381,14 @@ broadcast_vote_tally(#{
     vote_id := VoteId,
     votes := Votes,
     options := Options,
+    method := Method,
+    weights := Weights,
     opened_at := OpenedAt,
     window_ms := WindowMs
 }) ->
     Now = erlang:system_time(millisecond),
     Remaining = max(0, (OpenedAt + WindowMs) - Now),
-    Counts = maps:fold(
-        fun(_VoterId, OptionId, Acc) ->
-            Acc#{OptionId => maps:get(OptionId, Acc, 0) + 1}
-        end,
-        lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0} end, #{}, Options),
-        Votes
-    ),
+    Counts = compute_live_tallies(Method, Votes, Options, Weights),
     Payload = #{
         vote_id => VoteId,
         tallies => Counts,
@@ -416,6 +499,7 @@ external_state(Status, #{
     options := Options,
     method := Method,
     visibility := Visibility,
+    weights := Weights,
     votes := Votes,
     opened_at := OpenedAt,
     window_ms := WindowMs
@@ -432,14 +516,26 @@ external_state(Status, #{
     },
     case Visibility of
         ~"live" ->
-            Counts = maps:fold(
-                fun(_VoterId, OptionId, Acc) ->
-                    Acc#{OptionId => maps:get(OptionId, Acc, 0) + 1}
-                end,
-                lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0} end, #{}, Options),
-                Votes
-            ),
+            Counts = compute_live_tallies(Method, Votes, Options, Weights),
             Base#{tallies => Counts};
         _ ->
             Base
     end.
+
+compute_live_tallies(~"weighted", Votes, Options, Weights) ->
+    maps:fold(
+        fun(VoterId, OptionId, Acc) ->
+            W = maps:get(VoterId, Weights, 1),
+            Acc#{OptionId => maps:get(OptionId, Acc, 0.0) + W}
+        end,
+        init_counts_float(Options),
+        Votes
+    );
+compute_live_tallies(_Method, Votes, Options, _Weights) ->
+    maps:fold(
+        fun(_VoterId, OptionId, Acc) ->
+            Acc#{OptionId => maps:get(OptionId, Acc, 0) + 1}
+        end,
+        init_counts(Options),
+        Votes
+    ).

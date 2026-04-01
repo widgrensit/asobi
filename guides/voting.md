@@ -35,12 +35,14 @@ asobi_match_server:start_vote(MatchPid, #{
 | Key            | Type           | Default        | Description                        |
 |----------------|----------------|----------------|------------------------------------|
 | `options`      | `[map()]`      | required       | List of `#{id, label}` option maps |
-| `template`     | `binary()`     | `"default"`    | Template name (for analytics)      |
+| `template`     | `binary()`     | `"default"`    | Template name (resolved from config) |
 | `window_ms`    | `pos_integer()`| `15000`        | Vote window in milliseconds        |
-| `method`       | `binary()`     | `"plurality"`  | `"plurality"` or `"approval"`      |
+| `method`       | `binary()`     | `"plurality"`  | `"plurality"`, `"approval"`, or `"weighted"` |
 | `visibility`   | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
 | `tie_breaker`  | `binary()`     | `"random"`     | `"random"` or `"first"`            |
 | `veto_enabled` | `boolean()`    | `false`        | Allow players to veto              |
+| `weights`      | `map()`        | `#{}`          | Voter weights for `"weighted"` method |
+| `max_revotes`  | `pos_integer()`| `3`            | Max times a voter can change their vote |
 
 The match server automatically fills in `match_id`, `match_pid`, and
 `eligible` (all current players) when starting the vote.
@@ -57,6 +59,51 @@ Ties are broken by the configured `tie_breaker` strategy.
 Each player submits a list of all options they approve of. The option with
 the highest total approval count wins. Good for "avoid the worst option"
 scenarios.
+
+### Weighted
+
+Each vote is multiplied by the voter's weight. Pass weights via config:
+
+```erlang
+asobi_match_server:start_vote(MatchPid, #{
+    options => Options,
+    method => ~"weighted",
+    weights => #{~"player1" => 3, ~"player2" => 1}
+}).
+```
+
+Players not in the weights map default to weight 1. Useful for
+performance-based voting or role-based voting.
+
+## Vote Templates
+
+Define reusable vote configurations in your app config. Per-call config
+overrides template defaults:
+
+```erlang
+{asobi, [
+    {vote_templates, #{
+        ~"boon_pick" => #{method => ~"plurality", window_ms => 15000, visibility => ~"live"},
+        ~"path_choice" => #{method => ~"approval", window_ms => 20000, visibility => ~"hidden"},
+        ~"weighted_pick" => #{method => ~"weighted", window_ms => 15000}
+    }}
+]}
+```
+
+Then start a vote with just the template name and options:
+
+```erlang
+asobi_match_server:start_vote(MatchPid, #{
+    template => ~"boon_pick",
+    options => Options
+}).
+```
+
+## Rate Limiting
+
+Voters can change their vote during the window, but are limited to
+`max_revotes` changes (default 3). After that, `{error, rate_limited}` is
+returned. The initial vote does not count against the limit.
 
 ## Game Mode Integration
 
