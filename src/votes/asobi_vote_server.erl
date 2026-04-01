@@ -16,7 +16,7 @@ tie-breaking.
 | `options`        | `[map()]`      | required       | List of `#{id, label}` option maps |
 | `eligible`       | `[binary()]`   | `[]`           | Eligible voter IDs                 |
 | `window_ms`      | `pos_integer()`| `15000`        | Vote window in milliseconds        |
-| `method`         | `binary()`     | `"plurality"`  | `"plurality"`, `"approval"`, or `"weighted"` |
+| `method`         | `binary()`     | `"plurality"`  | `"plurality"`, `"approval"`, `"weighted"`, or `"ranked"` |
 | `visibility`     | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
 | `tie_breaker`    | `binary()`     | `"random"`     | `"random"` or `"first"`            |
 | `veto_enabled`   | `boolean()`    | `false`        | Allow eligible voters to veto      |
@@ -28,6 +28,11 @@ tie-breaking.
 | `min_window_ms`  | `pos_integer()`| `5000`         | Minimum window for `"hybrid"` mode |
 | `supermajority`  | `float()`      | `0.75`         | Threshold for `"adaptive"` early close |
 | `require_supermajority` | `boolean()` | `false`     | If true, winner must reach `supermajority` threshold or result is no-consensus |
+| `spectators`     | `[binary()]`   | `[]`           | Spectator voter IDs (separate pool) |
+| `spectator_weight` | `float()`    | `0.3`          | Weight ratio for spectator votes (0.0-1.0) |
+| `quorum`         | `float()`      | `0.0`          | Min fraction of eligible voters needed (0.0 = disabled) |
+| `default_votes`  | `map()`        | `#{}`          | Default option per voter if they don't vote: `#{voter_id => option_id}` |
+| `delegation`     | `map()`        | `#{}`          | Vote delegation: `#{delegator_id => delegate_id}` |
 
 ## Vote templates
 
@@ -47,6 +52,21 @@ Define reusable templates in app config. Per-call config overrides template defa
   approval count wins.
 - **Weighted**: like plurality, but each vote is multiplied by the voter's
   weight from the `weights` map. Unweighted voters default to 1.
+- **Ranked**: each voter submits a ranked list `[first_choice, second, ...]`.
+  Iterative elimination: lowest first-choice option eliminated, its votes
+  redistributed to next preference, until one option has majority.
+
+## Spectator voting
+
+Spectators are a separate voter pool. Their tallies are merged with player
+tallies using `spectator_weight` (default 0.3 = 30% influence). Set
+`spectators` list and optionally `spectator_weight`.
+
+## Async voting
+
+For non-real-time games. Set `quorum` (0.0-1.0) to resolve early when
+enough voters participate. Use `default_votes` for absent players and
+`delegation` to let a player's vote follow another's.
 
 ## Window types
 
@@ -120,16 +140,28 @@ init(Config) ->
     MinWindowMs = maps:get(min_window_ms, Merged, 5000),
     Supermajority = maps:get(supermajority, Merged, 0.75),
     RequireSupermajority = maps:get(require_supermajority, Merged, false),
+    Spectators = maps:get(spectators, Merged, []),
+    SpectatorWeight = maps:get(spectator_weight, Merged, 0.3),
+    Quorum = maps:get(quorum, Merged, 0.0),
+    DefaultVotes = maps:get(default_votes, Merged, #{}),
+    Delegation = maps:get(delegation, Merged, #{}),
     MatchPid = maps:get(match_pid, Merged),
+    AllEligible = Eligible ++ Spectators,
     State = #{
         vote_id => VoteId,
         match_id => MatchId,
         match_pid => MatchPid,
         template => Template,
         options => Options,
-        eligible => sets:from_list(Eligible, [{version, 2}]),
+        eligible => sets:from_list(AllEligible, [{version, 2}]),
         eligible_list => Eligible,
         eligible_count => length(Eligible),
+        spectators => sets:from_list(Spectators, [{version, 2}]),
+        spectator_list => Spectators,
+        spectator_weight => SpectatorWeight,
+        quorum => Quorum,
+        default_votes => DefaultVotes,
+        delegation => Delegation,
         window_ms => WindowMs,
         window_type => WindowType,
         min_window_ms => MinWindowMs,
@@ -313,11 +345,48 @@ resolve_and_stop(
         tie_breaker := TieBreaker,
         weights := Weights,
         require_supermajority := RequireSM,
-        supermajority := SMThreshold
+        supermajority := SMThreshold,
+        eligible_list := EligibleList,
+        spectators := SpectatorsSet,
+        spectator_weight := SpectatorW,
+        quorum := Quorum,
+        default_votes := DefaultVotes,
+        delegation := Delegation
     } =
         State
 ) ->
-    RawResult = tally(Method, Votes, Options, TieBreaker, Weights),
+    %% Apply delegation and defaults for absent voters
+    FinalVotes = apply_delegation_and_defaults(Votes, EligibleList, Delegation, DefaultVotes),
+    %% Check quorum
+    VoterCount = maps:size(FinalVotes),
+    EligibleCount = length(EligibleList),
+    QuorumMet =
+        Quorum =< 0.0 orelse EligibleCount =:= 0 orelse VoterCount / EligibleCount >= Quorum,
+    RawResult =
+        case QuorumMet of
+            false ->
+                #{
+                    winner => undefined,
+                    status => ~"no_quorum",
+                    counts => #{},
+                    total_votes => VoterCount
+                };
+            true ->
+                %% Split player and spectator votes
+                {PlayerVotes, SpectatorVotes} = split_spectator_votes(FinalVotes, SpectatorsSet),
+                case maps:size(SpectatorVotes) of
+                    0 ->
+                        tally(Method, PlayerVotes, Options, TieBreaker, Weights);
+                    _ ->
+                        merge_spectator_result(
+                            tally(Method, PlayerVotes, Options, TieBreaker, Weights),
+                            tally(Method, SpectatorVotes, Options, TieBreaker, Weights),
+                            SpectatorW,
+                            Options,
+                            TieBreaker
+                        )
+                end
+        end,
     Result = maybe_enforce_supermajority(RawResult, RequireSM, SMThreshold),
     State1 = State#{
         result => Result,
@@ -417,8 +486,66 @@ tally(~"weighted", Votes, Options, TieBreaker, Weights) ->
         distribution => Distribution,
         total_votes => TotalVotes
     };
+tally(~"ranked", Votes, Options, TieBreaker, _Weights) ->
+    TotalVotes = maps:size(Votes),
+    OptionIds = [Id || #{id := Id} <- Options],
+    Winner = ranked_eliminate(Votes, OptionIds, TieBreaker),
+    Counts = init_counts(Options),
+    FirstChoiceCounts = maps:fold(
+        fun
+            (_VoterId, [First | _], Acc) -> Acc#{First => maps:get(First, Acc, 0) + 1};
+            (_VoterId, _, Acc) -> Acc
+        end,
+        Counts,
+        Votes
+    ),
+    #{
+        winner => Winner,
+        counts => FirstChoiceCounts,
+        total_votes => TotalVotes
+    };
 tally(_Method, Votes, Options, TieBreaker, Weights) ->
     tally(~"plurality", Votes, Options, TieBreaker, Weights).
+
+ranked_eliminate(_Votes, [Single], _TieBreaker) ->
+    Single;
+ranked_eliminate(_Votes, [], _TieBreaker) ->
+    undefined;
+ranked_eliminate(Votes, Remaining, TieBreaker) ->
+    RemainingSet = sets:from_list(Remaining, [{version, 2}]),
+    FirstChoices = maps:fold(
+        fun
+            (_VoterId, Ranking, Acc) when is_list(Ranking) ->
+                case first_valid(Ranking, RemainingSet) of
+                    undefined -> Acc;
+                    Choice -> Acc#{Choice => maps:get(Choice, Acc, 0) + 1}
+                end;
+            (_VoterId, _, Acc) ->
+                Acc
+        end,
+        maps:from_list([{Id, 0} || Id <- Remaining]),
+        Votes
+    ),
+    TotalVotes = lists:sum(maps:values(FirstChoices)),
+    Majority = TotalVotes / 2,
+    case lists:any(fun({_Id, C}) -> C > Majority end, maps:to_list(FirstChoices)) of
+        true ->
+            {Winner, _} = lists:max([{C, Id} || {Id, C} <- maps:to_list(FirstChoices)]),
+            Winner;
+        false ->
+            MinCount = lists:min(maps:values(FirstChoices)),
+            Losers = [Id || {Id, C} <- maps:to_list(FirstChoices), C =:= MinCount],
+            Eliminated = break_tie(Losers, TieBreaker),
+            ranked_eliminate(Votes, Remaining -- [Eliminated], TieBreaker)
+    end.
+
+first_valid([], _Set) ->
+    undefined;
+first_valid([H | T], Set) ->
+    case sets:is_element(H, Set) of
+        true -> H;
+        false -> first_valid(T, Set)
+    end.
 
 maybe_enforce_supermajority(Result, false, _Threshold) ->
     Result;
@@ -434,6 +561,81 @@ maybe_enforce_supermajority(
         false ->
             Result#{winner => undefined, status => ~"no_consensus"}
     end.
+
+apply_delegation_and_defaults(Votes, EligibleList, Delegation, DefaultVotes) ->
+    lists:foldl(
+        fun(PlayerId, Acc) ->
+            case maps:is_key(PlayerId, Acc) of
+                true ->
+                    Acc;
+                false ->
+                    %% Check delegation first
+                    case maps:get(PlayerId, Delegation, undefined) of
+                        undefined ->
+                            %% Fall back to default vote
+                            case maps:get(PlayerId, DefaultVotes, undefined) of
+                                undefined -> Acc;
+                                Default -> Acc#{PlayerId => Default}
+                            end;
+                        DelegateId ->
+                            case maps:get(DelegateId, Acc, undefined) of
+                                undefined -> Acc;
+                                DelegateVote -> Acc#{PlayerId => DelegateVote}
+                            end
+                    end
+            end
+        end,
+        Votes,
+        EligibleList
+    ).
+
+split_spectator_votes(Votes, SpectatorsSet) ->
+    maps:fold(
+        fun(VoterId, Vote, {PAcc, SAcc}) ->
+            case sets:is_element(VoterId, SpectatorsSet) of
+                true -> {PAcc, SAcc#{VoterId => Vote}};
+                false -> {PAcc#{VoterId => Vote}, SAcc}
+            end
+        end,
+        {#{}, #{}},
+        Votes
+    ).
+
+merge_spectator_result(PlayerResult, SpectatorResult, SpectatorW, Options, TieBreaker) ->
+    PlayerW = 1.0 - SpectatorW,
+    PCounts = maps:get(counts, PlayerResult, init_counts(Options)),
+    SCounts = maps:get(counts, SpectatorResult, init_counts(Options)),
+    PTotalRaw = lists:sum([V || V <- maps:values(PCounts), is_number(V)]),
+    STotalRaw = lists:sum([V || V <- maps:values(SCounts), is_number(V)]),
+    MergedCounts = lists:foldl(
+        fun(#{id := Id}, Acc) ->
+            PNorm =
+                case PTotalRaw of
+                    0 -> 0.0;
+                    _ -> maps:get(Id, PCounts, 0) / PTotalRaw
+                end,
+            SNorm =
+                case STotalRaw of
+                    0 -> 0.0;
+                    _ -> maps:get(Id, SCounts, 0) / STotalRaw
+                end,
+            Acc#{Id => PNorm * PlayerW + SNorm * SpectatorW}
+        end,
+        #{},
+        Options
+    ),
+    MaxScore = lists:max([0.0 | maps:values(MergedCounts)]),
+    Winners = maps:keys(maps:filter(fun(_Id, S) -> S =:= MaxScore end, MergedCounts)),
+    Winner = break_tie(Winners, TieBreaker),
+    TotalVotes = maps:get(total_votes, PlayerResult, 0) + maps:get(total_votes, SpectatorResult, 0),
+    #{
+        winner => Winner,
+        counts => MergedCounts,
+        distribution => MergedCounts,
+        total_votes => TotalVotes,
+        player_counts => PCounts,
+        spectator_counts => SCounts
+    }.
 
 init_counts(Options) ->
     lists:foldl(fun(#{id := Id}, Acc) -> Acc#{Id => 0} end, #{}, Options).
@@ -625,6 +827,15 @@ external_state(Status, #{
             Base
     end.
 
+compute_live_tallies(~"ranked", Votes, Options, _Weights) ->
+    maps:fold(
+        fun
+            (_VoterId, [First | _], Acc) -> Acc#{First => maps:get(First, Acc, 0) + 1};
+            (_VoterId, _, Acc) -> Acc
+        end,
+        init_counts(Options),
+        Votes
+    );
 compute_live_tallies(~"weighted", Votes, Options, Weights) ->
     maps:fold(
         fun(VoterId, OptionId, Acc) ->

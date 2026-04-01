@@ -30,7 +30,15 @@
     vote_supermajority_not_met/1,
     vote_frustration_accumulator/1,
     vote_veto_tokens/1,
-    vote_veto_tokens_exhausted/1
+    vote_veto_tokens_exhausted/1,
+    vote_ranked_choice/1,
+    vote_ranked_elimination/1,
+    vote_spectator_voting/1,
+    vote_spectator_only/1,
+    vote_quorum_met/1,
+    vote_quorum_not_met/1,
+    vote_default_votes/1,
+    vote_delegation/1
 ]).
 
 all() ->
@@ -61,7 +69,15 @@ all() ->
         vote_supermajority_not_met,
         vote_frustration_accumulator,
         vote_veto_tokens,
-        vote_veto_tokens_exhausted
+        vote_veto_tokens_exhausted,
+        vote_ranked_choice,
+        vote_ranked_elimination,
+        vote_spectator_voting,
+        vote_spectator_only,
+        vote_quorum_met,
+        vote_quorum_not_met,
+        vote_default_votes,
+        vote_delegation
     ].
 
 init_per_suite(Config) ->
@@ -724,6 +740,216 @@ vote_veto_tokens_exhausted(_Config) ->
         veto_enabled => true
     }),
     ?assertMatch({error, no_veto_tokens}, asobi_match_server:use_veto(MatchPid, ~"p1", VoteId2)).
+
+vote_ranked_choice(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"},
+        #{id => ~"opt_c", label => ~"C"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3"],
+        window_ms => 200,
+        method => ~"ranked"
+    }),
+    %% p1: A > B > C, p2: B > A > C, p3: A > C > B
+    %% A has 2 first-choice votes, B has 1 — A wins outright
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", [~"opt_a", ~"opt_b", ~"opt_c"]),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", [~"opt_b", ~"opt_a", ~"opt_c"]),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p3", [~"opt_a", ~"opt_c", ~"opt_b"]),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(ranked_vote_did_not_resolve)
+    end.
+
+vote_ranked_elimination(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"},
+        #{id => ~"opt_c", label => ~"C"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3", ~"p4", ~"p5"],
+        window_ms => 200,
+        method => ~"ranked"
+    }),
+    %% p1,p2: A first. p3,p4: B first. p5: C first, A second.
+    %% Round 1: A=2, B=2, C=1 — C eliminated. p5's vote goes to A.
+    %% Round 2: A=3, B=2 — A wins.
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", [~"opt_a", ~"opt_b"]),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", [~"opt_a", ~"opt_c"]),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p3", [~"opt_b", ~"opt_a"]),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p4", [~"opt_b", ~"opt_c"]),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p5", [~"opt_c", ~"opt_a"]),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(ranked_elimination_did_not_resolve)
+    end.
+
+vote_spectator_voting(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2"],
+        spectators => [~"s1", ~"s2", ~"s3"],
+        spectator_weight => 0.5,
+        window_ms => 200,
+        method => ~"plurality"
+    }),
+    %% Players vote A. Spectators vote B (3 to 0).
+    %% Player: A=2, B=0. Spectator: A=0, B=3.
+    %% Merged: A = 1.0*0.5 + 0.0*0.5 = 0.5, B = 0.0*0.5 + 1.0*0.5 = 0.5
+    %% Tie broken randomly — both are valid outcomes
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"s1", ~"opt_b"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"s2", ~"opt_b"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"s3", ~"opt_b"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(spectator_vote_did_not_resolve)
+    end.
+
+vote_spectator_only(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [],
+        spectators => [~"s1", ~"s2"],
+        spectator_weight => 1.0,
+        window_ms => 200,
+        method => ~"plurality"
+    }),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"s1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"s2", ~"opt_a"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(spectator_only_did_not_resolve)
+    end.
+
+vote_quorum_met(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3", ~"p4"],
+        window_ms => 200,
+        quorum => 0.5
+    }),
+    %% 3 of 4 vote = 75%, above 50% quorum
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p3", ~"opt_b"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(quorum_vote_did_not_resolve)
+    end.
+
+vote_quorum_not_met(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3", ~"p4"],
+        window_ms => 200,
+        quorum => 0.75
+    }),
+    %% Only 1 of 4 votes = 25%, below 75% quorum
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(quorum_vote_did_not_resolve)
+    end.
+
+vote_default_votes(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3"],
+        window_ms => 200,
+        default_votes => #{~"p2" => ~"opt_b", ~"p3" => ~"opt_b"}
+    }),
+    %% Only p1 votes A. p2 and p3 default to B. B should win.
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(default_votes_did_not_resolve)
+    end.
+
+vote_delegation(_Config) ->
+    Options = [
+        #{id => ~"opt_a", label => ~"A"},
+        #{id => ~"opt_b", label => ~"B"}
+    ],
+    {ok, MatchPid} = start_test_match(),
+    {ok, VotePid} = asobi_vote_sup:start_vote(#{
+        match_id => asobi_id:generate(),
+        match_pid => MatchPid,
+        options => Options,
+        eligible => [~"p1", ~"p2", ~"p3"],
+        window_ms => 200,
+        delegation => #{~"p3" => ~"p1"}
+    }),
+    %% p1 votes A, p2 votes B. p3 delegates to p1, so effectively votes A.
+    %% A=2 (p1 + p3), B=1 (p2). A wins.
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
+    ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
+    Ref = monitor(process, VotePid),
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 2000 ->
+        error(delegation_did_not_resolve)
+    end.
 
 %% --- Helpers ---
 

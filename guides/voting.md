@@ -75,6 +75,85 @@ asobi_match_server:start_vote(MatchPid, #{
 Players not in the weights map default to weight 1. Useful for
 performance-based voting or role-based voting.
 
+### Ranked Choice
+
+Each player submits a ranked list. The option with fewest first-choice votes
+is eliminated each round, and those votes transfer to the next preference.
+Continues until one option has a majority.
+
+```erlang
+asobi_match_server:start_vote(MatchPid, #{
+    options => Options,
+    method => ~"ranked"
+}).
+```
+
+Clients send a list for `option_id`:
+
+```json
+{"type": "vote.cast", "payload": {"vote_id": "...", "option_id": ["jungle", "caves", "volcano"]}}
+```
+
+Live tallies show first-choice counts. The final result includes the winner
+after all elimination rounds.
+
+## Spectator Voting
+
+Spectators are a separate voter pool whose votes are merged with player
+votes using a configurable weight ratio.
+
+```erlang
+asobi_match_server:start_vote(MatchPid, #{
+    options => Options,
+    spectators => [~"spec1", ~"spec2", ~"spec3"],
+    spectator_weight => 0.3  %% spectators get 30% influence, players 70%
+}).
+```
+
+Both pools are tallied independently, normalized, then merged:
+`score = player_normalized * (1 - spectator_weight) + spectator_normalized * spectator_weight`
+
+For spectator-only votes (audience decides), set `eligible => []` and
+`spectator_weight => 1.0`.
+
+## Async Voting
+
+For non-real-time games where not all players are online simultaneously.
+
+### Quorum
+
+Require a minimum fraction of eligible voters before the result is valid:
+
+```erlang
+#{quorum => 0.5}  %% at least 50% must vote
+```
+
+If quorum is not met when the window expires, the result has
+`winner => undefined` and `status => "no_quorum"`.
+
+### Default Votes
+
+Set fallback votes for players who don't participate:
+
+```erlang
+#{default_votes => #{~"player2" => ~"opt_b", ~"player3" => ~"opt_a"}}
+```
+
+Defaults are applied at resolution time only — they don't count as active
+votes during the window. Players who vote explicitly override their default.
+
+### Delegation
+
+Let a player's vote follow another player's choice:
+
+```erlang
+#{delegation => #{~"player3" => ~"player1"}}
+```
+
+If player3 doesn't vote but player1 voted for `opt_a`, player3's vote
+becomes `opt_a` at resolution time. If the delegate also didn't vote,
+no vote is added.
+
 ## Vote Templates
 
 Define reusable vote configurations in your app config. Per-call config
