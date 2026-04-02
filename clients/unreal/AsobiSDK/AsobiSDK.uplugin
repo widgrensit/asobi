@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Asobi SDK",
+	"Description": "Client SDK for the Asobi game backend. Provides HTTP REST and WebSocket APIs for authentication, matchmaking, economy, social, leaderboards, storage, and more.",
+	"Category": "Networking",
+	"CreatedBy": "Asobi",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"Modules": [
+		{
+			"Name": "AsobiSDK",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

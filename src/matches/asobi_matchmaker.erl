@@ -1,7 +1,7 @@
 -module(asobi_matchmaker).
 -behaviour(gen_server).
 
--export([start_link/0, add/2, remove/2, get_ticket/1]).
+-export([start_link/0, add/2, remove/2, get_ticket/1, get_queue_stats/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(DEFAULT_TICK, 1000).
@@ -25,6 +25,12 @@ get_ticket(TicketId) ->
     case gen_server:call(?MODULE, {get_ticket, TicketId}) of
         {ok, Ticket} when is_map(Ticket) -> {ok, Ticket};
         {error, not_found} -> {error, not_found}
+    end.
+
+-spec get_queue_stats() -> {ok, map()}.
+get_queue_stats() ->
+    case gen_server:call(?MODULE, get_queue_stats) of
+        {ok, Stats} when is_map(Stats) -> {ok, Stats}
     end.
 
 -spec init([]) -> {ok, map()}.
@@ -65,6 +71,32 @@ handle_call({get_ticket, TicketId}, _From, #{tickets := Tickets} = State) ->
         #{TicketId := Ticket} -> {reply, {ok, Ticket}, State};
         _ -> {reply, {error, not_found}, State}
     end;
+handle_call(get_queue_stats, _From, #{tickets := Tickets} = State) ->
+    Now = erlang:system_time(millisecond),
+    ByMode = maps:fold(
+        fun(_Id, #{mode := Mode}, Acc) ->
+            Acc#{Mode => maps:get(Mode, Acc, 0) + 1}
+        end,
+        #{},
+        Tickets
+    ),
+    OldestAge = maps:fold(
+        fun(_Id, #{submitted_at := T}, Oldest) ->
+            Age = Now - T,
+            case Age > Oldest of
+                true -> Age;
+                false -> Oldest
+            end
+        end,
+        0,
+        Tickets
+    ),
+    Stats = #{
+        total => map_size(Tickets),
+        by_mode => ByMode,
+        oldest_age_ms => OldestAge
+    },
+    {reply, {ok, Stats}, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
