@@ -816,8 +816,8 @@ persist_vote(#{
             turnout => Turnout,
             eligible_count => EligibleCount,
             window_ms => WindowMs,
-            opened_at => OpenedAt,
-            closed_at => ClosedAt
+            opened_at => millis_to_datetime(OpenedAt),
+            closed_at => millis_to_datetime(ClosedAt)
         },
         [
             id,
@@ -899,3 +899,9 @@ compute_live_tallies(_Method, Votes, Options, _Weights) ->
         init_counts(Options),
         Votes
     ).
+
+millis_to_datetime(Ms) when is_integer(Ms) ->
+    Seconds = Ms div 1000,
+    calendar:gregorian_seconds_to_datetime(Seconds + 62167219200);
+millis_to_datetime(Other) ->
+    Other.
