@@ -8,5 +8,3 @@ log/
 .rebar3/
 rebar3.crashdump
 doc/
-clients/js/node_modules/
-clients/js/package-lock.json
