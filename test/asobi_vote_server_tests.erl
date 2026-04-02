@@ -1,9 +1,7 @@
 -module(asobi_vote_server_tests).
 -include_lib("eunit/include/eunit.hrl").
 
--define(OPTIONS, [
-    #{id => ~"a", label => ~"A"}, #{id => ~"b", label => ~"B"}, #{id => ~"c", label => ~"C"}
-]).
+-define(OPTIONS, [#{id => ~"a", label => ~"A"}, #{id => ~"b", label => ~"B"}, #{id => ~"c", label => ~"C"}]).
 -define(ELIGIBLE, [~"p1", ~"p2", ~"p3"]).
 
 %% --- Setup / Teardown ---
@@ -24,16 +22,13 @@ start_vote() ->
     start_vote(#{}).
 
 start_vote(Overrides) ->
-    Config = maps:merge(
-        #{
-            match_id => ~"test-match",
-            match_pid => self(),
-            options => ?OPTIONS,
-            eligible => ?ELIGIBLE,
-            window_ms => 60000
-        },
-        Overrides
-    ),
+    Config = maps:merge(#{
+        match_id => ~"test-match",
+        match_pid => self(),
+        options => ?OPTIONS,
+        eligible => ?ELIGIBLE,
+        window_ms => 60000
+    }, Overrides),
     {ok, Pid} = asobi_vote_server:start_link(Config),
     Pid.
 
@@ -500,7 +495,6 @@ stop(Pid) ->
     end.
 
 flush() ->
-    receive
-        _ -> flush()
+    receive _ -> flush()
     after 0 -> ok
     end.
