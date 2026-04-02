@@ -167,6 +167,11 @@ handle_message(
         {ok, MatchPid} ->
             case asobi_match_server:join(MatchPid, PlayerId) of
                 ok ->
+                    %% Notify session so match.input can find the match
+                    case maps:get(session, State, undefined) of
+                        undefined -> ok;
+                        SessionPid -> SessionPid ! {asobi_message, {match_joined, MatchPid}}
+                    end,
                     Info = asobi_match_server:get_info(MatchPid),
                     Reply = encode_reply(Cid, ~"match.joined", Info),
                     {reply, {text, Reply}, State};
