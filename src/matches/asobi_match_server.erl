@@ -162,9 +162,11 @@ running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue
         true ->
             case Mod:tick(GS1) of
                 {ok, GS2} ->
-                    broadcast_state(State#{game_state => GS2}),
-                    {keep_state, State#{game_state => GS2, input_queue => []}, [
-                        {state_timeout, maps:get(tick_rate, State), tick}
+                    State1 = State#{game_state => GS2, input_queue => []},
+                    State2 = maybe_start_requested_vote(Mod, GS2, State1),
+                    broadcast_state(State2),
+                    {keep_state, State2, [
+                        {state_timeout, maps:get(tick_rate, State2), tick}
                     ]};
                 {finished, Result, GS2} ->
                     {next_state, finished, State#{game_state => GS2, result => Result}}
@@ -402,6 +404,34 @@ handle_leave(PlayerId, #{players := Players, game_module := Mod, game_state := G
                 _ ->
                     {keep_state, State#{players => Players1, game_state => GS1}}
             end
+    end.
+
+maybe_start_requested_vote(Mod, GS, #{match_id := MatchId, players := Players} = State) ->
+    case erlang:function_exported(Mod, vote_requested, 1) of
+        true ->
+            case Mod:vote_requested(GS) of
+                {ok, VoteConfig0} ->
+                    VoteId = maps:get(vote_id, VoteConfig0, asobi_id:generate()),
+                    PlayerIds = maps:keys(Players),
+                    VoteConfig = VoteConfig0#{
+                        vote_id => VoteId,
+                        match_id => MatchId,
+                        match_pid => self(),
+                        eligible => PlayerIds
+                    },
+                    {ok, VotePid} = asobi_vote_sup:start_vote(VoteConfig),
+                    Active = maps:get(active_votes, State, #{}),
+                    GS1 =
+                        case erlang:function_exported(Mod, vote_started, 1) of
+                            true -> Mod:vote_started(GS);
+                            false -> GS
+                        end,
+                    State#{active_votes => Active#{VoteId => VotePid}, game_state => GS1};
+                none ->
+                    State
+            end;
+        false ->
+            State
     end.
 
 apply_inputs(_Mod, [], GS) ->
