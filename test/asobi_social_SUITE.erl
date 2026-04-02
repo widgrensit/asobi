@@ -40,6 +40,7 @@ init_per_suite(Config) ->
     B2 = nova_test:json(R2),
     #{~"player_id" := P1Id, ~"session_token" := P1Token} = B1,
     #{~"player_id" := P2Id, ~"session_token" := P2Token} = B2,
+    true = is_binary(P1Token),
     {ok, GR} = nova_test:post(
         "/api/v1/groups",
         #{
@@ -105,6 +106,7 @@ list_friends(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"friends" := Friends} = nova_test:json(Resp),
+    true = is_list(Friends),
     ?assert(length(Friends) >= 1),
     Config.
 

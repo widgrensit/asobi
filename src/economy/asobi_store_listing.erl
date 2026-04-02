@@ -3,7 +3,7 @@
 
 -include_lib("kura/include/kura.hrl").
 
--export([table/0, fields/0, associations/0]).
+-export([table/0, fields/0, associations/0, generate_id/0]).
 -export([changeset/2]).
 
 -spec table() -> binary().
@@ -21,6 +21,9 @@ fields() ->
         #kura_field{name = valid_until, type = utc_datetime},
         #kura_field{name = metadata, type = jsonb, default = #{}}
     ].
+
+-spec generate_id() -> binary().
+generate_id() -> asobi_id:generate().
 
 -spec associations() -> [#kura_assoc{}].
 associations() ->

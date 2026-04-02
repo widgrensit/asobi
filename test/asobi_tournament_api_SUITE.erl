@@ -91,6 +91,7 @@ list_tournaments(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"tournaments" := Tournaments} = nova_test:json(Resp),
+    true = is_list(Tournaments),
     ?assert(length(Tournaments) >= 1),
     Config.
 

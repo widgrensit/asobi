@@ -85,9 +85,40 @@ presence_spec() ->
 
 rate_limit_spec() ->
     #{
-        id => asobi_rate_limit_server,
-        start => {asobi_rate_limit_server, start_link, []}
+        id => asobi_rate_limits,
+        start => {erlang, apply, [fun register_limiters/0, []]},
+        restart => temporary
     }.
+
+register_limiters() ->
+    Defaults = #{
+        auth => #{algorithm => sliding_window, limit => 300, window => 1000},
+        iap => #{algorithm => sliding_window, limit => 300, window => 1000},
+        api => #{algorithm => sliding_window, limit => 300, window => 1000}
+    },
+    Configured =
+        case application:get_env(asobi, rate_limits, #{}) of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
+    maps:foreach(
+        fun(Group, DefaultOpts) ->
+            Overrides =
+                case maps:get(Group, Configured, #{}) of
+                    O when is_map(O) -> O;
+                    _ -> #{}
+                end,
+            Opts = maps:merge(DefaultOpts, Overrides),
+            Name = limiter_name(Group),
+            seki:new_limiter(Name, Opts)
+        end,
+        Defaults
+    ),
+    ignore.
+
+limiter_name(auth) -> asobi_auth_limiter;
+limiter_name(iap) -> asobi_iap_limiter;
+limiter_name(api) -> asobi_api_limiter.
 
 cluster_spec() ->
     #{

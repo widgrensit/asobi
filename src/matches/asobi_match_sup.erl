@@ -6,6 +6,13 @@
 
 -spec start_link() -> supervisor:startlink_ret().
 start_link() ->
+    _ =
+        case ets:whereis(asobi_match_state) of
+            undefined ->
+                ets:new(asobi_match_state, [named_table, public, set, {read_concurrency, true}]);
+            _ ->
+                asobi_match_state
+        end,
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 -spec start_match(map()) -> supervisor:startchild_ret().
@@ -22,6 +29,6 @@ init([]) ->
     ChildSpec = #{
         id => asobi_match_server,
         start => {asobi_match_server, start_link, []},
-        restart => temporary
+        restart => transient
     },
     {ok, {SupFlags, [ChildSpec]}}.

@@ -959,7 +959,7 @@ vote_delegation(_Config) ->
 
 -spec start_vote(map()) -> {ok, pid()}.
 start_vote(Config) ->
-    {ok, Pid} = start_vote(Config),
+    {ok, Pid} = asobi_vote_sup:start_vote(Config),
     true = is_pid(Pid),
     {ok, Pid}.
 

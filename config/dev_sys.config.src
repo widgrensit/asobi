@@ -7,7 +7,10 @@
                     map_depth => 3,
                     term_depth => 50
                 }}
-            }}
+            }},
+            {filters, log, [
+                {progress, {fun logger_filters:progress/2, stop}}
+            ]}
         ]}
     ]},
     {nova_auth, [
@@ -53,6 +56,12 @@
             %% ~"boon_pick" => #{method => ~"plurality", window_ms => 15000, visibility => ~"live"},
             %% ~"path_choice" => #{method => ~"approval", window_ms => 20000, visibility => ~"hidden"},
             %% ~"weighted_pick" => #{method => ~"weighted", window_ms => 15000}
+        }},
+        {rate_limits, #{
+            %% Per-group rate limits: #{limit => requests, window => milliseconds}
+            %% auth => #{limit => 300, window => 1000},
+            %% iap => #{limit => 300, window => 1000},
+            %% api => #{limit => 300, window => 1000}
         }},
         {matchmaker, #{
             tick_interval => 1000,
