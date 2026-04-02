@@ -94,6 +94,7 @@ list_matches_with_records(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"matches" := Matches} = nova_test:json(Resp),
+    true = is_list(Matches),
     ?assert(length(Matches) >= 2),
     Config.
 
@@ -105,6 +106,7 @@ list_matches_filter_mode(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"matches" := Matches} = nova_test:json(Resp),
+    true = is_list(Matches),
     ?assert(length(Matches) >= 1),
     Config.
 

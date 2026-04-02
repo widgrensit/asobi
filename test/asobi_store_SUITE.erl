@@ -128,6 +128,7 @@ list_store_with_listings(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"listings" := Listings} = nova_test:json(Resp),
+    true = is_list(Listings),
     ?assert(length(Listings) >= 2),
     Config.
 
@@ -139,6 +140,7 @@ list_store_filter_currency(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"listings" := Listings} = nova_test:json(Resp),
+    true = is_list(Listings),
     ?assert(length(Listings) >= 1),
     lists:foreach(
         fun(L) when is_map(L) -> ?assertEqual(~"gems", maps:get(~"currency", L)) end,
@@ -233,6 +235,7 @@ inventory_after_purchase(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"items" := Items} = nova_test:json(Resp),
+    true = is_list(Items),
     ?assert(length(Items) >= 1),
     Config.
 
@@ -295,6 +298,7 @@ consume_item_fully(Config) ->
         Config
     ),
     #{~"items" := Items} = nova_test:json(InvResp),
+    true = is_list(Items),
     case [I || I <- Items, is_map(I), maps:get(~"quantity", I) =:= 1] of
         [#{~"id" := ItemId} | _] ->
             {ok, ConsumeResp} = nova_test:post(

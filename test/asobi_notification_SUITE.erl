@@ -38,6 +38,7 @@ init_per_suite(Config) ->
     B2 = nova_test:json(R2),
     #{~"player_id" := PlayerId, ~"session_token" := P1Token} = B1,
     #{~"session_token" := P2Token} = B2,
+    true = is_binary(PlayerId),
     {ok, Notif1} = asobi_notify:send(PlayerId, ~"system", ~"Welcome", #{~"msg" => ~"hi"}),
     {ok, Notif2} = asobi_notify:send(PlayerId, ~"test", ~"Test", #{~"msg" => ~"test"}),
     [
@@ -69,6 +70,7 @@ create_and_list(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"notifications" := Notifs} = nova_test:json(Resp),
+    true = is_list(Notifs),
     ?assert(length(Notifs) >= 2),
     Config.
 

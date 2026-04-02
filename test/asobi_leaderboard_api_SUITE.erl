@@ -106,6 +106,7 @@ get_top(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"entries" := Entries} = nova_test:json(Resp),
+    true = is_list(Entries),
     ?assert(length(Entries) =:= 5),
     [First | _] = Entries,
     ?assertMatch(#{~"score" := 900, ~"rank" := 1}, First),
@@ -123,6 +124,7 @@ get_top_with_limit(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"entries" := Entries} = nova_test:json(Resp),
+    true = is_list(Entries),
     ?assert(length(Entries) =:= 3),
     Config.
 
@@ -141,5 +143,6 @@ get_around(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"entries" := Entries} = nova_test:json(Resp),
+    true = is_list(Entries),
     ?assert(length(Entries) >= 1),
     Config.

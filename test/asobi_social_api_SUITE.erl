@@ -42,6 +42,10 @@ init_per_suite(Config) ->
     B2 = nova_test:json(R2),
     #{~"session_token" := P1Token, ~"player_id" := P1Id} = B1,
     #{~"session_token" := P2Token, ~"player_id" := P2Id} = B2,
+    true = is_binary(P1Id),
+    true = is_binary(P2Id),
+    true = is_binary(P1Token),
+    true = is_binary(P2Token),
     {ok, GR} = nova_test:post(
         "/api/v1/groups",
         #{
@@ -53,6 +57,7 @@ init_per_suite(Config) ->
         Config0
     ),
     #{~"id" := GroupId} = nova_test:json(GR),
+    true = is_binary(GroupId),
     {ok, _} = nova_test:post(
         "/api/v1/groups/" ++ binary_to_list(GroupId) ++ "/join",
         #{headers => auth(P2Token), json => #{}},
@@ -163,5 +168,6 @@ chat_history_with_messages(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"messages" := Messages} = nova_test:json(Resp),
+    true = is_list(Messages),
     ?assert(length(Messages) >= 3),
     Config.

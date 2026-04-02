@@ -84,6 +84,7 @@ get_history(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"transactions" := History} = nova_test:json(Resp),
+    true = is_list(History),
     ?assert(length(History) >= 2),
     Config.
 

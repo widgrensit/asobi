@@ -162,6 +162,7 @@ list_storage(Config) ->
     ),
     ?assertStatus(200, Resp),
     #{~"objects" := Objects} = nova_test:json(Resp),
+    true = is_list(Objects),
     ?assert(length(Objects) >= 1),
     Config.
 
