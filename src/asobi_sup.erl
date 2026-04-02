@@ -92,9 +92,9 @@ rate_limit_spec() ->
 
 register_limiters() ->
     Defaults = #{
-        auth => #{algorithm => sliding_window, limit => 300, window => 1000},
-        iap => #{algorithm => sliding_window, limit => 300, window => 1000},
-        api => #{algorithm => sliding_window, limit => 300, window => 1000}
+        auth => #{algorithm => sliding_window, limit => 20, window => 60000},
+        iap => #{algorithm => sliding_window, limit => 10, window => 60000},
+        api => #{algorithm => sliding_window, limit => 100, window => 60000}
     },
     Configured =
         case application:get_env(asobi, rate_limits, #{}) of
