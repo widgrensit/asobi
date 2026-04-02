@@ -59,9 +59,9 @@
         }},
         {rate_limits, #{
             %% Per-group rate limits: #{limit => requests, window => milliseconds}
-            %% auth => #{limit => 20, window => 60000},
-            %% iap => #{limit => 10, window => 60000},
-            %% api => #{limit => 100, window => 60000}
+            %% auth => #{limit => 300, window => 1000},
+            %% iap => #{limit => 300, window => 1000},
+            %% api => #{limit => 300, window => 1000}
         }},
         {matchmaker, #{
             tick_interval => 1000,
