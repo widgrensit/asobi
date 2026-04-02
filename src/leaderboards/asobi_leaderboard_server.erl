@@ -4,19 +4,21 @@
 -export([start_link/1, submit/3, top/2, rank/2, around/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-define(PG_SCOPE, nova_scope).
+
 -spec start_link(binary()) -> gen_server:start_ret().
 start_link(BoardId) ->
-    gen_server:start_link({global, {?MODULE, BoardId}}, ?MODULE, BoardId, []).
+    gen_server:start_link(?MODULE, BoardId, []).
 
 -spec submit(binary(), binary(), integer()) -> ok.
 submit(BoardId, PlayerId, Score) ->
     ensure_started(BoardId),
-    gen_server:cast({global, {?MODULE, BoardId}}, {submit, PlayerId, Score}).
+    gen_server:cast(whereis_board(BoardId), {submit, PlayerId, Score}).
 
 -spec top(binary(), pos_integer()) -> [{binary(), number(), pos_integer()}].
 top(BoardId, N) ->
     ensure_started(BoardId),
-    case gen_server:call({global, {?MODULE, BoardId}}, {top, N}) of
+    case gen_server:call(whereis_board(BoardId), {top, N}) of
         Entries when is_list(Entries) -> validate_entries(Entries);
         _ -> []
     end.
@@ -24,7 +26,7 @@ top(BoardId, N) ->
 -spec rank(binary(), binary()) -> {ok, pos_integer()} | {error, not_found}.
 rank(BoardId, PlayerId) ->
     ensure_started(BoardId),
-    case gen_server:call({global, {?MODULE, BoardId}}, {rank, PlayerId}) of
+    case gen_server:call(whereis_board(BoardId), {rank, PlayerId}) of
         {ok, Pos} when is_integer(Pos) -> {ok, Pos};
         {error, not_found} -> {error, not_found}
     end.
@@ -32,7 +34,7 @@ rank(BoardId, PlayerId) ->
 -spec around(binary(), binary(), pos_integer()) -> [{binary(), number(), pos_integer()}].
 around(BoardId, PlayerId, N) ->
     ensure_started(BoardId),
-    case gen_server:call({global, {?MODULE, BoardId}}, {around, PlayerId, N}) of
+    case gen_server:call(whereis_board(BoardId), {around, PlayerId, N}) of
         Entries when is_list(Entries) -> validate_entries(Entries);
         _ -> []
     end.
@@ -43,16 +45,24 @@ validate_entries(Entries) ->
 
 -spec ensure_started(binary()) -> ok.
 ensure_started(BoardId) ->
-    case global:whereis_name({?MODULE, BoardId}) of
-        undefined ->
+    case pg:get_members(?PG_SCOPE, {?MODULE, BoardId}) of
+        [] ->
             _ = asobi_leaderboard_sup:start_board(BoardId),
             ok;
-        _Pid ->
+        [_ | _] ->
             ok
+    end.
+
+-spec whereis_board(binary()) -> pid().
+whereis_board(BoardId) ->
+    case pg:get_members(?PG_SCOPE, {?MODULE, BoardId}) of
+        [Pid | _] -> Pid;
+        [] -> error({leaderboard_not_found, BoardId})
     end.
 
 -spec init(binary()) -> {ok, map()}.
 init(BoardId) ->
+    pg:join(?PG_SCOPE, {?MODULE, BoardId}, self()),
     Table = ets:new(leaderboard, [ordered_set, private]),
     PlayerIndex = ets:new(player_index, [set, private]),
     erlang:send_after(30000, self(), persist),

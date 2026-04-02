@@ -2,6 +2,9 @@
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1]).
+-export([whereis/1]).
+
+-define(PG_SCOPE, nova_scope).
 -export([start_vote/2, cast_vote/4, use_veto/3, broadcast_event/3]).
 -export([callback_mode/0, init/1, terminate/3]).
 -export([waiting/3, running/3, paused/3, finished/3]).
@@ -84,6 +87,13 @@ use_veto(Pid, PlayerId, VoteId) ->
 broadcast_event(Pid, Event, Payload) ->
     gen_statem:cast(Pid, {broadcast_event, Event, Payload}).
 
+-spec whereis(binary()) -> {ok, pid()} | error.
+whereis(MatchId) ->
+    case pg:get_members(?PG_SCOPE, {asobi_match_server, MatchId}) of
+        [Pid | _] -> {ok, Pid};
+        [] -> error
+    end.
+
 %% --- gen_statem callbacks ---
 
 -spec callback_mode() -> gen_statem:callback_mode_result().
@@ -92,7 +102,7 @@ callback_mode() -> [state_functions, state_enter].
 -spec init(map()) -> {ok, atom(), map()}.
 init(Config) ->
     MatchId = maps:get(match_id, Config, generate_id()),
-    _ = global:register_name({asobi_match_server, MatchId}, self()),
+    pg:join(?PG_SCOPE, {asobi_match_server, MatchId}, self()),
     case recover_state(MatchId) of
         {ok, SavedStatus, SavedState} ->
             logger:notice(#{msg => ~"match recovered", match_id => MatchId, status => SavedStatus}),
@@ -330,16 +340,16 @@ finished(_EventType, _Event, _State) ->
 -spec terminate(term(), atom(), map()) -> ok.
 terminate(normal, _StateName, #{match_id := MatchId}) ->
     clear_state_backup(MatchId),
-    global:unregister_name({asobi_match_server, MatchId}),
+    pg:leave(?PG_SCOPE, {asobi_match_server, MatchId}, self()),
     ok;
 terminate({shutdown, _}, _StateName, #{match_id := MatchId}) ->
     clear_state_backup(MatchId),
-    global:unregister_name({asobi_match_server, MatchId}),
+    pg:leave(?PG_SCOPE, {asobi_match_server, MatchId}, self()),
     ok;
 terminate(_Reason, StateName, #{match_id := MatchId} = State) ->
     %% Abnormal termination — save state for recovery
     backup_state(MatchId, StateName, State),
-    global:unregister_name({asobi_match_server, MatchId}),
+    pg:leave(?PG_SCOPE, {asobi_match_server, MatchId}, self()),
     ok.
 
 %% --- Internal ---
