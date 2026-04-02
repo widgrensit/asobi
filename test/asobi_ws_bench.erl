@@ -80,7 +80,6 @@ ws_throughput(Config) ->
     ct:pal("  Total messages: ~w", [ActualN * MsgsPerConn]),
 
     Parent = self(),
-    Ref = make_ref(),
     MemBefore = erlang:memory(total),
     T0 = erlang:monotonic_time(microsecond),
 
