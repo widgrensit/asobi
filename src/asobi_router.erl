@@ -12,6 +12,13 @@ routes(_Environment) ->
         ws_routes()
     ].
 
+rate_limit_opts(Group) ->
+    #{limiter => limiter_name(Group)}.
+
+limiter_name(auth) -> asobi_auth_limiter;
+limiter_name(iap) -> asobi_iap_limiter;
+limiter_name(api) -> asobi_api_limiter.
+
 auth_routes() ->
     #{
         prefix => ~"/api/v1/auth",
@@ -22,7 +29,7 @@ auth_routes() ->
             }},
             {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, #{limit => 20, window => 60000}}
+            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(auth)}
         ],
         routes => [
             {~"/register", fun asobi_auth_controller:register/1, #{methods => [post]}},
@@ -42,7 +49,7 @@ iap_routes() ->
             }},
             {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, #{limit => 10, window => 60000}}
+            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(iap)}
         ],
         routes => [
             {~"/apple", fun asobi_iap_controller:verify_apple/1, #{methods => [post]}},
@@ -61,7 +68,7 @@ api_routes() ->
             }},
             {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, #{limit => 100, window => 60000}}
+            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(api)}
         ],
         routes => [
             %% Auth - Provider linking
