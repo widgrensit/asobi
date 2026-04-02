@@ -83,35 +83,12 @@ ws_throughput(Config) ->
     MemBefore = erlang:memory(total),
     T0 = erlang:monotonic_time(microsecond),
 
-    %% Phase A: Connect all WS clients in waves
-    ct:pal("  Connecting..."),
+    %% Spawn workers in waves — each worker connects, auths, then sends heartbeats
+    ct:pal("  Connecting and sending ~w msgs each...", [MsgsPerConn]),
     WaveSize = env_int("ASOBI_WS_WAVE", 200),
-    ConnRef = make_ref(),
-    connect_waves(Players, WaveSize, Port, Parent, ConnRef),
-    Conns = collect(ConnRef, ActualN, [], 120_000),
-    LiveConns = [{C, S} || {ok, {C, S}} <- Conns],
-    ConnectedN = length(LiveConns),
-    ct:pal("  Connected: ~w of ~w", [ConnectedN, ActualN]),
-
-    %% Phase B: Blast messages from all connections simultaneously
-    ct:pal("  Blasting ~w msgs each...", [MsgsPerConn]),
-    BlastRef = make_ref(),
-    lists:foreach(
-        fun({ConnPid, StreamRef}) when is_pid(ConnPid) ->
-            spawn_link(fun() ->
-                T0B = erlang:monotonic_time(microsecond),
-                blast_messages(ConnPid, StreamRef, MsgsPerConn),
-                Received = drain_replies(ConnPid, StreamRef, MsgsPerConn, 0),
-                ElapsedB = erlang:monotonic_time(microsecond) - T0B,
-                gun:close(ConnPid),
-                Parent !
-                    {BlastRef,
-                        {ok, #{elapsed_us => ElapsedB, sent => MsgsPerConn, received => Received}}}
-            end)
-        end,
-        LiveConns
-    ),
-    Results = collect(BlastRef, length(LiveConns), [], 300_000),
+    Ref = make_ref(),
+    spawn_waves(Players, WaveSize, Port, MsgsPerConn, Parent, Ref),
+    Results = collect(Ref, ActualN, [], 300_000),
     Elapsed = erlang:monotonic_time(microsecond) - T0,
     MemAfter = erlang:memory(total),
 
@@ -139,7 +116,7 @@ ws_throughput(Config) ->
         lists:sublist(Failures, 5)
     ),
 
-    TotalReceived = lists:sum([R || {ok, #{received := R}} <- Successes]),
+    TotalReceived = lists:sum([length(Ls) || {ok, #{latencies := Ls}} <- Successes, is_list(Ls)]),
 
     case SuccessCount of
         0 ->
@@ -160,23 +137,21 @@ ws_throughput(Config) ->
             ct:pal("  Conn throughput: ~w conn/sec", [round(SuccessCount * 1000 / ElapsedSafe)])
     end,
 
-    %% Per-worker RTT (total elapsed / msgs)
-    WorkerRtts = [
-        E div
-            case S of
-                0 -> 1;
-                _ -> S
-            end
-     || {ok, #{elapsed_us := E, sent := S}} <- Successes, is_integer(E), is_integer(S)
-    ],
-    print_latency_report(WorkerRtts),
+    AllLatencies = lists:flatmap(
+        fun
+            ({ok, #{latencies := Ls}}) when is_list(Ls) -> Ls;
+            (_) -> []
+        end,
+        Successes
+    ),
+    print_latency_report(AllLatencies),
 
     ?assert(SuccessCount > ActualN div 2),
     Config.
 
-connect_waves([], _WaveSize, _Port, _Parent, _Ref) ->
+spawn_waves([], _WaveSize, _Port, _Msgs, _Parent, _Ref) ->
     ok;
-connect_waves(Players, WaveSize, Port, Parent, Ref) ->
+spawn_waves(Players, WaveSize, Port, Msgs, Parent, Ref) ->
     {Wave, Rest} =
         case length(Players) > WaveSize of
             true -> lists:split(WaveSize, Players);
@@ -185,17 +160,17 @@ connect_waves(Players, WaveSize, Port, Parent, Ref) ->
     lists:foreach(
         fun({Token, _PlayerId}) ->
             spawn_link(fun() ->
-                Parent ! {Ref, ws_connect(Port, Token)}
+                Parent ! {Ref, ws_worker(Port, Token, Msgs)}
             end)
         end,
         Wave
     ),
     timer:sleep(100),
-    connect_waves(Rest, WaveSize, Port, Parent, Ref).
+    spawn_waves(Rest, WaveSize, Port, Msgs, Parent, Ref).
 
-%% --- WS Connect (returns gun pid + stream ref) ---
+%% --- WS Worker (connect + auth + heartbeat loop in same process) ---
 
-ws_connect(Port, Token) ->
+ws_worker(Port, Token, MsgsPerConn) ->
     try
         {ok, ConnPid} = gun:open("localhost", Port, #{protocols => [http]}),
         {ok, _Protocol} = gun:await_up(ConnPid, 30000),
@@ -222,30 +197,37 @@ ws_connect(Port, Token) ->
         after 60000 ->
             error(auth_timeout)
         end,
-        {ok, {ConnPid, StreamRef}}
+
+        T0 = erlang:monotonic_time(microsecond),
+        Latencies = heartbeat_loop(ConnPid, StreamRef, MsgsPerConn, []),
+        Elapsed = erlang:monotonic_time(microsecond) - T0,
+        gun:close(ConnPid),
+        {ok, #{
+            elapsed_us => Elapsed,
+            sent => MsgsPerConn,
+            received => length(Latencies),
+            latencies => Latencies
+        }}
     catch
         Class:Reason:Stack ->
             {error, {Class, Reason, hd(Stack)}}
     end.
 
-blast_messages(_ConnPid, _StreamRef, 0) ->
-    ok;
-blast_messages(ConnPid, StreamRef, Remaining) ->
+heartbeat_loop(_ConnPid, _StreamRef, 0, Acc) ->
+    lists:reverse(Acc);
+heartbeat_loop(ConnPid, StreamRef, Remaining, Acc) ->
     Msg = json:encode(#{
         ~"type" => ~"session.heartbeat",
         ~"cid" => integer_to_binary(Remaining)
     }),
+    T0 = erlang:monotonic_time(microsecond),
     gun:ws_send(ConnPid, StreamRef, {text, Msg}),
-    blast_messages(ConnPid, StreamRef, Remaining - 1).
-
-drain_replies(_ConnPid, _StreamRef, 0, Count) ->
-    Count;
-drain_replies(ConnPid, StreamRef, Remaining, Count) ->
     receive
         {gun_ws, ConnPid, StreamRef, {text, _}} ->
-            drain_replies(ConnPid, StreamRef, Remaining - 1, Count + 1)
-    after 15000 ->
-        Count
+            Latency = erlang:monotonic_time(microsecond) - T0,
+            heartbeat_loop(ConnPid, StreamRef, Remaining - 1, [Latency | Acc])
+    after 10000 ->
+        lists:reverse(Acc)
     end.
 
 %% --- Registration Batches ---
