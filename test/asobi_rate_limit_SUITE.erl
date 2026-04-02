@@ -42,13 +42,13 @@ allows_under_limit(Config) ->
     Config.
 
 blocks_over_limit(Config) ->
-    %% Auth limiter is 20 req/60s — exhaust it
+    {allow, #{remaining := Remaining}} = seki:inspect(asobi_auth_limiter, ~"exhaust_test"),
     seki:reset(asobi_auth_limiter, ~"exhaust_test"),
     lists:foreach(
         fun(_) ->
             seki:check(asobi_auth_limiter, ~"exhaust_test")
         end,
-        lists:seq(1, 20)
+        lists:seq(1, Remaining + 1)
     ),
     {deny, #{retry_after := RetryAfter}} = seki:check(asobi_auth_limiter, ~"exhaust_test"),
     ?assert(RetryAfter > 0),
