@@ -16,7 +16,7 @@
  {<<"pgo">>,{pkg,<<"pgo">>,<<"0.20.0">>},1},
  {<<"ranch">>,{pkg,<<"ranch">>,<<"2.2.0">>},2},
  {<<"routing_tree">>,{pkg,<<"routing_tree">>,<<"1.0.11">>},1},
- {<<"seki">>,{pkg,<<"seki">>,<<"0.4.3">>},1},
+ {<<"seki">>,{pkg,<<"seki">>,<<"0.4.3">>},0},
  {<<"shigoto">>,{pkg,<<"shigoto">>,<<"1.2.1">>},0},
  {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.4.1">>},1},
  {<<"telemetry_registry">>,{pkg,<<"telemetry_registry">>,<<"0.3.2">>},2},
