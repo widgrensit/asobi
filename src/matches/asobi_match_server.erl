@@ -92,7 +92,7 @@ callback_mode() -> [state_functions, state_enter].
 -spec init(map()) -> {ok, atom(), map()}.
 init(Config) ->
     MatchId = maps:get(match_id, Config, generate_id()),
-    global:register_name({asobi_match_server, MatchId}, self()),
+    _ = global:register_name({asobi_match_server, MatchId}, self()),
     case recover_state(MatchId) of
         {ok, SavedStatus, SavedState} ->
             logger:notice(#{msg => ~"match recovered", match_id => MatchId, status => SavedStatus}),
@@ -135,7 +135,9 @@ waiting({call, From}, get_info, State) ->
 waiting(state_timeout, waiting_timeout, State) ->
     {stop, {shutdown, timeout}, State};
 waiting(cast, {leave, PlayerId}, State) ->
-    handle_leave(PlayerId, State).
+    handle_leave(PlayerId, State);
+waiting(cast, cancel, State) ->
+    {stop, {shutdown, cancelled}, State}.
 
 %% --- running state ---
 

@@ -3,7 +3,7 @@
 
 -include_lib("kura/include/kura.hrl").
 
--export([table/0, fields/0, associations/0, indexes/0]).
+-export([table/0, fields/0, associations/0, indexes/0, generate_id/0]).
 
 -spec table() -> binary().
 table() -> ~"group_members".
@@ -17,6 +17,9 @@ fields() ->
         #kura_field{name = role, type = string, default = ~"member", nullable = false},
         #kura_field{name = joined_at, type = utc_datetime, nullable = false}
     ].
+
+-spec generate_id() -> binary().
+generate_id() -> asobi_id:generate().
 
 -spec associations() -> [#kura_assoc{}].
 associations() ->

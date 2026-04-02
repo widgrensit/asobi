@@ -4,7 +4,7 @@
 -export([index/1, show/1]).
 
 -spec index(cowboy_req:req()) -> {json, map()} | {status, integer()}.
-index(#{bindings := #{~"match_id" := MatchId}, auth_data := #{player_id := _PlayerId}} = _Req) ->
+index(#{bindings := #{~"id" := MatchId}, auth_data := #{player_id := _PlayerId}} = _Req) ->
     Q0 = kura_query:from(asobi_vote),
     Q1 = kura_query:where(Q0, {match_id, MatchId}),
     Q2 = kura_query:order_by(Q1, [{inserted_at, desc}]),

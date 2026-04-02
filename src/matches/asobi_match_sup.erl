@@ -6,7 +6,10 @@
 
 -spec start_link() -> supervisor:startlink_ret().
 start_link() ->
-    _ = ets:new(asobi_match_state, [named_table, public, set, {read_concurrency, true}]),
+    case ets:whereis(asobi_match_state) of
+        undefined -> _ = ets:new(asobi_match_state, [named_table, public, set, {read_concurrency, true}]);
+        _ -> ok
+    end,
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 -spec start_match(map()) -> supervisor:startchild_ret().

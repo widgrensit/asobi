@@ -1,30 +1,31 @@
 -module(asobi_rate_limit_plugin).
 -behaviour(nova_plugin).
 
--export([pre_request/2, post_request/2, plugin_info/0]).
+-export([pre_request/4, post_request/4, plugin_info/0]).
 
 -define(ETS_TABLE, asobi_rate_limits).
 -define(DEFAULT_LIMIT, 100).
 -define(DEFAULT_WINDOW, 60000).
 
--spec pre_request(cowboy_req:req(), map()) ->
-    {ok, cowboy_req:req()} | {stop, cowboy_req:req()}.
-pre_request(Req, Options) ->
+-spec pre_request(cowboy_req:req(), map(), map(), term()) ->
+    {ok, cowboy_req:req(), term()} | {break, cowboy_req:req(), term()}.
+pre_request(Req, _Env, Options, State) ->
     Limit = maps:get(limit, Options, ?DEFAULT_LIMIT),
     Window = maps:get(window, Options, ?DEFAULT_WINDOW),
     Key = rate_limit_key(Req),
     case check_rate(Key, Limit, Window) of
         ok ->
-            {ok, Req};
+            {ok, Req, State};
         rate_limited ->
             Body = json:encode(#{~"error" => ~"rate_limited", ~"retry_after" => Window div 1000}),
             Req1 = cowboy_req:reply(429, #{~"content-type" => ~"application/json"}, Body, Req),
-            {stop, Req1}
+            {break, Req1, State}
     end.
 
--spec post_request(cowboy_req:req(), map()) -> {ok, cowboy_req:req()}.
-post_request(Req, _Options) ->
-    {ok, Req}.
+-spec post_request(cowboy_req:req(), map(), map(), term()) ->
+    {ok, cowboy_req:req(), term()}.
+post_request(Req, _Env, _Options, State) ->
+    {ok, Req, State}.
 
 -spec plugin_info() -> map().
 plugin_info() ->
@@ -44,19 +45,14 @@ rate_limit_key(Req) ->
         case cowboy_req:header(~"authorization", Req) of
             <<"Bearer ", _/binary>> ->
                 case maps:get(auth_data, Req, undefined) of
-                    #{player_id := Id} -> Id;
+                    #{player_id := Id} when is_binary(Id) -> Id;
                     _ -> peer_ip(Req)
                 end;
             _ ->
                 peer_ip(Req)
         end,
     Path = cowboy_req:path(Req),
-    BinId =
-        case PlayerId of
-            B when is_binary(B) -> B;
-            _ -> ~""
-        end,
-    {BinId, Path}.
+    {PlayerId, Path}.
 
 -spec peer_ip(cowboy_req:req()) -> binary().
 peer_ip(Req) ->
@@ -71,15 +67,12 @@ check_rate(Key, Limit, Window) ->
     Now = erlang:system_time(millisecond),
     case ets:lookup(?ETS_TABLE, Key) of
         [{Key, _Count, WindowStart}] when (Now - WindowStart) >= Window ->
-            %% Window expired — reset
             ets:insert(?ETS_TABLE, {Key, 1, Now}),
             ok;
         [{Key, _Count, _WindowStart}] ->
-            %% Active window — atomically increment and check
             NewCount = ets:update_counter(?ETS_TABLE, Key, {2, 1}),
             case NewCount > Limit of
                 true ->
-                    %% Over limit — roll back the increment
                     _ = ets:update_counter(?ETS_TABLE, Key, {2, -1}),
                     rate_limited;
                 false ->

@@ -3,7 +3,7 @@
 
 -include_lib("kura/include/kura.hrl").
 
--export([table/0, fields/0, associations/0]).
+-export([table/0, fields/0, associations/0, generate_id/0]).
 
 -spec table() -> binary().
 table() -> ~"player_stats".
@@ -20,6 +20,9 @@ fields() ->
         #kura_field{name = metadata, type = jsonb, default = #{}},
         #kura_field{name = updated_at, type = utc_datetime, nullable = false}
     ].
+
+-spec generate_id() -> binary().
+generate_id() -> asobi_id:generate().
 
 -spec associations() -> [#kura_assoc{}].
 associations() ->

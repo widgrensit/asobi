@@ -3,7 +3,7 @@
 
 -include_lib("kura/include/kura.hrl").
 
--export([table/0, fields/0, associations/0, indexes/0]).
+-export([table/0, fields/0, associations/0, indexes/0, generate_id/0]).
 
 -spec table() -> binary().
 table() -> ~"cloud_saves".
@@ -18,6 +18,9 @@ fields() ->
         #kura_field{name = version, type = integer, default = 1, nullable = false},
         #kura_field{name = updated_at, type = utc_datetime, nullable = false}
     ].
+
+-spec generate_id() -> binary().
+generate_id() -> asobi_id:generate().
 
 -spec associations() -> [#kura_assoc{}].
 associations() ->
