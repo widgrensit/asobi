@@ -252,11 +252,17 @@ handle_message(_Msg, State) ->
 %% --- Internal ---
 
 authenticate(#{~"token" := Token}) ->
-    case nova_auth_session:get_user_by_session_token(asobi_auth, Token) of
+    case asobi_session_cache:get(Token) of
         {ok, Player} ->
             {ok, maps:get(id, Player)};
-        {error, _} ->
-            {error, ~"invalid_token"}
+        miss ->
+            case nova_auth_session:get_user_by_session_token(asobi_auth, Token) of
+                {ok, Player} ->
+                    asobi_session_cache:put(Token, Player),
+                    {ok, maps:get(id, Player)};
+                {error, _} ->
+                    {error, ~"invalid_token"}
+            end
     end.
 
 encode_reply(Cid, Type, Payload) ->

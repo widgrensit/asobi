@@ -16,6 +16,7 @@ init([]) ->
         period => 60
     },
     Children = [
+        session_cache_spec(),
         rate_limit_spec(),
         cluster_spec(),
         player_session_sup(),
@@ -81,6 +82,12 @@ presence_spec() ->
     #{
         id => asobi_presence,
         start => {asobi_presence, start_link, []}
+    }.
+
+session_cache_spec() ->
+    #{
+        id => asobi_session_cache,
+        start => {asobi_session_cache, start_link, []}
     }.
 
 rate_limit_spec() ->

@@ -16,6 +16,7 @@ register(#{json := #{~"username" := Username, ~"password" := Password} = Params}
     of
         {ok, Player} ->
             {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
+            asobi_session_cache:put(Token, Player),
             init_player_stats(maps:get(id, Player)),
             {json, 200, #{}, #{
                 player_id => maps:get(id, Player),
@@ -35,6 +36,7 @@ login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) whe
     case nova_auth_accounts:authenticate(asobi_auth, Username, Password) of
         {ok, Player} ->
             {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
+            asobi_session_cache:put(Token, Player),
             {json, 200, #{}, #{
                 player_id => maps:get(id, Player),
                 session_token => Token,
@@ -50,8 +52,10 @@ login(_Req) ->
 refresh(#{json := #{~"session_token" := OldToken}} = _Req) when is_binary(OldToken) ->
     case nova_auth_session:get_user_by_session_token(asobi_auth, OldToken) of
         {ok, Player} ->
+            asobi_session_cache:invalidate(OldToken),
             nova_auth_session:delete_session_token(asobi_auth, OldToken),
             {ok, NewToken} = nova_auth_session:generate_session_token(asobi_auth, Player),
+            asobi_session_cache:put(NewToken, Player),
             {json, 200, #{}, #{
                 player_id => maps:get(id, Player),
                 session_token => NewToken
