@@ -11,6 +11,10 @@ setup() ->
         undefined -> ets:new(asobi_match_state, [named_table, public, set]);
         _ -> ok
     end,
+    case whereis(nova_scope) of
+        undefined -> pg:start_link(nova_scope);
+        _ -> ok
+    end,
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     meck:expect(asobi_repo, insert, fun(_CS, _Opts) -> {ok, #{}} end),

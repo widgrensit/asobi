@@ -160,11 +160,11 @@ handle_message(
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    case global:whereis_name({asobi_match_server, MatchId}) of
-        undefined ->
+    case asobi_match_server:whereis(MatchId) of
+        error ->
             Reply = encode_reply(Cid, ~"error", #{reason => ~"match_not_found"}),
             {reply, {text, Reply}, State};
-        MatchPid ->
+        {ok, MatchPid} ->
             case asobi_match_server:join(MatchPid, PlayerId) of
                 ok ->
                     Info = asobi_match_server:get_info(MatchPid),
