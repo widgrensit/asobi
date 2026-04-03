@@ -7,9 +7,9 @@
 start(_StartType, _StartArgs) ->
     case kura_migrator:migrate(asobi_repo) of
         {ok, Applied} ->
-            logger:notice(#{msg => <<"migrations_applied">>, versions => Applied});
+            logger:notice(#{msg => ~"migrations_applied", versions => Applied});
         {error, MigErr} ->
-            logger:error(#{msg => <<"migration_failed">>, error => MigErr})
+            logger:error(#{msg => ~"migration_failed", error => MigErr})
     end,
     case asobi_sup:start_link() of
         {ok, Pid} -> {ok, Pid};
