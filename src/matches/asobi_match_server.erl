@@ -115,6 +115,7 @@ init(Config) ->
             FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
             State = #{
                 match_id => MatchId,
+                mode => maps:get(mode, Config, undefined),
                 config => Config,
                 game_module => GameMod,
                 game_state => GameState,
@@ -466,12 +467,13 @@ persist_result(#{match_id := MatchId, players := Players} = State) ->
     _ = asobi_repo:insert(CS),
     ok.
 
-match_info(Status, #{match_id := MatchId, players := Players}) ->
+match_info(Status, #{match_id := MatchId, players := Players} = State) ->
     #{
         match_id => MatchId,
         status => Status,
         player_count => map_size(Players),
-        players => maps:keys(Players)
+        players => maps:keys(Players),
+        mode => maps:get(mode, State, undefined)
     }.
 
 update_frustration(#{winner := undefined}, State) ->

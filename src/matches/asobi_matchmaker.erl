@@ -209,11 +209,15 @@ resolve_strategy(#{strategy := Strategy}) when is_atom(Strategy) ->
 resolve_strategy(_) ->
     asobi_matchmaker_fill.
 
--spec resolve_game_module(binary()) -> {ok, module()} | {error, not_found}.
+-spec resolve_game_module(binary()) -> {ok, module(), map()} | {error, not_found}.
 resolve_game_module(Mode) ->
     case mode_config(Mode) of
-        #{module := Mod} when is_atom(Mod) -> {ok, Mod};
-        _ -> {error, not_found}
+        #{module := {lua, Script}} ->
+            {ok, asobi_lua_match, #{lua_script => Script}};
+        #{module := Mod} when is_atom(Mod) ->
+            {ok, Mod, #{}};
+        _ ->
+            {error, not_found}
     end.
 
 -spec spawn_matches([[map()]]) -> [[map()]].
@@ -230,11 +234,11 @@ spawn_matches([Group | Rest], Failed) ->
     MatchSize = maps:get(match_size, ModeConfig, length(PlayerIds)),
     MaxPlayers = maps:get(max_players, ModeConfig, MatchSize),
     case resolve_game_module(Mode) of
-        {ok, GameMod} ->
+        {ok, GameMod, ExtraConfig} ->
             Config = #{
                 mode => Mode,
                 game_module => GameMod,
-                game_config => #{},
+                game_config => ExtraConfig,
                 min_players => MatchSize,
                 max_players => MaxPlayers
             },
