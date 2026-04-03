@@ -12,6 +12,10 @@ routes(_Environment) ->
         ws_routes()
     ].
 
+cors_opts() ->
+    Origins = application:get_env(asobi, cors_allow_origins, ~"*"),
+    #{allow_origins => Origins}.
+
 rate_limit_opts(Group) ->
     #{limiter => limiter_name(Group)}.
 
@@ -27,7 +31,7 @@ auth_routes() ->
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true
             }},
-            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
+            {pre_request, nova_cors_plugin, cors_opts()},
             {pre_request, nova_correlation_plugin, #{}},
             {pre_request, asobi_rate_limit_plugin, rate_limit_opts(auth)}
         ],
@@ -47,7 +51,7 @@ iap_routes() ->
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true
             }},
-            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
+            {pre_request, nova_cors_plugin, cors_opts()},
             {pre_request, nova_correlation_plugin, #{}},
             {pre_request, asobi_rate_limit_plugin, rate_limit_opts(iap)}
         ],
@@ -66,7 +70,7 @@ api_routes() ->
                 decode_json_body => true,
                 parse_qs => true
             }},
-            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
+            {pre_request, nova_cors_plugin, cors_opts()},
             {pre_request, nova_correlation_plugin, #{}},
             {pre_request, asobi_rate_limit_plugin, rate_limit_opts(api)}
         ],
