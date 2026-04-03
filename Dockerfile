@@ -17,28 +17,35 @@ RUN rebar3 compile --deps_only
 # Copy source and build release
 COPY config/ config/
 COPY src/ src/
-COPY priv/ priv/
 RUN rebar3 as prod release
 
 # --- Runtime ---
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libncurses6 libssl3 libtinfo6 ca-certificates && \
+    libncurses6 libssl3 libtinfo6 ca-certificates tini && \
     rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r asobi && useradd -r -g asobi -d /app asobi
 
 WORKDIR /app
 COPY --from=builder /build/_build/prod/rel/asobi/ ./
-RUN chown -R asobi:asobi /app
+
+# Game scripts mount point for Lua users
+RUN mkdir -p /app/game && chown -R asobi:asobi /app
+VOLUME ["/app/game"]
 
 USER asobi
 EXPOSE 8080
 
-ENV ASOBI_PORT=8080
-ENV ASOBI_NODE_HOST=127.0.0.1
-ENV ERLANG_COOKIE=asobi_cookie
+ENV ASOBI_PORT=8080 \
+    ASOBI_NODE_HOST=127.0.0.1 \
+    ERLANG_COOKIE=asobi_cookie \
+    ASOBI_DB_HOST=db \
+    ASOBI_DB_NAME=asobi \
+    ASOBI_DB_USER=postgres \
+    ASOBI_DB_PASSWORD=postgres \
+    ASOBI_CORS_ORIGINS=*
 
-ENTRYPOINT ["bin/asobi"]
-CMD ["foreground"]
+ENTRYPOINT ["tini", "--"]
+CMD ["bin/asobi", "foreground"]

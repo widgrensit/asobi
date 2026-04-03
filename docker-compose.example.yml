@@ -1,0 +1,42 @@
+## Example docker-compose for running Asobi with Lua game scripts.
+## Copy this file to your project and customize.
+##
+##   cp docker-compose.example.yml docker-compose.yml
+##   mkdir -p game
+##   # add your match.lua, bots/, etc. to game/
+##   docker compose up
+
+services:
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./game:/app/game
+    environment:
+      ASOBI_PORT: 8080
+      ASOBI_DB_HOST: db
+      ASOBI_DB_NAME: my_game
+      ASOBI_DB_USER: postgres
+      ASOBI_DB_PASSWORD: postgres
+      ASOBI_CORS_ORIGINS: "*"
+      ERLANG_COOKIE: change_me_in_production
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: my_game
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
