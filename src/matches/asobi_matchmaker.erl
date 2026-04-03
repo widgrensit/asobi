@@ -141,7 +141,7 @@ process_tickets(Tickets, Now, MaxWait) ->
         Tickets
     ),
     ByMode = group_by_mode(Pending),
-    {Matched, Unmatched} = match_groups(ByMode),
+    {Matched, Unmatched} = match_all_modes(ByMode),
     Remaining = ensure_map(
         lists:foldl(
             fun(T, Acc) when is_map(T), is_map(Acc) -> Acc#{maps:get(id, T) => T} end,
@@ -177,52 +177,44 @@ ensure_typed_map(Map) ->
         Map
     ).
 
--spec match_groups(#{binary() => [map()]}) -> {[[map()]], [[map()]]}.
-match_groups(ByMode) ->
+-spec match_all_modes(#{binary() => [map()]}) -> {[[map()]], [[map()]]}.
+match_all_modes(ByMode) ->
     maps:fold(
-        fun(_Mode, ModeTickets, {AllMatched, AllUnmatched}) ->
-            {M, U} = try_match(ModeTickets),
+        fun(Mode, ModeTickets, {AllMatched, AllUnmatched}) ->
+            ModeConfig = mode_config(Mode),
+            Strategy = resolve_strategy(ModeConfig),
+            {M, U} = Strategy:match(ModeTickets, ModeConfig),
             {M ++ AllMatched, [U | AllUnmatched]}
         end,
         {[], []},
         ByMode
     ).
 
--spec try_match([map()]) -> {[[map()]], [map()]}.
-try_match(Tickets) when length(Tickets) < 2 ->
-    {[], Tickets};
-try_match(Tickets) ->
-    Sorted = [
-        T
-     || T <- lists:sort(fun(A, B) when is_map(A), is_map(B) -> skill(A) =< skill(B) end, Tickets),
-        is_map(T)
-    ],
-    match_sorted(Sorted, [], []).
-
--spec match_sorted([map()], [[map()]], [map()]) -> {[[map()]], [map()]}.
-match_sorted([], Matched, Unmatched) ->
-    {Matched, Unmatched};
-match_sorted([Last], Matched, Unmatched) ->
-    {Matched, [Last | Unmatched]};
-match_sorted([A, B | Rest], Matched, Unmatched) ->
-    Window = skill_window(A),
-    case abs(skill(A) - skill(B)) =< Window of
-        true ->
-            match_sorted(Rest, [[A, B] | Matched], Unmatched);
-        false ->
-            match_sorted([B | Rest], Matched, [A | Unmatched])
+-spec mode_config(binary()) -> map().
+mode_config(Mode) ->
+    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
+    case Modes of
+        #{Mode := Config} when is_map(Config) -> Config;
+        #{Mode := Mod} when is_atom(Mod) -> #{module => Mod};
+        _ -> #{}
     end.
 
--spec skill(map()) -> integer().
-skill(#{properties := #{skill := S}}) when is_integer(S) -> S;
-skill(#{properties := #{~"skill" := S}}) when is_integer(S) -> S;
-skill(_) -> 1000.
+-spec resolve_strategy(map()) -> module().
+resolve_strategy(#{strategy := Strategy}) when is_atom(Strategy) ->
+    case Strategy of
+        fill -> asobi_matchmaker_fill;
+        skill_based -> asobi_matchmaker_skill;
+        Mod -> Mod
+    end;
+resolve_strategy(_) ->
+    asobi_matchmaker_fill.
 
--spec skill_window(map()) -> integer().
-skill_window(#{submitted_at := Sub}) ->
-    WaitSec = (erlang:system_time(millisecond) - Sub) div 1000,
-    %% Start with ±200, expand by 50 every 5 seconds
-    200 + (WaitSec div 5) * 50.
+-spec resolve_game_module(binary()) -> {ok, module()} | {error, not_found}.
+resolve_game_module(Mode) ->
+    case mode_config(Mode) of
+        #{module := Mod} when is_atom(Mod) -> {ok, Mod};
+        _ -> {error, not_found}
+    end.
 
 -spec spawn_matches([[map()]]) -> [[map()]].
 spawn_matches(Groups) ->
@@ -234,14 +226,17 @@ spawn_matches([Group | Rest], Failed) ->
     PlayerIds = [maps:get(player_id, T) || T <- Group],
     [First | _] = Group,
     Mode = maps:get(mode, First),
+    ModeConfig = mode_config(Mode),
+    MatchSize = maps:get(match_size, ModeConfig, length(PlayerIds)),
+    MaxPlayers = maps:get(max_players, ModeConfig, MatchSize),
     case resolve_game_module(Mode) of
         {ok, GameMod} ->
             Config = #{
                 mode => Mode,
                 game_module => GameMod,
                 game_config => #{},
-                min_players => length(PlayerIds),
-                max_players => length(PlayerIds)
+                min_players => MatchSize,
+                max_players => MaxPlayers
             },
             case asobi_match_sup:start_match(Config) of
                 {ok, MatchPid} when is_pid(MatchPid) ->
@@ -282,14 +277,6 @@ spawn_matches([Group | Rest], Failed) ->
                 PlayerIds
             ),
             spawn_matches(Rest, Failed)
-    end.
-
--spec resolve_game_module(binary()) -> {ok, module()} | {error, not_found}.
-resolve_game_module(Mode) ->
-    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
-    case Modes of
-        #{Mode := Mod} when is_atom(Mod) -> {ok, Mod};
-        _ -> {error, not_found}
     end.
 
 -spec notify_expired([map()]) -> ok.
