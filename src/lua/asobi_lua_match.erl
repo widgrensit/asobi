@@ -46,9 +46,10 @@ init(Config) ->
     GameConfig = maps:get(game_config, Config, #{}),
     case asobi_lua_loader:new(ScriptPath) of
         {ok, LuaSt0} ->
-            case asobi_lua_loader:call(init, [GameConfig], LuaSt0) of
-                {ok, [GameState | _], LuaSt1} ->
-                    {ok, #{lua_state => LuaSt1, game_state => GameState, script => ScriptPath}};
+            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0),
+            case asobi_lua_loader:call(init, [EncConfig], LuaSt1) of
+                {ok, [GameState | _], LuaSt2} ->
+                    {ok, #{lua_state => LuaSt2, game_state => GameState, script => ScriptPath}};
                 {ok, [], _} ->
                     {error, {lua_error, ~"init() must return a table"}};
                 {error, Reason} ->
@@ -80,9 +81,10 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec handle_input(binary(), map(), map()) -> {ok, map()}.
 handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(handle_input, [PlayerId, Input, GS], LuaSt) of
-        {ok, [GS1 | _], LuaSt1} ->
-            {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+    {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
+    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, GS], LuaSt1) of
+        {ok, [GS1 | _], LuaSt2} ->
+            {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, Reason} ->
             logger:warning(#{
                 msg => ~"lua input error", player_id => PlayerId, reason => Reason
@@ -94,10 +96,9 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
 tick(#{lua_state := LuaSt, game_state := GS} = State) ->
     case asobi_lua_loader:call(tick, [GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
-            case is_finished(GS1) of
+            case is_finished(GS1, LuaSt1) of
                 {true, Result} ->
-                    GS2 = remove_finished_flag(GS1),
-                    {finished, Result, State#{lua_state => LuaSt1, game_state => GS2}};
+                    {finished, Result, State#{lua_state => LuaSt1, game_state => GS1}};
                 false ->
                     {ok, State#{lua_state => LuaSt1, game_state => GS1}}
             end;
@@ -112,10 +113,8 @@ tick(#{lua_state := LuaSt, game_state := GS} = State) ->
 -spec get_state(binary(), map()) -> map().
 get_state(PlayerId, #{lua_state := LuaSt, game_state := GS} = _State) ->
     case asobi_lua_loader:call(get_state, [PlayerId, GS], LuaSt) of
-        {ok, [PlayerState | _], _LuaSt1} when is_map(PlayerState) ->
-            PlayerState;
-        {ok, [PlayerState | _], _LuaSt1} ->
-            ensure_map(PlayerState);
+        {ok, [PlayerState | _], LuaSt1} ->
+            decode_to_map(PlayerState, LuaSt1);
         {error, _} ->
             #{}
     end.
@@ -123,38 +122,54 @@ get_state(PlayerId, #{lua_state := LuaSt, game_state := GS} = _State) ->
 -spec vote_requested(map()) -> {ok, map()} | none.
 vote_requested(#{lua_state := LuaSt, game_state := GS}) ->
     case asobi_lua_loader:call(vote_requested, [GS], LuaSt) of
-        {ok, [nil | _], _} -> none;
-        {ok, [false | _], _} -> none;
-        {ok, [Config | _], _} when is_map(Config) -> {ok, Config};
-        _ -> none
+        {ok, [nil | _], _} ->
+            none;
+        {ok, [false | _], _} ->
+            none;
+        {ok, [Config | _], LuaSt1} ->
+            Decoded = decode_to_map(Config, LuaSt1),
+            case map_size(Decoded) of
+                0 -> none;
+                _ -> {ok, Decoded}
+            end;
+        _ ->
+            none
     end.
 
 -spec vote_resolved(binary(), map(), map()) -> {ok, map()}.
 vote_resolved(Template, Result, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(vote_resolved, [Template, Result, GS], LuaSt) of
-        {ok, [GS1 | _], LuaSt1} ->
-            {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+    {EncResult, LuaSt1} = luerl:encode(Result, LuaSt),
+    case asobi_lua_loader:call(vote_resolved, [Template, EncResult, GS], LuaSt1) of
+        {ok, [GS1 | _], LuaSt2} ->
+            {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, _} ->
             {ok, State}
     end.
 
 %% --- Internal ---
 
-is_finished(GS) when is_map(GS) ->
-    case maps:get(~"_finished", GS, maps:get(<<"_finished">>, GS, false)) of
-        true ->
-            Result = maps:get(~"_result", GS, maps:get(<<"_result">>, GS, #{})),
-            {true, ensure_map(Result)};
+is_finished(GS, LuaSt) ->
+    try
+        {ok, FinVal, LuaSt1} = luerl:get_table_key(GS, <<"_finished">>, LuaSt),
+        case FinVal of
+            true ->
+                case luerl:get_table_key(GS, <<"_result">>, LuaSt1) of
+                    {ok, ResRef, LuaSt2} -> {true, decode_to_map(ResRef, LuaSt2)};
+                    _ -> {true, #{}}
+                end;
+            _ ->
+                false
+        end
+    catch
+        _:_ -> false
+    end.
+
+decode_to_map(Term, LuaSt) ->
+    case luerl:decode(Term, LuaSt) of
+        [{K, _} | _] = PropList when is_binary(K) ->
+            maps:from_list(PropList);
+        M when is_map(M) ->
+            M;
         _ ->
-            false
-    end;
-is_finished(_) ->
-    false.
-
-remove_finished_flag(GS) when is_map(GS) ->
-    maps:without([~"_finished", <<"_finished">>, ~"_result", <<"_result">>], GS);
-remove_finished_flag(GS) ->
-    GS.
-
-ensure_map(M) when is_map(M) -> M;
-ensure_map(_) -> #{}.
+            #{}
+    end.

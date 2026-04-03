@@ -20,11 +20,11 @@ new(ScriptPath) ->
     case file:read_file(FullPath) of
         {ok, Code} ->
             try luerl:do(Code, St2) of
-                {ok, St3} -> {ok, St3};
-                {[_ | _], St3} -> {ok, St3};
-                {[], St3} -> {ok, St3}
+                {ok, _Results, St3} -> {ok, St3};
+                {error, Errors, _St3} -> {error, {lua_error, Errors}}
             catch
-                error:{lua_error, Reason, _} -> {error, {lua_error, Reason}}
+                error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
+                error:Reason -> {error, Reason}
             end;
         {error, Reason} ->
             {error, {file_error, FullPath, Reason}}
@@ -37,11 +37,16 @@ call(FuncName, Args, St) when is_atom(FuncName) ->
 call(FuncPath, Args, St) ->
     BinPath = [ensure_binary(P) || P <- FuncPath],
     try
-        {Result, St1} = luerl:call_function(BinPath, Args, St),
-        {ok, Result, St1}
+        case luerl:call_function(BinPath, Args, St) of
+            {ok, Result, St1} -> {ok, Result, St1}
+        end
     catch
-        error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
-        error:Reason -> {error, Reason}
+        error:{lua_error, Reason, _} ->
+            {error, {lua_error, Reason}};
+        error:{try_clause, {lua_error, Reason, _}} ->
+            {error, {lua_error, Reason}};
+        _:_ ->
+            {error, {call_failed, BinPath}}
     end.
 
 -spec call(atom() | [atom() | binary()], [term()], luerl:luerl_state(), non_neg_integer()) ->
@@ -63,27 +68,9 @@ call(FuncPath, Args, St, TimeoutMs) ->
 %% --- Internal ---
 
 install_searcher(BaseDir, St0) ->
-    Searcher = fun(Args, St) ->
-        case Args of
-            [ModName | _] when is_binary(ModName) ->
-                Path = resolve_module_path(BaseDir, ModName),
-                case file:read_file(Path) of
-                    {ok, Code} ->
-                        try luerl:do(Code, St) of
-                            {ok, St1} -> {[true], St1};
-                            {[_ | _], St1} -> {[true], St1};
-                            {[], St1} -> {[true], St1}
-                        catch
-                            _:_ -> {[false], St}
-                        end;
-                    {error, _} ->
-                        {[false], St}
-                end;
-            _ ->
-                {[false], St}
-        end
-    end,
-    {ok, St1} = luerl:set_table_keys([<<"package">>, <<"searchers">>], [Searcher], St0),
+    BaseDirBin = ensure_binary(BaseDir),
+    PathPattern = <<BaseDirBin/binary, "/?.lua;", BaseDirBin/binary, "/?/init.lua">>,
+    {ok, St1} = luerl:set_table_keys([<<"package">>, <<"path">>], PathPattern, St0),
     St1.
 
 install_helpers(St) ->
@@ -112,9 +99,3 @@ ensure_binary(L) when is_list(L) -> list_to_binary(L).
 
 to_string(B) when is_binary(B) -> binary_to_list(B);
 to_string(L) when is_list(L) -> L.
-
--spec resolve_module_path(string(), binary()) -> string().
-resolve_module_path(BaseDir, ModName) ->
-    Parts = binary:split(ModName, <<".">>, [global]),
-    RelPath = filename:join([binary_to_list(P) || P <- Parts]) ++ ".lua",
-    filename:join(BaseDir, RelPath).
