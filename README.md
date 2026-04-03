@@ -5,6 +5,14 @@
 
 Open-source game backend platform built on Erlang/OTP and the [Nova](https://github.com/novaframework/nova) ecosystem.
 
+<p align="center">
+  <a href="https://play.asobi.dev">
+    <img src="docs/arena-demo.gif" alt="Asobi Arena Demo" width="600">
+  </a>
+  <br>
+  <em><a href="https://play.asobi.dev">Try the live demo</a></em>
+</p>
+
 Asobi provides everything you need to build and run multiplayer games:
 authentication, player management, real-time multiplayer, matchmaking,
 leaderboards, virtual economy, social features, and background jobs -- all
