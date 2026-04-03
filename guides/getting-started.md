@@ -154,8 +154,24 @@ Register it in your config:
 ]}
 ```
 
+## Write Game Logic in Lua
+
+Don't want to write Erlang? Use Lua instead. Create `game/match.lua` and
+configure your game mode:
+
+```erlang
+{game_modes, #{
+    ~"my_mode" => #{module => {lua, "game/match.lua"}, match_size => 2}
+}}
+```
+
+See the [Lua Scripting](lua-scripting.md) guide for the full walkthrough.
+
 ## Next Steps
 
+- [Lua Scripting](lua-scripting.md) -- write game logic in Lua
+- [Bots](lua-bots.md) -- add AI-controlled players
+- [Configuration](configuration.md) -- all configuration options
 - [REST API](rest-api.md) -- full API reference
 - [WebSocket Protocol](websocket-protocol.md) -- real-time message types
 - [Matchmaking](matchmaking.md) -- query-based player matching

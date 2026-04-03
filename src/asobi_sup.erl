@@ -25,7 +25,9 @@ init([]) ->
         leaderboard_sup(),
         chat_sup(),
         tournament_sup(),
-        presence_spec()
+        presence_spec(),
+        bot_sup(),
+        bot_spawner_spec()
     ],
     {ok, {SupFlags, Children}}.
 
@@ -124,4 +126,17 @@ cluster_spec() ->
     #{
         id => asobi_cluster,
         start => {asobi_cluster, start_link, []}
+    }.
+
+bot_sup() ->
+    #{
+        id => asobi_bot_sup,
+        start => {asobi_bot_sup, start_link, []},
+        type => supervisor
+    }.
+
+bot_spawner_spec() ->
+    #{
+        id => asobi_bot_spawner,
+        start => {asobi_bot_spawner, start_link, []}
     }.
