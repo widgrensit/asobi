@@ -1,13 +1,13 @@
 FROM erlang:28.0.1-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates && \
+    git ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
 # Install rebar3
-RUN wget -q https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 -O /usr/local/bin/rebar3 && \
+RUN curl -fsSL https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 -o /usr/local/bin/rebar3 && \
     chmod +x /usr/local/bin/rebar3
 
 # Copy dependency specs first for layer caching
