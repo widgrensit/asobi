@@ -9,7 +9,7 @@ loads `bots/chaser.lua`).
 
 -export([new/1, call/3, call/4]).
 
--spec new(binary() | string()) -> {ok, luerl:luerl_state()} | {error, term()}.
+-spec new(binary() | string()) -> {ok, term()} | {error, term()}.
 new(ScriptPath) ->
     BaseDir = filename:dirname(to_string(ScriptPath)),
     FileName = filename:basename(to_string(ScriptPath)),
@@ -19,9 +19,11 @@ new(ScriptPath) ->
     FullPath = filename:join(BaseDir, FileName),
     case file:read_file(FullPath) of
         {ok, Code} ->
-            try luerl:do(Code, St2) of
+            CodeStr = binary_to_list(Code),
+            try luerl:do(CodeStr, St2) of
                 {ok, _Results, St3} -> {ok, St3};
-                {error, Errors, _St3} -> {error, {lua_error, Errors}}
+                {error, Errors, _St3} -> {error, {lua_error, Errors}};
+                {lua_error, Reason, _St3} -> {error, {lua_error, Reason}}
             catch
                 error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
                 error:Reason -> {error, Reason}
@@ -30,8 +32,8 @@ new(ScriptPath) ->
             {error, {file_error, FullPath, Reason}}
     end.
 
--spec call(atom() | [atom() | binary()], [term()], luerl:luerl_state()) ->
-    {ok, [term()], luerl:luerl_state()} | {error, term()}.
+-spec call(atom() | [atom() | binary()], [term()], term()) ->
+    {ok, [term()], term()} | {error, term()}.
 call(FuncName, Args, St) when is_atom(FuncName) ->
     call([atom_to_binary(FuncName)], Args, St);
 call(FuncPath, Args, St) ->
@@ -49,8 +51,8 @@ call(FuncPath, Args, St) ->
             {error, {call_failed, BinPath}}
     end.
 
--spec call(atom() | [atom() | binary()], [term()], luerl:luerl_state(), non_neg_integer()) ->
-    {ok, [term()], luerl:luerl_state()} | {error, timeout | term()}.
+-spec call(atom() | [atom() | binary()], [term()], term(), non_neg_integer()) ->
+    {ok, [term()], term()} | {error, timeout | term()}.
 call(FuncPath, Args, St, TimeoutMs) ->
     Self = self(),
     Ref = make_ref(),

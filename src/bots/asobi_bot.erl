@@ -204,19 +204,20 @@ maybe_auto_pick_boon(State) ->
 handle_vote_start(VotePayload, #{match_pid := MatchPid, bot_id := BotId} = State) ->
     VoteId = maps:get(vote_id, VotePayload, maps:get(~"vote_id", VotePayload, undefined)),
     Options = maps:get(options, VotePayload, maps:get(~"options", VotePayload, [])),
-    case pick_random_option(Options) of
-        undefined ->
-            ok;
-        OptionId when is_binary(VoteId), is_binary(OptionId) ->
-            timer:apply_after(
-                1000 + rand:uniform(3000),
-                asobi_match_server,
-                cast_vote,
-                [MatchPid, BotId, VoteId, OptionId]
-            );
-        _ ->
-            ok
-    end,
+    _ =
+        case pick_random_option(Options) of
+            undefined ->
+                ok;
+            OptionId when is_binary(VoteId), is_binary(OptionId) ->
+                timer:apply_after(
+                    1000 + rand:uniform(3000),
+                    asobi_match_server,
+                    cast_vote,
+                    [MatchPid, BotId, VoteId, OptionId]
+                );
+            _ ->
+                ok
+        end,
     {noreply, State#{phase => voting}}.
 
 pick_random_option([]) ->

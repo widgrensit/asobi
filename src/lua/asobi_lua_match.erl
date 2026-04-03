@@ -40,7 +40,7 @@ function vote_resolved(template, result, state) -- return updated state
 
 -define(TICK_TIMEOUT, 500).
 
--spec init(map()) -> {ok, map()}.
+-spec init(map()) -> {ok, map()} | {error, term()}.
 init(Config) ->
     ScriptPath = maps:get(lua_script, Config, undefined),
     GameConfig = maps:get(game_config, Config, #{}),
