@@ -5,23 +5,26 @@ inside the BEAM via [Luerl](https://github.com/rvirding/luerl), giving you
 the fault tolerance and concurrency of OTP with a language game developers
 already know.
 
-## Quick Start
+No Erlang knowledge required. No compilation step. Just Lua files and Docker.
 
-Create a `game/` directory with your match script:
+## Quick Start with Docker
 
-```
-my_game/
-├── game/
-│   └── match.lua
-├── rebar.config
-└── config/
-    └── dev_sys.config.src
+The fastest way to get started -- no Erlang toolchain needed:
+
+```bash
+mkdir my_game && cd my_game
+mkdir -p lua/bots
 ```
 
-Write your match logic:
+Create your match script:
 
 ```lua
--- game/match.lua
+-- lua/match.lua
+
+-- Game mode config
+match_size = 2
+max_players = 8
+strategy = "fill"
 
 function init(config)
     return {
@@ -68,7 +71,96 @@ function get_state(player_id, state)
 end
 ```
 
-Configure your game mode to use the Lua script:
+Create a `docker-compose.yml`:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: my_game_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./lua:/app/game:ro
+    environment:
+      ASOBI_DB_HOST: postgres
+      ASOBI_DB_NAME: my_game_dev
+```
+
+Start it:
+
+```bash
+docker compose up -d
+```
+
+That's it. Your game is running. Asobi reads your Lua scripts from the
+mounted volume, discovers the game mode from `match.lua`, and handles
+everything else -- database, authentication, matchmaking, WebSockets.
+
+### Multiple Game Modes
+
+For games with more than one mode, add a `config.lua` manifest:
+
+```lua
+-- lua/config.lua
+return {
+    arena = "arena/match.lua",
+    ctf   = "ctf/match.lua"
+}
+```
+
+```
+my_game/
+├── lua/
+│   ├── config.lua
+│   ├── arena/
+│   │   └── match.lua
+│   └── ctf/
+│       └── match.lua
+└── docker-compose.yml
+```
+
+Each match script declares its own config as globals. When `config.lua`
+exists, Asobi reads it instead of looking for a top-level `match.lua`.
+When there is no `config.lua`, a single `match.lua` is loaded as the
+`"default"` game mode.
+
+## Match Script Globals
+
+Declare your game mode settings as globals at the top of your match script.
+Asobi reads these at startup before calling any callbacks.
+
+```lua
+match_size   = 4                          -- required: min players to start
+max_players  = 10                         -- optional: max per match (defaults to match_size)
+strategy     = "fill"                     -- optional: "fill" or "skill_based"
+bots         = { script = "bots/ai.lua" } -- optional: enable bot filling
+```
+
+| Global | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `match_size` | yes | -- | Minimum players needed to start a match |
+| `max_players` | no | `match_size` | Maximum players per match |
+| `strategy` | no | `"fill"` | Matchmaking strategy |
+| `bots` | no | none | Bot configuration (see [Bots](lua-bots.md)) |
+
+## Using with Erlang Projects
+
+If you're building an Erlang OTP application that depends on asobi,
+configure Lua game modes in your `sys.config` instead:
 
 ```erlang
 {asobi, [
@@ -82,7 +174,8 @@ Configure your game mode to use the Lua script:
 ]}
 ```
 
-Start the server and your Lua match logic runs inside the BEAM.
+The Lua config loader only runs when a game directory with scripts exists.
+Erlang projects with their own `sys.config` are completely unaffected.
 
 ## Callbacks
 

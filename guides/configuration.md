@@ -1,12 +1,64 @@
 # Configuration
 
-All Asobi configuration lives in your `sys.config` file under the `{asobi, [...]}` key.
+Asobi supports two configuration paths depending on how you use it.
 
-## Game Modes
+## Lua (Docker)
 
-Define one or more game modes. Each mode maps a name to a module and match settings.
+For Lua game developers using the Docker image, configuration lives in
+your Lua scripts. No Erlang syntax needed.
 
-### Erlang Module
+### Game Mode Config
+
+Declare settings as globals at the top of your match script:
+
+```lua
+-- match.lua
+match_size = 4
+max_players = 10
+strategy = "fill"
+bots = { script = "bots/arena_bot.lua" }
+```
+
+| Global | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `match_size` | yes | -- | Minimum players to start a match |
+| `max_players` | no | `match_size` | Maximum players per match |
+| `strategy` | no | `"fill"` | `"fill"`, `"skill_based"`, or custom |
+| `bots` | no | none | `{ script = "path/to/bot.lua" }` |
+
+### Multiple Game Modes
+
+Add a `config.lua` manifest mapping mode names to scripts:
+
+```lua
+-- config.lua
+return {
+    arena = "arena/match.lua",
+    ctf   = "ctf/match.lua"
+}
+```
+
+### Infrastructure Config
+
+Infrastructure settings come from environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASOBI_PORT` | `8080` | HTTP/WebSocket port |
+| `ASOBI_DB_HOST` | `db` | PostgreSQL host |
+| `ASOBI_DB_NAME` | `asobi` | Database name |
+| `ASOBI_DB_USER` | `postgres` | Database user |
+| `ASOBI_DB_PASSWORD` | `postgres` | Database password |
+| `ASOBI_CORS_ORIGINS` | `*` | Allowed CORS origins |
+| `ASOBI_NODE_HOST` | `127.0.0.1` | Erlang node hostname |
+| `ERLANG_COOKIE` | `asobi_cookie` | Erlang distribution cookie |
+
+## Erlang (sys.config)
+
+For Erlang OTP projects that add asobi as a dependency, all configuration
+lives in `sys.config` under the `{asobi, [...]}` key.
+
+### Game Modes
 
 ```erlang
 {game_modes, #{
@@ -19,7 +71,7 @@ Define one or more game modes. Each mode maps a name to a module and match setti
 }}
 ```
 
-### Lua Script
+Lua scripts work too:
 
 ```erlang
 {game_modes, #{
@@ -32,7 +84,7 @@ Define one or more game modes. Each mode maps a name to a module and match setti
 }}
 ```
 
-### Shorthand (Erlang only)
+Shorthand (Erlang module only):
 
 ```erlang
 {game_modes, #{
@@ -197,7 +249,7 @@ Database configuration is under the `kura` application key:
 ]}
 ```
 
-## Full Example
+## Full Example (Erlang sys.config)
 
 ```erlang
 [
@@ -236,11 +288,63 @@ Database configuration is under the `kura` application key:
                     enabled => true,
                     fill_after_ms => 8000,
                     min_players => 4,
-                    script => "game/bots/chaser.lua",
-                    names => [~"Spark", ~"Blitz", ~"Volt", ~"Neon"]
+                    script => <<"game/bots/chaser.lua">>
                 }
             }
         }}
     ]}
 ].
+```
+
+## Full Example (Lua Docker)
+
+```yaml
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: my_game_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./lua:/app/game:ro
+    environment:
+      ASOBI_DB_HOST: postgres
+      ASOBI_DB_NAME: my_game_dev
+```
+
+```lua
+-- lua/match.lua
+match_size = 4
+max_players = 8
+strategy = "fill"
+bots = { script = "bots/chaser.lua" }
+
+function init(config)
+    return { players = {} }
+end
+
+-- ... rest of callbacks
+```
+
+```lua
+-- lua/bots/chaser.lua
+names = {"Spark", "Blitz", "Volt", "Neon"}
+
+function think(bot_id, state)
+    -- AI logic
+end
 ```

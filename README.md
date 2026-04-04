@@ -33,17 +33,93 @@ in a single BEAM release.
 - **Background Jobs** -- powered by [Shigoto](https://github.com/Taure/shigoto)
 - **Admin Dashboard** -- real-time LiveView console via [Arizona](https://github.com/novaframework/arizona_core)
 
-## Quick Start
+## Quick Start with Lua (Docker)
 
-### Prerequisites
+No Erlang needed. Just Lua scripts and Docker.
 
-- Erlang/OTP 27+
-- PostgreSQL 15+
-- [rebar3](https://rebar3.org)
+```bash
+mkdir my_game && cd my_game
+mkdir -p lua/bots
+```
 
-### Setup
+Write your game logic in Lua:
 
-Add asobi as a dependency:
+```lua
+-- lua/match.lua
+match_size = 2
+max_players = 4
+strategy = "fill"
+
+function init(config)
+    return { players = {} }
+end
+
+function join(player_id, state)
+    state.players[player_id] = { x = 400, y = 300, hp = 100 }
+    return state
+end
+
+function leave(player_id, state)
+    state.players[player_id] = nil
+    return state
+end
+
+function handle_input(player_id, input, state)
+    local p = state.players[player_id]
+    if not p then return state end
+    if input.right then p.x = p.x + 5 end
+    if input.left  then p.x = p.x - 5 end
+    return state
+end
+
+function tick(state)
+    return state
+end
+
+function get_state(player_id, state)
+    return { players = state.players }
+end
+```
+
+Add a `docker-compose.yml`:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: my_game_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./lua:/app/game:ro
+    environment:
+      ASOBI_DB_HOST: postgres
+      ASOBI_DB_NAME: my_game_dev
+```
+
+```bash
+docker compose up -d
+```
+
+That's it. Your game backend is running with authentication, matchmaking,
+WebSocket transport, and everything else handled by Asobi.
+
+## Quick Start with Erlang
+
+For Erlang/OTP developers who want full control, add asobi as a dependency:
 
 ```erlang
 {deps, [
@@ -51,55 +127,7 @@ Add asobi as a dependency:
 ]}.
 ```
 
-Configure your `sys.config`:
-
-```erlang
-[
-    {kura, [
-        {repo, asobi_repo},
-        {host, "localhost"},
-        {database, "my_game_dev"},
-        {user, "postgres"},
-        {password, "postgres"}
-    ]},
-    {shigoto, [
-        {pool, asobi_repo}
-    ]},
-    {asobi, [
-        {plugins, [
-            {pre_request, nova_request_plugin, #{
-                decode_json_body => true,
-                parse_qs => true
-            }},
-            {pre_request, nova_cors_plugin, #{allow_origins => <<"*">>}},
-            {pre_request, nova_correlation_plugin, #{}}
-        ]},
-        {game_modes, #{
-            ~"my_mode" => my_game_module
-        }},
-        {matchmaker, #{
-            tick_interval => 1000,
-            max_wait_seconds => 60
-        }},
-        {session, #{
-            token_ttl => 900,
-            refresh_ttl => 2592000
-        }}
-    ]}
-].
-```
-
-Start the database and run:
-
-```bash
-rebar3 shell
-```
-
-Asobi runs migrations automatically on startup.
-
-## Implementing a Game
-
-Implement the `asobi_match` behaviour to define your game logic:
+Implement the `asobi_match` behaviour:
 
 ```erlang
 -module(my_arena_game).
@@ -107,35 +135,27 @@ Implement the `asobi_match` behaviour to define your game logic:
 
 -export([init/1, join/2, leave/2, handle_input/3, tick/1, get_state/2]).
 
-init(Config) ->
-    {ok, #{players => #{}, round => 1}}.
+init(_Config) ->
+    {ok, #{players => #{}}}.
 
-join(PlayerId, State) ->
-    {ok, State#{players => maps:put(PlayerId, #{score => 0}, maps:get(players, State))}}.
+join(PlayerId, #{players := Players} = State) ->
+    {ok, State#{players => Players#{PlayerId => #{x => 0, y => 0}}}}.
 
-leave(PlayerId, State) ->
-    {ok, State#{players => maps:remove(PlayerId, maps:get(players, State))}}.
+leave(PlayerId, #{players := Players} = State) ->
+    {ok, State#{players => maps:remove(PlayerId, Players)}}.
 
-handle_input(PlayerId, #{~"action" := ~"shoot"} = Input, State) ->
-    %% Process player input, update game state
+handle_input(_PlayerId, _Input, State) ->
     {ok, State}.
 
 tick(State) ->
-    %% Called every tick (default 10/sec) -- advance game simulation
     {ok, State}.
 
-get_state(PlayerId, State) ->
-    %% Return the state visible to this player
-    maps:get(players, State).
+get_state(_PlayerId, #{players := Players}) ->
+    Players.
 ```
 
-Register your game mode in config:
-
-```erlang
-{asobi, [
-    {game_modes, #{~"arena" => my_arena_game}}
-]}
-```
+Register it in `sys.config` and start with `rebar3 shell`.
+See the [Getting Started](guides/getting-started.md) guide for the full walkthrough.
 
 ## Stack
 
@@ -164,12 +184,15 @@ The BEAM VM is uniquely suited for game backends:
 
 Full documentation is available on [HexDocs](https://hexdocs.pm/asobi).
 
-- [Getting Started](guides/getting-started.md)
-- [REST API](guides/rest-api.md)
-- [WebSocket Protocol](guides/websocket-protocol.md)
-- [Matchmaking](guides/matchmaking.md)
-- [Economy](guides/economy.md)
-- [Architecture](docs/ARCHITECTURE.md)
+- [Getting Started](guides/getting-started.md) -- Lua (Docker) or Erlang setup
+- [Lua Scripting](guides/lua-scripting.md) -- write game logic in Lua
+- [Bots](guides/lua-bots.md) -- add AI-controlled players
+- [Configuration](guides/configuration.md) -- all configuration options
+- [REST API](guides/rest-api.md) -- full API reference
+- [WebSocket Protocol](guides/websocket-protocol.md) -- real-time message types
+- [Matchmaking](guides/matchmaking.md) -- query-based player matching
+- [Economy](guides/economy.md) -- wallets, items, and store
+- [Architecture](docs/ARCHITECTURE.md) -- system design
 
 ## License
 
