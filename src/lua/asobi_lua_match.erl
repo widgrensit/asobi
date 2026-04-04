@@ -165,11 +165,15 @@ is_finished(GS, LuaSt) ->
     end.
 
 decode_to_map(Term, LuaSt) ->
-    case luerl:decode(Term, LuaSt) of
-        [{K, _} | _] = PropList when is_binary(K) ->
-            maps:from_list(PropList);
-        M when is_map(M) ->
-            M;
-        _ ->
-            #{}
-    end.
+    deep_decode(luerl:decode(Term, LuaSt)).
+
+deep_decode([{K, _} | _] = PropList) when is_binary(K) ->
+    maps:from_list([{Key, deep_decode(Val)} || {Key, Val} <- PropList]);
+deep_decode([{N, _} | _] = NumList) when is_integer(N) ->
+    [deep_decode(Val) || {_, Val} <- lists:sort(NumList)];
+deep_decode(M) when is_map(M) ->
+    maps:map(fun(_, V) -> deep_decode(V) end, M);
+deep_decode(L) when is_list(L) ->
+    [deep_decode(E) || E <- L];
+deep_decode(V) ->
+    V.
