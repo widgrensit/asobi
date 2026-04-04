@@ -59,6 +59,10 @@ handle_info({session_revoked, Reason}, #{ws_pid := WsPid} = State) ->
     {stop, {shutdown, session_revoked}, State};
 handle_info({asobi_message, {match_joined, MatchPid}}, State) ->
     {noreply, State#{match_pid => MatchPid}};
+handle_info({asobi_message, {world_joined, WorldPid, ZonePid}}, State) ->
+    {noreply, State#{world_pid => WorldPid, zone_pid => ZonePid}};
+handle_info({asobi_message, {world_zone_changed, ZonePid}}, State) ->
+    {noreply, State#{zone_pid => ZonePid}};
 handle_info({asobi_message, _} = Msg, #{ws_pid := WsPid} = State) ->
     WsPid ! Msg,
     {noreply, State};

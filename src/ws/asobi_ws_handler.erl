@@ -34,6 +34,13 @@ websocket_info({asobi_message, {match_event, Event, Payload}}, State) when is_at
     Type = iolist_to_binary([~"match.", atom_to_binary(Event)]),
     Reply = encode_reply(undefined, Type, Payload),
     {reply, {text, Reply}, State};
+websocket_info({asobi_message, {zone_delta, TickN, Deltas}}, State) ->
+    Reply = encode_reply(undefined, ~"world.tick", #{tick => TickN, updates => Deltas}),
+    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {world_event, Event, Payload}}, State) when is_atom(Event) ->
+    Type = iolist_to_binary([~"world.", atom_to_binary(Event)]),
+    Reply = encode_reply(undefined, Type, Payload),
+    {reply, {text, Reply}, State};
 websocket_info({chat_message, ChannelId, Msg}, State) when is_map(Msg) ->
     Reply = encode_reply(undefined, ~"chat.message", Msg#{channel_id => ChannelId}),
     {reply, {text, Reply}, State};
@@ -237,6 +244,63 @@ handle_message(
                             Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
                             {reply, {text, Reply}, State}
                     end
+            end
+    catch
+        exit:{noproc, _} ->
+            {ok, State#{session => undefined}}
+    end;
+handle_message(
+    #{~"type" := ~"world.join", ~"payload" := #{~"world_id" := WorldId}} = Msg,
+    #{player_id := PlayerId} = State
+) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    case asobi_world_server:whereis(WorldId) of
+        error ->
+            Reply = encode_reply(Cid, ~"error", #{reason => ~"world_not_found"}),
+            {reply, {text, Reply}, State};
+        {ok, WorldPid} ->
+            case asobi_world_server:join(WorldPid, PlayerId) of
+                ok ->
+                    Info = asobi_world_server:get_info(WorldPid),
+                    Reply = encode_reply(Cid, ~"world.joined", Info),
+                    {reply, {text, Reply}, State};
+                {error, Reason} ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+                    {reply, {text, Reply}, State}
+            end
+    end;
+handle_message(
+    #{~"type" := ~"world.leave"} = Msg,
+    #{player_id := PlayerId, session := SessionPid} = State
+) when SessionPid =/= undefined ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    case maps:get(world_pid, asobi_player_session:get_state(SessionPid), undefined) of
+        undefined ->
+            Reply = encode_reply(Cid, ~"world.left", #{success => true}),
+            {reply, {text, Reply}, State};
+        WorldPid ->
+            asobi_world_server:leave(WorldPid, PlayerId),
+            Reply = encode_reply(Cid, ~"world.left", #{success => true}),
+            {reply, {text, Reply}, State}
+    end;
+handle_message(
+    #{~"type" := ~"world.input", ~"payload" := Payload},
+    #{session := SessionPid} = State
+) when SessionPid =/= undefined ->
+    try asobi_player_session:get_state(SessionPid) of
+        #{player_id := PlayerId} = SState ->
+            case maps:get(zone_pid, SState, undefined) of
+                undefined ->
+                    {ok, State};
+                ZonePid ->
+                    InputData =
+                        case maps:get(~"data", Payload, undefined) of
+                            undefined when is_map(Payload) -> Payload;
+                            Other when is_map(Other) -> Other;
+                            _ -> #{}
+                        end,
+                    asobi_zone:player_input(ZonePid, PlayerId, InputData),
+                    {ok, State}
             end
     catch
         exit:{noproc, _} ->

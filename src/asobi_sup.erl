@@ -20,6 +20,7 @@ init([]) ->
         cluster_spec(),
         player_session_sup(),
         match_sup(),
+        world_sup(),
         vote_sup(),
         matchmaker_spec(),
         leaderboard_sup(),
@@ -42,6 +43,13 @@ match_sup() ->
     #{
         id => asobi_match_sup,
         start => {asobi_match_sup, start_link, []},
+        type => supervisor
+    }.
+
+world_sup() ->
+    #{
+        id => asobi_world_sup,
+        start => {asobi_world_sup, start_link, []},
         type => supervisor
     }.
 
