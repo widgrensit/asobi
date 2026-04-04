@@ -163,17 +163,21 @@ running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue
         true ->
             case Mod:tick(GS1) of
                 {ok, GS2} ->
-                    broadcast_state(State#{game_state => GS2}),
-                    {keep_state, State#{game_state => GS2, input_queue => []}, [
-                        {state_timeout, maps:get(tick_rate, State), tick}
+                    State1 = State#{game_state => GS2, input_queue => []},
+                    State2 = maybe_start_vote(Mod, State1),
+                    broadcast_state(State2),
+                    {keep_state, State2, [
+                        {state_timeout, maps:get(tick_rate, State2), tick}
                     ]};
                 {finished, Result, GS2} ->
                     {next_state, finished, State#{game_state => GS2, result => Result}}
             end;
         false ->
-            broadcast_state(State#{game_state => GS1}),
-            {keep_state, State#{game_state => GS1, input_queue => []}, [
-                {state_timeout, maps:get(tick_rate, State), tick}
+            State1 = State#{game_state => GS1, input_queue => []},
+            State2 = maybe_start_vote(Mod, State1),
+            broadcast_state(State2),
+            {keep_state, State2, [
+                {state_timeout, maps:get(tick_rate, State2), tick}
             ]}
     end;
 running(cast, {input, PlayerId, Input}, #{input_queue := Queue} = State) ->
@@ -475,6 +479,73 @@ match_info(Status, #{match_id := MatchId, players := Players} = State) ->
         players => maps:keys(Players),
         mode => maps:get(mode, State, undefined)
     }.
+
+maybe_start_vote(Mod, #{game_state := GS} = State) ->
+    case erlang:function_exported(Mod, vote_requested, 1) of
+        false ->
+            State;
+        true ->
+            case Mod:vote_requested(GS) of
+                {ok, VoteConfig} when is_map(VoteConfig) ->
+                    do_start_vote(Mod, VoteConfig, State);
+                _ ->
+                    State
+            end
+    end.
+
+do_start_vote(
+    Mod, VoteConfig, #{match_id := MatchId, players := Players, game_state := GS} = State
+) ->
+    FullConfig = build_vote_config(VoteConfig, MatchId, Players, State),
+    case asobi_vote_sup:start_vote(FullConfig) of
+        {ok, VotePid} ->
+            VoteId = maps:get(vote_id, FullConfig),
+            Active = maps:get(active_votes, State, #{}),
+            State1 = State#{active_votes => Active#{VoteId => VotePid}},
+            notify_vote_started(Mod, GS, State1);
+        {error, _} ->
+            State
+    end.
+
+build_vote_config(VoteConfig, MatchId, Players, State) ->
+    VoteId = maps:get(vote_id, VoteConfig, asobi_id:generate()),
+    PlayerIds = maps:keys(Players),
+    Weights = merge_vote_weights(VoteConfig, PlayerIds, State),
+    VoteConfig#{
+        vote_id => VoteId,
+        match_id => MatchId,
+        match_pid => self(),
+        eligible => PlayerIds,
+        weights => Weights
+    }.
+
+merge_vote_weights(VoteConfig, PlayerIds, State) ->
+    Frustration = maps:get(vote_frustration, State, #{}),
+    FBonus = maps:get(frustration_bonus, State, 0),
+    FWeights = lists:foldl(
+        fun(PId, Acc) ->
+            FVal =
+                case maps:get(PId, Frustration, 0) of
+                    N when is_number(N) -> N;
+                    _ -> 0
+                end,
+            Acc#{PId => 1 + FVal * FBonus}
+        end,
+        #{},
+        PlayerIds
+    ),
+    BaseWeights =
+        case maps:get(weights, VoteConfig, #{}) of
+            BW when is_map(BW) -> BW;
+            _ -> #{}
+        end,
+    maps:merge(FWeights, BaseWeights).
+
+notify_vote_started(Mod, GS, State) ->
+    case erlang:function_exported(Mod, vote_started, 1) of
+        true -> State#{game_state => Mod:vote_started(GS)};
+        false -> State
+    end.
 
 update_frustration(#{winner := undefined}, State) ->
     State;

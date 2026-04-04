@@ -13,7 +13,36 @@ such as path selection, item picks, event choices, and run modifiers.
 
 ## Starting a Vote
 
-Votes are started from a game mode callback or via the match server API:
+There are two ways to start a vote:
+
+### Automatic (via `vote_requested` callback)
+
+The match server polls the `vote_requested/1` callback after every tick. Return
+a vote config to start a vote, or `none`/`nil` to skip. This is the simplest
+approach and works for both Erlang and Lua game modules. Votes can be triggered
+at any point during gameplay - not just between rounds.
+
+```erlang
+vote_requested(#{phase := vote_pending} = _GameState) ->
+    {ok, #{
+        template => ~"path_choice",
+        options => [
+            #{id => ~"jungle", label => ~"Jungle Path"},
+            #{id => ~"volcano", label => ~"Volcano Path"}
+        ],
+        window_ms => 15000,
+        method => ~"plurality"
+    }};
+vote_requested(_) ->
+    none.
+```
+
+When a vote starts this way, the optional `vote_started/1` callback is called
+to let the game module update its state (e.g. change phase).
+
+### Manual (via match server API)
+
+Votes can also be started explicitly from a game mode callback:
 
 ```erlang
 %% From inside a game module callback
