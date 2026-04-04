@@ -33,6 +33,7 @@
         {pool_size, 20}
     ]},
     {asobi, [
+        {game_dir, "/app/game"},
         {nova_apps, [nova_resilience]},
         {plugins, [
             {pre_request, nova_request_plugin, #{

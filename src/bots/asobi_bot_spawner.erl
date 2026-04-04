@@ -3,21 +3,8 @@
 Watches the matchmaker queue and fills with bots when players are waiting.
 Also starts bot AI processes when bots join matches.
 
-Configuration per game mode:
-```erlang
-#{
-    ~"arena" => #{
-        module => {lua, "priv/lua/match.lua"},
-        bots => #{
-            enabled => true,
-            fill_after_ms => 8000,
-            min_players => 4,
-            script => "priv/lua/bots/chaser.lua",
-            names => [~"Spark", ~"Blitz", ~"Volt", ~"Neon", ~"Pulse"]
-        }
-    }
-}
-```
+Bot names are read from the bot script's `names` global. If not defined,
+falls back to default generated names.
 """.
 
 -behaviour(gen_server).
@@ -74,7 +61,7 @@ fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
             MinPlayers = maps:get(min_players, BotConfig, 4),
             case Count < MinPlayers of
                 true ->
-                    Names = maps:get(names, BotConfig, default_names()),
+                    Names = load_bot_names(BotConfig),
                     BotsNeeded = MinPlayers - Count,
                     lists:foreach(
                         fun(N) ->
@@ -141,6 +128,28 @@ start_bots_for_match(MatchId) ->
     end.
 
 %% --- Config Helpers ---
+
+load_bot_names(#{names := Names}) when is_list(Names) ->
+    Names;
+load_bot_names(#{script := Script}) when is_binary(Script); is_list(Script) ->
+    case asobi_lua_loader:new(Script) of
+        {ok, St} ->
+            case luerl:get_table_keys([~"names"], St) of
+                {ok, Val, St1} when Val =/= nil, Val =/= false ->
+                    case luerl:decode(Val, St1) of
+                        Props when is_list(Props) ->
+                            [V || {_, V} <- Props, is_binary(V)];
+                        _ ->
+                            default_names()
+                    end;
+                _ ->
+                    default_names()
+            end;
+        {error, _} ->
+            default_names()
+    end;
+load_bot_names(_) ->
+    default_names().
 
 bot_config(Mode) ->
     Modes =
