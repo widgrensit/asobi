@@ -493,7 +493,9 @@ maybe_start_vote(Mod, #{game_state := GS} = State) ->
             end
     end.
 
-do_start_vote(Mod, VoteConfig, #{match_id := MatchId, players := Players, game_state := GS} = State) ->
+do_start_vote(
+    Mod, VoteConfig, #{match_id := MatchId, players := Players, game_state := GS} = State
+) ->
     FullConfig = build_vote_config(VoteConfig, MatchId, Players, State),
     case asobi_vote_sup:start_vote(FullConfig) of
         {ok, VotePid} ->
@@ -522,19 +524,21 @@ merge_vote_weights(VoteConfig, PlayerIds, State) ->
     FBonus = maps:get(frustration_bonus, State, 0),
     FWeights = lists:foldl(
         fun(PId, Acc) ->
-            FVal = case maps:get(PId, Frustration, 0) of
-                N when is_number(N) -> N;
-                _ -> 0
-            end,
+            FVal =
+                case maps:get(PId, Frustration, 0) of
+                    N when is_number(N) -> N;
+                    _ -> 0
+                end,
             Acc#{PId => 1 + FVal * FBonus}
         end,
         #{},
         PlayerIds
     ),
-    BaseWeights = case maps:get(weights, VoteConfig, #{}) of
-        BW when is_map(BW) -> BW;
-        _ -> #{}
-    end,
+    BaseWeights =
+        case maps:get(weights, VoteConfig, #{}) of
+            BW when is_map(BW) -> BW;
+            _ -> #{}
+        end,
     maps:merge(FWeights, BaseWeights).
 
 notify_vote_started(Mod, GS, State) ->
