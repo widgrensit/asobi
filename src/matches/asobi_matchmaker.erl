@@ -212,6 +212,8 @@ resolve_strategy(_) ->
 -spec resolve_game_module(binary()) -> {ok, module(), map()} | {error, not_found}.
 resolve_game_module(Mode) ->
     case mode_config(Mode) of
+        #{type := world, module := {lua, Script}} ->
+            {ok, asobi_lua_world, #{lua_script => Script}};
         #{module := {lua, Script}} ->
             {ok, asobi_lua_match, #{lua_script => Script}};
         #{module := Mod} when is_atom(Mod) ->
@@ -231,6 +233,14 @@ spawn_matches([Group | Rest], Failed) ->
     [First | _] = Group,
     Mode = maps:get(mode, First),
     ModeConfig = mode_config(Mode),
+    case maps:get(type, ModeConfig, match) of
+        world ->
+            spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed);
+        match ->
+            spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed)
+    end.
+
+spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
     MatchSize = maps:get(match_size, ModeConfig, length(PlayerIds)),
     MaxPlayers = maps:get(max_players, ModeConfig, MatchSize),
     case resolve_game_module(Mode) of
@@ -270,18 +280,67 @@ spawn_matches([Group | Rest], Failed) ->
                     spawn_matches(Rest, [Group | Failed])
             end;
         {error, _} ->
-            logger:warning(#{msg => ~"no game module for mode", mode => Mode}),
-            lists:foreach(
-                fun(PlayerId) when is_binary(PlayerId) ->
-                    asobi_presence:send(
-                        PlayerId,
-                        {match_event, matchmaker_failed, #{reason => ~"no_game_module"}}
-                    )
-                end,
-                PlayerIds
-            ),
+            notify_no_game_module(Mode, PlayerIds),
             spawn_matches(Rest, Failed)
     end.
+
+spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
+    MaxPlayers = maps:get(max_players, ModeConfig, 500),
+    case resolve_game_module(Mode) of
+        {ok, GameMod, ExtraConfig} ->
+            Config = #{
+                mode => Mode,
+                game_module => GameMod,
+                game_config => ExtraConfig,
+                max_players => MaxPlayers,
+                grid_size => maps:get(grid_size, ModeConfig, 10),
+                zone_size => maps:get(zone_size, ModeConfig, 200),
+                tick_rate => maps:get(tick_rate, ModeConfig, 50),
+                view_radius => maps:get(view_radius, ModeConfig, 1)
+            },
+            case asobi_world_instance_sup:start_world(Config) of
+                {ok, InstancePid} when is_pid(InstancePid) ->
+                    WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
+                    WorldInfo = asobi_world_server:get_info(WorldPid),
+                    lists:foreach(
+                        fun(PlayerId) when is_binary(PlayerId) ->
+                            _ = asobi_world_server:join(WorldPid, PlayerId),
+                            asobi_presence:send(
+                                PlayerId,
+                                {match_event, matched, #{
+                                    world_id => maps:get(world_id, WorldInfo, undefined),
+                                    players => PlayerIds
+                                }}
+                            )
+                        end,
+                        PlayerIds
+                    ),
+                    spawn_matches(Rest, Failed);
+                {error, Reason} ->
+                    logger:error(#{
+                        msg => ~"world spawn failed, re-queuing players",
+                        mode => Mode,
+                        players => PlayerIds,
+                        error => Reason
+                    }),
+                    spawn_matches(Rest, [Group | Failed])
+            end;
+        {error, _} ->
+            notify_no_game_module(Mode, PlayerIds),
+            spawn_matches(Rest, Failed)
+    end.
+
+notify_no_game_module(Mode, PlayerIds) ->
+    logger:warning(#{msg => ~"no game module for mode", mode => Mode}),
+    lists:foreach(
+        fun(PlayerId) when is_binary(PlayerId) ->
+            asobi_presence:send(
+                PlayerId,
+                {match_event, matchmaker_failed, #{reason => ~"no_game_module"}}
+            )
+        end,
+        PlayerIds
+    ).
 
 -spec notify_expired([map()]) -> ok.
 notify_expired([]) ->
