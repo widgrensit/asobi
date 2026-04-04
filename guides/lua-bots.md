@@ -14,34 +14,59 @@ AI logic runs in the same tick loop as the game.
 
 ## Configuration
 
-Enable bots per game mode in your `sys.config`:
+### Lua (Docker)
 
-```erlang
-{asobi, [
-    {game_modes, #{
-        ~"arena" => #{
-            module => {lua, "game/match.lua"},
-            match_size => 4,
-            max_players => 8,
-            bots => #{
-                enabled => true,
-                fill_after_ms => 8000,
-                min_players => 4,
-                script => "game/bots/chaser.lua",
-                names => [~"Spark", ~"Blitz", ~"Volt", ~"Neon", ~"Pulse"]
-            }
-        }
-    }}
-]}
+Enable bots by adding `bots` to your match script globals and a `names`
+list to your bot script:
+
+```lua
+-- match.lua
+match_size = 4
+max_players = 8
+strategy = "fill"
+bots = { script = "bots/chaser.lua" }
 ```
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `enabled` | `false` | Enable bot filling for this mode |
-| `fill_after_ms` | `8000` | Wait time before adding bots to queue |
-| `min_players` | `4` | Fill up to this many players with bots |
-| `script` | `undefined` | Path to Lua bot AI script |
-| `names` | `["Spark", ...]` | Display names for bots (prefixed with `bot_`) |
+```lua
+-- bots/chaser.lua
+names = {"Spark", "Blitz", "Volt", "Neon", "Pulse"}
+
+function think(bot_id, state)
+    -- AI logic here
+end
+```
+
+The platform reads `names` from your bot script at runtime. Bot names are
+prefixed with `bot_` (e.g., `bot_Spark`).
+
+Platform-level bot tuning is controlled via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASOBI_BOT_FILL_AFTER` | `8000` | Milliseconds before bots fill queue |
+| `ASOBI_BOT_MIN_PLAYERS` | `match_size` | Fill up to this many players |
+
+### Erlang (sys.config)
+
+For Erlang OTP projects, configure bots in `sys.config`:
+
+```erlang
+{game_modes, #{
+    ~"arena" => #{
+        module => {lua, "game/match.lua"},
+        match_size => 4,
+        bots => #{
+            enabled => true,
+            fill_after_ms => 8000,
+            min_players => 4,
+            script => <<"game/bots/chaser.lua">>
+        }
+    }
+}}
+```
+
+Bot names are read from the bot script's `names` global. If not defined,
+defaults to `["Spark", "Blitz", "Volt", "Neon", "Pulse"]`.
 
 ## Writing a Bot AI Script
 
