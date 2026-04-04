@@ -292,7 +292,9 @@ end
 ### `vote_requested(state)` (optional)
 
 Called after each tick. Return a vote configuration table to start a player
-vote, or `nil` to skip.
+vote, or `nil` to skip. Votes can be triggered at any point during gameplay -
+between rounds, after a boss kill, when a player levels up, or any other
+game event.
 
 ```lua
 function vote_requested(state)
@@ -311,6 +313,35 @@ function vote_requested(state)
     return nil
 end
 ```
+
+Mid-game example (roguelike ability choice):
+
+```lua
+function vote_requested(state)
+    if state.pending_vote then
+        local vote = state.pending_vote
+        state.pending_vote = nil
+        return vote
+    end
+    return nil
+end
+
+function tick(state)
+    -- Trigger a vote when party reaches XP threshold
+    if state.party_xp >= state.next_level_xp and not state.pending_vote then
+        state.pending_vote = {
+            template = "choose_ability",
+            options = random_abilities(3),
+            method = "plurality",
+            window_ms = 15000
+        }
+    end
+    return state
+end
+```
+
+The game keeps running while a vote is active. Multiple votes can run
+simultaneously.
 
 ### `vote_resolved(template, result, state)` (optional)
 
