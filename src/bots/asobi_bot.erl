@@ -111,10 +111,13 @@ send_input(#{lua_state := undefined, bot_id := BotId, match_pid := MatchPid, gam
     Input = default_ai(BotId, GS),
     asobi_match_server:handle_input(MatchPid, BotId, Input);
 send_input(#{lua_state := LuaSt, bot_id := BotId, match_pid := MatchPid, game_state := GS}) ->
+    {EncGS, LuaSt1} = luerl:encode(GS, LuaSt),
     Input =
-        case asobi_lua_loader:call(think, [BotId, GS], LuaSt, 50) of
-            {ok, [Result | _], _} when is_map(Result) -> Result;
-            _ -> default_ai(BotId, GS)
+        case asobi_lua_loader:call(think, [BotId, EncGS], LuaSt1, 50) of
+            {ok, [Result | _], LuaSt2} ->
+                decode_result(Result, LuaSt2);
+            _ ->
+                default_ai(BotId, GS)
         end,
     asobi_match_server:handle_input(MatchPid, BotId, Input).
 
@@ -226,6 +229,18 @@ pick_random_option(Options) ->
     Idx = rand:uniform(length(Options)),
     Opt = lists:nth(Idx, Options),
     maps:get(id, Opt, maps:get(~"id", Opt, undefined)).
+
+decode_result(Result, _LuaSt) when is_map(Result) ->
+    Result;
+decode_result(Result, LuaSt) ->
+    case luerl:decode(Result, LuaSt) of
+        [{K, _} | _] = PropList when is_binary(K) ->
+            maps:from_list(PropList);
+        M when is_map(M) ->
+            M;
+        _ ->
+            #{}
+    end.
 
 %% --- Helpers ---
 
