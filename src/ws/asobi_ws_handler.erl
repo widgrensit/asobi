@@ -117,22 +117,28 @@ handle_message(
 ->
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
+            InputData =
+                case maps:get(~"data", Payload, undefined) of
+                    undefined when is_map(Payload) -> Payload;
+                    Bin when is_binary(Bin) ->
+                        case json:decode(Bin) of
+                            M when is_map(M) -> M;
+                            _ -> #{}
+                        end;
+                    Other when is_map(Other) -> Other;
+                    _ ->
+                        #{}
+                end,
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    {ok, State};
+                    case maps:get(zone_pid, SState, undefined) of
+                        undefined ->
+                            {ok, State};
+                        ZonePid ->
+                            asobi_zone:player_input(ZonePid, PlayerId, InputData),
+                            {ok, State}
+                    end;
                 MatchPid ->
-                    InputData =
-                        case maps:get(~"data", Payload, undefined) of
-                            undefined when is_map(Payload) -> Payload;
-                            Bin when is_binary(Bin) ->
-                                case json:decode(Bin) of
-                                    M when is_map(M) -> M;
-                                    _ -> #{}
-                                end;
-                            Other when is_map(Other) -> Other;
-                            _ ->
-                                #{}
-                        end,
                     asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
                     {ok, State}
             end
@@ -296,6 +302,47 @@ handle_message(
     catch
         exit:{noproc, _} ->
             {ok, State#{session => undefined}}
+    end;
+handle_message(
+    #{~"type" := ~"world.list", ~"payload" := Payload} = Msg,
+    #{player_id := _PlayerId} = State
+) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    Filters = #{
+        mode => maps:get(~"mode", Payload, undefined),
+        has_capacity => maps:get(~"has_capacity", Payload, false)
+    },
+    Filters1 = maps:filter(fun(_, V) -> V =/= undefined end, Filters),
+    Worlds = asobi_world_lobby:list_worlds(Filters1),
+    Reply = encode_reply(Cid, ~"world.list", #{worlds => Worlds}),
+    {reply, {text, Reply}, State};
+handle_message(
+    #{~"type" := ~"world.create", ~"payload" := #{~"mode" := Mode}} = Msg,
+    #{player_id := PlayerId} = State
+) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    case asobi_world_lobby:create_world(Mode) of
+        {ok, WorldPid, Info} ->
+            _ = asobi_world_server:join(WorldPid, PlayerId),
+            Reply = encode_reply(Cid, ~"world.joined", Info),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            {reply, {text, Reply}, State}
+    end;
+handle_message(
+    #{~"type" := ~"world.find_or_create", ~"payload" := #{~"mode" := Mode}} = Msg,
+    #{player_id := PlayerId} = State
+) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    case asobi_world_lobby:find_or_create(Mode) of
+        {ok, WorldPid, Info} ->
+            _ = asobi_world_server:join(WorldPid, PlayerId),
+            Reply = encode_reply(Cid, ~"world.joined", Info),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            {reply, {text, Reply}, State}
     end;
 handle_message(
     #{~"type" := ~"world.join", ~"payload" := #{~"world_id" := WorldId}} = Msg,
