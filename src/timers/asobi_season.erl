@@ -58,7 +58,7 @@ config(Key) ->
 upcoming() ->
     Q = kura_query:order_by(
         kura_query:where(kura_query:from(asobi_season), {status, ~"upcoming"}),
-        {starts_at, asc}
+        [{starts_at, asc}]
     ),
     case asobi_repo:all(Q) of
         {ok, Seasons} -> Seasons;
@@ -70,7 +70,7 @@ history() ->
     Q = kura_query:limit(
         kura_query:order_by(
             kura_query:where(kura_query:from(asobi_season), {status, ~"ended"}),
-            {ends_at, desc}
+            [{ends_at, desc}]
         ),
         20
     ),
