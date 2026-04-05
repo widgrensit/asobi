@@ -191,7 +191,7 @@ info(#{current_started := false} = PS) ->
     #{
         status => waiting,
         phase => maps:get(name, Phase),
-        start_condition => maps:get(start, Phase, prev_ended)
+        start_condition => format_condition(maps:get(start, Phase, prev_ended))
     };
 info(PS) ->
     Phase = current_phase_def(PS),
@@ -202,6 +202,13 @@ info(PS) ->
         config => maps:get(config, Phase, #{}),
         timers => timers_info(PS)
     }.
+
+format_condition({Type, Value}) ->
+    #{type => Type, value => Value};
+format_condition(Atom) when is_atom(Atom) ->
+    Atom;
+format_condition(Other) ->
+    Other.
 
 %% -------------------------------------------------------------------
 %% Internal — waiting for phase start condition

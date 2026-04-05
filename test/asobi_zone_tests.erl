@@ -69,24 +69,33 @@ subscribe_unsubscribe() ->
 
 tick_broadcasts() ->
     Pid = start_zone(),
-    asobi_zone:subscribe(Pid, {<<"p1">>, self()}),
     asobi_zone:add_entity(Pid, <<"e1">>, #{x => 0, y => 0, type => ~"player"}),
     timer:sleep(10),
-    %% First tick — entity appears as added
-    asobi_zone:tick(Pid, 1),
+    asobi_zone:subscribe(Pid, {<<"p1">>, self()}),
+    timer:sleep(10),
+    %% Subscribe sends immediate snapshot
     receive
-        {asobi_message, {zone_delta, 1, Deltas}} ->
-            ?assertEqual(1, length(Deltas)),
-            [Delta] = Deltas,
-            ?assertEqual(~"a", maps:get(~"op", Delta)),
-            ?assertEqual(<<"e1">>, maps:get(~"id", Delta))
+        {asobi_message, {zone_delta, 0, Snapshot}} ->
+            ?assertEqual(1, length(Snapshot)),
+            [S] = Snapshot,
+            ?assertEqual(~"a", maps:get(~"op", S)),
+            ?assertEqual(<<"e1">>, maps:get(~"id", S))
     after 1000 ->
         ?assert(false)
     end,
-    %% Second tick — no changes, no delta message
+    %% Broadcast interval is 3, so tick 3 broadcasts
+    asobi_zone:tick(Pid, 1),
     asobi_zone:tick(Pid, 2),
+    asobi_zone:tick(Pid, 3),
     receive
-        {asobi_message, {zone_delta, 2, _}} ->
+        {asobi_message, {zone_delta, 3, _Deltas}} -> ok
+    after 1000 ->
+        ?assert(false)
+    end,
+    %% Tick 4 does not broadcast (4 rem 3 = 1)
+    asobi_zone:tick(Pid, 4),
+    receive
+        {asobi_message, {zone_delta, 4, _}} ->
             ?assert(false)
     after 100 ->
         ok

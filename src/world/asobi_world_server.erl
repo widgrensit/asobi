@@ -82,6 +82,7 @@ init(Config) ->
     ViewRadius = maps:get(view_radius, Config, ?DEFAULT_VIEW_RADIUS),
     VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
     FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
+    Persistent = maps:get(persistent, Config, false),
     InstanceSup = maps:get(instance_sup, Config, undefined),
     PhaseState =
         case erlang:function_exported(GameMod, phases, 1) of
@@ -117,6 +118,7 @@ init(Config) ->
         veto_tokens_per_player => VetoTokensPerPlayer,
         frustration_bonus => FrustrationBonus,
         active_votes => #{},
+        persistent => Persistent,
         chat_state => ChatState,
         phase_state => PhaseState
     },
@@ -210,7 +212,10 @@ running(info, {vote_resolved, VoteId, Template, Result}, State) ->
     handle_vote_resolved(VoteId, Template, Result, State);
 running(info, {vote_vetoed, VoteId, _Template}, State) ->
     Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
-    {keep_state, State#{active_votes => Active}}.
+    {keep_state, State#{active_votes => Active}};
+running(info, {asobi_message, _}, _State) ->
+    %% Zone snapshots/deltas forwarded here in tests — ignore
+    keep_state_and_data.
 
 %% --- finished state ---
 
@@ -343,8 +348,8 @@ handle_leave(
             leave_chat(PlayerId, State),
             State1 = remove_player_from_zones(PlayerId, State),
             Players1 = maps:remove(PlayerId, Players),
-            case map_size(Players1) of
-                0 ->
+            case {map_size(Players1), maps:get(persistent, State, false)} of
+                {0, false} ->
                     {next_state, finished, State1#{
                         players => Players1, game_state => GS1, result => #{status => ~"empty"}
                     }};
