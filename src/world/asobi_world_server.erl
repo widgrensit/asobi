@@ -79,6 +79,14 @@ init(Config) ->
     VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
     FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
     {ZoneSupPid, TickerPid} = resolve_siblings(Config),
+    PhaseState =
+        case erlang:function_exported(GameMod, phases, 1) of
+            true ->
+                Phases = GameMod:phases(GameConfig),
+                asobi_phase:init(Phases);
+            false ->
+                undefined
+        end,
     State = #{
         world_id => WorldId,
         mode => maps:get(mode, Config, undefined),
@@ -100,7 +108,8 @@ init(Config) ->
         veto_tokens => #{},
         veto_tokens_per_player => VetoTokensPerPlayer,
         frustration_bonus => FrustrationBonus,
-        active_votes => #{}
+        active_votes => #{},
+        phase_state => PhaseState
     },
     {ok, loading, State}.
 
@@ -130,10 +139,31 @@ running({call, From}, {join, PlayerId}, State) ->
     handle_join(From, PlayerId, State);
 running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
-running(cast, {post_tick, TickN}, #{game_module := Mod, game_state := GS} = State) ->
+running(
+    cast,
+    {post_tick, TickN},
+    #{
+        game_module := Mod,
+        game_state := GS,
+        tick_rate := TickRate
+    } = State
+) ->
     case Mod:post_tick(TickN, GS) of
         {ok, GS1} ->
-            {keep_state, State#{game_state => GS1}};
+            State1 = tick_phases(TickRate, State#{game_state => GS1}),
+            case maps:get(phase_state, State1) of
+                PS when is_map(PS) ->
+                    case asobi_phase:info(PS) of
+                        #{status := complete} ->
+                            {next_state, finished, State1#{
+                                result => #{status => ~"phases_complete"}
+                            }};
+                        _ ->
+                            {keep_state, State1}
+                    end;
+                _ ->
+                    {keep_state, State1}
+            end;
         {vote, VoteConfig, GS1} ->
             State1 = State#{game_state => GS1},
             do_start_vote(VoteConfig, State1);
@@ -251,7 +281,8 @@ handle_join(
                         players => Players1,
                         veto_tokens => VetoTokens#{PlayerId => VetoCount}
                     },
-                    {keep_state, State3, [{reply, From, ok}]};
+                    State4 = notify_phase_player_joined(State3),
+                    {keep_state, State4, [{reply, From, ok}]};
                 {error, Reason} ->
                     {keep_state_and_data, [{reply, From, {error, Reason}}]}
             end
@@ -535,14 +566,18 @@ notify_players(Event, #{players := Players, world_id := WorldId} = State) ->
     ).
 
 world_info(Status, #{world_id := WorldId, players := Players} = State) ->
-    #{
+    Base = #{
         world_id => WorldId,
         status => Status,
         player_count => map_size(Players),
         players => maps:keys(Players),
         mode => maps:get(mode, State, undefined),
         grid_size => maps:get(grid_size, State)
-    }.
+    },
+    case maps:get(phase_state, State, undefined) of
+        undefined -> Base;
+        PS -> Base#{phase => asobi_phase:info(PS)}
+    end.
 
 resolve_siblings(#{zone_sup_pid := ZSP, ticker_pid := TP}) ->
     {ZSP, TP};
@@ -550,3 +585,52 @@ resolve_siblings(#{instance_sup := InstanceSup}) ->
     ZoneSupPid = asobi_world_instance:get_child(InstanceSup, asobi_zone_sup),
     TickerPid = asobi_world_instance:get_child(InstanceSup, asobi_world_ticker),
     {ZoneSupPid, TickerPid}.
+
+%% --- Internal: Phases ---
+
+tick_phases(_DeltaMs, #{phase_state := undefined} = State) ->
+    State;
+tick_phases(DeltaMs, #{phase_state := PS, game_module := Mod, game_state := GS} = State) ->
+    {Events, PS1} = asobi_phase:tick(DeltaMs, PS),
+    GS1 = handle_phase_events(Events, Mod, GS),
+    State#{phase_state => PS1, game_state => GS1}.
+
+notify_phase_player_joined(#{phase_state := undefined} = State) ->
+    State;
+notify_phase_player_joined(
+    #{
+        phase_state := PS,
+        players := Players,
+        game_module := Mod,
+        game_state := GS
+    } = State
+) ->
+    Count = map_size(Players),
+    {Events, PS1} = asobi_phase:notify({player_joined, Count}, PS),
+    GS1 = handle_phase_events(Events, Mod, GS),
+    State#{phase_state => PS1, game_state => GS1}.
+
+handle_phase_events([], _Mod, GS) ->
+    GS;
+handle_phase_events([{phase_started, Name} | Rest], Mod, GS) ->
+    GS1 =
+        case erlang:function_exported(Mod, on_phase_started, 2) of
+            true ->
+                {ok, GS2} = Mod:on_phase_started(Name, GS),
+                GS2;
+            false ->
+                GS
+        end,
+    handle_phase_events(Rest, Mod, GS1);
+handle_phase_events([{phase_ended, Name} | Rest], Mod, GS) ->
+    GS1 =
+        case erlang:function_exported(Mod, on_phase_ended, 2) of
+            true ->
+                {ok, GS2} = Mod:on_phase_ended(Name, GS),
+                GS2;
+            false ->
+                GS
+        end,
+    handle_phase_events(Rest, Mod, GS1);
+handle_phase_events([_Event | Rest], Mod, GS) ->
+    handle_phase_events(Rest, Mod, GS).
