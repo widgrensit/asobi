@@ -40,12 +40,10 @@ EXPOSE 8080
 
 ENV ASOBI_PORT=8080 \
     ASOBI_NODE_HOST=127.0.0.1 \
-    ERLANG_COOKIE=asobi_cookie \
     ASOBI_DB_HOST=db \
     ASOBI_DB_NAME=asobi \
     ASOBI_DB_USER=postgres \
-    ASOBI_DB_PASSWORD=postgres \
-    ASOBI_CORS_ORIGINS=*
+    ASOBI_DB_PASSWORD=postgres
 
 ENTRYPOINT ["tini", "--"]
 CMD ["bin/asobi", "foreground"]
