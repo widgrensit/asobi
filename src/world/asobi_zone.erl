@@ -5,6 +5,7 @@
 -export([tick/2, player_input/3, add_entity/3, remove_entity/2]).
 -export([subscribe/2, unsubscribe/2]).
 -export([get_entities/1, get_subscriber_count/1]).
+-export([start_entity_timer/2, cancel_entity_timer/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(PG_SCOPE, nova_scope).
@@ -47,6 +48,14 @@ get_entities(Pid) ->
 get_subscriber_count(Pid) ->
     gen_server:call(Pid, get_subscriber_count).
 
+-spec start_entity_timer(pid(), map()) -> ok.
+start_entity_timer(Pid, Config) ->
+    gen_server:cast(Pid, {start_entity_timer, Config}).
+
+-spec cancel_entity_timer(pid(), binary(), binary()) -> ok.
+cancel_entity_timer(Pid, EntityId, TimerId) ->
+    gen_server:cast(Pid, {cancel_entity_timer, EntityId, TimerId}).
+
 %% --- gen_server callbacks ---
 
 -spec init(map()) -> {ok, map()}.
@@ -67,6 +76,7 @@ init(Config) ->
         subscribers => #{},
         zone_state => ZoneState,
         input_queue => [],
+        entity_timers => asobi_entity_timer:new(),
         tick => 0
     }}.
 
@@ -99,6 +109,10 @@ handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
             demonitor(MonRef, [flush]),
             {noreply, State#{subscribers => maps:remove(PlayerId, Subs)}}
     end;
+handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) ->
+    {noreply, State#{entity_timers => asobi_entity_timer:start_timer(Config, ET)}};
+handle_cast({cancel_entity_timer, EntityId, TimerId}, #{entity_timers := ET} = State) ->
+    {noreply, State#{entity_timers => asobi_entity_timer:cancel_timer(EntityId, TimerId, ET)}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -128,21 +142,39 @@ do_tick(
         zone_state := ZoneState,
         input_queue := Queue,
         subscribers := Subs,
-        ticker_pid := TickerPid
+        ticker_pid := TickerPid,
+        entity_timers := ET
     } = State
 ) ->
     Entities1 = apply_inputs(GameMod, Queue, Entities),
     {Entities2, ZoneState1} = GameMod:zone_tick(Entities1, ZoneState),
-    Deltas = compute_deltas(PrevEntities, Entities2),
+    Now = erlang:system_time(millisecond),
+    {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
+    Entities3 = apply_timer_events(TimerEvents, Entities2),
+    Deltas = compute_deltas(PrevEntities, Entities3),
     broadcast_deltas(TickN, Deltas, Subs),
     asobi_world_ticker:tick_done(TickerPid, self(), TickN),
     State#{
-        entities => Entities2,
-        prev_entities => Entities2,
+        entities => Entities3,
+        prev_entities => Entities3,
         zone_state => ZoneState1,
         input_queue => [],
+        entity_timers => ET1,
         tick => TickN
     }.
+
+apply_timer_events([], Entities) ->
+    Entities;
+apply_timer_events([{entity_timer_expired, EntityId, _TimerId, OnComplete} | Rest], Entities) ->
+    Entities1 =
+        case maps:get(EntityId, Entities, undefined) of
+            undefined ->
+                Entities;
+            EntityState ->
+                Timers = maps:get(~"completed_timers", EntityState, []),
+                Entities#{EntityId => EntityState#{~"completed_timers" => [OnComplete | Timers]}}
+        end,
+    apply_timer_events(Rest, Entities1).
 
 apply_inputs(_GameMod, [], Entities) ->
     Entities;

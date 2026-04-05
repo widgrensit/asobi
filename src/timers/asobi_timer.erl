@@ -6,7 +6,7 @@
 %% advances each tick by calling `tick/2`. This keeps timer logic
 %% testable and avoids per-timer process overhead.
 
--export([countdown/1, conditional/1, cycle/1]).
+-export([countdown/1, conditional/1, cycle/1, scheduled/1]).
 -export([tick/2, notify/3, pause/1, resume/1]).
 -export([is_expired/1, is_started/1, is_paused/1]).
 -export([remaining/1, current_phase/1, info/1]).
@@ -14,7 +14,7 @@
 -export_type([timer/0, timer_event/0]).
 
 -opaque timer() :: #{
-    type := countdown | conditional | cycle,
+    type := countdown | conditional | cycle | scheduled,
     id := binary(),
     _ => _
 }.
@@ -23,7 +23,10 @@
     {timer_started, binary()}
     | {timer_warning, binary(), pos_integer()}
     | {timer_expired, binary()}
-    | {phase_changed, binary(), binary()}.
+    | {phase_changed, binary(), binary()}
+    | {window_open, binary()}
+    | {window_close, binary()}
+    | {scheduled_fire, binary()}.
 
 %% -------------------------------------------------------------------
 %% Constructors
@@ -93,6 +96,24 @@ cycle(Config) ->
         expired => false
     }.
 
+-spec scheduled(map()) -> timer().
+scheduled(Config) ->
+    Id = maps:get(id, Config),
+    Schedule = maps:get(schedule, Config),
+    OnOpen = maps:get(on_open, Config, window_open),
+    OnClose = maps:get(on_close, Config, window_close),
+    #{
+        type => scheduled,
+        id => Id,
+        schedule => Schedule,
+        on_open => OnOpen,
+        on_close => OnClose,
+        window_active => false,
+        last_check => erlang:system_time(second),
+        paused => false,
+        expired => false
+    }.
+
 %% -------------------------------------------------------------------
 %% Tick — advance timer by DeltaMs, return {Events, Timer1}
 %% -------------------------------------------------------------------
@@ -139,6 +160,25 @@ tick(DeltaMs, #{type := conditional, started := true, id := Id, remaining := Rem
         false ->
             {WarningEvents, Timer1#{remaining => Rem1}}
     end;
+%% Scheduled — check wall-clock windows
+tick(
+    _DeltaMs,
+    #{
+        type := scheduled,
+        id := Id,
+        schedule := Schedule,
+        window_active := WasActive
+    } = Timer
+) ->
+    Now = erlang:system_time(second),
+    IsActive = check_schedule(Schedule, Now),
+    Events =
+        case {WasActive, IsActive} of
+            {false, true} -> [{window_open, Id}];
+            {true, false} -> [{window_close, Id}];
+            _ -> []
+        end,
+    {Events, Timer#{window_active => IsActive, last_check => Now}};
 %% Cycle
 tick(DeltaMs, #{type := cycle} = Timer) ->
     tick_cycle(DeltaMs, Timer, []).
@@ -189,6 +229,7 @@ is_paused(#{paused := Paused}) -> Paused.
 
 -spec remaining(timer()) -> pos_integer() | infinity.
 remaining(#{type := conditional, started := false}) -> infinity;
+remaining(#{type := scheduled}) -> infinity;
 remaining(#{type := cycle, phase_remaining := Rem}) -> Rem;
 remaining(#{remaining := Rem}) -> max(0, Rem).
 
@@ -225,6 +266,20 @@ info(#{
                 true -> max(0, Rem);
                 false -> infinity
             end,
+        paused => Paused,
+        expired => Expired
+    };
+info(#{
+    type := scheduled,
+    id := Id,
+    window_active := Active,
+    paused := Paused,
+    expired := Expired
+}) ->
+    #{
+        type => scheduled,
+        id => Id,
+        window_active => Active,
         paused => Paused,
         expired => Expired
     };
@@ -333,4 +388,34 @@ check_condition(Event, _Data, {event, Event}) ->
 check_condition(timer_expired, TimerId, {prev_expired, TimerId}) ->
     true;
 check_condition(_Event, _Data, _Condition) ->
+    false.
+
+%% -------------------------------------------------------------------
+%% Internal — schedule checking
+%% -------------------------------------------------------------------
+
+-spec check_schedule(term(), integer()) -> boolean().
+check_schedule({window, WindowConfig}, NowSec) ->
+    {{_Y, _M, _D} = Date, {H, Mi, _S}} = calendar:system_time_to_universal_time(NowSec, second),
+    DayOfWeek = calendar:day_of_the_week(Date),
+    Key =
+        case DayOfWeek of
+            N when N >= 6 -> weekend;
+            _ -> weekday
+        end,
+    case maps:get(Key, WindowConfig, undefined) of
+        undefined ->
+            false;
+        {StartH, StartM, EndH, EndM} ->
+            NowMins = H * 60 + Mi,
+            StartMins = StartH * 60 + StartM,
+            EndMins = EndH * 60 + EndM,
+            NowMins >= StartMins andalso NowMins < EndMins
+    end;
+check_schedule({once, TargetDatetime}, NowSec) ->
+    TargetSec =
+        calendar:datetime_to_gregorian_seconds(TargetDatetime) -
+            calendar:datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}}),
+    NowSec >= TargetSec;
+check_schedule(_Schedule, _NowSec) ->
     false.
