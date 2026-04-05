@@ -137,7 +137,8 @@ init(Config) ->
                 veto_tokens => #{},
                 veto_tokens_per_player => VetoTokensPerPlayer,
                 frustration_bonus => FrustrationBonus,
-                phase_state => PhaseState
+                phase_state => PhaseState,
+                reconnect_state => init_reconnect(Config)
             },
             {ok, waiting, State}
     end.
@@ -176,7 +177,7 @@ running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue
                 {ok, GS2} ->
                     State1 = State#{game_state => GS2, input_queue => []},
                     State2 = maybe_start_vote(Mod, State1),
-                    State3 = tick_phases(TickRate, State2),
+                    State3 = tick_reconnect(TickRate, tick_phases(TickRate, State2)),
                     case maps:get(phase_state, State3) of
                         PS when is_map(PS) ->
                             case asobi_phase:info(PS) of
@@ -695,6 +696,45 @@ handle_phase_events([{phase_ended, Name} | Rest], Mod, GS) ->
     handle_phase_events(Rest, Mod, GS1);
 handle_phase_events([_Event | Rest], Mod, GS) ->
     handle_phase_events(Rest, Mod, GS).
+
+%% --- Internal: Reconnection ---
+
+init_reconnect(Config) ->
+    case maps:get(reconnect, Config, undefined) of
+        undefined -> undefined;
+        Policy when is_map(Policy) -> asobi_reconnect:new(Policy)
+    end.
+
+tick_reconnect(_DeltaMs, #{reconnect_state := undefined} = State) ->
+    State;
+tick_reconnect(DeltaMs, #{reconnect_state := RS} = State) ->
+    {Events, RS1} = asobi_reconnect:tick(DeltaMs, RS),
+    State1 = State#{reconnect_state => RS1},
+    handle_reconnect_events(Events, State1).
+
+handle_reconnect_events([], State) ->
+    State;
+handle_reconnect_events([{grace_expired, PlayerId, Action} | Rest], State) ->
+    State1 =
+        case Action of
+            remove ->
+                #{players := Players, game_module := Mod, game_state := GS} = State,
+                case maps:is_key(PlayerId, Players) of
+                    false ->
+                        State;
+                    true ->
+                        {ok, GS1} = Mod:leave(PlayerId, GS),
+                        State#{
+                            players => maps:remove(PlayerId, Players),
+                            game_state => GS1
+                        }
+                end;
+            _ ->
+                State
+        end,
+    handle_reconnect_events(Rest, State1);
+handle_reconnect_events([_ | Rest], State) ->
+    handle_reconnect_events(Rest, State).
 
 generate_id() ->
     asobi_id:generate().

@@ -313,7 +313,8 @@ build_timers(TimerConfigs) ->
                 case Type of
                     countdown -> asobi_timer:countdown(Config);
                     conditional -> asobi_timer:conditional(Config);
-                    cycle -> asobi_timer:cycle(Config)
+                    cycle -> asobi_timer:cycle(Config);
+                    scheduled -> asobi_timer:scheduled(Config)
                 end,
             Acc#{Id => Timer}
         end,

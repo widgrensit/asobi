@@ -28,7 +28,8 @@ init([]) ->
         tournament_sup(),
         presence_spec(),
         bot_sup(),
-        bot_spawner_spec()
+        bot_spawner_spec(),
+        season_manager_spec()
     ],
     {ok, {SupFlags, Children}}.
 
@@ -147,4 +148,10 @@ bot_spawner_spec() ->
     #{
         id => asobi_bot_spawner,
         start => {asobi_bot_spawner, start_link, []}
+    }.
+
+season_manager_spec() ->
+    #{
+        id => asobi_season_manager,
+        start => {asobi_season_manager, start_link, []}
     }.

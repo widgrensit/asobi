@@ -215,3 +215,53 @@ info_cycle_test() ->
     ?assertEqual(cycle, maps:get(type, Info)),
     ?assertEqual(~"a", maps:get(current_phase, Info)),
     ?assertEqual(2, maps:get(total_phases, Info)).
+
+%% -------------------------------------------------------------------
+%% Scheduled
+%% -------------------------------------------------------------------
+
+scheduled_window_open_close_test() ->
+    {{Y, M, D}, _} = calendar:universal_time(),
+    DayOfWeek = calendar:day_of_the_week({Y, M, D}),
+    Key =
+        case DayOfWeek >= 6 of
+            true -> weekend;
+            false -> weekday
+        end,
+    T = asobi_timer:scheduled(#{
+        id => ~"pvp",
+        schedule => {window, #{Key => {0, 0, 23, 59}}}
+    }),
+    ?assertNot(asobi_timer:is_expired(T)),
+    {Events, T1} = asobi_timer:tick(0, T),
+    ?assertMatch([{window_open, ~"pvp"}], Events),
+    Info = asobi_timer:info(T1),
+    ?assertEqual(scheduled, maps:get(type, Info)),
+    ?assert(maps:get(window_active, Info)).
+
+scheduled_window_closed_test() ->
+    T = asobi_timer:scheduled(#{
+        id => ~"pvp",
+        schedule => {window, #{weekday => {25, 0, 25, 1}}}
+    }),
+    {Events, _} = asobi_timer:tick(0, T),
+    ?assertEqual([], Events).
+
+scheduled_once_test() ->
+    Past = {{2020, 1, 1}, {0, 0, 0}},
+    T = asobi_timer:scheduled(#{
+        id => ~"event",
+        schedule => {once, Past}
+    }),
+    {Events, T1} = asobi_timer:tick(0, T),
+    ?assertMatch([{window_open, ~"event"}], Events),
+    {[], _} = asobi_timer:tick(0, T1).
+
+scheduled_info_test() ->
+    T = asobi_timer:scheduled(#{
+        id => ~"s1",
+        schedule => {window, #{}}
+    }),
+    Info = asobi_timer:info(T),
+    ?assertEqual(scheduled, maps:get(type, Info)),
+    ?assertNot(maps:get(window_active, Info)).
