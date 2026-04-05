@@ -165,6 +165,7 @@ waiting(cast, cancel, State) ->
     gen_statem:state_enter_result(atom()).
 running(enter, _OldState, #{tick_rate := TickRate, match_id := MatchId} = State) ->
     backup_state(MatchId, running, State),
+    asobi_telemetry:match_started(MatchId, maps:get(mode, State, undefined)),
     {keep_state_and_data, [{state_timeout, TickRate, tick}]};
 running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue := Queue} = State) ->
     GS1 = apply_inputs(Mod, Queue, GS),
@@ -367,7 +368,13 @@ paused(_EventType, _Event, _State) ->
 
 -spec finished(gen_statem:event_type() | enter, term(), map()) ->
     gen_statem:state_enter_result(atom()).
-finished(enter, _OldState, State) ->
+finished(enter, _OldState, #{match_id := MatchId} = State) ->
+    DurationMs =
+        case maps:get(started_at, State, undefined) of
+            undefined -> 0;
+            StartedAt -> erlang:system_time(millisecond) - StartedAt
+        end,
+    asobi_telemetry:match_finished(MatchId, DurationMs, maps:get(result, State, #{})),
     persist_result(State),
     notify_players(finished, State),
     {keep_state_and_data, [{state_timeout, 5000, cleanup}]};
@@ -415,6 +422,9 @@ handle_join(
                     State1 = State#{
                         players => Players1, game_state => GS1, veto_tokens => VetoTokens1
                     },
+                    asobi_telemetry:match_player_joined(
+                        maps:get(match_id, State), PlayerId
+                    ),
                     State2 = notify_phase_player_joined(State1),
                     maybe_start(From, PlayerId, State2);
                 {error, Reason} ->
@@ -436,6 +446,7 @@ handle_leave(PlayerId, #{players := Players, game_module := Mod, game_state := G
         false ->
             keep_state_and_data;
         true ->
+            asobi_telemetry:match_player_left(maps:get(match_id, State), PlayerId),
             {ok, GS1} = Mod:leave(PlayerId, GS),
             Players1 = maps:remove(PlayerId, Players),
             case map_size(Players1) of

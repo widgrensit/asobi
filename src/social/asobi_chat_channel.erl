@@ -25,6 +25,7 @@ leave(ChannelId, Pid) ->
 
 -spec send_message(binary(), binary(), binary()) -> ok.
 send_message(ChannelId, SenderId, Content) ->
+    asobi_telemetry:chat_message_sent(ChannelId, SenderId),
     ensure_channel(ChannelId),
     case lookup(ChannelId) of
         {ok, Pid} ->

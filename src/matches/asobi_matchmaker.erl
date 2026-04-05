@@ -65,6 +65,7 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when 
         submitted_at => erlang:system_time(millisecond),
         status => pending
     },
+    asobi_telemetry:matchmaker_queued(PlayerId, maps:get(mode, Ticket)),
     {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}};
 handle_call({get_ticket, TicketId}, _From, #{tickets := Tickets} = State) ->
     case Tickets of
@@ -101,7 +102,8 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({remove, _PlayerId, TicketId}, #{tickets := Tickets} = State) ->
+handle_cast({remove, PlayerId, TicketId}, #{tickets := Tickets} = State) ->
+    asobi_telemetry:matchmaker_removed(PlayerId, cancelled),
     {noreply, State#{tickets => maps:remove(TicketId, Tickets)}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -254,6 +256,11 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
             },
             case asobi_match_sup:start_match(Config) of
                 {ok, MatchPid} when is_pid(MatchPid) ->
+                    Now = erlang:system_time(millisecond),
+                    AvgWait =
+                        lists:sum([Now - maps:get(submitted_at, T) || T <- Group]) div
+                            max(1, length(Group)),
+                    asobi_telemetry:matchmaker_formed(Mode, length(PlayerIds), AvgWait),
                     MatchInfo = asobi_match_server:get_info(MatchPid),
                     lists:foreach(
                         fun(PlayerId) when is_binary(PlayerId) ->
@@ -300,6 +307,11 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
             },
             case asobi_world_instance_sup:start_world(Config) of
                 {ok, InstancePid} when is_pid(InstancePid) ->
+                    Now = erlang:system_time(millisecond),
+                    AvgWait =
+                        lists:sum([Now - maps:get(submitted_at, T) || T <- Group]) div
+                            max(1, length(Group)),
+                    asobi_telemetry:matchmaker_formed(Mode, length(PlayerIds), AvgWait),
                     WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
                     WorldInfo = asobi_world_server:get_info(WorldPid),
                     lists:foreach(

@@ -5,6 +5,7 @@
 
 -spec start(application:start_type(), term()) -> {ok, pid()} | {error, term()}.
 start(_StartType, _StartArgs) ->
+    setup_telemetry(),
     case kura_migrator:migrate(asobi_repo) of
         {ok, Applied} ->
             logger:notice(#{msg => ~"migrations_applied", versions => Applied});
@@ -23,6 +24,10 @@ start(_StartType, _StartArgs) ->
         ignore -> {error, supervisor_ignored};
         {error, _} = Err -> Err
     end.
+
+setup_telemetry() ->
+    asobi_telemetry:setup(),
+    ok.
 
 -spec stop(term()) -> ok.
 stop(_State) ->
