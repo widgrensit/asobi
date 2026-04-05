@@ -607,8 +607,6 @@ world_info(Status, #{world_id := WorldId, players := Players} = State) ->
         PS -> Base#{phase => asobi_phase:info(PS)}
     end.
 
-resolve_siblings(#{zone_sup_pid := ZSP, ticker_pid := TP}) ->
-    {ZSP, TP};
 resolve_siblings(#{instance_sup := InstanceSup}) ->
     ZoneSupPid = asobi_world_instance:get_child(InstanceSup, asobi_zone_sup),
     TickerPid = asobi_world_instance:get_child(InstanceSup, asobi_world_ticker),
