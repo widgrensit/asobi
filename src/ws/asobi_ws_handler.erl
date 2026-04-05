@@ -71,6 +71,9 @@ websocket_info({asobi_message, {world_event, Event, Payload}}, State) when is_at
 websocket_info({chat_message, ChannelId, Msg}, State) when is_map(Msg) ->
     Reply = encode_reply(undefined, ~"chat.message", Msg#{channel_id => ChannelId}),
     {reply, {text, Reply}, State};
+websocket_info({asobi_message, {dm_message, Msg}}, State) when is_map(Msg) ->
+    Reply = encode_reply(undefined, ~"dm.message", Msg),
+    {reply, {text, Reply}, State};
 websocket_info({asobi_message, {notification, Notif}}, State) ->
     Reply = encode_reply(undefined, ~"notification.new", Notif),
     {reply, {text, Reply}, State};
@@ -145,6 +148,21 @@ handle_message(
     #{~"channel_id" := ChannelId, ~"content" := Content} = Payload,
     asobi_chat_channel:send_message(ChannelId, PlayerId, Content),
     {ok, State};
+handle_message(
+    #{~"type" := ~"dm.send", ~"payload" := Payload} = Msg, #{player_id := PlayerId} = State
+) when is_binary(PlayerId) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    #{~"recipient_id" := RecipientId, ~"content" := Content} = Payload,
+    case asobi_dm:send(PlayerId, RecipientId, Content) of
+        ok ->
+            Reply = encode_reply(Cid, ~"dm.sent", #{
+                channel_id => asobi_dm:channel_id(PlayerId, RecipientId)
+            }),
+            {reply, {text, Reply}, State};
+        {error, blocked} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => ~"blocked"}),
+            {reply, {text, Reply}, State}
+    end;
 handle_message(
     #{~"type" := ~"chat.join", ~"payload" := #{~"channel_id" := ChannelId}} = Msg, State
 ) ->

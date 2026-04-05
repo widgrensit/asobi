@@ -10,7 +10,11 @@
     create_group/1,
     show_group/1,
     join_group/1,
-    leave_group/1
+    leave_group/1,
+    update_member_role/1,
+    kick_member/1,
+    list_members/1,
+    update_group/1
 ]).
 
 %% --- Friends ---
@@ -154,6 +158,106 @@ leave_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Playe
             {json, 200, #{}, #{success => true}};
         _ ->
             {json, 200, #{}, #{success => true}}
+    end.
+
+%% --- Group Management ---
+
+-spec list_members(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+list_members(#{bindings := #{~"id" := GroupId}} = _Req) ->
+    Q = kura_query:where(kura_query:from(asobi_group_member), {group_id, GroupId}),
+    case asobi_repo:all(Q) of
+        {ok, Members} -> {json, #{members => Members}};
+        _ -> {status, 404}
+    end.
+
+-spec update_member_role(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+update_member_role(#{
+    bindings := #{~"id" := GroupId, ~"player_id" := TargetPlayerId},
+    json := #{~"role" := NewRole},
+    auth_data := #{player_id := ActorId}
+}) ->
+    case asobi_group_roles:valid_role(NewRole) of
+        false ->
+            {json, 400, #{}, #{error => ~"invalid_role"}};
+        true ->
+            case {get_member(GroupId, ActorId), get_member(GroupId, TargetPlayerId)} of
+                {{ok, #{role := ActorRole}}, {ok, #{role := TargetRole} = Target}} ->
+                    case asobi_group_roles:can_promote(ActorRole, TargetRole, NewRole) of
+                        true ->
+                            CS = kura_changeset:cast(
+                                asobi_group_member, Target, #{role => NewRole}, [role]
+                            ),
+                            {ok, Updated} = asobi_repo:update(CS),
+                            {json, 200, #{}, Updated};
+                        false ->
+                            {json, 403, #{}, #{error => ~"insufficient_permissions"}}
+                    end;
+                _ ->
+                    {json, 404, #{}, #{error => ~"member_not_found"}}
+            end
+    end.
+
+-spec kick_member(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+kick_member(#{
+    bindings := #{~"id" := GroupId, ~"player_id" := TargetPlayerId},
+    auth_data := #{player_id := ActorId}
+}) ->
+    case {get_member(GroupId, ActorId), get_member(GroupId, TargetPlayerId)} of
+        {{ok, #{role := ActorRole}}, {ok, #{role := TargetRole} = Target}} ->
+            case asobi_group_roles:can_kick(ActorRole, TargetRole) of
+                true ->
+                    _ = asobi_repo:delete(asobi_group_member, Target),
+                    {json, 200, #{}, #{success => true}};
+                false ->
+                    {json, 403, #{}, #{error => ~"insufficient_permissions"}}
+            end;
+        _ ->
+            {json, 404, #{}, #{error => ~"member_not_found"}}
+    end.
+
+-spec update_group(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+update_group(#{
+    bindings := #{~"id" := GroupId},
+    json := Params,
+    auth_data := #{player_id := ActorId}
+}) when is_map(Params) ->
+    case get_member(GroupId, ActorId) of
+        {ok, #{role := Role}} ->
+            case asobi_group_roles:can_update_group(Role) of
+                true ->
+                    case asobi_repo:get(asobi_group, GroupId) of
+                        {ok, Group} ->
+                            Updates = maps:with(
+                                [~"name", ~"description", ~"max_members", ~"open"], Params
+                            ),
+                            Atomized = maps:fold(
+                                fun(K, V, Acc) -> Acc#{binary_to_existing_atom(K) => V} end,
+                                #{},
+                                Updates
+                            ),
+                            CS = asobi_group:changeset(Group, Atomized),
+                            {ok, Updated} = asobi_repo:update(CS),
+                            {json, 200, #{}, Updated};
+                        _ ->
+                            {json, 404, #{}, #{error => ~"group_not_found"}}
+                    end;
+                false ->
+                    {json, 403, #{}, #{error => ~"insufficient_permissions"}}
+            end;
+        _ ->
+            {json, 403, #{}, #{error => ~"not_a_member"}}
+    end.
+
+%% --- Internal ---
+
+get_member(GroupId, PlayerId) ->
+    Q = kura_query:where(
+        kura_query:where(kura_query:from(asobi_group_member), {group_id, GroupId}),
+        {player_id, PlayerId}
+    ),
+    case asobi_repo:all(Q) of
+        {ok, [Member]} -> {ok, Member};
+        _ -> {error, not_found}
     end.
 
 qs_integer(Key, Params, Default) ->
