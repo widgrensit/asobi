@@ -117,22 +117,28 @@ handle_message(
 ->
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
+            InputData =
+                case maps:get(~"data", Payload, undefined) of
+                    undefined when is_map(Payload) -> Payload;
+                    Bin when is_binary(Bin) ->
+                        case json:decode(Bin) of
+                            M when is_map(M) -> M;
+                            _ -> #{}
+                        end;
+                    Other when is_map(Other) -> Other;
+                    _ ->
+                        #{}
+                end,
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    {ok, State};
+                    case maps:get(zone_pid, SState, undefined) of
+                        undefined ->
+                            {ok, State};
+                        ZonePid ->
+                            asobi_zone:player_input(ZonePid, PlayerId, InputData),
+                            {ok, State}
+                    end;
                 MatchPid ->
-                    InputData =
-                        case maps:get(~"data", Payload, undefined) of
-                            undefined when is_map(Payload) -> Payload;
-                            Bin when is_binary(Bin) ->
-                                case json:decode(Bin) of
-                                    M when is_map(M) -> M;
-                                    _ -> #{}
-                                end;
-                            Other when is_map(Other) -> Other;
-                            _ ->
-                                #{}
-                        end,
                     asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
                     {ok, State}
             end
