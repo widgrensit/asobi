@@ -1,7 +1,6 @@
 -module(asobi_telemetry).
 
 -export([setup/0]).
--export([span/3, span/4]).
 -export([match_started/2, match_finished/3, match_player_joined/2, match_player_left/2]).
 -export([world_started/2, world_finished/3, world_player_joined/2, world_player_left/2]).
 -export([world_phase_changed/3]).
@@ -47,25 +46,6 @@ setup() ->
         #{}
     ),
     ok.
-
-%% --- Spans ---
-
--spec span(binary(), map(), fun(() -> T)) -> T when T :: term().
-span(Name, Attributes, Fun) ->
-    otel_tracer:with_span(opentelemetry:get_tracer(asobi), Name, Attributes, fun(_) -> Fun() end).
-
--spec span(binary(), map(), map(), fun(() -> T)) -> T when T :: term().
-span(Name, StartAttributes, SetAttributes, Fun) ->
-    otel_tracer:with_span(
-        opentelemetry:get_tracer(asobi),
-        Name,
-        StartAttributes,
-        fun(Span) ->
-            Result = Fun(),
-            otel_span:set_attributes(Span, maps:to_list(SetAttributes)),
-            Result
-        end
-    ).
 
 %% --- Match Events ---
 

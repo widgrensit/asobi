@@ -83,25 +83,5 @@
             {~"broadcast", 5, #{window => 120}}
         ]}
     ]},
-    {opentelemetry, [
-        {resource, #{
-            <<"service.name">> => <<"asobi">>,
-            <<"deployment.environment">> => <<"prod">>
-        }},
-        {traces_exporter, {opentelemetry_exporter, #{
-            protocol => http_protobuf,
-            endpoint => "${OTEL_EXPORTER_OTLP_ENDPOINT}"
-        }}},
-        {processors, [
-            {otel_batch_processor, #{
-                scheduled_delay_ms => 5000,
-                max_queue_size => 4096,
-                exporter => {opentelemetry_exporter, #{
-                    protocol => http_protobuf,
-                    endpoint => "${OTEL_EXPORTER_OTLP_ENDPOINT}"
-                }}
-            }}
-        ]}
-    ]},
     {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].

@@ -26,9 +26,6 @@ start(_StartType, _StartArgs) ->
     end.
 
 setup_telemetry() ->
-    opentelemetry_kura:setup(),
-    opentelemetry_shigoto:setup(),
-    opentelemetry_nova:setup(),
     asobi_telemetry:setup(),
     ok.
 
