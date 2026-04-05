@@ -14,7 +14,7 @@
 
 -spec setup() -> ok.
 setup() ->
-    telemetry:attach_many(
+    ok = telemetry:attach_many(
         <<"asobi-metrics-logger">>,
         [
             [asobi, match, started],
