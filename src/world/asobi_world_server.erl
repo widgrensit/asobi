@@ -352,6 +352,7 @@ place_player(
     ZonePid = maps:get(ZoneCoords, ZonePids),
     PlayerPid = find_player_pid(PlayerId),
     asobi_zone:add_entity(ZonePid, PlayerId, #{x => X, y => Y, type => ~"player"}),
+    asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
     InterestZones = interest_zones(ZoneCoords, ViewRadius, GridSize),
     lists:foreach(
         fun(Coords) ->
