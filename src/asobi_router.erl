@@ -13,7 +13,7 @@ routes(_Environment) ->
     ].
 
 cors_opts() ->
-    Origins = application:get_env(asobi, cors_allow_origins, ~"*"),
+    Origins = application:get_env(asobi, cors_allow_origins, ~""),
     #{allow_origins => Origins}.
 
 rate_limit_opts(Group) ->
@@ -33,7 +33,8 @@ auth_routes() ->
             }},
             {pre_request, nova_cors_plugin, cors_opts()},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(auth)}
+            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(auth)},
+            {post_request, asobi_security_headers_plugin, #{}}
         ],
         routes => [
             {~"/register", fun asobi_auth_controller:register/1, #{methods => [post]}},
@@ -53,7 +54,8 @@ iap_routes() ->
             }},
             {pre_request, nova_cors_plugin, cors_opts()},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(iap)}
+            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(iap)},
+            {post_request, asobi_security_headers_plugin, #{}}
         ],
         routes => [
             {~"/apple", fun asobi_iap_controller:verify_apple/1, #{methods => [post]}},
@@ -72,7 +74,8 @@ api_routes() ->
             }},
             {pre_request, nova_cors_plugin, cors_opts()},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(api)}
+            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(api)},
+            {post_request, asobi_security_headers_plugin, #{}}
         ],
         routes => [
             %% Auth - Provider linking

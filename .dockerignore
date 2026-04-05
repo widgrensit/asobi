@@ -6,3 +6,4 @@ test/
 docs/
 *.md
 erl_crash.dump
+rebar3.crashdump

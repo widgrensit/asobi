@@ -3,6 +3,10 @@
 
 -export([init/1, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 
+-define(WS_MSG_LIMIT, 60).
+-define(WS_MSG_WINDOW_MS, 1000).
+-define(WS_MAX_PAYLOAD_BYTES, 65536).
+
 -spec init(map()) -> {ok, map()}.
 init(State) ->
     {ok, State#{session => undefined}}.
@@ -10,21 +14,40 @@ init(State) ->
 -spec websocket_init(map()) -> {ok, map()}.
 websocket_init(State) ->
     asobi_telemetry:ws_connected(),
-    {ok, State#{connected_at => erlang:system_time(millisecond)}}.
+    {ok, State#{
+        connected_at => erlang:system_time(millisecond),
+        ws_msg_count => 0,
+        ws_msg_window_start => erlang:system_time(millisecond)
+    }}.
 
 -spec websocket_handle({text | binary, binary()}, map()) ->
     {ok, map()} | {reply, {text, binary()}, map()}.
 websocket_handle({text, Raw}, State) ->
-    try json:decode(Raw) of
-        #{~"type" := Type} = Msg ->
-            asobi_telemetry:ws_message_in(Type),
-            handle_message(Msg, State);
-        Msg ->
-            handle_message(Msg, State)
-    catch
-        _:_ ->
-            Reply = encode_reply(undefined, ~"error", #{reason => ~"invalid_json"}),
-            {reply, {text, Reply}, State}
+    case byte_size(Raw) > ?WS_MAX_PAYLOAD_BYTES of
+        true ->
+            Reply = encode_reply(undefined, ~"error", #{reason => ~"payload_too_large"}),
+            {reply, {text, Reply}, State};
+        false ->
+            case check_ws_rate_limit(State) of
+                {ok, State1} ->
+                    try json:decode(Raw) of
+                        #{~"type" := Type} = Msg when is_binary(Type) ->
+                            asobi_telemetry:ws_message_in(Type),
+                            handle_message(Msg, State1);
+                        _ ->
+                            Reply = encode_reply(undefined, ~"error", #{
+                                reason => ~"invalid_message"
+                            }),
+                            {reply, {text, Reply}, State1}
+                    catch
+                        _:_ ->
+                            Reply = encode_reply(undefined, ~"error", #{reason => ~"invalid_json"}),
+                            {reply, {text, Reply}, State1}
+                    end;
+                {rate_limited, State1} ->
+                    Reply = encode_reply(undefined, ~"error", #{reason => ~"rate_limited"}),
+                    {reply, {text, Reply}, State1}
+            end
     end;
 websocket_handle(_Frame, State) ->
     {ok, State}.
@@ -328,6 +351,17 @@ authenticate(#{~"token" := Token}) ->
             {ok, maps:get(id, Player)};
         {error, _} ->
             {error, ~"invalid_token"}
+    end.
+
+check_ws_rate_limit(#{ws_msg_count := Count, ws_msg_window_start := WindowStart} = State) ->
+    Now = erlang:system_time(millisecond),
+    case Now - WindowStart >= ?WS_MSG_WINDOW_MS of
+        true ->
+            {ok, State#{ws_msg_count => 1, ws_msg_window_start => Now}};
+        false when Count >= ?WS_MSG_LIMIT ->
+            {rate_limited, State};
+        false ->
+            {ok, State#{ws_msg_count => Count + 1}}
     end.
 
 encode_reply(Cid, Type, Payload) ->
