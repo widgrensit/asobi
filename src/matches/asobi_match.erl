@@ -36,4 +36,19 @@
 -callback vote_resolved(Template :: binary(), Result :: map(), GameState :: term()) ->
     {ok, GameState1 :: term()}.
 
--optional_callbacks([tick/1, vote_requested/1, vote_resolved/3]).
+-callback phases(Config :: map()) -> [asobi_phase:phase_def()].
+
+-callback on_phase_started(PhaseName :: binary(), GameState :: term()) ->
+    {ok, GameState1 :: term()}.
+
+-callback on_phase_ended(PhaseName :: binary(), GameState :: term()) ->
+    {ok, GameState1 :: term()}.
+
+-optional_callbacks([
+    tick/1,
+    vote_requested/1,
+    vote_resolved/3,
+    phases/1,
+    on_phase_started/2,
+    on_phase_ended/2
+]).

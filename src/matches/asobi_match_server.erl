@@ -113,6 +113,14 @@ init(Config) ->
             {ok, GameState} = GameMod:init(GameConfig),
             VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
             FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
+            PhaseState =
+                case erlang:function_exported(GameMod, phases, 1) of
+                    true ->
+                        Phases = GameMod:phases(GameConfig),
+                        asobi_phase:init(Phases);
+                    false ->
+                        undefined
+                end,
             State = #{
                 match_id => MatchId,
                 mode => maps:get(mode, Config, undefined),
@@ -128,7 +136,8 @@ init(Config) ->
                 vote_frustration => #{},
                 veto_tokens => #{},
                 veto_tokens_per_player => VetoTokensPerPlayer,
-                frustration_bonus => FrustrationBonus
+                frustration_bonus => FrustrationBonus,
+                phase_state => PhaseState
             },
             {ok, waiting, State}
     end.
@@ -159,26 +168,53 @@ running(enter, _OldState, #{tick_rate := TickRate, match_id := MatchId} = State)
     {keep_state_and_data, [{state_timeout, TickRate, tick}]};
 running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue := Queue} = State) ->
     GS1 = apply_inputs(Mod, Queue, GS),
+    TickRate = maps:get(tick_rate, State),
     case erlang:function_exported(Mod, tick, 1) of
         true ->
             case Mod:tick(GS1) of
                 {ok, GS2} ->
                     State1 = State#{game_state => GS2, input_queue => []},
                     State2 = maybe_start_vote(Mod, State1),
-                    broadcast_state(State2),
-                    {keep_state, State2, [
-                        {state_timeout, maps:get(tick_rate, State2), tick}
-                    ]};
+                    State3 = tick_phases(TickRate, State2),
+                    case maps:get(phase_state, State3) of
+                        PS when is_map(PS) ->
+                            case asobi_phase:info(PS) of
+                                #{status := complete} ->
+                                    {next_state, finished, State3#{
+                                        result => #{status => ~"phases_complete"}
+                                    }};
+                                _ ->
+                                    broadcast_state(State3),
+                                    {keep_state, State3, [
+                                        {state_timeout, TickRate, tick}
+                                    ]}
+                            end;
+                        _ ->
+                            broadcast_state(State3),
+                            {keep_state, State3, [{state_timeout, TickRate, tick}]}
+                    end;
                 {finished, Result, GS2} ->
                     {next_state, finished, State#{game_state => GS2, result => Result}}
             end;
         false ->
             State1 = State#{game_state => GS1, input_queue => []},
             State2 = maybe_start_vote(Mod, State1),
-            broadcast_state(State2),
-            {keep_state, State2, [
-                {state_timeout, maps:get(tick_rate, State2), tick}
-            ]}
+            State3 = tick_phases(TickRate, State2),
+            case maps:get(phase_state, State3) of
+                PS when is_map(PS) ->
+                    case asobi_phase:info(PS) of
+                        #{status := complete} ->
+                            {next_state, finished, State3#{
+                                result => #{status => ~"phases_complete"}
+                            }};
+                        _ ->
+                            broadcast_state(State3),
+                            {keep_state, State3, [{state_timeout, TickRate, tick}]}
+                    end;
+                _ ->
+                    broadcast_state(State3),
+                    {keep_state, State3, [{state_timeout, TickRate, tick}]}
+            end
     end;
 running(cast, {input, PlayerId, Input}, #{input_queue := Queue} = State) ->
     {keep_state, State#{input_queue => [{PlayerId, Input} | Queue]}};
@@ -379,7 +415,8 @@ handle_join(
                     State1 = State#{
                         players => Players1, game_state => GS1, veto_tokens => VetoTokens1
                     },
-                    maybe_start(From, PlayerId, State1);
+                    State2 = notify_phase_player_joined(State1),
+                    maybe_start(From, PlayerId, State2);
                 {error, Reason} ->
                     {keep_state_and_data, [{reply, From, {error, Reason}}]}
             end
@@ -472,13 +509,17 @@ persist_result(#{match_id := MatchId, players := Players} = State) ->
     ok.
 
 match_info(Status, #{match_id := MatchId, players := Players} = State) ->
-    #{
+    Base = #{
         match_id => MatchId,
         status => Status,
         player_count => map_size(Players),
         players => maps:keys(Players),
         mode => maps:get(mode, State, undefined)
-    }.
+    },
+    case maps:get(phase_state, State, undefined) of
+        undefined -> Base;
+        PS -> Base#{phase => asobi_phase:info(PS)}
+    end.
 
 maybe_start_vote(Mod, #{game_state := GS} = State) ->
     case erlang:function_exported(Mod, vote_requested, 1) of
@@ -594,6 +635,55 @@ clear_state_backup(MatchId) ->
     catch
         error:badarg -> ok
     end.
+
+%% --- Internal: Phases ---
+
+tick_phases(_DeltaMs, #{phase_state := undefined} = State) ->
+    State;
+tick_phases(DeltaMs, #{phase_state := PS, game_module := Mod, game_state := GS} = State) ->
+    {Events, PS1} = asobi_phase:tick(DeltaMs, PS),
+    GS1 = handle_phase_events(Events, Mod, GS),
+    State#{phase_state => PS1, game_state => GS1}.
+
+notify_phase_player_joined(#{phase_state := undefined} = State) ->
+    State;
+notify_phase_player_joined(
+    #{
+        phase_state := PS,
+        players := Players,
+        game_module := Mod,
+        game_state := GS
+    } = State
+) ->
+    Count = map_size(Players),
+    {Events, PS1} = asobi_phase:notify({player_joined, Count}, PS),
+    GS1 = handle_phase_events(Events, Mod, GS),
+    State#{phase_state => PS1, game_state => GS1}.
+
+handle_phase_events([], _Mod, GS) ->
+    GS;
+handle_phase_events([{phase_started, Name} | Rest], Mod, GS) ->
+    GS1 =
+        case erlang:function_exported(Mod, on_phase_started, 2) of
+            true ->
+                {ok, GS2} = Mod:on_phase_started(Name, GS),
+                GS2;
+            false ->
+                GS
+        end,
+    handle_phase_events(Rest, Mod, GS1);
+handle_phase_events([{phase_ended, Name} | Rest], Mod, GS) ->
+    GS1 =
+        case erlang:function_exported(Mod, on_phase_ended, 2) of
+            true ->
+                {ok, GS2} = Mod:on_phase_ended(Name, GS),
+                GS2;
+            false ->
+                GS
+        end,
+    handle_phase_events(Rest, Mod, GS1);
+handle_phase_events([_Event | Rest], Mod, GS) ->
+    handle_phase_events(Rest, Mod, GS).
 
 generate_id() ->
     asobi_id:generate().
