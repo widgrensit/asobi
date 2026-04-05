@@ -38,7 +38,7 @@
        {ref,"787b1fd3a7e5ac378b15f4c1639cbae78a07001a"}},
   0},
  {<<"opentelemetry_shigoto">>,
-  {git,"https://github.com/novaframework/opentelemetry_shigoto.git",
+  {git,"https://github.com/Taure/opentelemetry_shigoto.git",
        {ref,"4c1e0615172b2ad2eaf5000dd45ba1a90a8bbe1d"}},
   0},
  {<<"pg_types">>,{pkg,<<"pg_types">>,<<"0.6.0">>},2},
