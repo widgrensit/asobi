@@ -32,26 +32,16 @@ start_world() ->
     start_world(#{}).
 
 start_world(Overrides) ->
-    {ok, ZoneSupPid} = asobi_zone_sup:start_link(),
-    unlink(ZoneSupPid),
-    TickerConfig = #{tick_rate => 50},
-    {ok, TickerPid} = asobi_world_ticker:start_link(TickerConfig),
-    unlink(TickerPid),
     Config = maps:merge(?BASE_CONFIG, Overrides),
-    FullConfig = Config#{
-        zone_sup_pid => ZoneSupPid,
-        ticker_pid => TickerPid
-    },
-    {ok, Pid} = asobi_world_server:start_link(FullConfig),
-    unlink(Pid),
+    {ok, InstancePid} = asobi_world_instance:start_link(Config),
+    unlink(InstancePid),
     %% Give time for loading -> running transition
-    timer:sleep(20),
-    #{world_pid => Pid, zone_sup_pid => ZoneSupPid, ticker_pid => TickerPid}.
+    timer:sleep(50),
+    ServerPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
+    #{instance_pid => InstancePid, world_pid => ServerPid}.
 
-stop_world(#{world_pid := Pid, zone_sup_pid := ZSPid, ticker_pid := TPid}) ->
-    catch gen_statem:stop(Pid, normal, 5000),
-    catch gen_server:stop(TPid, normal, 5000),
-    catch exit(ZSPid, shutdown),
+stop_world(#{instance_pid := InstancePid}) ->
+    catch exit(InstancePid, shutdown),
     timer:sleep(10),
     ok.
 
