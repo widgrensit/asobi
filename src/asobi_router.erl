@@ -131,11 +131,25 @@ api_routes() ->
             %% Social - Groups
             {~"/groups", fun asobi_social_controller:create_group/1, #{methods => [post]}},
             {~"/groups/:id", fun asobi_social_controller:show_group/1, #{methods => [get]}},
+            {~"/groups/:id", fun asobi_social_controller:update_group/1, #{methods => [put]}},
             {~"/groups/:id/join", fun asobi_social_controller:join_group/1, #{methods => [post]}},
             {~"/groups/:id/leave", fun asobi_social_controller:leave_group/1, #{methods => [post]}},
+            {~"/groups/:id/members", fun asobi_social_controller:list_members/1, #{methods => [get]}},
+            {
+                ~"/groups/:id/members/:player_id/role",
+                fun asobi_social_controller:update_member_role/1,
+                #{methods => [put]}
+            },
+            {~"/groups/:id/members/:player_id", fun asobi_social_controller:kick_member/1, #{
+                methods => [delete]
+            }},
 
             %% Chat
             {~"/chat/:channel_id/history", fun asobi_chat_controller:history/1, #{methods => [get]}},
+
+            %% Direct Messages
+            {~"/dm", fun asobi_dm_controller:send/1, #{methods => [post]}},
+            {~"/dm/:player_id/history", fun asobi_dm_controller:history/1, #{methods => [get]}},
 
             %% Votes
             {~"/matches/:id/votes", fun asobi_vote_controller:index/1, #{methods => [get]}},
