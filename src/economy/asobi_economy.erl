@@ -46,6 +46,12 @@ get_or_create_wallet(PlayerId, Currency) ->
 
 -spec grant(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
 grant(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
+    asobi_telemetry:economy_transaction(
+        PlayerId,
+        Currency,
+        Amount,
+        maps:get(reason, Opts, ~"admin_grant")
+    ),
     case
         asobi_repo:transaction(fun() ->
             {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
@@ -77,6 +83,12 @@ grant(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
 
 -spec debit(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
 debit(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
+    asobi_telemetry:economy_transaction(
+        PlayerId,
+        Currency,
+        -Amount,
+        maps:get(reason, Opts, ~"purchase")
+    ),
     case
         asobi_repo:transaction(fun() ->
             {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),

@@ -9,12 +9,16 @@ init(State) ->
 
 -spec websocket_init(map()) -> {ok, map()}.
 websocket_init(State) ->
-    {ok, State}.
+    asobi_telemetry:ws_connected(),
+    {ok, State#{connected_at => erlang:system_time(millisecond)}}.
 
 -spec websocket_handle({text | binary, binary()}, map()) ->
     {ok, map()} | {reply, {text, binary()}, map()}.
 websocket_handle({text, Raw}, State) ->
     try json:decode(Raw) of
+        #{~"type" := Type} = Msg ->
+            asobi_telemetry:ws_message_in(Type),
+            handle_message(Msg, State);
         Msg ->
             handle_message(Msg, State)
     catch
@@ -55,8 +59,10 @@ websocket_info(_Info, State) ->
 
 -spec terminate(term(), term(), map()) -> ok.
 terminate(_Reason, _Req, #{session := undefined}) ->
+    asobi_telemetry:ws_disconnected(),
     ok;
 terminate(_Reason, _Req, #{session := SessionPid}) ->
+    asobi_telemetry:ws_disconnected(),
     asobi_player_session:stop(SessionPid),
     ok.
 
@@ -67,6 +73,7 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
     case authenticate(Payload) of
         {ok, PlayerId} ->
             {ok, SessionPid} = asobi_player_session_sup:start_session(PlayerId, self()),
+            asobi_telemetry:session_connected(PlayerId),
             Reply = encode_reply(Cid, ~"session.connected", #{player_id => PlayerId}),
             {reply, {text, Reply}, State#{session => SessionPid, player_id => PlayerId}};
         {error, Reason} ->

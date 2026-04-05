@@ -12,7 +12,9 @@
         nova_auth,
         nova_resilience,
         shigoto,
-        luerl
+        luerl,
+        opentelemetry_api,
+        opentelemetry
     ]},
     {env, []},
     {modules, []},

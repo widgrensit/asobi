@@ -131,9 +131,18 @@ loading(cast, cancel, State) ->
 
 -spec running(gen_statem:event_type() | enter, term(), map()) ->
     gen_statem:state_enter_result(atom()).
-running(enter, _OldState, #{ticker_pid := TickerPid, zone_pids := ZonePids}) ->
+running(
+    enter,
+    _OldState,
+    #{
+        ticker_pid := TickerPid,
+        zone_pids := ZonePids,
+        world_id := WorldId
+    } = State
+) ->
     Zones = maps:values(ZonePids),
     asobi_world_ticker:set_zones(TickerPid, Zones, self()),
+    asobi_telemetry:world_started(WorldId, maps:get(mode, State, undefined)),
     keep_state_and_data;
 running({call, From}, {join, PlayerId}, State) ->
     handle_join(From, PlayerId, State);
@@ -190,7 +199,13 @@ running(info, {vote_vetoed, VoteId, _Template}, State) ->
 
 -spec finished(gen_statem:event_type() | enter, term(), map()) ->
     gen_statem:state_enter_result(atom()).
-finished(enter, _OldState, State) ->
+finished(enter, _OldState, #{world_id := WorldId} = State) ->
+    DurationMs =
+        case maps:get(started_at, State, undefined) of
+            undefined -> 0;
+            StartedAt -> erlang:system_time(millisecond) - StartedAt
+        end,
+    asobi_telemetry:world_finished(WorldId, DurationMs, maps:get(result, State, #{})),
     persist_result(State),
     notify_players(finished, State),
     {keep_state_and_data, [{state_timeout, 5000, cleanup}]};
@@ -254,6 +269,7 @@ handle_join(
     From,
     PlayerId,
     #{
+        world_id := WorldId,
         players := Players,
         max_players := Max,
         game_module := Mod,
@@ -281,6 +297,7 @@ handle_join(
                         players => Players1,
                         veto_tokens => VetoTokens#{PlayerId => VetoCount}
                     },
+                    asobi_telemetry:world_player_joined(WorldId, PlayerId),
                     State4 = notify_phase_player_joined(State3),
                     {keep_state, State4, [{reply, From, ok}]};
                 {error, Reason} ->
@@ -300,6 +317,7 @@ handle_leave(
         false ->
             keep_state_and_data;
         true ->
+            asobi_telemetry:world_player_left(maps:get(world_id, State), PlayerId),
             {ok, GS1} = Mod:leave(PlayerId, GS),
             State1 = remove_player_from_zones(PlayerId, State),
             Players1 = maps:remove(PlayerId, Players),
@@ -590,8 +608,34 @@ resolve_siblings(#{instance_sup := InstanceSup}) ->
 
 tick_phases(_DeltaMs, #{phase_state := undefined} = State) ->
     State;
-tick_phases(DeltaMs, #{phase_state := PS, game_module := Mod, game_state := GS} = State) ->
+tick_phases(
+    DeltaMs,
+    #{
+        phase_state := PS,
+        game_module := Mod,
+        game_state := GS,
+        world_id := WorldId
+    } = State
+) ->
+    OldPhase = asobi_phase:current(PS),
     {Events, PS1} = asobi_phase:tick(DeltaMs, PS),
+    NewPhase = asobi_phase:current(PS1),
+    case OldPhase =/= NewPhase of
+        true ->
+            asobi_telemetry:world_phase_changed(
+                WorldId,
+                case OldPhase of
+                    undefined -> ~"none";
+                    P -> P
+                end,
+                case NewPhase of
+                    undefined -> ~"complete";
+                    P -> P
+                end
+            );
+        false ->
+            ok
+    end,
     GS1 = handle_phase_events(Events, Mod, GS),
     State#{phase_state => PS1, game_state => GS1}.
 

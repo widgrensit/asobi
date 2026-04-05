@@ -98,5 +98,25 @@
         {gate_enabled, false},
         {health_prefix, ~""}
     ]},
+    {opentelemetry, [
+        {resource, #{
+            <<"service.name">> => <<"asobi">>,
+            <<"deployment.environment">> => <<"dev">>
+        }},
+        {traces_exporter, {opentelemetry_exporter, #{
+            protocol => http_protobuf,
+            endpoint => "http://localhost:4318"
+        }}},
+        {processors, [
+            {otel_batch_processor, #{
+                scheduled_delay_ms => 5000,
+                max_queue_size => 2048,
+                exporter => {opentelemetry_exporter, #{
+                    protocol => http_protobuf,
+                    endpoint => "http://localhost:4318"
+                }}
+            }}
+        ]}
+    ]},
     {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].

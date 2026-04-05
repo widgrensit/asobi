@@ -187,6 +187,7 @@ init(Config) ->
         vetoed => false,
         opened_at => erlang:system_time(millisecond)
     },
+    asobi_telemetry:vote_started(maps:get(vote_id, State), maps:get(method, State, ~"unknown")),
     broadcast_vote_start(State),
     {ok, open, State}.
 
@@ -258,6 +259,7 @@ handle_cast_vote(
         {_, _, true} ->
             {keep_state_and_data, [{reply, From, {error, rate_limited}}]};
         {true, true, false} ->
+            asobi_telemetry:vote_cast(maps:get(vote_id, State), VoterId),
             Votes1 = Votes#{VoterId => OptionId},
             NewCount =
                 case HasPriorVote of
@@ -402,6 +404,8 @@ resolve_and_stop(
         result => Result,
         closed_at => erlang:system_time(millisecond)
     },
+    DurationMs = maps:get(closed_at, State1) - maps:get(opened_at, State1, 0),
+    asobi_telemetry:vote_resolved(maps:get(vote_id, State1), DurationMs, Result),
     broadcast_vote_result(State1),
     persist_vote(State1),
     _ = notify_match(resolved, State1),
