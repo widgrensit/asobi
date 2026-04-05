@@ -383,6 +383,70 @@ When you send `world.input`, the message is routed to the zone process
 that currently owns your player entity. You don't need to specify which
 zone -- the server tracks your position and routes automatically.
 
+## Chat Channels
+
+World chat is configuration-driven. Enable the channel types you need per
+game mode:
+
+```erlang
+{asobi, [
+    {game_modes, #{
+        ~"galaxy" => #{
+            type => world,
+            module => my_game,
+            chat => #{
+                world => true,       %% global channel for everyone in the world
+                zone => true,        %% auto-join/leave as players move between zones
+                proximity => 2       %% chat with players within N zones of you
+            }
+        }
+    }}
+]}
+```
+
+Lua equivalent:
+
+```lua
+-- In your world script globals
+chat_world     = true
+chat_zone      = true
+chat_proximity = 2
+```
+
+### Channel Types
+
+| Type | Scope | Lifecycle |
+|------|-------|-----------|
+| **World** | All players in the world instance | Join on world join, leave on world leave |
+| **Zone** | Players in the same zone cell | Auto-swap when crossing zone boundaries |
+| **Proximity** | Players within N zones | Follows your interest radius, updates on zone change |
+| **Federation** | Federation members only | Managed by the social system (works automatically) |
+
+### How It Works
+
+Chat channels use the existing `asobi_chat_channel` system. The world
+server automatically manages subscriptions:
+
+- **On join**: player is added to world chat and their spawn zone's chat
+- **On zone change**: old zone chat is left, new zone chat is joined.
+  Proximity channels diff the old and new interest areas so only the
+  delta is updated
+- **On leave**: all world/zone/proximity channels are cleaned up
+
+No extra client code needed. Chat messages arrive via the same WebSocket
+as `chat.message` events. Clients just need to know the channel IDs,
+which follow a predictable format:
+
+- World: `world:{world_id}`
+- Zone: `zone:{world_id}:{x},{y}`
+- Proximity: `prox:{world_id}:{x},{y}`
+
+### No Chat Config
+
+If you omit the `chat` key entirely, no chat channels are created. The
+world server runs without any chat overhead. Add channels later by
+updating your mode config.
+
 ## Clustering
 
 Zones are regular Erlang processes. In a multi-node cluster, they

@@ -1,7 +1,7 @@
 -module(asobi_world_server).
 -behaviour(gen_statem).
 
--export([start_link/1, join/2, leave/2, post_tick/2, get_info/1, cancel/1]).
+-export([start_link/1, join/2, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
 -export([whereis/1]).
 -export([callback_mode/0, init/1, terminate/3]).
@@ -27,6 +27,10 @@ join(Pid, PlayerId) ->
 -spec leave(pid(), binary()) -> ok.
 leave(Pid, PlayerId) ->
     gen_statem:cast(Pid, {leave, PlayerId}).
+
+-spec move_player(pid(), binary(), {number(), number()}) -> ok.
+move_player(Pid, PlayerId, NewPos) ->
+    gen_statem:cast(Pid, {move_player, PlayerId, NewPos}).
 
 -spec post_tick(pid(), non_neg_integer()) -> ok.
 post_tick(Pid, TickN) ->
@@ -87,6 +91,9 @@ init(Config) ->
             false ->
                 undefined
         end,
+    ChatConfig0 = maps:get(chat, Config, #{}),
+    ChatConfig = ChatConfig0#{grid_size => GridSize},
+    ChatState = asobi_world_chat:init(WorldId, Config#{chat => ChatConfig}),
     State = #{
         world_id => WorldId,
         mode => maps:get(mode, Config, undefined),
@@ -109,6 +116,7 @@ init(Config) ->
         veto_tokens_per_player => VetoTokensPerPlayer,
         frustration_bonus => FrustrationBonus,
         active_votes => #{},
+        chat_state => ChatState,
         phase_state => PhaseState
     },
     {ok, loading, State}.
@@ -148,6 +156,8 @@ running({call, From}, {join, PlayerId}, State) ->
     handle_join(From, PlayerId, State);
 running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
+running(cast, {move_player, PlayerId, NewPos}, State) ->
+    handle_move(PlayerId, NewPos, State);
 running(
     cast,
     {post_tick, TickN},
@@ -298,6 +308,10 @@ handle_join(
                         veto_tokens => VetoTokens#{PlayerId => VetoCount}
                     },
                     asobi_telemetry:world_player_joined(WorldId, PlayerId),
+                    ZoneCoords = pos_to_zone(SpawnPos, maps:get(zone_size, State3)),
+                    asobi_world_chat:player_joined(
+                        PlayerId, ZoneCoords, maps:get(chat_state, State3)
+                    ),
                     State4 = notify_phase_player_joined(State3),
                     {keep_state, State4, [{reply, From, ok}]};
                 {error, Reason} ->
@@ -319,6 +333,7 @@ handle_leave(
         true ->
             asobi_telemetry:world_player_left(maps:get(world_id, State), PlayerId),
             {ok, GS1} = Mod:leave(PlayerId, GS),
+            leave_chat(PlayerId, State),
             State1 = remove_player_from_zones(PlayerId, State),
             Players1 = maps:remove(PlayerId, Players),
             case map_size(Players1) of
@@ -383,6 +398,69 @@ remove_player_from_zones(
                 InterestZones
             ),
             State#{player_zones => maps:remove(PlayerId, PlayerZones)}
+    end.
+
+handle_move(
+    PlayerId,
+    {X, Y} = NewPos,
+    #{
+        players := Players,
+        player_zones := PlayerZones,
+        zone_pids := ZonePids,
+        zone_size := ZoneSize,
+        view_radius := ViewRadius,
+        grid_size := GridSize,
+        chat_state := ChatState
+    } = State
+) ->
+    case maps:get(PlayerId, PlayerZones, undefined) of
+        undefined ->
+            keep_state_and_data;
+        #{zone := OldZoneCoords} ->
+            NewZoneCoords = pos_to_zone(NewPos, ZoneSize),
+            case OldZoneCoords =:= NewZoneCoords of
+                true ->
+                    %% Same zone — just update entity position
+                    ZonePid = maps:get(OldZoneCoords, ZonePids),
+                    asobi_zone:add_entity(ZonePid, PlayerId, #{x => X, y => Y, type => ~"player"}),
+                    Players1 = maps:update_with(
+                        PlayerId,
+                        fun(Meta) -> Meta#{position => NewPos} end,
+                        Players
+                    ),
+                    {keep_state, State#{players => Players1}};
+                false ->
+                    %% Zone crossing — full handoff
+                    State1 = remove_player_from_zones(PlayerId, State),
+                    State2 = place_player(PlayerId, NewPos, State1),
+                    asobi_world_chat:player_zone_changed(
+                        PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
+                    ),
+                    Players1 = maps:update_with(
+                        PlayerId,
+                        fun(Meta) -> Meta#{position => NewPos} end,
+                        maps:get(players, State2)
+                    ),
+                    PlayerPid = find_player_pid(PlayerId),
+                    ZonePid = maps:get(NewZoneCoords, ZonePids),
+                    PlayerPid ! {asobi_message, {world_zone_changed, ZonePid}},
+                    NewInterest = interest_zones(NewZoneCoords, ViewRadius, GridSize),
+                    PZ = maps:get(player_zones, State2),
+                    {keep_state, State2#{
+                        players => Players1,
+                        player_zones => PZ#{
+                            PlayerId => #{zone => NewZoneCoords, interest => NewInterest}
+                        }
+                    }}
+            end
+    end.
+
+leave_chat(PlayerId, #{player_zones := PlayerZones, chat_state := ChatState}) ->
+    case maps:get(PlayerId, PlayerZones, undefined) of
+        undefined ->
+            ok;
+        #{zone := ZoneCoords} ->
+            asobi_world_chat:player_left(PlayerId, ZoneCoords, ChatState)
     end.
 
 %% --- Internal: Spatial ---
