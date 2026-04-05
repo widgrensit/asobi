@@ -47,10 +47,13 @@ handle_call(_, _From, State) -> {reply, ok, State}.
 %% --- Queue Filling ---
 
 fill_queue_with_bots() ->
-    case asobi_matchmaker:get_queue_stats() of
+    try asobi_matchmaker:get_queue_stats() of
         {ok, #{by_mode := ByMode}} when map_size(ByMode) > 0 ->
             maps:foreach(fun fill_mode/2, ByMode);
         _ ->
+            ok
+    catch
+        exit:{timeout, _} ->
             ok
     end.
 

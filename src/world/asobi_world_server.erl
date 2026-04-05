@@ -78,7 +78,7 @@ init(Config) ->
     ViewRadius = maps:get(view_radius, Config, ?DEFAULT_VIEW_RADIUS),
     VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
     FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
-    {ZoneSupPid, TickerPid} = resolve_siblings(Config),
+    InstanceSup = maps:get(instance_sup, Config, undefined),
     PhaseState =
         case erlang:function_exported(GameMod, phases, 1) of
             true ->
@@ -101,8 +101,9 @@ init(Config) ->
         players => #{},
         player_zones => #{},
         zone_pids => #{},
-        zone_sup_pid => ZoneSupPid,
-        ticker_pid => TickerPid,
+        instance_sup => InstanceSup,
+        zone_sup_pid => undefined,
+        ticker_pid => undefined,
         started_at => undefined,
         vote_frustration => #{},
         veto_tokens => #{},
@@ -117,9 +118,15 @@ init(Config) ->
 
 -spec loading(gen_statem:event_type() | enter, term(), map()) ->
     gen_statem:state_enter_result(atom()).
-loading(enter, _OldState, State) ->
-    State1 = spawn_zones(State),
-    {keep_state, State1, [{state_timeout, 0, zones_ready}]};
+loading(enter, _OldState, _State) ->
+    %% Defer zone spawning — supervisor:which_children deadlocks if called during init
+    erlang:send(self(), resolve_and_spawn),
+    keep_state_and_data;
+loading(info, resolve_and_spawn, #{instance_sup := InstanceSup} = State) ->
+    {ZoneSupPid, TickerPid} = resolve_siblings(#{instance_sup => InstanceSup}),
+    State1 = State#{zone_sup_pid => ZoneSupPid, ticker_pid => TickerPid},
+    State2 = spawn_zones(State1),
+    {keep_state, State2, [{state_timeout, 0, zones_ready}]};
 loading(state_timeout, zones_ready, State) ->
     {next_state, running, State#{started_at => erlang:system_time(millisecond)}};
 loading({call, From}, get_info, State) ->

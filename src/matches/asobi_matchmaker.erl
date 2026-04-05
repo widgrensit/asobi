@@ -305,38 +305,58 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                 tick_rate => maps:get(tick_rate, ModeConfig, 50),
                 view_radius => maps:get(view_radius, ModeConfig, 1)
             },
-            case asobi_world_instance_sup:start_world(Config) of
-                {ok, InstancePid} when is_pid(InstancePid) ->
-                    Now = erlang:system_time(millisecond),
-                    AvgWait =
-                        lists:sum([Now - maps:get(submitted_at, T) || T <- Group]) div
-                            max(1, length(Group)),
-                    asobi_telemetry:matchmaker_formed(Mode, length(PlayerIds), AvgWait),
-                    WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
-                    WorldInfo = asobi_world_server:get_info(WorldPid),
-                    lists:foreach(
-                        fun(PlayerId) when is_binary(PlayerId) ->
-                            _ = asobi_world_server:join(WorldPid, PlayerId),
-                            asobi_presence:send(
-                                PlayerId,
-                                {match_event, matched, #{
-                                    world_id => maps:get(world_id, WorldInfo, undefined),
-                                    players => PlayerIds
-                                }}
-                            )
-                        end,
-                        PlayerIds
-                    ),
-                    spawn_matches(Rest, Failed);
-                {error, Reason} ->
-                    logger:error(#{
-                        msg => ~"world spawn failed, re-queuing players",
-                        mode => Mode,
-                        players => PlayerIds,
-                        error => Reason
-                    }),
-                    spawn_matches(Rest, [Group | Failed])
-            end;
+            %% Spawn world asynchronously to avoid blocking the matchmaker
+            SpawnGroup = Group,
+            SpawnPlayerIds = PlayerIds,
+            spawn(fun() ->
+                try
+                    case asobi_world_instance_sup:start_world(Config) of
+                        {ok, InstancePid} when is_pid(InstancePid) ->
+                            Now = erlang:system_time(millisecond),
+                            AvgWait =
+                                lists:sum([Now - maps:get(submitted_at, T) || T <- SpawnGroup]) div
+                                    max(1, length(SpawnGroup)),
+                            asobi_telemetry:matchmaker_formed(Mode, length(SpawnPlayerIds), AvgWait),
+                            WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
+                            logger:notice(#{msg => ~"world spawn complete", world_pid => WorldPid, instance_pid => InstancePid}),
+                            WorldInfo = asobi_world_server:get_info(WorldPid),
+                            WorldId = maps:get(world_id, WorldInfo, undefined),
+                            lists:foreach(
+                                fun(PlayerId) when is_binary(PlayerId) ->
+                                    JoinResult = asobi_world_server:join(WorldPid, PlayerId),
+                                    logger:notice(#{msg => ~"player joined world", player_id => PlayerId, result => JoinResult}),
+                                    asobi_presence:send(
+                                        PlayerId,
+                                        {match_event, matched, #{
+                                            match_id => WorldId,
+                                            mode => Mode,
+                                            player_ids => SpawnPlayerIds
+                                        }}
+                                    )
+                                end,
+                                SpawnPlayerIds
+                            );
+                        {error, Reason} ->
+                            logger:error(#{
+                                msg => ~"world spawn failed",
+                                mode => Mode,
+                                players => SpawnPlayerIds,
+                                error => Reason
+                            })
+                    end
+                catch
+                    Class:Reason2:Stack ->
+                        logger:error(#{
+                            msg => ~"world spawn crashed",
+                            mode => Mode,
+                            players => SpawnPlayerIds,
+                            class => Class,
+                            error => Reason2,
+                            stacktrace => Stack
+                        })
+                end
+            end),
+            spawn_matches(Rest, Failed);
         {error, _} ->
             notify_no_game_module(Mode, PlayerIds),
             spawn_matches(Rest, Failed)
