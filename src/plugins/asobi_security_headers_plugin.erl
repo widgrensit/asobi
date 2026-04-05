@@ -8,9 +8,9 @@
 pre_request(Req, _Env, _Options, State) ->
     {ok, Req, State}.
 
--spec post_request(integer(), cowboy_req:req(), map(), map()) ->
-    {ok, cowboy_req:req()}.
-post_request(_StatusCode, Req, _Env, _Options) ->
+-spec post_request(cowboy_req:req(), map(), map(), term()) ->
+    {ok, cowboy_req:req(), term()}.
+post_request(Req, _Env, _Options, State) ->
     Req1 = cowboy_req:set_resp_headers(
         #{
             ~"x-content-type-options" => ~"nosniff",
@@ -22,12 +22,14 @@ post_request(_StatusCode, Req, _Env, _Options) ->
         },
         Req
     ),
-    {ok, Req1}.
+    {ok, Req1, State}.
 
--spec plugin_info() -> #{}.
+-spec plugin_info() -> map().
 plugin_info() ->
     #{
-        name => ~"Security Headers",
+        title => ~"Security Headers",
         version => ~"1.0.0",
+        url => ~"https://github.com/widgrensit/asobi",
+        authors => [~"widgrensit"],
         description => ~"Adds standard security headers to all HTTP responses"
     }.

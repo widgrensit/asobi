@@ -15,8 +15,6 @@ jobs:
     with:
       version-file: '.tool-versions'
       enable-audit: true
-      enable-sbom: true
-      enable-sbom-scan: true
       enable-ct: true
       extra-services-compose: 'docker-compose.yml'
       enable-dependency-submission: true
