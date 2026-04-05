@@ -316,15 +316,27 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                             AvgWait =
                                 lists:sum([Now - maps:get(submitted_at, T) || T <- SpawnGroup]) div
                                     max(1, length(SpawnGroup)),
-                            asobi_telemetry:matchmaker_formed(Mode, length(SpawnPlayerIds), AvgWait),
-                            WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
-                            logger:notice(#{msg => ~"world spawn complete", world_pid => WorldPid, instance_pid => InstancePid}),
+                            asobi_telemetry:matchmaker_formed(
+                                Mode, length(SpawnPlayerIds), AvgWait
+                            ),
+                            WorldPid = asobi_world_instance:get_child(
+                                InstancePid, asobi_world_server
+                            ),
+                            logger:notice(#{
+                                msg => ~"world spawn complete",
+                                world_pid => WorldPid,
+                                instance_pid => InstancePid
+                            }),
                             WorldInfo = asobi_world_server:get_info(WorldPid),
                             WorldId = maps:get(world_id, WorldInfo, undefined),
                             lists:foreach(
                                 fun(PlayerId) when is_binary(PlayerId) ->
                                     JoinResult = asobi_world_server:join(WorldPid, PlayerId),
-                                    logger:notice(#{msg => ~"player joined world", player_id => PlayerId, result => JoinResult}),
+                                    logger:notice(#{
+                                        msg => ~"player joined world",
+                                        player_id => PlayerId,
+                                        result => JoinResult
+                                    }),
                                     asobi_presence:send(
                                         PlayerId,
                                         {match_event, matched, #{
