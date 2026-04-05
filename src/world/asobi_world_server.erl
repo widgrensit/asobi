@@ -596,9 +596,11 @@ world_info(Status, #{world_id := WorldId, players := Players} = State) ->
         world_id => WorldId,
         status => Status,
         player_count => map_size(Players),
+        max_players => maps:get(max_players, State, 500),
         players => maps:keys(Players),
         mode => maps:get(mode, State, undefined),
-        grid_size => maps:get(grid_size, State)
+        grid_size => maps:get(grid_size, State),
+        started_at => maps:get(started_at, State, undefined)
     },
     case maps:get(phase_state, State, undefined) of
         undefined -> Base;

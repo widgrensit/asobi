@@ -86,6 +86,11 @@ api_routes() ->
             {~"/players/:id", fun asobi_player_controller:show/1, #{methods => [get]}},
             {~"/players/:id", fun asobi_player_controller:update/1, #{methods => [put]}},
 
+            %% Worlds
+            {~"/worlds", fun asobi_world_controller:index/1, #{methods => [get]}},
+            {~"/worlds/:id", fun asobi_world_controller:show/1, #{methods => [get]}},
+            {~"/worlds", fun asobi_world_controller:create/1, #{methods => [post]}},
+
             %% Matches
             {~"/matches", fun asobi_match_controller:index/1, #{methods => [get]}},
             {~"/matches/:id", fun asobi_match_controller:show/1, #{methods => [get]}},

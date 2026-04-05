@@ -304,6 +304,47 @@ handle_message(
             {ok, State#{session => undefined}}
     end;
 handle_message(
+    #{~"type" := ~"world.list", ~"payload" := Payload} = Msg,
+    #{player_id := _PlayerId} = State
+) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    Filters = #{
+        mode => maps:get(~"mode", Payload, undefined),
+        has_capacity => maps:get(~"has_capacity", Payload, false)
+    },
+    Filters1 = maps:filter(fun(_, V) -> V =/= undefined end, Filters),
+    Worlds = asobi_world_lobby:list_worlds(Filters1),
+    Reply = encode_reply(Cid, ~"world.list", #{worlds => Worlds}),
+    {reply, {text, Reply}, State};
+handle_message(
+    #{~"type" := ~"world.create", ~"payload" := #{~"mode" := Mode}} = Msg,
+    #{player_id := PlayerId} = State
+) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    case asobi_world_lobby:create_world(Mode) of
+        {ok, WorldPid, Info} ->
+            _ = asobi_world_server:join(WorldPid, PlayerId),
+            Reply = encode_reply(Cid, ~"world.joined", Info),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            {reply, {text, Reply}, State}
+    end;
+handle_message(
+    #{~"type" := ~"world.find_or_create", ~"payload" := #{~"mode" := Mode}} = Msg,
+    #{player_id := PlayerId} = State
+) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    case asobi_world_lobby:find_or_create(Mode) of
+        {ok, WorldPid, Info} ->
+            _ = asobi_world_server:join(WorldPid, PlayerId),
+            Reply = encode_reply(Cid, ~"world.joined", Info),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            {reply, {text, Reply}, State}
+    end;
+handle_message(
     #{~"type" := ~"world.join", ~"payload" := #{~"world_id" := WorldId}} = Msg,
     #{player_id := PlayerId} = State
 ) ->
