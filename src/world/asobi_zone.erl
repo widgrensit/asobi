@@ -95,7 +95,8 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(term(), map()) -> {noreply, map()}.
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
-    {noreply, State1};
+    State2 = transfer_out_of_bounds_npcs(State1),
+    {noreply, State2};
 handle_cast({input, PlayerId, Input}, #{input_queue := Queue} = State) ->
     {noreply, State#{input_queue => [{PlayerId, Input} | Queue]}};
 handle_cast({add_entity, EntityId, EntityState}, #{entities := Entities} = State) ->
@@ -279,6 +280,51 @@ encode_delta({added, Id, FullState}) ->
     FullState#{~"op" => ~"a", ~"id" => Id};
 encode_delta({removed, Id}) ->
     #{~"op" => ~"r", ~"id" => Id}.
+
+%% --- NPC Zone Crossing ---
+
+transfer_out_of_bounds_npcs(
+    #{
+        entities := Entities,
+        zone_state := ZS,
+        world_id := WorldId,
+        coords := {ZX, ZY}
+    } = State
+) ->
+    Zs = maps:get(zone_size, ZS, 1200) * 1.0,
+    {ToRemove, ToTransfer} = maps:fold(
+        fun
+            (Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans}) ->
+                NewZX = trunc(X / Zs),
+                NewZY = trunc(Y / Zs),
+                case {NewZX, NewZY} =/= {ZX, ZY} of
+                    true -> {[Id | Rem], [{Id, {NewZX, NewZY}, Entity} | Trans]};
+                    false -> {Rem, Trans}
+                end;
+            (_, _, Acc) ->
+                Acc
+        end,
+        {[], []},
+        Entities
+    ),
+    %% Transfer each NPC to the target zone
+    lists:foreach(
+        fun({Id, TargetCoords, Entity}) ->
+            case pg:get_members(?PG_SCOPE, {asobi_zone, WorldId, TargetCoords}) of
+                [TargetPid | _] ->
+                    gen_server:cast(TargetPid, {add_entity, Id, Entity});
+                [] ->
+                    %% Target zone doesn't exist, NPC disappears
+                    ok
+            end
+        end,
+        ToTransfer
+    ),
+    %% Remove transferred NPCs from this zone
+    Entities1 = maps:without(ToRemove, Entities),
+    State#{entities => Entities1};
+transfer_out_of_bounds_npcs(State) ->
+    State.
 
 %% --- Zone State Backup/Recovery ---
 
