@@ -33,7 +33,7 @@ websocket_handle({text, Raw}, State) ->
                     try json:decode(Raw) of
                         #{~"type" := Type} = Msg when is_binary(Type) ->
                             asobi_telemetry:ws_message_in(Type),
-                            handle_message(Msg, State1);
+                            safe_handle_message(Msg, State1);
                         _ ->
                             Reply = encode_reply(undefined, ~"error", #{
                                 reason => ~"invalid_message"
@@ -152,8 +152,13 @@ handle_message(
     is_binary(PlayerId)
 ->
     #{~"channel_id" := ChannelId, ~"content" := Content} = Payload,
-    asobi_chat_channel:send_message(ChannelId, PlayerId, Content),
-    {ok, State};
+    case is_binary(Content) andalso byte_size(Content) =< 2000 of
+        true ->
+            asobi_chat_channel:send_message(ChannelId, PlayerId, Content),
+            {ok, State};
+        false ->
+            {ok, State}
+    end;
 handle_message(
     #{~"type" := ~"dm.send", ~"payload" := Payload} = Msg, #{player_id := PlayerId} = State
 ) when is_binary(PlayerId) ->
@@ -407,6 +412,31 @@ handle_message(#{~"type" := Type} = Msg, State) ->
     {reply, {text, Reply}, State};
 handle_message(_Msg, State) ->
     {ok, State}.
+
+%% --- Safe Message Dispatch ---
+
+safe_handle_message(Msg, State) ->
+    try
+        handle_message(Msg, State)
+    catch
+        error:{badmatch, _}:_Stack ->
+            reply_error(Msg, ~"invalid_payload", State);
+        error:{badkey, _}:_Stack ->
+            reply_error(Msg, ~"missing_field", State);
+        error:function_clause:_Stack ->
+            reply_error(Msg, ~"invalid_payload", State);
+        error:{case_clause, _}:_Stack ->
+            reply_error(Msg, ~"invalid_payload", State);
+        Class:Reason:Stack ->
+            logger:warning(#{msg => ~"ws_handler_crash", class => Class,
+                reason => Reason, stacktrace => Stack}),
+            reply_error(Msg, ~"internal_error", State)
+    end.
+
+reply_error(Msg, Reason, State) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+    {reply, {text, Reply}, State}.
 
 %% --- Internal ---
 
