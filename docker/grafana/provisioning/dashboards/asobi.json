@@ -1,0 +1,120 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "HTTP Request Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "targets": [
+        {
+          "expr": "rate(http_server_request_duration_seconds_count[1m])",
+          "legendFormat": "{{http_route}} {{http_request_method}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "HTTP Request Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(http_server_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(http_server_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(http_server_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s"}
+      }
+    },
+    {
+      "title": "Active HTTP Requests",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "targets": [
+        {
+          "expr": "http_server_active_requests"
+        }
+      ]
+    },
+    {
+      "title": "HTTP Error Rate (5xx)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "targets": [
+        {
+          "expr": "rate(http_server_request_duration_seconds_count{http_response_status_code=~\"5..\"}[5m])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.01}]}}
+      }
+    },
+    {
+      "title": "Request Body Size",
+      "type": "timeseries",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "targets": [
+        {
+          "expr": "rate(http_server_request_body_size_bytes_sum[5m]) / rate(http_server_request_body_size_bytes_count[5m])",
+          "legendFormat": "avg request size"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "bytes"}
+      }
+    },
+    {
+      "title": "Response Body Size",
+      "type": "timeseries",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "mimir"},
+      "targets": [
+        {
+          "expr": "rate(http_server_response_body_size_bytes_sum[5m]) / rate(http_server_response_body_size_bytes_count[5m])",
+          "legendFormat": "avg response size"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "bytes"}
+      }
+    },
+    {
+      "title": "Traces",
+      "type": "traces",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 12},
+      "datasource": {"type": "tempo", "uid": "tempo"},
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "limit": 20
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["asobi", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "title": "Asobi Observability",
+  "uid": "asobi-observability"
+}

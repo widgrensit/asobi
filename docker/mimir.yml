@@ -1,0 +1,32 @@
+target: all
+
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+  grpc_listen_port: 9095
+
+common:
+  storage:
+    backend: filesystem
+    filesystem:
+      dir: /var/mimir/data
+
+blocks_storage:
+  storage_prefix: blocks
+  tsdb:
+    dir: /var/mimir/tsdb
+
+compactor:
+  data_dir: /var/mimir/compactor
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+ingester:
+  ring:
+    replication_factor: 1
+
+limits:
+  native_histograms_ingestion_enabled: true

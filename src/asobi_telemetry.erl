@@ -160,8 +160,11 @@ ws_disconnected() ->
 
 -spec anticheat_violation(binary(), atom(), map()) -> ok.
 anticheat_violation(PlayerId, Type, Details) ->
-    telemetry:execute([asobi, anticheat, violation], #{count => 1},
-        #{player_id => PlayerId, type => Type, details => Details}).
+    telemetry:execute(
+        [asobi, anticheat, violation],
+        #{count => 1},
+        #{player_id => PlayerId, type => Type, details => Details}
+    ).
 
 -spec ws_message_in(binary()) -> ok.
 ws_message_in(Type) ->
