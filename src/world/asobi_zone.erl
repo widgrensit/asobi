@@ -160,7 +160,8 @@ do_tick(
     } = State
 ) ->
     Entities1 = apply_inputs(GameMod, Queue, Entities),
-    {Entities2, ZoneState1} = GameMod:zone_tick(Entities1, ZoneState),
+    ZoneStateWithTick = ZoneState#{tick => TickN},
+    {Entities2, ZoneState1} = GameMod:zone_tick(Entities1, ZoneStateWithTick),
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),

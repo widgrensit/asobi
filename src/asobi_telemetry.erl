@@ -7,6 +7,7 @@
 -export([matchmaker_queued/2, matchmaker_removed/2, matchmaker_formed/3]).
 -export([session_connected/1, session_disconnected/2]).
 -export([ws_connected/0, ws_disconnected/0, ws_message_in/1, ws_message_out/1]).
+-export([anticheat_violation/3]).
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).
 -export([vote_started/2, vote_cast/2, vote_resolved/3]).
@@ -156,6 +157,11 @@ ws_connected() ->
 -spec ws_disconnected() -> ok.
 ws_disconnected() ->
     telemetry:execute([asobi, ws, disconnected], #{count => 1}, #{}).
+
+-spec anticheat_violation(binary(), atom(), map()) -> ok.
+anticheat_violation(PlayerId, Type, Details) ->
+    telemetry:execute([asobi, anticheat, violation], #{count => 1},
+        #{player_id => PlayerId, type => Type, details => Details}).
 
 -spec ws_message_in(binary()) -> ok.
 ws_message_in(Type) ->
