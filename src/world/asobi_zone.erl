@@ -285,8 +285,6 @@ encode_delta({removed, Id}) ->
 
 transfer_out_of_bounds_npcs(#{entities := Entities, zone_state := ZS,
         world_id := WorldId, coords := {ZX, ZY}} = State) ->
-    Ox = maps:get(origin_x, ZS, 0) * 1.0,
-    Oy = maps:get(origin_y, ZS, 0) * 1.0,
     Zs = maps:get(zone_size, ZS, 1200) * 1.0,
     {ToRemove, ToTransfer} = maps:fold(
         fun(Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans}) ->
