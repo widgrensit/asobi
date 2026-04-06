@@ -283,18 +283,26 @@ encode_delta({removed, Id}) ->
 
 %% --- NPC Zone Crossing ---
 
-transfer_out_of_bounds_npcs(#{entities := Entities, zone_state := ZS,
-        world_id := WorldId, coords := {ZX, ZY}} = State) ->
+transfer_out_of_bounds_npcs(
+    #{
+        entities := Entities,
+        zone_state := ZS,
+        world_id := WorldId,
+        coords := {ZX, ZY}
+    } = State
+) ->
     Zs = maps:get(zone_size, ZS, 1200) * 1.0,
     {ToRemove, ToTransfer} = maps:fold(
-        fun(Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans}) ->
+        fun
+            (Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans}) ->
                 NewZX = trunc(X / Zs),
                 NewZY = trunc(Y / Zs),
                 case {NewZX, NewZY} =/= {ZX, ZY} of
                     true -> {[Id | Rem], [{Id, {NewZX, NewZY}, Entity} | Trans]};
                     false -> {Rem, Trans}
                 end;
-            (_, _, Acc) -> Acc
+            (_, _, Acc) ->
+                Acc
         end,
         {[], []},
         Entities
@@ -306,7 +314,8 @@ transfer_out_of_bounds_npcs(#{entities := Entities, zone_state := ZS,
                 [TargetPid | _] ->
                     gen_server:cast(TargetPid, {add_entity, Id, Entity});
                 [] ->
-                    ok  %% Target zone doesn't exist, NPC disappears
+                    %% Target zone doesn't exist, NPC disappears
+                    ok
             end
         end,
         ToTransfer
