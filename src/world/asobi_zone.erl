@@ -103,13 +103,14 @@ handle_cast({remove_entity, EntityId}, #{entities := Entities} = State) ->
 handle_cast({subscribe, PlayerId, PlayerPid}, #{subscribers := Subs, entities := Entities} = State) ->
     MonRef = monitor(process, PlayerPid),
     %% Send immediate snapshot so new subscribers see all current entities
-    _ = case map_size(Entities) of
-        0 ->
-            ok;
-        _ ->
-            Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
-            PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
-    end,
+    _ =
+        case map_size(Entities) of
+            0 ->
+                ok;
+            _ ->
+                Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
+                PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
+        end,
     {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}};
 handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
     case maps:get(PlayerId, Subs, undefined) of
