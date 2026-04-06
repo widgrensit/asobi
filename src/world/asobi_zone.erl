@@ -66,12 +66,14 @@ init(Config) ->
     GameModule = maps:get(game_module, Config),
     ZoneState = maps:get(zone_state, Config, #{}),
     pg:join(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
+    %% Recover entity state from ETS backup if available (zone crash recovery)
+    RecoveredEntities = recover_zone_state(WorldId, Coords),
     {ok, #{
         world_id => WorldId,
         coords => Coords,
         ticker_pid => TickerPid,
         game_module => GameModule,
-        entities => #{},
+        entities => RecoveredEntities,
         prev_entities => #{},
         broadcast_entities => #{},
         broadcast_interval => maps:get(broadcast_interval, Config, 3),
@@ -138,7 +140,17 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -spec terminate(term(), map()) -> ok.
-terminate(_Reason, #{world_id := WorldId, coords := Coords}) ->
+terminate(normal, #{world_id := WorldId, coords := Coords}) ->
+    clear_zone_backup(WorldId, Coords),
+    pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
+    ok;
+terminate({shutdown, _}, #{world_id := WorldId, coords := Coords}) ->
+    clear_zone_backup(WorldId, Coords),
+    pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
+    ok;
+terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities}) ->
+    %% Abnormal termination — save state for recovery
+    backup_zone_state(WorldId, Coords, Entities),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok.
 
@@ -147,6 +159,8 @@ terminate(_Reason, #{world_id := WorldId, coords := Coords}) ->
 do_tick(
     TickN,
     #{
+        world_id := WorldId,
+        coords := Coords,
         game_module := GameMod,
         entities := Entities,
         prev_entities := _PrevEntities,
@@ -160,7 +174,8 @@ do_tick(
     } = State
 ) ->
     Entities1 = apply_inputs(GameMod, Queue, Entities),
-    {Entities2, ZoneState1} = GameMod:zone_tick(Entities1, ZoneState),
+    ZoneStateWithTick = ZoneState#{tick => TickN},
+    {Entities2, ZoneState1} = GameMod:zone_tick(Entities1, ZoneStateWithTick),
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),
@@ -175,6 +190,11 @@ do_tick(
                 State
         end,
     asobi_world_ticker:tick_done(TickerPid, self(), TickN),
+    %% Periodic backup for crash recovery (every 20 ticks ≈ 1 second)
+    case TickN rem 20 of
+        0 -> backup_zone_state(WorldId, Coords, Entities3);
+        _ -> ok
+    end,
     State1#{
         entities => Entities3,
         prev_entities => Entities3,
@@ -259,3 +279,31 @@ encode_delta({added, Id, FullState}) ->
     FullState#{~"op" => ~"a", ~"id" => Id};
 encode_delta({removed, Id}) ->
     #{~"op" => ~"r", ~"id" => Id}.
+
+%% --- Zone State Backup/Recovery ---
+
+backup_zone_state(WorldId, Coords, Entities) ->
+    case ets:info(asobi_world_state) of
+        undefined -> ok;
+        _ -> ets:insert(asobi_world_state, {{WorldId, Coords}, Entities})
+    end.
+
+recover_zone_state(WorldId, Coords) ->
+    case ets:info(asobi_world_state) of
+        undefined ->
+            #{};
+        _ ->
+            case ets:lookup(asobi_world_state, {WorldId, Coords}) of
+                [{{WorldId, Coords}, Entities}] ->
+                    ets:delete(asobi_world_state, {WorldId, Coords}),
+                    Entities;
+                [] ->
+                    #{}
+            end
+    end.
+
+clear_zone_backup(WorldId, Coords) ->
+    case ets:info(asobi_world_state) of
+        undefined -> ok;
+        _ -> ets:delete(asobi_world_state, {WorldId, Coords})
+    end.
