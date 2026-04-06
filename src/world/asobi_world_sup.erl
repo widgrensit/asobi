@@ -11,18 +11,20 @@ start_link() ->
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     %% ETS tables for world state backup and player-world mapping
-    case ets:info(asobi_world_state) of
-        undefined ->
-            ets:new(asobi_world_state, [named_table, public, set, {read_concurrency, true}]);
-        _ ->
-            ok
-    end,
-    case ets:info(asobi_player_worlds) of
-        undefined ->
-            ets:new(asobi_player_worlds, [named_table, public, set, {read_concurrency, true}]);
-        _ ->
-            ok
-    end,
+    _ =
+        case ets:info(asobi_world_state) of
+            undefined ->
+                ets:new(asobi_world_state, [named_table, public, set, {read_concurrency, true}]);
+            _ ->
+                ok
+        end,
+    _ =
+        case ets:info(asobi_player_worlds) of
+            undefined ->
+                ets:new(asobi_player_worlds, [named_table, public, set, {read_concurrency, true}]);
+            _ ->
+                ok
+        end,
     SupFlags = #{
         strategy => one_for_one,
         intensity => 10,

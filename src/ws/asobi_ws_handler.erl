@@ -101,14 +101,15 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
             {ok, SessionPid} = asobi_player_session_sup:start_session(PlayerId, self()),
             asobi_telemetry:session_connected(PlayerId),
             %% Check for pending world reconnection
-            case ets:lookup(asobi_player_worlds, PlayerId) of
-                [{PlayerId, WorldPid}] ->
-                    spawn(fun() ->
-                        catch asobi_world_server:reconnect(WorldPid, PlayerId)
-                    end);
-                [] ->
-                    ok
-            end,
+            _ =
+                case ets:lookup(asobi_player_worlds, PlayerId) of
+                    [{PlayerId, WorldPid}] ->
+                        _ = spawn(fun() ->
+                            catch asobi_world_server:reconnect(WorldPid, PlayerId)
+                        end);
+                    [] ->
+                        ok
+                end,
             Reply = encode_reply(Cid, ~"session.connected", #{player_id => PlayerId}),
             {reply, {text, Reply}, State#{session => SessionPid, player_id => PlayerId}};
         {error, Reason} ->
