@@ -73,6 +73,8 @@ init(Config) ->
         game_module => GameModule,
         entities => #{},
         prev_entities => #{},
+        broadcast_entities => #{},
+        broadcast_interval => maps:get(broadcast_interval, Config, 3),
         subscribers => #{},
         zone_state => ZoneState,
         input_queue => [],
@@ -98,8 +100,17 @@ handle_cast({add_entity, EntityId, EntityState}, #{entities := Entities} = State
     {noreply, State#{entities => Entities#{EntityId => EntityState}}};
 handle_cast({remove_entity, EntityId}, #{entities := Entities} = State) ->
     {noreply, State#{entities => maps:remove(EntityId, Entities)}};
-handle_cast({subscribe, PlayerId, PlayerPid}, #{subscribers := Subs} = State) ->
+handle_cast({subscribe, PlayerId, PlayerPid}, #{subscribers := Subs, entities := Entities} = State) ->
     MonRef = monitor(process, PlayerPid),
+    %% Send immediate snapshot so new subscribers see all current entities
+    _ =
+        case map_size(Entities) of
+            0 ->
+                ok;
+            _ ->
+                Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
+                PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
+        end,
     {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}};
 handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
     case maps:get(PlayerId, Subs, undefined) of
@@ -138,7 +149,9 @@ do_tick(
     #{
         game_module := GameMod,
         entities := Entities,
-        prev_entities := PrevEntities,
+        prev_entities := _PrevEntities,
+        broadcast_entities := BroadcastEntities,
+        broadcast_interval := BroadcastInterval,
         zone_state := ZoneState,
         input_queue := Queue,
         subscribers := Subs,
@@ -151,10 +164,18 @@ do_tick(
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),
-    Deltas = compute_deltas(PrevEntities, Entities3),
-    broadcast_deltas(TickN, Deltas, Subs),
+    %% Only broadcast every Nth tick to reduce network traffic
+    State1 =
+        case TickN rem BroadcastInterval of
+            0 ->
+                Deltas = compute_deltas(BroadcastEntities, Entities3),
+                broadcast_deltas(TickN, Deltas, Subs),
+                State#{broadcast_entities => Entities3};
+            _ ->
+                State
+        end,
     asobi_world_ticker:tick_done(TickerPid, self(), TickN),
-    State#{
+    State1#{
         entities => Entities3,
         prev_entities => Entities3,
         zone_state => ZoneState1,

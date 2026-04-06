@@ -38,7 +38,8 @@ world_config(Mode) ->
                 grid_size => maps:get(grid_size, ModeConfig, 10),
                 zone_size => maps:get(zone_size, ModeConfig, 200),
                 tick_rate => maps:get(tick_rate, ModeConfig, 50),
-                view_radius => maps:get(view_radius, ModeConfig, 1)
+                view_radius => maps:get(view_radius, ModeConfig, 1),
+                persistent => maps:get(persistent, ModeConfig, false)
             }};
         {error, _} = Err ->
             Err
