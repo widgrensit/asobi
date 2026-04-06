@@ -103,7 +103,7 @@ handle_cast({remove_entity, EntityId}, #{entities := Entities} = State) ->
 handle_cast({subscribe, PlayerId, PlayerPid}, #{subscribers := Subs, entities := Entities} = State) ->
     MonRef = monitor(process, PlayerPid),
     %% Send immediate snapshot so new subscribers see all current entities
-    case map_size(Entities) of
+    _ = case map_size(Entities) of
         0 ->
             ok;
         _ ->
