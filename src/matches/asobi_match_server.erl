@@ -83,7 +83,7 @@ use_veto(Pid, PlayerId, VoteId) ->
         {error, _} = Err -> Err
     end.
 
--spec broadcast_event(pid(), atom(), map()) -> ok.
+-spec broadcast_event(pid(), atom() | binary(), map()) -> ok.
 broadcast_event(Pid, Event, Payload) ->
     gen_statem:cast(Pid, {broadcast_event, Event, Payload}).
 
@@ -109,7 +109,8 @@ init(Config) ->
             {ok, SavedStatus, SavedState};
         none ->
             GameMod = maps:get(game_module, Config),
-            GameConfig = maps:get(game_config, Config, #{}),
+            GameConfig0 = maps:get(game_config, Config, #{}),
+            GameConfig = GameConfig0#{match_id => MatchId},
             {ok, GameState} = GameMod:init(GameConfig),
             VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
             FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
