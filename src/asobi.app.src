@@ -11,8 +11,7 @@
         kura,
         nova_auth,
         nova_resilience,
-        shigoto,
-        luerl
+        shigoto
     ]},
     {env, []},
     {modules, []},

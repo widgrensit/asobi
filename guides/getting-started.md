@@ -96,7 +96,7 @@ services:
       retries: 5
 
   asobi:
-    image: ghcr.io/widgrensit/asobi:latest
+    image: ghcr.io/widgrensit/asobi_lua:latest
     depends_on:
       postgres: { condition: service_healthy }
     ports:
