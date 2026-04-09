@@ -21,7 +21,19 @@
         }},
         {dev_mode, false},
         {bootstrap_application, asobi},
-        {json_lib, json}
+        {json_lib, json},
+        {plugins, [
+            {pre_request, nova_request_plugin, #{
+                decode_json_body => true,
+                parse_qs => true
+            }},
+            {pre_request, nova_cors_plugin, #{
+                allow_origins => <<"${ASOBI_CORS_ORIGINS}">>
+            }},
+            {pre_request, nova_correlation_plugin, #{}},
+            {pre_request, asobi_rate_limit_plugin, #{limiter => asobi_api_limiter}},
+            {post_request, asobi_security_headers_plugin, #{}}
+        ]}
     ]},
     {kura, [
         {repo, asobi_repo},
@@ -35,16 +47,6 @@
     {asobi, [
         {game_dir, "/app/game"},
         {nova_apps, [nova_resilience]},
-        {plugins, [
-            {pre_request, nova_request_plugin, #{
-                decode_json_body => true,
-                parse_qs => true
-            }},
-            {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, nova_cors_plugin, #{
-                allow_origins => <<"${ASOBI_CORS_ORIGINS}">>
-            }}
-        ]},
         {matchmaker, #{
             tick_interval => 1000,
             max_wait_seconds => 60
