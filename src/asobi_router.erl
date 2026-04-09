@@ -12,30 +12,10 @@ routes(_Environment) ->
         ws_routes()
     ].
 
-cors_opts() ->
-    Origins = application:get_env(asobi, cors_allow_origins, ~""),
-    #{allow_origins => Origins}.
-
-rate_limit_opts(Group) ->
-    #{limiter => limiter_name(Group)}.
-
-limiter_name(auth) -> asobi_auth_limiter;
-limiter_name(iap) -> asobi_iap_limiter;
-limiter_name(api) -> asobi_api_limiter.
-
 auth_routes() ->
     #{
         prefix => ~"/api/v1/auth",
         security => false,
-        plugins => [
-            {pre_request, nova_request_plugin, #{
-                decode_json_body => true
-            }},
-            {pre_request, nova_cors_plugin, cors_opts()},
-            {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(auth)},
-            {post_request, asobi_security_headers_plugin, #{}}
-        ],
         routes => [
             {~"/register", fun asobi_auth_controller:register/1, #{methods => [post]}},
             {~"/login", fun asobi_auth_controller:login/1, #{methods => [post]}},
@@ -48,15 +28,6 @@ iap_routes() ->
     #{
         prefix => ~"/api/v1/iap",
         security => fun asobi_auth_plugin:verify/1,
-        plugins => [
-            {pre_request, nova_request_plugin, #{
-                decode_json_body => true
-            }},
-            {pre_request, nova_cors_plugin, cors_opts()},
-            {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(iap)},
-            {post_request, asobi_security_headers_plugin, #{}}
-        ],
         routes => [
             {~"/apple", fun asobi_iap_controller:verify_apple/1, #{methods => [post]}},
             {~"/google", fun asobi_iap_controller:verify_google/1, #{methods => [post]}}
@@ -67,16 +38,6 @@ api_routes() ->
     #{
         prefix => ~"/api/v1",
         security => fun asobi_auth_plugin:verify/1,
-        plugins => [
-            {pre_request, nova_request_plugin, #{
-                decode_json_body => true,
-                parse_qs => true
-            }},
-            {pre_request, nova_cors_plugin, cors_opts()},
-            {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, rate_limit_opts(api)},
-            {post_request, asobi_security_headers_plugin, #{}}
-        ],
         routes => [
             %% Auth - Provider linking
             {~"/auth/link", fun asobi_oauth_controller:link/1, #{methods => [post]}},
@@ -139,7 +100,9 @@ api_routes() ->
             {~"/groups/:id", fun asobi_social_controller:update_group/1, #{methods => [put]}},
             {~"/groups/:id/join", fun asobi_social_controller:join_group/1, #{methods => [post]}},
             {~"/groups/:id/leave", fun asobi_social_controller:leave_group/1, #{methods => [post]}},
-            {~"/groups/:id/members", fun asobi_social_controller:list_members/1, #{methods => [get]}},
+            {~"/groups/:id/members", fun asobi_social_controller:list_members/1, #{
+                methods => [get]
+            }},
             {
                 ~"/groups/:id/members/:player_id/role",
                 fun asobi_social_controller:update_member_role/1,
