@@ -32,6 +32,7 @@
             }},
             {pre_request, nova_correlation_plugin, #{}},
             {pre_request, asobi_rate_limit_plugin, #{limiter => asobi_api_limiter}},
+            {pre_request, asobi_saas_key_plugin, #{}},
             {post_request, asobi_security_headers_plugin, #{}}
         ]}
     ]},
@@ -47,6 +48,9 @@
     {asobi, [
         {game_dir, "/app/game"},
         {nova_apps, [nova_resilience]},
+        {saas_internal_url, <<"${ASOBI_SAAS_URL}">>},
+        {saas_internal_token, <<"${ASOBI_SAAS_INTERNAL_TOKEN}">>},
+        {environment_name, <<"${ASOBI_ENVIRONMENT_NAME}">>},
         {matchmaker, #{
             tick_interval => 1000,
             max_wait_seconds => 60

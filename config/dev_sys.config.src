@@ -35,6 +35,7 @@
             }},
             {pre_request, nova_correlation_plugin, #{}},
             {pre_request, asobi_rate_limit_plugin, #{limiter => asobi_api_limiter}},
+            {pre_request, asobi_saas_key_plugin, #{}},
             {post_request, asobi_security_headers_plugin, #{}}
         ]}
     ]},
