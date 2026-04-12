@@ -2,6 +2,7 @@
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1]).
+-export([spawn_at/3, spawn_at/4]).
 -export([reconnect/2]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
 -export([whereis/1]).
@@ -48,6 +49,14 @@ reconnect(Pid, PlayerId) ->
 -spec cancel(pid()) -> ok.
 cancel(Pid) ->
     gen_statem:cast(Pid, cancel).
+
+-spec spawn_at(pid(), binary(), {number(), number()}) -> ok.
+spawn_at(Pid, TemplateId, Pos) ->
+    spawn_at(Pid, TemplateId, Pos, #{}).
+
+-spec spawn_at(pid(), binary(), {number(), number()}, map()) -> ok.
+spawn_at(Pid, TemplateId, Pos, Overrides) ->
+    gen_statem:cast(Pid, {spawn_at, TemplateId, Pos, Overrides}).
 
 -spec start_vote(pid(), map()) -> {ok, pid()} | {error, term()}.
 start_vote(Pid, VoteConfig) ->
@@ -214,6 +223,19 @@ running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
     handle_cast_vote(From, PlayerId, VoteId, OptionId, State);
 running({call, From}, {use_veto, PlayerId, VoteId}, State) ->
     handle_use_veto(From, PlayerId, VoteId, State);
+running(
+    cast,
+    {spawn_at, TemplateId, {_X, _Y} = Pos, Overrides},
+    #{zone_pids := ZP, zone_size := ZS} = _State
+) ->
+    Coords = pos_to_zone(Pos, ZS),
+    case maps:get(Coords, ZP, undefined) of
+        undefined ->
+            keep_state_and_data;
+        ZonePid ->
+            asobi_zone:spawn_entity(ZonePid, TemplateId, Pos, Overrides),
+            keep_state_and_data
+    end;
 running(cast, cancel, State) ->
     {next_state, finished, State#{result => #{status => ~"cancelled"}}};
 running(info, {vote_resolved, VoteId, Template, Result}, State) ->
@@ -287,7 +309,7 @@ running({call, From}, {reconnect, PlayerId}, State) ->
 
 -spec finished(gen_statem:event_type() | enter, term(), map()) ->
     gen_statem:state_enter_result(atom()).
-finished(enter, _OldState, #{world_id := WorldId} = State) ->
+finished(enter, _OldState, #{world_id := WorldId, config := Config} = State) ->
     DurationMs =
         case maps:get(started_at, State, undefined) of
             undefined -> 0;
@@ -295,6 +317,11 @@ finished(enter, _OldState, #{world_id := WorldId} = State) ->
         end,
     asobi_telemetry:world_finished(WorldId, DurationMs, maps:get(result, State, #{})),
     persist_result(State),
+    %% Clean up snapshots unless world is persistent (will be restarted)
+    case maps:get(persistent, Config, false) of
+        false -> asobi_zone_snapshotter:delete_world(WorldId);
+        true -> ok
+    end,
     notify_players(finished, State),
     {keep_state_and_data, [{state_timeout, 5000, cleanup}]};
 finished(state_timeout, cleanup, State) ->
@@ -318,37 +345,84 @@ spawn_zones(
         config := Config,
         zone_sup_pid := ZoneSupPid,
         ticker_pid := TickerPid,
-        world_id := WorldId
+        world_id := WorldId,
+        game_state := GS
     } = State
 ) ->
-    Seed = maps:get(seed, Config, erlang:system_time(millisecond)),
-    ZoneStates = generate_zone_states(GameMod, Seed, Config, GridSize),
+    Persistence = maps:get(persistence, Config, false),
+    Templates = get_spawn_templates(GameMod, Config),
     AllCoords = [{X, Y} || X <- lists:seq(0, GridSize - 1), Y <- lists:seq(0, GridSize - 1)],
+    %% Check for existing snapshots when persistence is enabled
+    {ZoneStates, Entities, SpawnerStates, GS1} =
+        case Persistence of
+            true ->
+                case asobi_zone_snapshotter:load_snapshots(WorldId) of
+                    {ok, Snapshots} when map_size(Snapshots) > 0 ->
+                        ZS = maps:map(fun(_, #{zone_state := V}) -> V end, Snapshots),
+                        Ents = maps:map(fun(_, #{entities := V}) -> V end, Snapshots),
+                        SS = maps:map(fun(_, #{spawner_state := V}) -> V end, Snapshots),
+                        GS2 =
+                            case erlang:function_exported(GameMod, on_world_recovered, 2) of
+                                true ->
+                                    {ok, GS3} = GameMod:on_world_recovered(Snapshots, GS),
+                                    GS3;
+                                false ->
+                                    GS
+                            end,
+                        {ZS, Ents, SS, GS2};
+                    _ ->
+                        {generate_zone_states(GameMod, Config), #{}, #{}, GS}
+                end;
+            false ->
+                {generate_zone_states(GameMod, Config), #{}, #{}, GS}
+        end,
     ZonePids = lists:foldl(
         fun(Coords, Acc) ->
             ZoneState = maps:get(Coords, ZoneStates, #{}),
-            ZoneConfig = #{
+            RecoveredEnts = maps:get(Coords, Entities, #{}),
+            SpawnerS = maps:get(Coords, SpawnerStates, undefined),
+            ZoneConfig0 = #{
                 world_id => WorldId,
                 coords => Coords,
                 ticker_pid => TickerPid,
                 game_module => GameMod,
-                zone_state => ZoneState
+                zone_state => ZoneState,
+                spawn_templates => Templates,
+                persistence => Persistence,
+                snapshot_interval => maps:get(snapshot_interval, Config, 600)
             },
+            ZoneConfig =
+                case SpawnerS of
+                    undefined -> ZoneConfig0;
+                    _ -> ZoneConfig0#{spawner_state => SpawnerS}
+                end,
             {ok, Pid} = asobi_zone_sup:start_zone(ZoneSupPid, ZoneConfig),
+            %% Add recovered entities to zone
+            maps:foreach(
+                fun(EId, EState) -> asobi_zone:add_entity(Pid, EId, EState) end,
+                RecoveredEnts
+            ),
             Acc#{Coords => Pid}
         end,
         #{},
         AllCoords
     ),
-    State#{zone_pids => ZonePids}.
+    State#{zone_pids => ZonePids, game_state => GS1}.
 
-generate_zone_states(GameMod, Seed, Config, _GridSize) ->
+generate_zone_states(GameMod, Config) ->
+    Seed = maps:get(seed, Config, erlang:system_time(millisecond)),
     case erlang:function_exported(GameMod, generate_world, 2) of
         true ->
             {ok, ZoneStates} = GameMod:generate_world(Seed, Config),
             ZoneStates;
         false ->
             #{}
+    end.
+
+get_spawn_templates(GameMod, Config) ->
+    case erlang:function_exported(GameMod, spawn_templates, 1) of
+        true -> GameMod:spawn_templates(Config);
+        false -> maps:get(spawn_templates, Config, #{})
     end.
 
 %% --- Internal: Player Management ---

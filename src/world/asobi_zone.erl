@@ -3,6 +3,7 @@
 
 -export([start_link/1]).
 -export([tick/2, player_input/3, add_entity/3, remove_entity/2]).
+-export([spawn_entity/3, spawn_entity/4, spawn_entities/2, despawn_entity/2]).
 -export([subscribe/2, unsubscribe/2]).
 -export([get_entities/1, get_subscriber_count/1]).
 -export([start_entity_timer/2, cancel_entity_timer/3]).
@@ -56,6 +57,22 @@ start_entity_timer(Pid, Config) ->
 cancel_entity_timer(Pid, EntityId, TimerId) ->
     gen_server:cast(Pid, {cancel_entity_timer, EntityId, TimerId}).
 
+-spec spawn_entity(pid(), binary(), {number(), number()}) -> ok.
+spawn_entity(Pid, TemplateId, Pos) ->
+    spawn_entity(Pid, TemplateId, Pos, #{}).
+
+-spec spawn_entity(pid(), binary(), {number(), number()}, map()) -> ok.
+spawn_entity(Pid, TemplateId, Pos, Overrides) ->
+    gen_server:cast(Pid, {spawn_entity, TemplateId, Pos, Overrides}).
+
+-spec spawn_entities(pid(), [{binary(), {number(), number()}, map()}]) -> ok.
+spawn_entities(Pid, Spawns) ->
+    gen_server:cast(Pid, {spawn_entities, Spawns}).
+
+-spec despawn_entity(pid(), binary()) -> ok.
+despawn_entity(Pid, EntityId) ->
+    gen_server:cast(Pid, {despawn_entity, EntityId}).
+
 %% --- gen_server callbacks ---
 
 -spec init(map()) -> {ok, map()}.
@@ -68,6 +85,19 @@ init(Config) ->
     pg:join(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     %% Recover entity state from ETS backup if available (zone crash recovery)
     RecoveredEntities = recover_zone_state(WorldId, Coords),
+    Templates = maps:get(spawn_templates, Config, #{}),
+    SpawnerInit = maps:get(spawner_state, Config, undefined),
+    Spawner =
+        case SpawnerInit of
+            undefined ->
+                asobi_zone_spawner:new(Templates);
+            S when is_map(S) ->
+                asobi_zone_spawner:set_templates(
+                    Templates, asobi_zone_spawner:deserialise(S)
+                )
+        end,
+    Persistence = maps:get(persistence, Config, false),
+    SnapshotInterval = maps:get(snapshot_interval, Config, 600),
     {ok, #{
         world_id => WorldId,
         coords => Coords,
@@ -81,6 +111,9 @@ init(Config) ->
         zone_state => ZoneState,
         input_queue => [],
         entity_timers => asobi_entity_timer:new(),
+        spawner => Spawner,
+        persistence => Persistence,
+        snapshot_interval => SnapshotInterval,
         tick => 0
     }}.
 
@@ -127,6 +160,33 @@ handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) ->
     {noreply, State#{entity_timers => asobi_entity_timer:start_timer(Config, ET)}};
 handle_cast({cancel_entity_timer, EntityId, TimerId}, #{entity_timers := ET} = State) ->
     {noreply, State#{entity_timers => asobi_entity_timer:cancel_timer(EntityId, TimerId, ET)}};
+handle_cast(
+    {spawn_entity, TemplateId, Pos, Overrides}, #{entities := Entities, spawner := Spawner} = State
+) ->
+    case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Spawner) of
+        {ok, {EntityId, Entity}, Spawner1} ->
+            {noreply, State#{entities => Entities#{EntityId => Entity}, spawner => Spawner1}};
+        {error, _} ->
+            {noreply, State}
+    end;
+handle_cast({spawn_entities, Spawns}, State) ->
+    State1 = lists:foldl(
+        fun({TemplateId, Pos, Overrides}, #{entities := Ents, spawner := Sp} = S) ->
+            case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Sp) of
+                {ok, {EntityId, Entity}, Sp1} ->
+                    S#{entities => Ents#{EntityId => Entity}, spawner => Sp1};
+                {error, _} ->
+                    S
+            end
+        end,
+        State,
+        Spawns
+    ),
+    {noreply, State1};
+handle_cast({despawn_entity, EntityId}, #{entities := Entities, spawner := Spawner} = State) ->
+    Now = erlang:system_time(millisecond),
+    Spawner1 = asobi_zone_spawner:entity_removed(EntityId, Now, Spawner),
+    {noreply, State#{entities => maps:remove(EntityId, Entities), spawner => Spawner1}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -141,16 +201,19 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -spec terminate(term(), map()) -> ok.
-terminate(normal, #{world_id := WorldId, coords := Coords}) ->
+terminate(normal, #{world_id := WorldId, coords := Coords} = State) ->
+    maybe_final_snapshot(State),
     clear_zone_backup(WorldId, Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
-terminate({shutdown, _}, #{world_id := WorldId, coords := Coords}) ->
+terminate({shutdown, _}, #{world_id := WorldId, coords := Coords} = State) ->
+    maybe_final_snapshot(State),
     clear_zone_backup(WorldId, Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
-terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities}) ->
+terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities} = State) ->
     %% Abnormal termination — save state for recovery
+    maybe_final_snapshot(State),
     backup_zone_state(WorldId, Coords, Entities),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok.
@@ -180,28 +243,56 @@ do_tick(
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),
+    %% Tick spawner — process respawn queue
+    Spawner = maps:get(spawner, State),
+    {Respawns, Spawner1} = asobi_zone_spawner:tick(Now, Spawner),
+    Entities4 = lists:foldl(
+        fun({EntityId, EntityState, _Pos}, Acc) ->
+            Acc#{EntityId => EntityState}
+        end,
+        Entities3,
+        Respawns
+    ),
     %% Only broadcast every Nth tick to reduce network traffic
     State1 =
         case TickN rem BroadcastInterval of
             0 ->
-                Deltas = compute_deltas(BroadcastEntities, Entities3),
+                Deltas = compute_deltas(BroadcastEntities, Entities4),
                 broadcast_deltas(TickN, Deltas, Subs),
-                State#{broadcast_entities => Entities3};
+                State#{broadcast_entities => Entities4};
             _ ->
                 State
         end,
     asobi_world_ticker:tick_done(TickerPid, self(), TickN),
     %% Periodic backup for crash recovery (every 20 ticks ≈ 1 second)
     case TickN rem 20 of
-        0 -> backup_zone_state(WorldId, Coords, Entities3);
+        0 -> backup_zone_state(WorldId, Coords, Entities4);
         _ -> ok
     end,
+    %% Periodic DB snapshot for persistence
+    SnapshotInterval = maps:get(snapshot_interval, State1),
+    Persistence = maps:get(persistence, State1),
+    case Persistence andalso SnapshotInterval > 0 andalso TickN rem SnapshotInterval =:= 0 of
+        true ->
+            asobi_zone_snapshotter:snapshot(#{
+                world_id => WorldId,
+                coords => Coords,
+                entities => snapshot_entities(Entities4),
+                zone_state => ZoneState1,
+                entity_timers => asobi_entity_timer:info(ET1),
+                spawner_state => asobi_zone_spawner:serialise(Spawner1),
+                tick => TickN
+            });
+        false ->
+            ok
+    end,
     State1#{
-        entities => Entities3,
-        prev_entities => Entities3,
+        entities => Entities4,
+        prev_entities => Entities4,
         zone_state => ZoneState1,
         input_queue => [],
         entity_timers => ET1,
+        spawner => Spawner1,
         tick => TickN
     }.
 
@@ -325,6 +416,43 @@ transfer_out_of_bounds_npcs(
     State#{entities => Entities1};
 transfer_out_of_bounds_npcs(State) ->
     State.
+
+%% --- Snapshot Helpers ---
+
+snapshot_entities(Entities) ->
+    maps:filter(
+        fun(_Id, E) ->
+            maps:get(type, E, ~"unknown") =/= ~"player" andalso
+                maps:get(persistent, E, true)
+        end,
+        Entities
+    ).
+
+maybe_final_snapshot(#{persistence := true} = State) ->
+    #{
+        world_id := WorldId,
+        coords := Coords,
+        entities := Entities,
+        zone_state := ZoneState,
+        entity_timers := ET,
+        spawner := Spawner,
+        tick := Tick
+    } = State,
+    try
+        asobi_zone_snapshotter:snapshot_sync(#{
+            world_id => WorldId,
+            coords => Coords,
+            entities => snapshot_entities(Entities),
+            zone_state => ZoneState,
+            entity_timers => asobi_entity_timer:info(ET),
+            spawner_state => asobi_zone_spawner:serialise(Spawner),
+            tick => Tick
+        })
+    catch
+        _:_ -> ok
+    end;
+maybe_final_snapshot(_) ->
+    ok.
 
 %% --- Zone State Backup/Recovery ---
 
