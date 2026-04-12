@@ -42,10 +42,18 @@
 -callback on_phase_ended(PhaseName :: binary(), GameState :: term()) ->
     {ok, GameState1 :: term()}.
 
+-callback on_world_recovered(Snapshots :: map(), GameState :: term()) ->
+    {ok, GameState1 :: term()}.
+
+-callback spawn_templates(Config :: map()) ->
+    #{binary() => asobi_zone_spawner:spawn_template()}.
+
 -optional_callbacks([
     generate_world/2,
     get_state/2,
     phases/1,
     on_phase_started/2,
-    on_phase_ended/2
+    on_phase_ended/2,
+    on_world_recovered/2,
+    spawn_templates/1
 ]).

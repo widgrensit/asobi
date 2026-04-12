@@ -32,6 +32,10 @@ init([]) ->
     },
     Children = [
         #{
+            id => asobi_zone_snapshotter,
+            start => {asobi_zone_snapshotter, start_link, []}
+        },
+        #{
             id => asobi_world_registry,
             start => {asobi_world_registry, start_link, []}
         },
