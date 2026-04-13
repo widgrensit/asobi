@@ -48,6 +48,15 @@
 -callback spawn_templates(Config :: map()) ->
     #{binary() => asobi_zone_spawner:spawn_template()}.
 
+-callback terrain_provider(Config :: map()) ->
+    {Module :: module(), ProviderArgs :: map()} | none.
+
+-callback on_zone_loaded(Coords :: {integer(), integer()}, GameState :: term()) ->
+    {ok, ZoneState :: map(), GameState1 :: term()}.
+
+-callback on_zone_unloaded(Coords :: {integer(), integer()}, GameState :: term()) ->
+    {ok, GameState1 :: term()}.
+
 -optional_callbacks([
     generate_world/2,
     get_state/2,
@@ -55,5 +64,8 @@
     on_phase_started/2,
     on_phase_ended/2,
     on_world_recovered/2,
-    spawn_templates/1
+    spawn_templates/1,
+    terrain_provider/1,
+    on_zone_loaded/2,
+    on_zone_unloaded/2
 ]).

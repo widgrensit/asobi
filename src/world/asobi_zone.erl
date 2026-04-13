@@ -7,6 +7,7 @@
 -export([subscribe/2, unsubscribe/2]).
 -export([get_entities/1, get_subscriber_count/1]).
 -export([start_entity_timer/2, cancel_entity_timer/3]).
+-export([query_radius/3, query_rect/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(PG_SCOPE, nova_scope).
@@ -73,6 +74,15 @@ spawn_entities(Pid, Spawns) ->
 despawn_entity(Pid, EntityId) ->
     gen_server:cast(Pid, {despawn_entity, EntityId}).
 
+-spec query_radius(pid(), {number(), number()}, number()) -> [{binary(), {number(), number()}}].
+query_radius(Pid, Center, Radius) ->
+    gen_server:call(Pid, {query_radius, Center, Radius}).
+
+-spec query_rect(pid(), {number(), number()}, {number(), number()}) ->
+    [{binary(), {number(), number()}}].
+query_rect(Pid, TopLeft, BottomRight) ->
+    gen_server:call(Pid, {query_rect, TopLeft, BottomRight}).
+
 %% --- gen_server callbacks ---
 
 -spec init(map()) -> {ok, map()}.
@@ -82,6 +92,8 @@ init(Config) ->
     TickerPid = maps:get(ticker_pid, Config),
     GameModule = maps:get(game_module, Config),
     ZoneState = maps:get(zone_state, Config, #{}),
+    ZoneManagerPid = maps:get(zone_manager_pid, Config, undefined),
+    TerrainStorePid = maps:get(terrain_store_pid, Config, undefined),
     pg:join(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     %% Recover entity state from ETS backup if available (zone crash recovery)
     RecoveredEntities = recover_zone_state(WorldId, Coords),
@@ -98,11 +110,18 @@ init(Config) ->
         end,
     Persistence = maps:get(persistence, Config, false),
     SnapshotInterval = maps:get(snapshot_interval, Config, 600),
+    SpatialGrid =
+        case maps:get(spatial_grid_cell_size, Config, undefined) of
+            undefined -> undefined;
+            CellSize -> asobi_spatial_grid:new(CellSize)
+        end,
     {ok, #{
         world_id => WorldId,
         coords => Coords,
         ticker_pid => TickerPid,
         game_module => GameModule,
+        zone_manager_pid => ZoneManagerPid,
+        terrain_store_pid => TerrainStorePid,
         entities => RecoveredEntities,
         prev_entities => #{},
         broadcast_entities => #{},
@@ -114,6 +133,7 @@ init(Config) ->
         spawner => Spawner,
         persistence => Persistence,
         snapshot_interval => SnapshotInterval,
+        spatial_grid => SpatialGrid,
         tick => 0
     }}.
 
@@ -122,6 +142,34 @@ handle_call(get_entities, _From, #{entities := Entities} = State) ->
     {reply, Entities, State};
 handle_call(get_subscriber_count, _From, #{subscribers := Subs} = State) ->
     {reply, map_size(Subs), State};
+handle_call(
+    {query_radius, Center, Radius}, _From, #{spatial_grid := Grid, entities := Entities} = State
+) ->
+    Result =
+        case Grid of
+            undefined ->
+                [
+                    {Id, {maps:get(x, E), maps:get(y, E)}}
+                 || {Id, E, _Dist} <- asobi_spatial:query_radius(Entities, Center, Radius)
+                ];
+            _ ->
+                asobi_spatial_grid:query_radius(Center, Radius, Grid)
+        end,
+    {reply, Result, State};
+handle_call(
+    {query_rect, TopLeft, BottomRight}, _From, #{spatial_grid := Grid, entities := Entities} = State
+) ->
+    Result =
+        case Grid of
+            undefined ->
+                [
+                    {Id, {maps:get(x, E), maps:get(y, E)}}
+                 || {Id, E, _Dist} <- asobi_spatial:query_rect(Entities, TopLeft, BottomRight)
+                ];
+            _ ->
+                asobi_spatial_grid:query_rect(TopLeft, BottomRight, Grid)
+        end,
+    {reply, Result, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -129,14 +177,34 @@ handle_call(_Request, _From, State) ->
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
     State2 = transfer_out_of_bounds_npcs(State1),
-    {noreply, State2};
+    #{subscribers := Subs, entities := Ents, zone_manager_pid := ZMPid, coords := Coords} = State2,
+    case map_size(Subs) of
+        0 ->
+            case has_tickable_entities(Ents) of
+                false -> {noreply, State2, hibernate};
+                true -> {noreply, State2}
+            end;
+        _ ->
+            case ZMPid of
+                undefined -> ok;
+                _ -> asobi_zone_manager:touch_zone(ZMPid, Coords)
+            end,
+            {noreply, State2}
+    end;
 handle_cast({input, PlayerId, Input}, #{input_queue := Queue} = State) ->
     {noreply, State#{input_queue => [{PlayerId, Input} | Queue]}};
-handle_cast({add_entity, EntityId, EntityState}, #{entities := Entities} = State) ->
-    {noreply, State#{entities => Entities#{EntityId => EntityState}}};
-handle_cast({remove_entity, EntityId}, #{entities := Entities} = State) ->
-    {noreply, State#{entities => maps:remove(EntityId, Entities)}};
-handle_cast({subscribe, PlayerId, PlayerPid}, #{subscribers := Subs, entities := Entities} = State) ->
+handle_cast(
+    {add_entity, EntityId, EntityState}, #{entities := Entities, spatial_grid := Grid} = State
+) ->
+    Grid1 = spatial_grid_insert(EntityId, EntityState, Grid),
+    {noreply, State#{entities => Entities#{EntityId => EntityState}, spatial_grid => Grid1}};
+handle_cast({remove_entity, EntityId}, #{entities := Entities, spatial_grid := Grid} = State) ->
+    Grid1 = spatial_grid_remove(EntityId, Grid),
+    {noreply, State#{entities => maps:remove(EntityId, Entities), spatial_grid => Grid1}};
+handle_cast(
+    {subscribe, PlayerId, PlayerPid},
+    #{subscribers := Subs, entities := Entities, coords := Coords} = State
+) ->
     MonRef = monitor(process, PlayerPid),
     %% Send immediate snapshot so new subscribers see all current entities
     _ =
@@ -147,6 +215,15 @@ handle_cast({subscribe, PlayerId, PlayerPid}, #{subscribers := Subs, entities :=
                 Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
                 PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
         end,
+    case maps:get(terrain_store_pid, State, undefined) of
+        undefined ->
+            ok;
+        StorePid ->
+            case asobi_terrain_store:get_chunk(StorePid, Coords) of
+                {ok, Data} -> PlayerPid ! {asobi_message, {terrain_chunk, Coords, Data}};
+                _ -> ok
+            end
+    end,
     {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}};
 handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
     case maps:get(PlayerId, Subs, undefined) of
@@ -161,20 +238,29 @@ handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) ->
 handle_cast({cancel_entity_timer, EntityId, TimerId}, #{entity_timers := ET} = State) ->
     {noreply, State#{entity_timers => asobi_entity_timer:cancel_timer(EntityId, TimerId, ET)}};
 handle_cast(
-    {spawn_entity, TemplateId, Pos, Overrides}, #{entities := Entities, spawner := Spawner} = State
+    {spawn_entity, TemplateId, Pos, Overrides},
+    #{entities := Entities, spawner := Spawner, spatial_grid := Grid} = State
 ) ->
     case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Spawner) of
         {ok, {EntityId, Entity}, Spawner1} ->
-            {noreply, State#{entities => Entities#{EntityId => Entity}, spawner => Spawner1}};
+            Grid1 = spatial_grid_insert(EntityId, Entity, Grid),
+            {noreply, State#{
+                entities => Entities#{EntityId => Entity},
+                spawner => Spawner1,
+                spatial_grid => Grid1
+            }};
         {error, _} ->
             {noreply, State}
     end;
 handle_cast({spawn_entities, Spawns}, State) ->
     State1 = lists:foldl(
-        fun({TemplateId, Pos, Overrides}, #{entities := Ents, spawner := Sp} = S) ->
+        fun(
+            {TemplateId, Pos, Overrides}, #{entities := Ents, spawner := Sp, spatial_grid := Gr} = S
+        ) ->
             case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Sp) of
                 {ok, {EntityId, Entity}, Sp1} ->
-                    S#{entities => Ents#{EntityId => Entity}, spawner => Sp1};
+                    Gr1 = spatial_grid_insert(EntityId, Entity, Gr),
+                    S#{entities => Ents#{EntityId => Entity}, spawner => Sp1, spatial_grid => Gr1};
                 {error, _} ->
                     S
             end
@@ -183,10 +269,16 @@ handle_cast({spawn_entities, Spawns}, State) ->
         Spawns
     ),
     {noreply, State1};
-handle_cast({despawn_entity, EntityId}, #{entities := Entities, spawner := Spawner} = State) ->
+handle_cast(
+    {despawn_entity, EntityId},
+    #{entities := Entities, spawner := Spawner, spatial_grid := Grid} = State
+) ->
     Now = erlang:system_time(millisecond),
     Spawner1 = asobi_zone_spawner:entity_removed(EntityId, Now, Spawner),
-    {noreply, State#{entities => maps:remove(EntityId, Entities), spawner => Spawner1}};
+    Grid1 = spatial_grid_remove(EntityId, Grid),
+    {noreply, State#{
+        entities => maps:remove(EntityId, Entities), spawner => Spawner1, spatial_grid => Grid1
+    }};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -204,17 +296,20 @@ handle_info(_Info, State) ->
 terminate(normal, #{world_id := WorldId, coords := Coords} = State) ->
     maybe_final_snapshot(State),
     clear_zone_backup(WorldId, Coords),
+    notify_zone_manager_terminated(State),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate({shutdown, _}, #{world_id := WorldId, coords := Coords} = State) ->
     maybe_final_snapshot(State),
     clear_zone_backup(WorldId, Coords),
+    notify_zone_manager_terminated(State),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities} = State) ->
     %% Abnormal termination — save state for recovery
     maybe_final_snapshot(State),
     backup_zone_state(WorldId, Coords, Entities),
+    notify_zone_manager_terminated(State),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok.
 
@@ -286,6 +381,8 @@ do_tick(
         false ->
             ok
     end,
+    Grid = maps:get(spatial_grid, State1),
+    Grid1 = sync_spatial_grid(Entities, Entities4, Grid),
     State1#{
         entities => Entities4,
         prev_entities => Entities4,
@@ -293,6 +390,7 @@ do_tick(
         input_queue => [],
         entity_timers => ET1,
         spawner => Spawner1,
+        spatial_grid => Grid1,
         tick => TickN
     }.
 
@@ -356,9 +454,14 @@ compute_deltas(OldEntities, NewEntities) ->
 broadcast_deltas(_TickN, [], _Subs) ->
     ok;
 broadcast_deltas(TickN, Deltas, Subs) ->
-    Msg = {asobi_message, {zone_delta, TickN, encode_deltas(Deltas)}},
+    EncodedDeltas = encode_deltas(Deltas),
+    Payload = #{
+        ~"type" => ~"world.tick", ~"payload" => #{~"tick" => TickN, ~"updates" => EncodedDeltas}
+    },
+    PreEncoded = iolist_to_binary(json:encode(Payload)),
+    RawMsg = {asobi_message, {zone_delta_raw, PreEncoded}},
     maps:foreach(
-        fun(_PlayerId, {Pid, _MonRef}) -> Pid ! Msg end,
+        fun(_PlayerId, {Pid, _MonRef}) -> Pid ! RawMsg end,
         Subs
     ).
 
@@ -413,7 +516,9 @@ transfer_out_of_bounds_npcs(
     ),
     %% Remove transferred NPCs from this zone
     Entities1 = maps:without(ToRemove, Entities),
-    State#{entities => Entities1};
+    Grid = maps:get(spatial_grid, State, undefined),
+    Grid1 = lists:foldl(fun(Id, G) -> spatial_grid_remove(Id, G) end, Grid, ToRemove),
+    State#{entities => Entities1, spatial_grid => Grid1};
 transfer_out_of_bounds_npcs(State) ->
     State.
 
@@ -481,3 +586,53 @@ clear_zone_backup(WorldId, Coords) ->
         undefined -> ok;
         _ -> ets:delete(asobi_world_state, {WorldId, Coords})
     end.
+
+notify_zone_manager_terminated(#{zone_manager_pid := ZMPid, coords := Coords}) when is_pid(ZMPid) ->
+    asobi_zone_manager:zone_terminated(ZMPid, Coords);
+notify_zone_manager_terminated(_) ->
+    ok.
+
+has_tickable_entities(Entities) ->
+    maps:fold(
+        fun
+            (_, #{type := ~"npc"}, _) -> true;
+            (_, _, Acc) -> Acc
+        end,
+        false,
+        Entities
+    ).
+
+%% --- Spatial Grid Helpers ---
+
+spatial_grid_insert(_EntityId, _EntityState, undefined) ->
+    undefined;
+spatial_grid_insert(EntityId, #{x := X, y := Y}, Grid) ->
+    asobi_spatial_grid:insert(EntityId, {X, Y}, Grid);
+spatial_grid_insert(_EntityId, _EntityState, Grid) ->
+    Grid.
+
+spatial_grid_remove(_EntityId, undefined) ->
+    undefined;
+spatial_grid_remove(EntityId, Grid) ->
+    asobi_spatial_grid:remove(EntityId, Grid).
+
+sync_spatial_grid(_OldEntities, _NewEntities, undefined) ->
+    undefined;
+sync_spatial_grid(OldEntities, NewEntities, Grid) ->
+    %% Remove entities that no longer exist
+    Removed = maps:keys(OldEntities) -- maps:keys(NewEntities),
+    Grid1 = lists:foldl(fun(Id, G) -> asobi_spatial_grid:remove(Id, G) end, Grid, Removed),
+    %% Update/insert entities with changed or new positions
+    maps:fold(
+        fun
+            (Id, #{x := X, y := Y}, G) ->
+                case maps:find(Id, OldEntities) of
+                    {ok, #{x := X, y := Y}} -> G;
+                    _ -> asobi_spatial_grid:update(Id, {X, Y}, G)
+                end;
+            (_Id, _Entity, G) ->
+                G
+        end,
+        Grid1,
+        NewEntities
+    ).

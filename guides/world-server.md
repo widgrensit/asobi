@@ -9,6 +9,9 @@ Use the world server when your game has players moving through a shared
 space (co-op dungeons, open worlds, large-scale survival). For arena-style
 games with smaller player counts, use the standard [match server](matchmaking.md).
 
+For massive tile-based worlds (10K+ zones), see [Large Worlds](large-worlds.md)
+for lazy zone loading, terrain data, and scaling configuration.
+
 ## How It Works
 
 A world is divided into a grid of **zones** -- each zone is a separate

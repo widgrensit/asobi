@@ -34,6 +34,17 @@ init(Config) ->
         intensity => 5,
         period => 60
     },
+    GridSize = maps:get(grid_size, Config, 10),
+    ZoneSize = maps:get(zone_size, Config, 200),
+    ZoneManagerConfig = #{
+        world_id => maps:get(world_id, Config, undefined),
+        instance_sup => self(),
+        grid_size => GridSize,
+        zone_size => ZoneSize,
+        zone_config => maps:get(zone_manager_config, Config, #{}),
+        idle_timeout => maps:get(zone_idle_timeout, Config, 30_000),
+        max_active_zones => maps:get(max_active_zones, Config, 10_000)
+    },
     TickerConfig = #{
         tick_rate => maps:get(tick_rate, Config, 50),
         world_pid => self()
@@ -46,6 +57,11 @@ init(Config) ->
             id => asobi_zone_sup,
             start => {asobi_zone_sup, start_link, []},
             type => supervisor
+        },
+        #{
+            id => asobi_zone_manager,
+            start => {asobi_zone_manager, start_link, [ZoneManagerConfig]},
+            restart => transient
         },
         #{
             id => asobi_world_ticker,
