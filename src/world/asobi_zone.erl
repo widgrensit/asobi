@@ -164,7 +164,7 @@ handle_call(
             undefined ->
                 [
                     {Id, {maps:get(x, E), maps:get(y, E)}}
-                 || {Id, E, _Dist} <- asobi_spatial:query_rect(Entities, TopLeft, BottomRight)
+                 || {Id, E} <- asobi_spatial:query_rect(Entities, TopLeft, BottomRight)
                 ];
             _ ->
                 asobi_spatial_grid:query_rect(TopLeft, BottomRight, Grid)
@@ -215,15 +215,18 @@ handle_cast(
                 Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
                 PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
         end,
-    case maps:get(terrain_store_pid, State, undefined) of
-        undefined ->
-            ok;
-        StorePid ->
-            case asobi_terrain_store:get_chunk(StorePid, Coords) of
-                {ok, Data} -> PlayerPid ! {asobi_message, {terrain_chunk, Coords, Data}};
-                _ -> ok
-            end
-    end,
+    _ =
+        case maps:get(terrain_store_pid, State, undefined) of
+            undefined ->
+                ok;
+            StorePid ->
+                case asobi_terrain_store:get_chunk(StorePid, Coords) of
+                    {ok, Data} ->
+                        PlayerPid ! {asobi_message, {terrain_chunk, Coords, Data}};
+                    _ ->
+                        ok
+                end
+        end,
     {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}};
 handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
     case maps:get(PlayerId, Subs, undefined) of

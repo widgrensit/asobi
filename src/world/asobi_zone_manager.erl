@@ -300,7 +300,7 @@ reap_idle_zones(
                 [{Coords, Pid}] ->
                     snapshot_before_reap(WorldId, Coords, Pid),
                     SAcc1 = cleanup_zone(Coords, SAcc),
-                    terminate_zone(ZoneSup, Pid),
+                    _ = terminate_zone(ZoneSup, Pid),
                     SAcc1;
                 [] ->
                     cleanup_zone(Coords, SAcc)
