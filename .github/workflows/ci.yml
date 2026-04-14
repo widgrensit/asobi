@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@main
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@dc560fbe8e4e39898dd808645fc1d3e69d248429  # main as of 2026-03-31, pinned via Dependabot
     permissions:
       contents: write
       pull-requests: write
