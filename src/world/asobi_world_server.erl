@@ -123,9 +123,10 @@ init(Config) ->
         view_radius => ViewRadius,
         players => #{},
         player_zones => #{},
-        zone_pids => #{},
         instance_sup => InstanceSup,
         zone_sup_pid => undefined,
+        zone_manager_pid => undefined,
+        terrain_store_pid => undefined,
         ticker_pid => undefined,
         started_at => undefined,
         vote_frustration => #{},
@@ -148,10 +149,20 @@ loading(enter, _OldState, _State) ->
     %% Defer zone spawning — supervisor:which_children deadlocks if called during init
     erlang:send(self(), resolve_and_spawn),
     keep_state_and_data;
-loading(info, resolve_and_spawn, #{instance_sup := InstanceSup} = State) ->
-    {ZoneSupPid, TickerPid} = resolve_siblings(#{instance_sup => InstanceSup}),
-    State1 = State#{zone_sup_pid => ZoneSupPid, ticker_pid => TickerPid},
-    State2 = spawn_zones(State1),
+loading(info, resolve_and_spawn, #{instance_sup := InstanceSup, grid_size := GridSize} = State) ->
+    {ZoneSupPid, TickerPid, ZoneManagerPid} = resolve_siblings(#{instance_sup => InstanceSup}),
+    LazyZones = maps:get(lazy_zones, maps:get(config, State, #{}), GridSize > 100),
+    State1 = State#{
+        zone_sup_pid => ZoneSupPid,
+        ticker_pid => TickerPid,
+        zone_manager_pid => ZoneManagerPid
+    },
+    State1a = configure_zone_manager(State1),
+    State2 =
+        case LazyZones of
+            false -> spawn_zones(State1a);
+            true -> State1a
+        end,
     {keep_state, State2, [{state_timeout, 0, zones_ready}]};
 loading(state_timeout, zones_ready, State) ->
     {next_state, running, State#{started_at => erlang:system_time(millisecond)}};
@@ -169,12 +180,11 @@ running(
     _OldState,
     #{
         ticker_pid := TickerPid,
-        zone_pids := ZonePids,
+        zone_manager_pid := ZoneManagerPid,
         world_id := WorldId
     } = State
 ) ->
-    Zones = maps:values(ZonePids),
-    asobi_world_ticker:set_zones(TickerPid, Zones, self()),
+    asobi_world_ticker:set_zone_manager(TickerPid, ZoneManagerPid, self()),
     asobi_telemetry:world_started(WorldId, maps:get(mode, State, undefined)),
     keep_state_and_data;
 running({call, From}, {join, PlayerId}, State) ->
@@ -226,14 +236,14 @@ running({call, From}, {use_veto, PlayerId, VoteId}, State) ->
 running(
     cast,
     {spawn_at, TemplateId, {_X, _Y} = Pos, Overrides},
-    #{zone_pids := ZP, zone_size := ZS} = _State
+    #{zone_manager_pid := ZMPid, zone_size := ZS} = _State
 ) ->
     Coords = pos_to_zone(Pos, ZS),
-    case maps:get(Coords, ZP, undefined) of
-        undefined ->
-            keep_state_and_data;
-        ZonePid ->
+    case asobi_zone_manager:ensure_zone(ZMPid, Coords) of
+        {ok, ZonePid} ->
             asobi_zone:spawn_entity(ZonePid, TemplateId, Pos, Overrides),
+            keep_state_and_data;
+        {error, _} ->
             keep_state_and_data
     end;
 running(cast, cancel, State) ->
@@ -268,9 +278,7 @@ running({call, From}, {reconnect, PlayerId}, State) ->
     #{
         reconnect_state := RS,
         player_zones := PZ,
-        zone_pids := ZP,
-        view_radius := _ViewRadius,
-        grid_size := _GridSize
+        zone_manager_pid := ZMPid
     } = State,
     case {RS, maps:get(PlayerId, PZ, undefined)} of
         {undefined, _} ->
@@ -284,15 +292,19 @@ running({call, From}, {reconnect, PlayerId}, State) ->
             %% Re-subscribe to all interest zones
             lists:foreach(
                 fun(Coords) ->
-                    case maps:get(Coords, ZP, undefined) of
-                        undefined -> ok;
-                        ZPid -> asobi_zone:subscribe(ZPid, {PlayerId, PlayerPid})
+                    case asobi_zone_manager:get_zone(ZMPid, Coords) of
+                        {ok, ZPid} -> asobi_zone:subscribe(ZPid, {PlayerId, PlayerPid});
+                        not_loaded -> ok
                     end
                 end,
                 InterestZones
             ),
             %% Notify session of world/zone
-            ZonePid = maps:get(ZoneCoords, ZP, undefined),
+            ZonePid =
+                case asobi_zone_manager:get_zone(ZMPid, ZoneCoords) of
+                    {ok, ZP} -> ZP;
+                    not_loaded -> undefined
+                end,
             asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
             %% Update player entry with new session
             Players = maps:get(players, State),
@@ -338,22 +350,61 @@ terminate(_Reason, _StateName, #{world_id := WorldId}) ->
 
 %% --- Internal: Zone Management ---
 
+configure_zone_manager(
+    #{
+        zone_manager_pid := ZoneManagerPid,
+        ticker_pid := TickerPid,
+        world_id := WorldId,
+        game_module := GameMod,
+        config := Config
+    } = State
+) ->
+    Templates = get_spawn_templates(GameMod, Config),
+    Persistence = maps:get(persistence, Config, false),
+    TerrainStorePid = start_terrain_store(GameMod, Config),
+    BaseZoneConfig = #{
+        world_id => WorldId,
+        ticker_pid => TickerPid,
+        game_module => GameMod,
+        spawn_templates => Templates,
+        persistence => Persistence,
+        snapshot_interval => maps:get(snapshot_interval, Config, 600),
+        zone_manager_pid => ZoneManagerPid,
+        terrain_store_pid => TerrainStorePid
+    },
+    asobi_zone_manager:set_zone_config(ZoneManagerPid, BaseZoneConfig),
+    State#{terrain_store_pid => TerrainStorePid}.
+
+start_terrain_store(GameMod, Config) ->
+    case erlang:function_exported(GameMod, terrain_provider, 1) of
+        true ->
+            case GameMod:terrain_provider(Config) of
+                none ->
+                    undefined;
+                {ProvMod, ProvArgs} ->
+                    {ok, Pid} = asobi_terrain_store:start_link(#{
+                        provider => {ProvMod, ProvArgs},
+                        seed => maps:get(seed, Config, 0)
+                    }),
+                    Pid
+            end;
+        false ->
+            undefined
+    end.
+
 spawn_zones(
     #{
         grid_size := GridSize,
         game_module := GameMod,
         config := Config,
-        zone_sup_pid := ZoneSupPid,
-        ticker_pid := TickerPid,
+        zone_manager_pid := ZoneManagerPid,
         world_id := WorldId,
         game_state := GS
     } = State
 ) ->
     Persistence = maps:get(persistence, Config, false),
-    Templates = get_spawn_templates(GameMod, Config),
     AllCoords = [{X, Y} || X <- lists:seq(0, GridSize - 1), Y <- lists:seq(0, GridSize - 1)],
-    %% Check for existing snapshots when persistence is enabled
-    {ZoneStates, Entities, SpawnerStates, GS1} =
+    {_ZoneStates, Entities, _SpawnerStates, GS1} =
         case Persistence of
             true ->
                 case asobi_zone_snapshotter:load_snapshots(WorldId) of
@@ -376,38 +427,26 @@ spawn_zones(
             false ->
                 {generate_zone_states(GameMod, Config), #{}, #{}, GS}
         end,
-    ZonePids = lists:foldl(
-        fun(Coords, Acc) ->
-            ZoneState = maps:get(Coords, ZoneStates, #{}),
+    %% Pre-warm all zones via zone_manager (uses base config with terrain_store_pid etc.)
+    ok = asobi_zone_manager:pre_warm(ZoneManagerPid),
+    %% Add recovered entities to zones
+    lists:foreach(
+        fun(Coords) ->
             RecoveredEnts = maps:get(Coords, Entities, #{}),
-            SpawnerS = maps:get(Coords, SpawnerStates, undefined),
-            ZoneConfig0 = #{
-                world_id => WorldId,
-                coords => Coords,
-                ticker_pid => TickerPid,
-                game_module => GameMod,
-                zone_state => ZoneState,
-                spawn_templates => Templates,
-                persistence => Persistence,
-                snapshot_interval => maps:get(snapshot_interval, Config, 600)
-            },
-            ZoneConfig =
-                case SpawnerS of
-                    undefined -> ZoneConfig0;
-                    _ -> ZoneConfig0#{spawner_state => SpawnerS}
-                end,
-            {ok, Pid} = asobi_zone_sup:start_zone(ZoneSupPid, ZoneConfig),
-            %% Add recovered entities to zone
-            maps:foreach(
-                fun(EId, EState) -> asobi_zone:add_entity(Pid, EId, EState) end,
-                RecoveredEnts
-            ),
-            Acc#{Coords => Pid}
+            case map_size(RecoveredEnts) of
+                0 ->
+                    ok;
+                _ ->
+                    {ok, ZonePid} = asobi_zone_manager:ensure_zone(ZoneManagerPid, Coords),
+                    maps:foreach(
+                        fun(EId, EState) -> asobi_zone:add_entity(ZonePid, EId, EState) end,
+                        RecoveredEnts
+                    )
+            end
         end,
-        #{},
         AllCoords
     ),
-    State#{zone_pids => ZonePids, game_state => GS1}.
+    State#{game_state => GS1}.
 
 generate_zone_states(GameMod, Config) ->
     Seed = maps:get(seed, Config, erlang:system_time(millisecond)),
@@ -512,23 +551,23 @@ place_player(
     PlayerId,
     {X, Y} = _Pos,
     #{
-        zone_pids := ZonePids,
+        zone_manager_pid := ZMPid,
         view_radius := ViewRadius,
         zone_size := ZoneSize,
         grid_size := GridSize
     } = State
 ) ->
     ZoneCoords = pos_to_zone({X, Y}, ZoneSize),
-    ZonePid = maps:get(ZoneCoords, ZonePids),
+    {ok, ZonePid} = asobi_zone_manager:ensure_zone(ZMPid, ZoneCoords),
     PlayerPid = find_player_pid(PlayerId),
     asobi_zone:add_entity(ZonePid, PlayerId, #{x => X, y => Y, type => ~"player"}),
     asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
     InterestZones = interest_zones(ZoneCoords, ViewRadius, GridSize),
     lists:foreach(
         fun(Coords) ->
-            case maps:get(Coords, ZonePids, undefined) of
-                undefined -> ok;
-                ZPid -> asobi_zone:subscribe(ZPid, {PlayerId, PlayerPid})
+            case asobi_zone_manager:get_zone(ZMPid, Coords) of
+                {ok, ZPid} -> asobi_zone:subscribe(ZPid, {PlayerId, PlayerPid});
+                not_loaded -> ok
             end
         end,
         InterestZones
@@ -542,24 +581,28 @@ remove_player_from_zones(
     PlayerId,
     #{
         player_zones := PlayerZones,
-        zone_pids := ZonePids
+        zone_manager_pid := ZMPid
     } = State
 ) ->
     case maps:get(PlayerId, PlayerZones, undefined) of
         undefined ->
             State;
         #{zone := ZoneCoords, interest := InterestZones} ->
-            ZonePid = maps:get(ZoneCoords, ZonePids),
-            asobi_zone:remove_entity(ZonePid, PlayerId),
+            case asobi_zone_manager:get_zone(ZMPid, ZoneCoords) of
+                {ok, ZonePid} -> asobi_zone:remove_entity(ZonePid, PlayerId);
+                not_loaded -> ok
+            end,
             lists:foreach(
                 fun(Coords) ->
-                    case maps:get(Coords, ZonePids, undefined) of
-                        undefined -> ok;
-                        ZPid -> asobi_zone:unsubscribe(ZPid, PlayerId)
+                    case asobi_zone_manager:get_zone(ZMPid, Coords) of
+                        {ok, ZPid} -> asobi_zone:unsubscribe(ZPid, PlayerId);
+                        not_loaded -> ok
                     end
                 end,
                 InterestZones
             ),
+            %% Release primary zone if no other players need it
+            asobi_zone_manager:release_zone(ZMPid, ZoneCoords),
             State#{player_zones => maps:remove(PlayerId, PlayerZones)}
     end.
 
@@ -569,7 +612,7 @@ handle_move(
     #{
         players := Players,
         player_zones := PlayerZones,
-        zone_pids := ZonePids,
+        zone_manager_pid := ZMPid,
         zone_size := ZoneSize,
         view_radius := ViewRadius,
         grid_size := GridSize,
@@ -583,9 +626,14 @@ handle_move(
             NewZoneCoords = pos_to_zone(NewPos, ZoneSize),
             case OldZoneCoords =:= NewZoneCoords of
                 true ->
-                    %% Same zone — just update entity position
-                    ZonePid = maps:get(OldZoneCoords, ZonePids),
-                    asobi_zone:add_entity(ZonePid, PlayerId, #{x => X, y => Y, type => ~"player"}),
+                    case asobi_zone_manager:get_zone(ZMPid, OldZoneCoords) of
+                        {ok, ZonePid} ->
+                            asobi_zone:add_entity(ZonePid, PlayerId, #{
+                                x => X, y => Y, type => ~"player"
+                            });
+                        not_loaded ->
+                            ok
+                    end,
                     Players1 = maps:update_with(
                         PlayerId,
                         fun(Meta) -> Meta#{position => NewPos} end,
@@ -593,7 +641,6 @@ handle_move(
                     ),
                     {keep_state, State#{players => Players1}};
                 false ->
-                    %% Zone crossing — full handoff
                     State1 = remove_player_from_zones(PlayerId, State),
                     State2 = place_player(PlayerId, NewPos, State1),
                     asobi_world_chat:player_zone_changed(
@@ -605,7 +652,7 @@ handle_move(
                         maps:get(players, State2)
                     ),
                     PlayerPid = find_player_pid(PlayerId),
-                    ZonePid = maps:get(NewZoneCoords, ZonePids),
+                    {ok, ZonePid} = asobi_zone_manager:ensure_zone(ZMPid, NewZoneCoords),
                     PlayerPid ! {asobi_message, {world_zone_changed, ZonePid}},
                     NewInterest = interest_zones(NewZoneCoords, ViewRadius, GridSize),
                     PZ = maps:get(player_zones, State2),
@@ -898,7 +945,8 @@ find_player_by_pid(Pid, #{players := Players}) ->
 resolve_siblings(#{instance_sup := InstanceSup}) ->
     ZoneSupPid = asobi_world_instance:get_child(InstanceSup, asobi_zone_sup),
     TickerPid = asobi_world_instance:get_child(InstanceSup, asobi_world_ticker),
-    {ZoneSupPid, TickerPid}.
+    ZoneManagerPid = asobi_world_instance:get_child(InstanceSup, asobi_zone_manager),
+    {ZoneSupPid, TickerPid, ZoneManagerPid}.
 
 %% --- Internal: Phases ---
 

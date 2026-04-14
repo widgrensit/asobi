@@ -61,8 +61,16 @@ websocket_info({asobi_message, {match_event, Event, Payload}}, State) when is_at
     Type = iolist_to_binary([~"match.", atom_to_binary(Event)]),
     Reply = encode_reply(undefined, Type, Payload),
     {reply, {text, Reply}, State};
+websocket_info({asobi_message, {zone_delta_raw, PreEncoded}}, State) ->
+    {reply, {text, PreEncoded}, State};
 websocket_info({asobi_message, {zone_delta, TickN, Deltas}}, State) ->
     Reply = encode_reply(undefined, ~"world.tick", #{tick => TickN, updates => Deltas}),
+    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {terrain_chunk, {CX, CY}, Data}}, State) ->
+    Reply = encode_reply(undefined, ~"world.terrain", #{
+        coords => [CX, CY],
+        data => base64:encode(Data)
+    }),
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {world_event, Event, Payload}}, State) when is_atom(Event) ->
     Type = iolist_to_binary([~"world.", atom_to_binary(Event)]),
