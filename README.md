@@ -1,39 +1,73 @@
-# Asobi
+<p align="center">
+  <img src="docs/logo.png" alt="Asobi" width="420">
+</p>
 
-[![Hex.pm](https://img.shields.io/hexpm/v/asobi.svg)](https://hex.pm/packages/asobi)
-[![CI](https://github.com/widgrensit/asobi/actions/workflows/ci.yml/badge.svg)](https://github.com/widgrensit/asobi/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://hex.pm/packages/asobi"><img alt="Hex.pm" src="https://img.shields.io/hexpm/v/asobi.svg"></a>
+  <a href="https://github.com/widgrensit/asobi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/widgrensit/asobi/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+</p>
 
-Open-source game backend platform built on Erlang/OTP and the [Nova](https://github.com/novaframework/nova) ecosystem.
+<p align="center">
+  <strong>Multiplayer game backend on Erlang/OTP.</strong><br>
+  Per-match supervision. Hot-reloadable Lua. Zero-downtime deploys. 100K+ connections per node.
+</p>
 
 <p align="center">
   <a href="https://play.asobi.dev">
-    <img src="docs/arena-demo.gif" alt="Asobi Arena Demo" width="600">
+    <img src="docs/arena-demo.gif" alt="Asobi Arena Demo" width="640">
   </a>
   <br>
-  <em><a href="https://play.asobi.dev">Try the live demo</a></em>
+  <em><a href="https://play.asobi.dev">Try the live demo</a> · <a href="https://asobi.dev">asobi.dev</a></em>
 </p>
 
-Asobi provides everything you need to build and run multiplayer games:
-authentication, player management, real-time multiplayer, matchmaking,
-leaderboards, virtual economy, social features, and background jobs -- all
-in a single BEAM release.
+## Why Asobi
+
+The BEAM VM was built for telecoms switches handling millions of concurrent
+connections with soft real-time guarantees. That turns out to be the exact
+shape of a multiplayer game backend.
+
+- **Each match is an OTP process** — crashes restart in milliseconds without
+  touching the neighbours. No stop-the-world GC pauses affecting other players.
+- **Lua scripting with hot reload** — edit your match module, save, watch the
+  server pick it up live. No container rebuilds, no reconnects.
+- **Zero-downtime deploys** — rolling releases via standard OTP release
+  handling. Players keep playing through the upgrade.
+- **Single-node capacity** — one machine comfortably holds 100K+ WebSocket
+  connections, so "scale" usually means "shard by game", not "rebuild for
+  Kubernetes".
+- **No external state stores** — ETS replaces Redis for hot state; OTP `pg`
+  replaces Redis pub/sub. One release, one PostgreSQL, done.
+
+## How Asobi compares
+
+|                      | **Asobi**                  | Nakama            | Colyseus        | SpacetimeDB      |
+| -------------------- | -------------------------- | ----------------- | --------------- | ---------------- |
+| Runtime              | BEAM (Erlang/OTP)          | Go                | Node.js         | Rust + WASM      |
+| GC model             | Per-process, isolated      | Stop-the-world    | Stop-the-world  | Custom           |
+| Fault tolerance      | OTP supervision trees      | Manual recovery   | Manual recovery | Transactional    |
+| Pub/Sub              | Built-in (`pg`)            | Requires Redis    | Built-in        | Built-in         |
+| Connections / node   | 100K+                      | ~50K              | ~10K            | ~10K             |
+| Hot reload           | Yes (Lua + Erlang modules) | Lua/TypeScript    | TypeScript      | No               |
+| Scripting            | Lua (Luerl, in-VM)         | Lua / JS / Go     | JS / TS         | Rust / C#        |
+| License              | Apache-2.0                 | Apache-2.0 / BSL  | MIT             | BSL              |
 
 ## Features
 
-- **Authentication** -- register, login, session tokens via [nova_auth](https://github.com/novaframework/nova_auth)
-- **Player Management** -- profiles, stats, metadata
-- **Real-Time Multiplayer** -- WebSocket transport, server-authoritative game loop with configurable tick rate
-- **Matchmaking** -- query-based matching with skill windows and party support
-- **Leaderboards** -- ETS-backed for microsecond reads, PostgreSQL for persistence
-- **Virtual Economy** -- wallets, transactions, item definitions, store, inventory
-- **Social** -- friends, groups/guilds, chat channels, presence, notifications
-- **Tournaments** -- scheduled competitions with entry fees and rewards
-- **Cloud Saves** -- per-slot save data with optimistic concurrency
-- **Generic Storage** -- key-value storage with permissions (public/owner/none)
-- **Background Jobs** -- powered by [Shigoto](https://github.com/Taure/shigoto)
-- **Admin Dashboard** -- real-time LiveView console via [Arizona](https://github.com/novaframework/arizona_core)
+- **Authentication** — register, login, session tokens via [nova_auth](https://github.com/novaframework/nova_auth)
+- **Player management** — profiles, stats, metadata
+- **Real-time multiplayer** — WebSocket transport, server-authoritative game loop with configurable tick rate
+- **Matchmaking** — pluggable strategies (fill, skill-based) with query windows and party support
+- **Leaderboards** — ETS for microsecond reads, PostgreSQL for persistence
+- **Virtual economy** — wallets, transactions, item definitions, store, inventory
+- **Social** — friends, groups/guilds, chat channels, presence, notifications
+- **Tournaments** — scheduled competitions with entry fees and rewards
+- **Cloud saves** — per-slot save data with optimistic concurrency
+- **Generic storage** — key-value storage with permissions (public/owner/none)
+- **Background jobs** — powered by [Shigoto](https://github.com/Taure/shigoto)
+- **Admin dashboard** — real-time console via [Arizona](https://github.com/novaframework/arizona_core)
 
-## Quick Start with Lua (Docker)
+## Quick start with Lua (Docker)
 
 No Erlang needed. Just Lua scripts and Docker.
 
@@ -114,10 +148,9 @@ services:
 docker compose up -d
 ```
 
-That's it. Your game backend is running with authentication, matchmaking,
-WebSocket transport, and everything else handled by Asobi.
+Your game backend is running — authentication, matchmaking, WebSocket transport, and everything else handled by Asobi.
 
-## Quick Start with Erlang
+## Quick start with Erlang
 
 For Erlang/OTP developers who want full control, add asobi as a dependency:
 
@@ -154,45 +187,60 @@ get_state(_PlayerId, #{players := Players}) ->
     Players.
 ```
 
-Register it in `sys.config` and start with `rebar3 shell`.
-See the [Getting Started](guides/getting-started.md) guide for the full walkthrough.
+Register it in `sys.config` and start with `rebar3 shell`. See the [Getting Started](guides/getting-started.md) guide for the full walkthrough.
 
 ## Stack
 
-| Layer | Technology |
-|-------|-----------|
-| HTTP / REST | [Nova](https://github.com/novaframework/nova) (Cowboy) |
-| WebSocket | Nova WebSocket (Cowboy) |
-| Database / ORM | [Kura](https://github.com/Taure/kura) (PostgreSQL via pgo) |
-| Real-time UI | [Arizona](https://github.com/novaframework/arizona_core) |
-| Authentication | [nova_auth](https://github.com/novaframework/nova_auth) |
-| Background Jobs | [Shigoto](https://github.com/Taure/shigoto) |
-| Pub/Sub | OTP `pg` module |
+| Layer             | Technology                                                          |
+| ----------------- | ------------------------------------------------------------------- |
+| HTTP / REST       | [Nova](https://github.com/novaframework/nova) (Cowboy)              |
+| WebSocket         | Nova WebSocket (Cowboy)                                             |
+| Database / ORM    | [Kura](https://github.com/Taure/kura) (PostgreSQL via pgo)          |
+| Real-time UI      | [Arizona](https://github.com/novaframework/arizona_core)            |
+| Authentication    | [nova_auth](https://github.com/novaframework/nova_auth)             |
+| Background jobs   | [Shigoto](https://github.com/Taure/shigoto)                         |
+| Pub/Sub           | OTP `pg` module                                                     |
+| Lua runtime       | [Luerl](https://github.com/rvirding/luerl) (Lua-on-BEAM)            |
 
-## Why BEAM?
+## Status
 
-The BEAM VM is uniquely suited for game backends:
+Asobi is in **public preview (v0.1)** — fully open-source, API stabilising.
+Early-adopter friendly; expect to read code occasionally.
 
-- **Per-process GC** -- no global pauses; one match collecting garbage never affects another
-- **Fault tolerance** -- OTP supervision restarts crashed matches without affecting others
-- **Hot code upgrade** -- deploy game logic changes without disconnecting players
-- **Native clustering** -- distributed Erlang handles cross-node messaging with no external coordination
-- **500K+ connections per node** -- dramatically lower infrastructure costs
-- **No external state stores** -- ETS replaces Redis, `pg` replaces pub/sub services
+| Area                         | Status     |
+| ---------------------------- | ---------- |
+| Authentication               | Stable     |
+| Matchmaking                  | Stable     |
+| Real-time WebSocket transport| Stable     |
+| Leaderboards                 | Stable     |
+| Virtual economy              | Stable     |
+| Social (friends / chat)      | Stable     |
+| Lua scripting + hot reload   | Stable     |
+| Admin dashboard (Arizona)    | Beta       |
+| Cloud saves                  | Beta       |
+| Tournaments                  | Beta       |
+| Client SDKs (Unity/Godot/Defold/Dart) | Alpha |
+| Managed cloud offering       | [Coming soon](https://asobi.dev/cloud) |
 
 ## Documentation
 
-Full documentation is available on [HexDocs](https://hexdocs.pm/asobi).
+- [Getting started](guides/getting-started.md) — Lua (Docker) or Erlang setup
+- [Lua scripting](guides/lua-scripting.md) — write game logic in Lua
+- [Bots](guides/lua-bots.md) — add AI-controlled players
+- [Configuration](guides/configuration.md) — all configuration options
+- [REST API](guides/rest-api.md) — full API reference
+- [WebSocket protocol](guides/websocket-protocol.md) — real-time message types
+- [Matchmaking](guides/matchmaking.md) — query-based player matching
+- [Economy](guides/economy.md) — wallets, items, and store
+- [Architecture](docs/ARCHITECTURE.md) — system design
 
-- [Getting Started](guides/getting-started.md) -- Lua (Docker) or Erlang setup
-- [Lua Scripting](guides/lua-scripting.md) -- write game logic in Lua
-- [Bots](guides/lua-bots.md) -- add AI-controlled players
-- [Configuration](guides/configuration.md) -- all configuration options
-- [REST API](guides/rest-api.md) -- full API reference
-- [WebSocket Protocol](guides/websocket-protocol.md) -- real-time message types
-- [Matchmaking](guides/matchmaking.md) -- query-based player matching
-- [Economy](guides/economy.md) -- wallets, items, and store
-- [Architecture](docs/ARCHITECTURE.md) -- system design
+Full API docs on [HexDocs](https://hexdocs.pm/asobi).
+
+## Community
+
+- [Discord](https://discord.gg/vYSfYYyXpu) — ask questions, share what you're building
+- [Issues](https://github.com/widgrensit/asobi/issues) — bug reports and feature requests
+- [asobi.dev/blog](https://asobi.dev/blog) — design notes and release updates
 
 ## License
 
