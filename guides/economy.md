@@ -103,13 +103,16 @@ programmatically:
 
 ```erlang
 %% Grant currency
-asobi_economy:credit(PlayerId, ~"gold", 100, #{reason => match_reward}).
+asobi_economy:grant(PlayerId, ~"gold", 100, #{reason => ~"match_reward"}).
 
 %% Debit currency
-asobi_economy:debit(PlayerId, ~"gold", 50, #{reason => store_purchase}).
+asobi_economy:debit(PlayerId, ~"gold", 50, #{reason => ~"store_purchase"}).
 
-%% Grant item
-asobi_economy:grant_item(PlayerId, ~"sword_of_fire", 1).
+%% Read a wallet (creates one with balance 0 if missing)
+{ok, #{balance := Bal}} = asobi_economy:get_or_create_wallet(PlayerId, ~"gold").
+
+%% Purchase a store listing (atomically debits wallet and grants item)
+{ok, _} = asobi_economy:purchase(PlayerId, ListingId).
 ```
 
 All economy operations use ACID transactions to prevent double-spending

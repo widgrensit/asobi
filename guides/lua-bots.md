@@ -31,39 +31,40 @@ Enable bots in your game mode configuration:
 
 ## Lua Bot Scripts
 
-Bot scripts implement a `bot_tick` callback that runs each tick:
+Bot scripts implement a top-level `think` callback that runs each bot tick.
+It receives the bot's own ID and the latest match state for that bot and
+returns an input table (or an empty table to skip the tick):
 
 ```lua
-function bot_tick(bot_id, state, entities)
-    -- Find nearest player
+function think(bot_id, state)
+    local players = state.players or {}
+    local me = players[bot_id]
+    if not me then return {} end
+
+    -- Find nearest other player
     local target = nil
     local min_dist = math.huge
-
-    for id, entity in pairs(entities) do
-        if entity.type == "player" and id ~= bot_id then
-            local dx = entity.x - state.x
-            local dy = entity.y - state.y
+    for id, p in pairs(players) do
+        if id ~= bot_id then
+            local dx = p.x - me.x
+            local dy = p.y - me.y
             local dist = math.sqrt(dx * dx + dy * dy)
             if dist < min_dist then
                 min_dist = dist
-                target = entity
+                target = p
             end
         end
     end
 
-    -- Move towards target
     if target then
-        local dx = target.x - state.x
-        local dy = target.y - state.y
-        local len = math.sqrt(dx * dx + dy * dy)
         return {
-            action = "move",
-            x = state.x + (dx / len) * 2.0,
-            y = state.y + (dy / len) * 2.0
+            right = target.x > me.x,
+            left  = target.x < me.x,
+            up    = target.y < me.y,
+            down  = target.y > me.y,
         }
     end
-
-    return nil
+    return {}
 end
 ```
 
