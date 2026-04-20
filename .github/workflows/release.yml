@@ -35,7 +35,7 @@ jobs:
 
       - name: Log in to Container Registry
         if: steps.tag.outputs.skip == 'false'
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
