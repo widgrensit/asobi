@@ -156,7 +156,7 @@ For Erlang/OTP developers who want full control, add asobi as a dependency:
 
 ```erlang
 {deps, [
-    {asobi, "~> 0.1"}
+    {asobi, "~> 0.25"}
 ]}.
 ```
 
@@ -204,7 +204,7 @@ Register it in `sys.config` and start with `rebar3 shell`. See the [Getting Star
 
 ## Status
 
-Asobi is in **public preview (v0.1)** — fully open-source, API stabilising.
+Asobi is in **public preview** — fully open-source, API stabilising.
 Early-adopter friendly; expect to read code occasionally.
 
 | Area                         | Status     |

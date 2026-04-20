@@ -139,7 +139,7 @@ For Erlang developers who want full control.
 ### 1. Create a New Project
 
 ```bash
-rebar3 new nova my_game
+rebar3 new app my_game
 cd my_game
 ```
 
@@ -147,8 +147,14 @@ Add asobi to your dependencies in `rebar.config`:
 
 ```erlang
 {deps, [
-    {asobi, {git, "https://github.com/widgrensit/asobi.git", {branch, "main"}}}
+    {asobi, "~> 0.25"}
 ]}.
+```
+
+Point rebar3 at a `sys.config` for the shell (added below):
+
+```erlang
+{shell, [{config, "./config/sys.config"}]}.
 ```
 
 ### 2. Configure the Database
@@ -159,21 +165,19 @@ Create a PostgreSQL database:
 createdb my_game_dev
 ```
 
-Add configuration to your `sys.config`:
+Create `config/sys.config`. Asobi is hosted by Nova, so Nova needs to be
+told to bootstrap the `asobi` application, which plugins to run, and
+which `pg` scopes to register. `shigoto` (background jobs) needs to know
+which DB pool to use, and `kura` needs the connection details:
 
 ```erlang
 [
-    {kura, [
-        {repo, asobi_repo},
-        {host, "localhost"},
-        {database, "my_game_dev"},
-        {user, "postgres"},
-        {password, "postgres"}
-    ]},
-    {shigoto, [
-        {pool, asobi_repo}
-    ]},
-    {asobi, [
+    {nova, [
+        {environment, dev},
+        {dev_mode, true},
+        {bootstrap_application, asobi},
+        {json_lib, json},
+        {cowboy_configuration, #{port => 8080}},
         {plugins, [
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
@@ -181,7 +185,23 @@ Add configuration to your `sys.config`:
             }},
             {pre_request, nova_cors_plugin, #{allow_origins => <<"*">>}},
             {pre_request, nova_correlation_plugin, #{}}
-        ]},
+        ]}
+    ]},
+    {kura, [
+        {repo, asobi_repo},
+        {host, "localhost"},
+        {port, 5432},
+        {database, "my_game_dev"},
+        {user, "postgres"},
+        {password, "postgres"},
+        {pool_size, 10}
+    ]},
+    {shigoto, [
+        {pool, asobi_repo},
+        {poll_interval, 200},
+        {queues, [{~"default", 10}]}
+    ]},
+    {asobi, [
         {game_modes, #{
             ~"my_mode" => my_game
         }},
@@ -193,9 +213,15 @@ Add configuration to your `sys.config`:
             token_ttl => 900,
             refresh_ttl => 2592000
         }}
-    ]}
+    ]},
+    {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].
 ```
+
+> **Why `{bootstrap_application, asobi}`?** Nova is a web framework that
+> hosts one or more applications. Without this key Nova doesn't know
+> which app owns its router, and the release dies at boot with
+> `{error, no_nova_app_defined}`.
 
 ### 3. Start the Server
 
