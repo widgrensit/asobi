@@ -386,7 +386,7 @@ A player has vetoed the vote (when `veto_enabled` is true).
 ### List votes for a match
 
 ```bash
-curl http://localhost:8082/api/v1/matches/<match_id>/votes \
+curl http://localhost:8080/api/v1/matches/<match_id>/votes \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -395,7 +395,7 @@ Returns the most recent 50 votes for the match, ordered by newest first.
 ### Get a single vote
 
 ```bash
-curl http://localhost:8082/api/v1/votes/<vote_id> \
+curl http://localhost:8080/api/v1/votes/<vote_id> \
   -H 'Authorization: Bearer <token>'
 ```
 

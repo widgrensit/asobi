@@ -20,7 +20,7 @@ POST /api/v1/iap/apple
 ### Example
 
 ```bash
-curl -X POST http://localhost:8082/api/v1/iap/apple \
+curl -X POST http://localhost:8080/api/v1/iap/apple \
   -H 'Authorization: Bearer <session_token>' \
   -H 'Content-Type: application/json' \
   -d '{"signed_transaction": "eyJhbGciOi..."}'
@@ -82,7 +82,7 @@ POST /api/v1/iap/google
 ### Example
 
 ```bash
-curl -X POST http://localhost:8082/api/v1/iap/google \
+curl -X POST http://localhost:8080/api/v1/iap/google \
   -H 'Authorization: Bearer <session_token>' \
   -H 'Content-Type: application/json' \
   -d '{

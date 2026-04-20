@@ -115,12 +115,8 @@ Shorthand (Erlang module only):
 
 ## Sessions
 
-```erlang
-{session, #{
-    token_ttl => 900,          %% access token lifetime in seconds (default 15 min)
-    refresh_ttl => 2592000     %% refresh token lifetime in seconds (default 30 days)
-}}
-```
+Session token lifetime is handled by Nova's `nova_auth_session` — configure
+there (not under `asobi`). See the Nova docs for token/refresh TTL settings.
 
 ## Rate Limiting
 
@@ -139,11 +135,16 @@ Default: 300 requests per second for all groups.
 
 ## CORS
 
-```erlang
-{cors_allow_origins, ~"https://mygame.com"}
-```
+CORS is handled by `nova_cors_plugin` in the Nova plugin chain — configure
+it under `{nova, [{plugins, [...]}]}`:
 
-Default: `"*"` (allow all origins). Set to your domain in production.
+```erlang
+{nova, [
+    {plugins, [
+        {pre_request, nova_cors_plugin, #{allow_origins => ~"https://mygame.com"}}
+    ]}
+]}
+```
 
 ## Clustering
 
@@ -265,11 +266,6 @@ Database configuration is under the `kura` application key:
         {pool, asobi_repo}
     ]},
     {asobi, [
-        {cors_allow_origins, ~"*"},
-        {session, #{
-            token_ttl => 900,
-            refresh_ttl => 2592000
-        }},
         {rate_limits, #{
             auth => #{limit => 10, window => 60000},
             api => #{limit => 300, window => 1000}

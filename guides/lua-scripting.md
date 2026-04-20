@@ -30,7 +30,10 @@ function join(player_id, state)
     return state
 end
 
-function tick(tick_n, state, players)
+function tick(state)
+    -- To finish the match, set reserved keys on the state and return it:
+    --   state._finished = true
+    --   state._result   = { winner = "..." }
     return state
 end
 
@@ -74,11 +77,11 @@ The `game.*` namespace provides access to engine features from Lua:
 | Function | Description |
 |----------|-------------|
 | `game.id()` | Generate a unique ID |
-| `game.broadcast(event, data)` | Broadcast to all players |
-| `game.send(player_id, event, data)` | Send to a specific player |
+| `game.broadcast(event, payload)` | Broadcast to all players |
+| `game.send(player_id, message)` | Send to a specific player |
 | `game.economy.grant(player, currency, amount, reason)` | Grant currency |
 | `game.economy.debit(player, currency, amount, reason)` | Debit currency |
-| `game.economy.balance(player, currency)` | Check balance |
+| `game.economy.balance(player_id)` | Return the player's full wallet list |
 | `game.economy.purchase(player, listing_id)` | Purchase store item |
 | `game.leaderboard.submit(board, player, score)` | Submit score |
 | `game.leaderboard.top(board, limit)` | Get top scores |

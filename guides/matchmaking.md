@@ -1,15 +1,15 @@
 # Matchmaking
 
-Asobi includes a query-based matchmaker that runs as a periodic tick via
-the `asobi_matchmaker` gen_server.
+Asobi ships a periodic-tick matchmaker (`asobi_matchmaker` gen_server) that
+groups tickets into matches using a per-mode strategy module.
 
 ## How It Works
 
-1. Player submits a matchmaking ticket with properties and a query
-2. Matchmaker ticks periodically (default every 1 second)
-3. Each tick groups tickets by mode/region, finds mutually compatible pairs
-4. When enough compatible players are found, a match is spawned
-5. Players are notified via WebSocket (`matchmaker.matched`)
+1. Player submits a matchmaking ticket with a mode, optional properties, and an optional party.
+2. Matchmaker ticks periodically (default every 1 second).
+3. Each tick groups tickets by mode, and the mode's strategy module decides which tickets form a match.
+4. When a group is formed, a match is spawned.
+5. Players are notified via WebSocket (`matchmaker.matched`).
 
 ## Submitting a Ticket
 
@@ -21,8 +21,7 @@ curl -X POST http://localhost:8080/api/v1/matchmaker \
   -H 'Content-Type: application/json' \
   -d '{
     "mode": "arena",
-    "properties": {"skill": 1200, "region": "eu-west"},
-    "query": "+region:eu-west skill:>=1000 skill:<=1400"
+    "properties": {"skill": 1200, "region": "eu-west"}
   }'
 ```
 
@@ -33,31 +32,58 @@ curl -X POST http://localhost:8080/api/v1/matchmaker \
   "type": "matchmaker.add",
   "payload": {
     "mode": "arena",
-    "properties": {"skill": 1200, "region": "eu-west"},
-    "query": "+region:eu-west skill:>=1000 skill:<=1400"
+    "properties": {"skill": 1200, "region": "eu-west"}
   }
 }
 ```
 
-## Query Language
+A ticket currently supports `mode`, `properties`, and `party`. A
+query-language extension (numeric ranges, required keys, automatic skill
+window expansion) is on the roadmap but not shipped — do that filtering
+inside your strategy module instead.
 
-Tickets include a query that specifies what opponents the player will accept.
-Both players must match each other's query for a pairing to form.
+## Strategies
 
+Strategy is selected per mode via the `strategy` key in `game_modes`. Two
+are built in:
+
+- `fill` (default) — first-come-first-matched, groups players in submission
+  order until `match_size` is reached.
+- `skill_based` — sorts tickets by `properties.skill` and pairs within an
+  expanding window (configurable via `skill_window` and
+  `skill_expand_rate`).
+
+## Custom Strategies
+
+Implement `asobi_matchmaker_strategy` (a single `match/2` callback):
+
+```erlang
+-module(my_matchmaker).
+-behaviour(asobi_matchmaker_strategy).
+
+-export([match/2]).
+
+-spec match([map()], map()) -> {[[map()]], [map()]}.
+match(Tickets, Config) ->
+    Size = maps:get(match_size, Config, 4),
+    %% Return {Matched, Unmatched}, where Matched is a list of
+    %% groups (each group a list of tickets that form a match).
+    group_by_size(Tickets, Size).
 ```
-+region:eu-west mode:ranked skill:>=800 skill:<=1200
+
+Wire it up per mode:
+
+```erlang
+{asobi, [
+    {game_modes, #{
+        ~"ranked" => #{
+            module     => my_arena,
+            match_size => 4,
+            strategy   => my_matchmaker
+        }
+    }}
+]}
 ```
-
-- `key:value` -- exact match
-- `+key:value` -- required (must match)
-- `key:>=N` / `key:<=N` -- numeric range
-- Multiple conditions are AND-ed
-
-## Skill Window Expansion
-
-When a player waits too long, the matchmaker automatically widens the skill
-window. Each tick increments the `expansion_level` for unfilled tickets,
-relaxing numeric range constraints.
 
 ## Configuration
 
@@ -80,8 +106,7 @@ Players can queue as a party. All party members are placed in the same match:
   "payload": {
     "mode": "arena",
     "party": ["player_id_2", "player_id_3"],
-    "properties": {"skill": 1200},
-    "query": "skill:>=1000 skill:<=1400"
+    "properties": {"skill": 1200}
   }
 }
 ```
