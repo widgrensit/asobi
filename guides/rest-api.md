@@ -7,9 +7,12 @@ Authenticated endpoints require the `Authorization: Bearer <session_token>` head
 ## Auth
 
 ```
-POST /api/v1/auth/register     Register a new player
-POST /api/v1/auth/login        Login, returns session token
-POST /api/v1/auth/refresh      Refresh session token
+POST   /api/v1/auth/register     Register a new player
+POST   /api/v1/auth/login        Login, returns session token
+POST   /api/v1/auth/refresh      Refresh session token
+POST   /api/v1/auth/oauth        OAuth / Steam token validation
+POST   /api/v1/auth/link         Link a provider to the current account
+DELETE /api/v1/auth/unlink       Unlink a provider
 ```
 
 ### Register
@@ -46,15 +49,19 @@ PUT /api/v1/players/:id        Update own profile
 ## Social
 
 ```
-GET    /api/v1/friends                List friends
-POST   /api/v1/friends                Send friend request
-PUT    /api/v1/friends/:id            Accept/reject/block
-DELETE /api/v1/friends/:id            Remove friend
+GET    /api/v1/friends                               List friends
+POST   /api/v1/friends                               Send friend request
+PUT    /api/v1/friends/:friend_id                    Accept/reject/block
+DELETE /api/v1/friends/:friend_id                    Remove friend
 
-POST   /api/v1/groups                 Create group
-GET    /api/v1/groups/:id             Get group
-POST   /api/v1/groups/:id/join        Join group
-POST   /api/v1/groups/:id/leave       Leave group
+POST   /api/v1/groups                                Create group
+GET    /api/v1/groups/:id                            Get group
+PUT    /api/v1/groups/:id                            Update group
+POST   /api/v1/groups/:id/join                       Join group
+POST   /api/v1/groups/:id/leave                      Leave group
+GET    /api/v1/groups/:id/members                    List group members
+PUT    /api/v1/groups/:id/members/:player_id/role    Update member role
+DELETE /api/v1/groups/:id/members/:player_id         Kick member
 ```
 
 ## Economy
@@ -66,6 +73,9 @@ GET  /api/v1/store                     List store catalog
 POST /api/v1/store/purchase            Purchase item
 GET  /api/v1/inventory                 List player items
 POST /api/v1/inventory/consume         Consume item
+
+POST /api/v1/iap/apple                 Validate an Apple receipt
+POST /api/v1/iap/google                Validate a Google Play receipt
 ```
 
 ## Leaderboards
@@ -115,6 +125,13 @@ Real-time chat messages are sent and received over WebSocket.
 GET    /api/v1/notifications           List notifications (paginated)
 PUT    /api/v1/notifications/:id/read  Mark as read
 DELETE /api/v1/notifications/:id       Delete notification
+```
+
+## Direct messages
+
+```
+POST /api/v1/dm                        Send a direct message
+GET  /api/v1/dm/:player_id/history     DM history with a player
 ```
 
 ## Storage
