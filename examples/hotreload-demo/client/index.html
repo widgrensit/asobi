@@ -156,8 +156,24 @@
     addEventListener("keydown", (e) => { keys[e.key.toLowerCase()] = true;  });
     addEventListener("keyup",   (e) => { keys[e.key.toLowerCase()] = false; });
 
-    function sendInput() {
+    // Throttle input to 30 Hz and only send when a key is actually held.
+    // asobi's WS rate limit is 60 msg/s; requestAnimationFrame fires at the
+    // display refresh rate (60 Hz on most, 120 Hz+ on newer monitors), so
+    // sending every frame hits the limit on high-refresh displays.
+    const INPUT_INTERVAL_MS = 33;
+    let lastInputAt = 0;
+    let lastKeysHash = "";
+
+    function sendInput(now) {
       if (!ws || ws.readyState !== 1) return;
+      const anyHeld = keys["a"] || keys["d"] || keys["w"] || keys["s"];
+      const hash = (keys["a"]?1:0)+"|"+(keys["d"]?1:0)+"|"+(keys["w"]?1:0)+"|"+(keys["s"]?1:0);
+      // Skip if nothing held and nothing changed since last send.
+      if (!anyHeld && hash === lastKeysHash) return;
+      // Skip if we sent recently, unless the key set changed.
+      if (now - lastInputAt < INPUT_INTERVAL_MS && hash === lastKeysHash) return;
+      lastInputAt = now;
+      lastKeysHash = hash;
       ws.send(JSON.stringify({
         type: "match.input",
         payload: {
@@ -191,8 +207,8 @@
     }
 
     // --- Main loop
-    function loop() {
-      sendInput();
+    function loop(now) {
+      sendInput(now);
       draw();
       requestAnimationFrame(loop);
     }
