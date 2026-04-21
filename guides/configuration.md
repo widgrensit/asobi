@@ -298,7 +298,7 @@ Database configuration is under the `kura` application key:
 # docker-compose.yml
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

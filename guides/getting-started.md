@@ -84,7 +84,7 @@ end
 ```yaml
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -117,11 +117,41 @@ docker compose up -d
 Your game backend is running. Asobi reads your Lua scripts, sets up the
 database, and starts listening for WebSocket connections on port 8080.
 
-Edit your Lua files and restart to pick up changes:
+### 6. Verify it works
+
+Register a player:
 
 ```bash
-docker compose restart asobi
+curl -s localhost:8080/api/v1/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"username":"alice","password":"hunter2"}' | jq
 ```
+
+Expected response:
+
+```json
+{
+  "player_id": "01HX...",
+  "session_token": "eyJ...",
+  "username": "alice"
+}
+```
+
+If you see that, everything is wired up — auth, database, REST, and the
+Lua runtime are all live. Save the `session_token` for the WebSocket
+handshake (see [WebSocket Protocol](websocket-protocol.md)).
+
+Common error responses:
+
+- `{"error": "missing_required_fields"}` — check your JSON shape.
+- Connection refused — the server hasn't finished booting; give it 10s
+  and retry, or check `docker compose logs asobi` for migration errors.
+
+### Hot-reloading Lua
+
+Edit any `.lua` file under `./lua/` and save. Asobi picks up the change
+**live** — in-flight matches keep running on the old code until they
+finish, new matches bind the new code. No restart, no reconnect.
 
 See the [Lua Scripting](lua-scripting.md) guide for the full callback
 reference and advanced patterns.
