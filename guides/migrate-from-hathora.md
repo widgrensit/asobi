@@ -158,14 +158,17 @@ coexist in the client during this phase (different base URLs).
 ### WebSocket handshake
 
 Asobi expects every WebSocket client to authenticate with a `session.connect`
-frame *before* it can use any other WS message type:
+frame *before* it can use any other WS message type. The payload field is
+**`token`** (the value of the `session_token` you got from register/login):
 
 ```json
-{"type":"session.connect","payload":{"session_token":"eyJ..."}}
+{"type":"session.connect","payload":{"token":"eyJ..."}}
 ```
 
-After this the server routes match/matchmaker/chat/world events to this
-player. Other message types the server handles: `matchmaker.add`,
+The server replies `{"type":"session.connected","payload":{"player_id":"..."}}`
+when the token is accepted, or `{"type":"error","payload":{"reason":"invalid_payload"}}`
+if the field name is wrong. After successful auth the server routes
+match/matchmaker/chat/world events to this player. Other message types the server handles: `matchmaker.add`,
 `matchmaker.remove`, `match.input`, `match.join`, `match.leave`, `chat.send`,
 `chat.join`, `chat.leave`, `dm.send`, `presence.update`, `vote.cast`,
 `vote.veto`, `world.list`, `world.create`, `world.find_or_create`,
