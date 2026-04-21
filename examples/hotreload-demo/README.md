@@ -11,9 +11,12 @@ Used to produce the landing-page video.
 docker compose up -d
 ```
 
-Open `client/index.html` in a browser (any modern one — drag the file in,
-or run `python3 -m http.server 3000 --directory client` and open
-`http://localhost:3000`).
+Open <http://localhost:3000> in a browser.
+
+That's it. Compose brings up three containers — Postgres, asobi_lua, and
+an nginx proxy — so the browser hits everything on `localhost:3000` with
+no CORS to worry about. nginx proxies `/api/*` and `/ws` to asobi; the
+client HTML is served from `./client/`.
 
 You'll see a cube you can drive with `W A S D`. The status line reads
 `matched — you're in. edit lua/match.lua and save.` once the match

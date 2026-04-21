@@ -15,11 +15,19 @@ services:
     image: ghcr.io/widgrensit/asobi_lua:latest
     depends_on:
       postgres: { condition: service_healthy }
-    ports:
-      - "8080:8080"
     volumes:
       - ./lua:/app/game:ro
     environment:
       ASOBI_DB_HOST: postgres
       ASOBI_DB_NAME: hotreload_demo
-      ASOBI_CORS_ORIGINS: "*"
+
+  # Serves the HTML client AND reverse-proxies /api and /ws to asobi. Same-
+  # origin from the browser's POV → no CORS preflight, no flaky cross-origin
+  # WebSocket upgrades. Open http://localhost:3000.
+  web:
+    image: nginx:alpine
+    depends_on: [asobi]
+    ports: ["3000:80"]
+    volumes:
+      - ./client:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
