@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hotreload_demo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  asobi:
+    image: ghcr.io/widgrensit/asobi_lua:latest
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./lua:/app/game:ro
+    environment:
+      ASOBI_DB_HOST: postgres
+      ASOBI_DB_NAME: hotreload_demo
+      ASOBI_CORS_ORIGINS: "*"

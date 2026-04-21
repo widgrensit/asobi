@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>asobi hot-reload demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0b0d11;
+      color: #e5e7eb;
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 2rem;
+    }
+    .wrap { max-width: 880px; width: 100%; }
+    h1 {
+      font-weight: 700;
+      font-size: 1.4rem;
+      margin-bottom: .5rem;
+    }
+    .sub {
+      color: #9ca3af;
+      margin-bottom: 1rem;
+      font-size: .95rem;
+    }
+    canvas {
+      display: block;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0,0,0,.5);
+    }
+    .status {
+      margin-top: .75rem;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: .85rem;
+      color: #6b7280;
+    }
+    .status.live { color: #10b981; }
+    .status.err  { color: #ef4444; }
+    .kbd {
+      display: inline-block;
+      padding: 2px 6px;
+      border: 1px solid #374151;
+      border-radius: 4px;
+      background: #111827;
+      font-family: ui-monospace, monospace;
+      font-size: .8rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>asobi hot-reload demo</h1>
+    <p class="sub">
+      Move with <span class="kbd">W</span>
+      <span class="kbd">A</span>
+      <span class="kbd">S</span>
+      <span class="kbd">D</span>.
+      Edit <code>lua/match.lua</code> &mdash; colour, size, and message update live.
+    </p>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <p class="status" id="status">connecting…</p>
+  </div>
+
+  <script>
+    const API = "http://localhost:8080";
+    const WS  = "ws://localhost:8080/ws";
+
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+
+    let state = { players: {}, cube_color: "#888", cube_size: 60, bg_color: "#1e272e", message: "" };
+    let myPlayerId = null;
+    let ws = null;
+    const keys = {};
+
+    function log(msg, cls = "") {
+      statusEl.className = "status " + cls;
+      statusEl.textContent = msg;
+    }
+
+    // --- Auth: register or login with a locally persisted credential
+    async function auth() {
+      let creds = JSON.parse(localStorage.getItem("asobi_demo_creds") || "null");
+      if (!creds) {
+        creds = {
+          username: "demo-" + Math.random().toString(36).slice(2, 10),
+          password: Math.random().toString(36).slice(2)
+        };
+        localStorage.setItem("asobi_demo_creds", JSON.stringify(creds));
+        const r = await fetch(API + "/api/v1/auth/register", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(creds),
+        });
+        if (!r.ok) throw new Error("register failed: " + r.status);
+        return r.json();
+      } else {
+        const r = await fetch(API + "/api/v1/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(creds),
+        });
+        if (r.ok) return r.json();
+        // Creds stale? re-register fresh.
+        localStorage.removeItem("asobi_demo_creds");
+        return auth();
+      }
+    }
+
+    // --- Queue for a match (size=1 + fill strategy = auto-start)
+    async function queue(token) {
+      const r = await fetch(API + "/api/v1/matchmaker", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "authorization": "Bearer " + token,
+        },
+        body: JSON.stringify({ mode: "default" }),
+      });
+      if (!r.ok) throw new Error("matchmaker add failed: " + r.status);
+      return r.json();
+    }
+
+    // --- WebSocket: session.connect, then match input
+    function openSocket(token) {
+      ws = new WebSocket(WS);
+      ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({
+          type: "session.connect",
+          payload: { session_token: token },
+        }));
+        log("connected — queuing…", "live");
+      });
+      ws.addEventListener("message", (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "match.matched") {
+          log("matched — you're in. edit lua/match.lua and save.", "live");
+        } else if (msg.type === "match.state") {
+          state = msg.payload;
+        }
+      });
+      ws.addEventListener("close", () => log("disconnected", "err"));
+      ws.addEventListener("error", () => log("socket error", "err"));
+    }
+
+    // --- Input
+    addEventListener("keydown", (e) => { keys[e.key.toLowerCase()] = true;  });
+    addEventListener("keyup",   (e) => { keys[e.key.toLowerCase()] = false; });
+
+    function sendInput() {
+      if (!ws || ws.readyState !== 1) return;
+      ws.send(JSON.stringify({
+        type: "match.input",
+        payload: {
+          left:  !!keys["a"],
+          right: !!keys["d"],
+          up:    !!keys["w"],
+          down:  !!keys["s"],
+        },
+      }));
+    }
+
+    // --- Render
+    function draw() {
+      ctx.fillStyle = state.bg_color || "#1e272e";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const size  = state.cube_size  || 60;
+      const color = state.cube_color || "#ff4757";
+      ctx.fillStyle = color;
+      for (const id in state.players) {
+        const p = state.players[id];
+        ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+      }
+
+      if (state.message) {
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "20px ui-sans-serif, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(state.message, canvas.width / 2, 40);
+      }
+    }
+
+    // --- Main loop
+    function loop() {
+      sendInput();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    (async () => {
+      try {
+        log("authenticating…");
+        const { session_token, player_id } = await auth();
+        myPlayerId = player_id;
+        openSocket(session_token);
+        await queue(session_token);
+        loop();
+      } catch (e) {
+        log("error: " + e.message, "err");
+        console.error(e);
+      }
+    })();
+  </script>
+</body>
+</html>
