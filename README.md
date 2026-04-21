@@ -1,247 +1,117 @@
 <p align="center">
-  <img src="docs/logo.png" alt="Asobi" width="420">
+  <img src="docs/logo.png" alt="asobi" height="96">
+</p>
+
+<h1 align="center">asobi</h1>
+
+<p align="center">
+  <b>Multiplayer game backend on Erlang/OTP. Hot-reloadable, Apache-2.</b>
 </p>
 
 <p align="center">
   <a href="https://hex.pm/packages/asobi"><img alt="Hex.pm" src="https://img.shields.io/hexpm/v/asobi.svg"></a>
+  <a href="https://hexdocs.pm/asobi"><img alt="Hexdocs" src="https://img.shields.io/badge/hex-docs-green"></a>
   <a href="https://github.com/widgrensit/asobi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/widgrensit/asobi/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
 </p>
 
 <p align="center">
-  <strong>Multiplayer game backend on Erlang/OTP.</strong><br>
-  Per-match supervision. Hot-reloadable Lua. Zero-downtime deploys. 100K+ connections per node.
+  <a href="https://asobi.dev/docs">Docs</a> •
+  <a href="https://asobi.dev/demo">Live demo</a> •
+  <a href="https://discord.gg/vYSfYYyXpu">Discord</a> •
+  <a href="https://github.com/widgrensit/asobi/issues">Issues</a>
 </p>
 
-<p align="center">
-  <a href="https://play.asobi.dev">
-    <img src="docs/arena-demo.gif" alt="Asobi Arena Demo" width="640">
-  </a>
-  <br>
-  <em><a href="https://play.asobi.dev">Try the live demo</a> · <a href="https://asobi.dev">asobi.dev</a></em>
-</p>
+---
 
-## Why Asobi
+## Two ways to use asobi
 
-The BEAM VM was built for telecoms switches handling millions of concurrent
-connections with soft real-time guarantees. That turns out to be the exact
-shape of a multiplayer game backend.
+**Write your game in Lua** — use the [**asobi_lua**](https://github.com/widgrensit/asobi_lua)
+Docker runtime. One container, hot-reloadable Lua match scripts, batteries
+included. No Erlang required. **This is what most people want.**
 
-- **Each match is an OTP process** — crashes restart in milliseconds without
-  touching the neighbours. No stop-the-world GC pauses affecting other players.
-- **Lua scripting with hot reload** — edit your match module, save, watch the
-  server pick it up live. No container rebuilds, no reconnects.
-- **Zero-downtime deploys** — rolling releases via standard OTP release
-  handling. Players keep playing through the upgrade.
-- **Single-node capacity** — one machine comfortably holds 100K+ WebSocket
-  connections, so "scale" usually means "shard by game", not "rebuild for
-  Kubernetes".
-- **No external state stores** — ETS replaces Redis for hot state; OTP `pg`
-  replaces Redis pub/sub. One release, one PostgreSQL, done.
-
-## How Asobi compares
-
-|                      | **Asobi**                  | Nakama            | Colyseus        | SpacetimeDB      |
-| -------------------- | -------------------------- | ----------------- | --------------- | ---------------- |
-| Runtime              | BEAM (Erlang/OTP)          | Go                | Node.js         | Rust + WASM      |
-| GC model             | Per-process, isolated      | Stop-the-world    | Stop-the-world  | Custom           |
-| Fault tolerance      | OTP supervision trees      | Manual recovery   | Manual recovery | Transactional    |
-| Pub/Sub              | Built-in (`pg`)            | Requires Redis    | Built-in        | Built-in         |
-| Connections / node   | 100K+                      | ~50K              | ~10K            | ~10K             |
-| Hot reload           | Yes (Lua + Erlang modules) | Lua/TypeScript    | TypeScript      | No               |
-| Scripting            | Lua (Luerl, in-VM)         | Lua / JS / Go     | JS / TS         | Rust / C#        |
-| License              | Apache-2.0                 | Apache-2.0 / BSL  | MIT             | BSL              |
-
-## Features
-
-- **Authentication** — register, login, session tokens via [nova_auth](https://github.com/novaframework/nova_auth)
-- **Player management** — profiles, stats, metadata
-- **Real-time multiplayer** — WebSocket transport, server-authoritative game loop with configurable tick rate
-- **Matchmaking** — pluggable strategies (fill, skill-based) with query windows and party support
-- **Leaderboards** — ETS for microsecond reads, PostgreSQL for persistence
-- **Virtual economy** — wallets, transactions, item definitions, store, inventory
-- **Social** — friends, groups/guilds, chat channels, presence, notifications
-- **Tournaments** — scheduled competitions with entry fees and rewards
-- **Cloud saves** — per-slot save data with optimistic concurrency
-- **Generic storage** — key-value storage with permissions (public/owner/none)
-- **Background jobs** — powered by [Shigoto](https://github.com/Taure/shigoto)
-- **Admin dashboard** — real-time console via [Arizona](https://github.com/novaframework/arizona_core)
-
-## Quick start with Lua (Docker)
-
-No Erlang needed. Just Lua scripts and Docker.
-
-```bash
-mkdir my_game && cd my_game
-mkdir -p lua/bots
-```
-
-Write your game logic in Lua:
-
-```lua
--- lua/match.lua
-match_size = 2
-max_players = 4
-strategy = "fill"
-
-function init(config)
-    return { players = {} }
-end
-
-function join(player_id, state)
-    state.players[player_id] = { x = 400, y = 300, hp = 100 }
-    return state
-end
-
-function leave(player_id, state)
-    state.players[player_id] = nil
-    return state
-end
-
-function handle_input(player_id, input, state)
-    local p = state.players[player_id]
-    if not p then return state end
-    if input.right then p.x = p.x + 5 end
-    if input.left  then p.x = p.x - 5 end
-    return state
-end
-
-function tick(state)
-    return state
-end
-
-function get_state(player_id, state)
-    return { players = state.players }
-end
-```
-
-Add a `docker-compose.yml`:
-
-```yaml
-services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: my_game_dev
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  asobi:
-    image: ghcr.io/widgrensit/asobi_lua:latest
-    depends_on:
-      postgres: { condition: service_healthy }
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./lua:/app/game:ro
-    environment:
-      ASOBI_DB_HOST: postgres
-      ASOBI_DB_NAME: my_game_dev
-```
-
-```bash
-docker compose up -d
-```
-
-Your game backend is running — authentication, matchmaking, WebSocket transport, and everything else handled by Asobi.
-
-## Quick start with Erlang
-
-For Erlang/OTP developers who want full control, add asobi as a dependency:
+**Write your game in Erlang** — depend on this library directly. You get the
+same match supervisor, matchmaker, leaderboards, economy, world server, and
+voting primitives, implemented as OTP behaviours you compose with the rest of
+your release.
 
 ```erlang
+%% rebar.config
 {deps, [
-    {asobi, "~> 0.25"}
+    {asobi, "~> 0.1"}
 ]}.
 ```
 
-Implement the `asobi_match` behaviour:
+## Features
 
-```erlang
--module(my_arena_game).
--behaviour(asobi_match).
+- **`asobi_match`** — behaviour for per-match logic, backed by a supervised `gen_server` with ETS state backup on crash.
+- **`asobi_matchmaker`** — pluggable strategies (`fill`, `skill_based`); your own via the `asobi_matchmaker_strategy` behaviour.
+- **`asobi_world_server`** — persistent worlds with lazy zones, spatial grid indexing, terrain chunk serving, adaptive tick rates.
+- **`asobi_vote_server`** — plurality, ranked choice, approval, weighted. Fixed / ready-up / hybrid / adaptive windows. Spectator voting, veto tokens, majority-tyranny mitigations.
+- **`asobi_phase`, `asobi_season_manager`, `asobi_timer`** — phase engine, season lifecycles, five timer primitives.
+- **Rate limiting** via `seki` (sliding window, per route group), **sessions** cached in ETS, **presence** via `pg`, **chat / social / economy / inventory / storage / tournaments / notifications** as Nova controllers.
+- **Client SDKs** for Godot, Defold, Unity, Unreal, JS/TS, Dart, Flame — [see below](#client-sdks).
 
--export([init/1, join/2, leave/2, handle_input/3, tick/1, get_state/2]).
+## Benchmarks
 
-init(_Config) ->
-    {ok, #{players => #{}}}.
+Single node, 8 cores, same-machine client. See [guides/benchmarks.md](guides/benchmarks.md) for full numbers.
 
-join(PlayerId, #{players := Players} = State) ->
-    {ok, State#{players => Players#{PlayerId => #{x => 0, y => 0}}}}.
+| | Peak |
+|---|---|
+| WebSocket throughput | **83,000 msg/sec** @ 3,500 concurrent connections |
+| RTT p50 / p99 | 4.4 ms / 6.5 ms |
+| REST reads (matches / friends / wallets) | 7–14 ms p50 |
+| Memory per connection | ~15 KB |
 
-leave(PlayerId, #{players := Players} = State) ->
-    {ok, State#{players => maps:remove(PlayerId, Players)}}.
+Not a twitch-FPS backend — WebSocket/TCP has a latency floor. Excellent for
+turn-based, casual, MMO zone, roguelike, co-op, and party games. Pair with a
+UDP relay if you need sub-3ms physics.
 
-handle_input(_PlayerId, _Input, State) ->
-    {ok, State}.
+## Client SDKs
 
-tick(State) ->
-    {ok, State}.
-
-get_state(_PlayerId, #{players := Players}) ->
-    Players.
-```
-
-Register it in `sys.config` and start with `rebar3 shell`. See the [Getting Started](guides/getting-started.md) guide for the full walkthrough.
-
-## Stack
-
-| Layer             | Technology                                                          |
-| ----------------- | ------------------------------------------------------------------- |
-| HTTP / REST       | [Nova](https://github.com/novaframework/nova) (Cowboy)              |
-| WebSocket         | Nova WebSocket (Cowboy)                                             |
-| Database / ORM    | [Kura](https://github.com/Taure/kura) (PostgreSQL via pgo)          |
-| Real-time UI      | [Arizona](https://github.com/novaframework/arizona_core)            |
-| Authentication    | [nova_auth](https://github.com/novaframework/nova_auth)             |
-| Background jobs   | [Shigoto](https://github.com/Taure/shigoto)                         |
-| Pub/Sub           | OTP `pg` module                                                     |
-| Lua runtime       | [Luerl](https://github.com/rvirding/luerl) (Lua-on-BEAM)            |
-
-## Status
-
-Asobi is in **public preview** — fully open-source, API stabilising.
-Early-adopter friendly; expect to read code occasionally.
-
-| Area                         | Status     |
-| ---------------------------- | ---------- |
-| Authentication               | Stable     |
-| Matchmaking                  | Stable     |
-| Real-time WebSocket transport| Stable     |
-| Leaderboards                 | Stable     |
-| Virtual economy              | Stable     |
-| Social (friends / chat)      | Stable     |
-| Lua scripting + hot reload   | Stable     |
-| Admin dashboard (Arizona)    | Beta       |
-| Cloud saves                  | Beta       |
-| Tournaments                  | Beta       |
-| Client SDKs (Unity/Godot/Defold/Dart) | Alpha |
-| Managed cloud offering       | [Coming soon](https://asobi.dev/cloud) |
+Godot, Defold, Unity, Unreal, JS/TS, Dart/Flutter, Flame — all under the
+[widgrensit](https://github.com/widgrensit?tab=repositories&q=asobi-&type=public)
+org, each with install instructions and a sample game. The
+[asobi_lua README](https://github.com/widgrensit/asobi_lua#client-sdks) has
+the table.
 
 ## Documentation
 
-- [Getting started](guides/getting-started.md) — Lua (Docker) or Erlang setup
-- [Lua scripting](guides/lua-scripting.md) — write game logic in Lua
-- [Bots](guides/lua-bots.md) — add AI-controlled players
-- [Configuration](guides/configuration.md) — all configuration options
-- [REST API](guides/rest-api.md) — full API reference
-- [WebSocket protocol](guides/websocket-protocol.md) — real-time message types
-- [Matchmaking](guides/matchmaking.md) — query-based player matching
-- [Economy](guides/economy.md) — wallets, items, and store
-- [Architecture](docs/ARCHITECTURE.md) — system design
+- [**Getting started**](guides/getting-started.md) — stand up a local asobi node from Erlang
+- [**Architecture**](guides/architecture.md) — supervision tree, modules, design
+- [**REST API**](guides/rest-api.md) · [**WebSocket protocol**](guides/websocket-protocol.md)
+- [**Matchmaking**](guides/matchmaking.md) · [**Voting**](guides/voting.md) · [**World server**](guides/world-server.md) · [**Large worlds**](guides/large-worlds.md)
+- [**Economy**](guides/economy.md) · [**Authentication**](guides/authentication.md) · [**IAP**](guides/iap.md)
+- [**Lua scripting**](guides/lua-scripting.md) · [**Lua bots**](guides/lua-bots.md)
+- [**Configuration**](guides/configuration.md) · [**Clustering**](guides/clustering.md) · [**Performance tuning**](guides/performance-tuning.md)
+- [**Benchmarks**](guides/benchmarks.md) · [**Comparison vs Nakama / Colyseus / SpacetimeDB**](guides/comparison.md)
+- [**HexDocs**](https://hexdocs.pm/asobi) — full API reference
 
-Full API docs on [HexDocs](https://hexdocs.pm/asobi).
+## Migrating?
 
-## Community
+- [**from Hathora**](guides/migrate-from-hathora.md) — Hathora shuts down 2026-05-05.
+- [**from PlayFab**](guides/migrate-from-playfab.md)
+- [**from Nakama self-host**](guides/migrate-from-nakama.md)
 
-- [Discord](https://discord.gg/vYSfYYyXpu) — ask questions, share what you're building
-- [Issues](https://github.com/widgrensit/asobi/issues) — bug reports and feature requests
-- [asobi.dev/blog](https://asobi.dev/blog) — design notes and release updates
+## Related projects
+
+- [**asobi_lua**](https://github.com/widgrensit/asobi_lua) — Lua scripting runtime + Docker image (`ghcr.io/widgrensit/asobi_lua`)
+- [**asobi-cli**](https://github.com/widgrensit/asobi-cli) — deploy, manage, and scaffold games
+- [**asobi_admin**](https://github.com/widgrensit/asobi_admin) — admin dashboard
+- Client SDKs: [asobi-godot](https://github.com/widgrensit/asobi-godot) · [asobi-defold](https://github.com/widgrensit/asobi-defold) · [asobi-unity](https://github.com/widgrensit/asobi-unity) · [asobi-unreal](https://github.com/widgrensit/asobi-unreal) · [asobi-js](https://github.com/widgrensit/asobi-js) · [asobi-dart](https://github.com/widgrensit/asobi-dart) · [flame_asobi](https://github.com/widgrensit/flame_asobi)
+
+## Stability
+
+> [!NOTE]
+> asobi is pre-1.0. The API is stabilising; expect minor breaking changes
+> until 1.0. We will never relicense — see [guides/exit.md](guides/exit.md)
+> for the "if asobi disappears tomorrow" runbook.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build setup, pre-push
+checklist, and test matrix. Security issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0
+Apache-2.0. See [LICENSE](LICENSE).
