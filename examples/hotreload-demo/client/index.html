@@ -64,8 +64,10 @@
   </div>
 
   <script>
-    const API = "http://localhost:8080";
-    const WS  = "ws://localhost:8080/ws";
+    // Same-origin — nginx in docker-compose.yml proxies /api and /ws to
+    // the asobi container. No CORS needed, cleaner WS upgrade.
+    const API = "";
+    const WS  = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
 
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");

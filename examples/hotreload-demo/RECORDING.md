@@ -5,12 +5,11 @@ landing page.
 
 ## Setup
 
-1. `docker compose up -d`
-2. Serve the client: `python3 -m http.server 3000 --directory client`
-3. Open `http://localhost:3000` in a browser, sized to a clean 16:9
+1. `docker compose up -d` — starts Postgres, asobi, and an nginx proxy.
+2. Open <http://localhost:3000> in a browser, sized to a clean 16:9
    (1280×720 is a good target — set the browser window to that size
    before recording).
-4. Open `lua/match.lua` in your editor. Arrange the editor and browser
+3. Open `lua/match.lua` in your editor. Arrange the editor and browser
    side-by-side so both are visible in the recording frame.
 
 ## Shot list (15 seconds)
