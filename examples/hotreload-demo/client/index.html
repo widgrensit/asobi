@@ -132,16 +132,20 @@
       ws.addEventListener("open", () => {
         ws.send(JSON.stringify({
           type: "session.connect",
-          payload: { session_token: token },
+          payload: { token: token },
         }));
         log("connected — queuing…", "live");
       });
       ws.addEventListener("message", (ev) => {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "match.matched") {
+        if (msg.type === "session.connected") {
+          log("authenticated — waiting to match…", "live");
+        } else if (msg.type === "match.matched") {
           log("matched — you're in. edit lua/match.lua and save.", "live");
         } else if (msg.type === "match.state") {
           state = msg.payload;
+        } else if (msg.type === "error") {
+          log("server error: " + (msg.payload && msg.payload.reason), "err");
         }
       });
       ws.addEventListener("close", () => log("disconnected", "err"));
