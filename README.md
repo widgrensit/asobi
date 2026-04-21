@@ -22,6 +22,12 @@
   <a href="https://github.com/widgrensit/asobi/issues">Issues</a>
 </p>
 
+<p align="center">
+  <img src="docs/media/hotreload-demo.gif" alt="asobi hot-reload: edit a Lua file, save, live match updates — no restart" width="800">
+  <br>
+  <em>Edit a Lua file. Save. Live match updates. No restart. <a href="examples/hotreload-demo/">Try it.</a></em>
+</p>
+
 ---
 
 ## Two ways to use asobi
