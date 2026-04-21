@@ -41,14 +41,37 @@ How Asobi compares to other open-source game backend platforms.
 
 - You want a **single deployable** with auth, matchmaking, economy, social, and real-time multiplayer
 - You need **fault-tolerant game sessions** that survive crashes without losing state
+- You want **hot-reloadable Lua** so bug-fixes ship without kicking players
 - You want **zero-downtime deploys** for game logic updates
 - You're building for **high concurrency** (many simultaneous matches/rooms)
-- You prefer **self-hosted** over managed cloud services
+- You prefer **self-hosted Apache-2** over closed managed clouds, with a real exit guarantee (see [exit.md](exit.md))
 - You want a **PostgreSQL-backed** system with a proper ORM
+
+## Don't know Erlang?
+
+You don't need to. Use [**asobi_lua**](https://github.com/widgrensit/asobi_lua) — the
+same engine packaged as a Docker image with Lua scripting. Write your match
+logic in a `.lua` file, `docker compose up`, you're running. The Erlang is
+underneath but you never touch it.
+
+The Erlang-library path (depending on `asobi` directly via rebar.config) is
+for teams that already write OTP and want to compose asobi with the rest of
+their release.
 
 ## When to Choose Something Else
 
-- You need a **managed cloud service** with no infrastructure to maintain (PlayFab, GameSparks)
-- Your team has **no Erlang/OTP experience** and prefers Go or JavaScript
-- You need **Unity/Unreal SDK** out of the box (Nakama has official SDKs)
-- You're building a **single-player** game that only needs analytics and IAP
+- You need **sub-3ms UDP latency** for a twitch FPS / fighting game / racer. Pair asobi with a UDP relay, or use Photon Fusion / Quantum for the physics.
+- You need **deep LiveOps tooling** (A/B testing, segmentation, push campaigns) today. PlayFab still leads here, though it's an operational/trust trade-off post-v2 migration.
+- You need a **fully managed cloud** and are willing to pay cloud-scale prices. Our managed tier opens later in 2026; until then, self-host.
+- You're building a **single-player** game that only needs analytics and IAP. Firebase Analytics + a simple store validator is cheaper than any backend here.
+
+## Client SDKs
+
+First-class SDKs for **Godot, Defold, Unity, Unreal, JavaScript/TypeScript, Dart/Flutter, Flame**
+— see the [asobi_lua README](https://github.com/widgrensit/asobi_lua#client-sdks) for the table.
+
+## Migrating from another backend?
+
+- [**from Hathora**](migrate-from-hathora.md) — shutdown 2026-05-05
+- [**from PlayFab**](migrate-from-playfab.md)
+- [**from Nakama self-host**](migrate-from-nakama.md)
