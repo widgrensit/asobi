@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/logo.png" alt="asobi" height="96">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/logo-dark.png">
+    <img src="docs/media/logo.png" alt="asobi" height="120">
+  </picture>
 </p>
 
 <h1 align="center">asobi</h1>
@@ -29,6 +32,27 @@
 </p>
 
 ---
+
+## Who it's for
+
+Solo devs and small teams building **indie 2D multiplayer**. If you're on
+Godot, Defold, LÖVE, Phaser, or Flame+Flutter, asobi ships the backend
+pieces you'd otherwise rebuild from scratch: matches, matchmaker, chat,
+leaderboards, economy, voting, phases, worlds, presence, inventory.
+
+Not the right fit for twitch-latency AAA shooters — WebSocket/TCP has a
+floor around 4ms. Great for turn-based, casual, MMO zone, roguelike,
+co-op, party, and social games.
+
+## Try it in 60 seconds
+
+```bash
+git clone https://github.com/widgrensit/asobi
+cd asobi/examples/hotreload-demo && docker compose up
+```
+
+Open <http://localhost:3000>, then edit `lua/match.lua` and save — the
+running match updates live. No restart, no reconnect, no kicked players.
 
 ## Two ways to use asobi
 
@@ -75,11 +99,17 @@ UDP relay if you need sub-3ms physics.
 
 ## Client SDKs
 
-Godot, Defold, Unity, Unreal, JS/TS, Dart/Flutter, Flame — all under the
-[widgrensit](https://github.com/widgrensit?tab=repositories&q=asobi-&type=public)
-org, each with install instructions and a sample game. The
-[asobi_lua README](https://github.com/widgrensit/asobi_lua#client-sdks) has
-the table.
+| Engine | Package | Docs | Example |
+|---|---|---|---|
+| **Godot 4.x** (GDScript) | [asobi-godot](https://github.com/widgrensit/asobi-godot) | [Guide](https://asobi.dev/godot) | [Demo](https://github.com/widgrensit/asobi-godot-demo) |
+| **Defold** (Lua) | [asobi-defold](https://github.com/widgrensit/asobi-defold) | [Guide](https://asobi.dev/defold) | [Demo](https://github.com/widgrensit/asobi-defold-demo) |
+| **LÖVE** (Lua) | _asobi-love — ships May 2026_ | — | — |
+| **Phaser** (TypeScript) | _asobi-phaser — ships May 2026_ | — | — |
+| **Unity 2021.3+** (C#) | [asobi-unity](https://github.com/widgrensit/asobi-unity) | [Guide](https://asobi.dev/unity) | [Demo](https://github.com/widgrensit/asobi-unity-demo) |
+| **Unreal Engine 5** (C++) | [asobi-unreal](https://github.com/widgrensit/asobi-unreal) | — | — |
+| **TypeScript / JS** (Browser + Node) | [asobi-js](https://github.com/widgrensit/asobi-js) | — | — |
+| **Dart / Flutter** | [asobi-dart](https://github.com/widgrensit/asobi-dart) | [Guide](https://asobi.dev/dart) | — |
+| **Flame** (Flutter) | [flame_asobi](https://github.com/widgrensit/flame_asobi) | — | [Demo](https://github.com/widgrensit/asobi-flame-demo) |
 
 ## Documentation
 
@@ -112,6 +142,36 @@ the table.
 > asobi is pre-1.0. The API is stabilising; expect minor breaking changes
 > until 1.0. We will never relicense — see [guides/exit.md](guides/exit.md)
 > for the "if asobi disappears tomorrow" runbook.
+
+## Run it yourself, or use the cloud
+
+asobi is Apache-2 and self-hostable. One Docker container runs the full
+stack — see [`docker-compose.example.yml`](docker-compose.example.yml) for
+a production-shaped setup with Postgres.
+
+Don't want to operate it? [**asobi.dev/cloud**](https://asobi.dev/cloud)
+is the managed version — €9/mo Indie tier, EU-sovereign, same open-source
+core. If we ever pivot, you still have the code — see
+[guides/exit.md](guides/exit.md).
+
+## FAQ
+
+**Does asobi replace Nakama / Colyseus / PlayFab?**
+For the indie-2D multiplayer slot, yes. For AAA shooters needing
+per-match dedicated UDP servers, no — pair asobi with a UDP relay.
+
+**Can I write my game logic in something other than Lua?**
+Yes. Depend on asobi as an Erlang library and write match code in Erlang,
+or call the REST/WebSocket API from any language. Lua is the easy mode.
+
+**Does it scale across machines?**
+asobi is single-node by design — one BEAM node handles tens of thousands
+of connections. Shard at the app level (game-per-node, region-per-node),
+don't try to cluster a single match across hosts.
+
+**What happens if asobi disappears?**
+Apache-2, single-binary deploy, Postgres backing store. Nothing in your
+stack is load-bearing on us. See [guides/exit.md](guides/exit.md).
 
 ## Contributing
 
