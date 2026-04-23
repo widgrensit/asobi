@@ -15,7 +15,20 @@ match(Tickets, Config) ->
 
 -spec group([map()], pos_integer(), [[map()]]) -> {[[map()]], [map()]}.
 group(Remaining, Size, Matched) when length(Remaining) < Size ->
-    {lists:reverse(Matched), Remaining};
+    {rev(Matched, []), Remaining};
 group(Tickets, Size, Matched) ->
-    {Group, Rest} = lists:split(Size, Tickets),
+    {Group, Rest} = split_at(Size, Tickets),
     group(Rest, Size, [Group | Matched]).
+
+-spec split_at(non_neg_integer(), [T]) -> {[T], [T]}.
+split_at(0, Rest) ->
+    {[], Rest};
+split_at(_, []) ->
+    {[], []};
+split_at(N, [H | T]) ->
+    {Taken, Rest} = split_at(N - 1, T),
+    {[H | Taken], Rest}.
+
+-spec rev([T], [T]) -> [T].
+rev([], Acc) -> Acc;
+rev([H | T], Acc) -> rev(T, [H | Acc]).
