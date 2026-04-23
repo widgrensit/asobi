@@ -1,0 +1,13 @@
+{application, erlang_match, [
+    {description, "Minimal asobi match example"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {erlang_match_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        asobi
+    ]},
+    {env, []},
+    {modules, []}
+]}.
