@@ -113,6 +113,7 @@ UDP relay if you need sub-3ms physics.
 
 ## Documentation
 
+- [**Glossary**](guides/glossary.md) — asobi vs asobi_lua vs asobi.dev Cloud. Start here if the names blur.
 - [**Getting started**](guides/getting-started.md) — stand up a local asobi node from Erlang
 - [**Architecture**](guides/architecture.md) — supervision tree, modules, design
 - [**REST API**](guides/rest-api.md) · [**WebSocket protocol**](guides/websocket-protocol.md)
@@ -132,7 +133,6 @@ UDP relay if you need sub-3ms physics.
 ## Related projects
 
 - [**asobi_lua**](https://github.com/widgrensit/asobi_lua) — Lua scripting runtime + Docker image (`ghcr.io/widgrensit/asobi_lua`)
-- [**asobi-cli**](https://github.com/widgrensit/asobi-cli) — deploy, manage, and scaffold games
 - [**asobi_admin**](https://github.com/widgrensit/asobi_admin) — admin dashboard
 - Client SDKs: [asobi-godot](https://github.com/widgrensit/asobi-godot) · [asobi-defold](https://github.com/widgrensit/asobi-defold) · [asobi-unity](https://github.com/widgrensit/asobi-unity) · [asobi-unreal](https://github.com/widgrensit/asobi-unreal) · [asobi-js](https://github.com/widgrensit/asobi-js) · [asobi-dart](https://github.com/widgrensit/asobi-dart) · [flame_asobi](https://github.com/widgrensit/flame_asobi)
 
