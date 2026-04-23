@@ -10,7 +10,7 @@
 -export([compress_chunk/1, decompress_chunk/1]).
 -export([default_format/0, chunk_byte_size/1]).
 
--export_type([tile/0, format/0]).
+-export_type([tile/0, tile_map/0, format/0]).
 
 -type tile() :: {
     X :: non_neg_integer(),
@@ -18,6 +18,10 @@
     TileId :: non_neg_integer(),
     Flags :: non_neg_integer(),
     Elevation :: non_neg_integer()
+}.
+-type tile_map() :: #{
+    {non_neg_integer(), non_neg_integer()} =>
+        {non_neg_integer(), non_neg_integer(), non_neg_integer()}
 }.
 -type format() :: #{
     tile_size := pos_integer(),
@@ -39,21 +43,19 @@ chunk_byte_size(#{tile_size := TS, chunk_width := W, chunk_height := H}) ->
 encode_chunk(Tiles) ->
     encode_chunk(Tiles, default_format()).
 
--spec encode_chunk([tile()] | #{}, format()) -> binary().
+-spec encode_chunk([tile()] | tile_map(), format()) -> binary().
 encode_chunk(Tiles, Fmt) when is_list(Tiles) ->
-    Map = lists:foldl(
-        fun({X, Y, TileId, Flags, Elev}, Acc) ->
-            Acc#{{X, Y} => {TileId, Flags, Elev}}
-        end,
-        #{},
-        Tiles
-    ),
+    Map = tiles_to_map(Tiles),
     encode_chunk(Map, Fmt);
 encode_chunk(TileMap, #{chunk_width := W, chunk_height := H} = _Fmt) when is_map(TileMap) ->
     iolist_to_binary([
         encode_tile(maps:get({X, Y}, TileMap, {0, 0, 0}))
      || Y <- lists:seq(0, H - 1), X <- lists:seq(0, W - 1)
     ]).
+
+-spec tiles_to_map([tile()]) -> tile_map().
+tiles_to_map(Tiles) ->
+    maps:from_list([{{X, Y}, {TileId, Flags, Elev}} || {X, Y, TileId, Flags, Elev} <- Tiles]).
 
 -spec decode_chunk(binary()) -> [tile()].
 decode_chunk(Bin) ->

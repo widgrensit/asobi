@@ -79,12 +79,16 @@ history() ->
         _ -> []
     end.
 
--spec time_remaining() -> pos_integer() | infinity.
+-spec time_remaining() -> non_neg_integer() | infinity.
 time_remaining() ->
     case current() of
-        {ok, #{ends_at := EndsAt}} ->
+        {ok, #{ends_at := EndsAt}} when is_integer(EndsAt) ->
             Now = erlang:system_time(millisecond),
-            max(0, EndsAt - Now);
+            Remaining = EndsAt - Now,
+            if
+                Remaining > 0 -> Remaining;
+                true -> 0
+            end;
         _ ->
             infinity
     end.
