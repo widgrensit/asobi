@@ -8,7 +8,7 @@
 -export([query_radius/3, query_rect/3]).
 -export([entities_in_cell/2, size/1]).
 
--export_type([grid/0, cell_coords/0]).
+-export_type([grid/0, cell_coords/0, pos/0]).
 
 -type cell_coords() :: {integer(), integer()}.
 -type pos() :: {number(), number()}.
@@ -108,10 +108,8 @@ query_radius({CX, CY}, Radius, #{cell_size := CS, cells := Cells}) ->
 
 -spec query_rect(pos(), pos(), grid()) -> [{binary(), pos()}].
 query_rect({X1, Y1}, {X2, Y2}, #{cell_size := CS, cells := Cells}) ->
-    MinX = min(X1, X2),
-    MinY = min(Y1, Y2),
-    MaxX = max(X1, X2),
-    MaxY = max(Y1, Y2),
+    {MinX, MaxX} = order_pair(X1, X2),
+    {MinY, MaxY} = order_pair(Y1, Y2),
     {MinCellX, MinCellY} = pos_to_cell(MinX, MinY, CS),
     {MaxCellX, MaxCellY} = pos_to_cell(MaxX, MaxY, CS),
     scan_cells(
@@ -124,6 +122,10 @@ query_rect({X1, Y1}, {X2, Y2}, #{cell_size := CS, cells := Cells}) ->
             X >= MinX andalso X =< MaxX andalso Y >= MinY andalso Y =< MaxY
         end
     ).
+
+-spec order_pair(number(), number()) -> {number(), number()}.
+order_pair(A, B) when A =< B -> {A, B};
+order_pair(A, B) -> {B, A}.
 
 -spec entities_in_cell(cell_coords(), grid()) -> [{binary(), pos()}].
 entities_in_cell(Cell, #{cells := Cells}) ->
@@ -150,30 +152,46 @@ pos_to_cell(X, Y, CS) ->
     fun((binary(), pos()) -> boolean())
 ) -> [{binary(), pos()}].
 scan_cells(MinCX, MinCY, MaxCX, MaxCY, Cells, Filter) ->
-    lists:foldl(
-        fun(CellX, Acc1) ->
-            lists:foldl(
-                fun(CellY, Acc2) ->
-                    case maps:find({CellX, CellY}, Cells) of
-                        {ok, CellEntities} ->
-                            maps:fold(
-                                fun(Id, Pos, Acc3) ->
-                                    case Filter(Id, Pos) of
-                                        true -> [{Id, Pos} | Acc3];
-                                        false -> Acc3
-                                    end
-                                end,
-                                Acc2,
-                                CellEntities
-                            );
-                        error ->
-                            Acc2
-                    end
-                end,
-                Acc1,
-                lists:seq(MinCY, MaxCY)
-            )
+    scan_cells_x(lists:seq(MinCX, MaxCX), MinCY, MaxCY, Cells, Filter, []).
+
+-spec scan_cells_x(
+    [integer()],
+    integer(),
+    integer(),
+    #{cell_coords() => #{binary() => pos()}},
+    fun((binary(), pos()) -> boolean()),
+    [{binary(), pos()}]
+) -> [{binary(), pos()}].
+scan_cells_x([], _MinCY, _MaxCY, _Cells, _Filter, Acc) ->
+    Acc;
+scan_cells_x([CellX | Rest], MinCY, MaxCY, Cells, Filter, Acc) ->
+    Acc1 = scan_cells_y(lists:seq(MinCY, MaxCY), CellX, Cells, Filter, Acc),
+    scan_cells_x(Rest, MinCY, MaxCY, Cells, Filter, Acc1).
+
+-spec scan_cells_y(
+    [integer()],
+    integer(),
+    #{cell_coords() => #{binary() => pos()}},
+    fun((binary(), pos()) -> boolean()),
+    [{binary(), pos()}]
+) -> [{binary(), pos()}].
+scan_cells_y([], _CellX, _Cells, _Filter, Acc) ->
+    Acc;
+scan_cells_y([CellY | Rest], CellX, Cells, Filter, Acc) ->
+    Acc1 =
+        case maps:find({CellX, CellY}, Cells) of
+            {ok, CellEntities} ->
+                maps:fold(
+                    fun(Id, Pos, A) ->
+                        case Filter(Id, Pos) of
+                            true -> [{Id, Pos} | A];
+                            false -> A
+                        end
+                    end,
+                    Acc,
+                    CellEntities
+                );
+            error ->
+                Acc
         end,
-        [],
-        lists:seq(MinCX, MaxCX)
-    ).
+    scan_cells_y(Rest, CellX, Cells, Filter, Acc1).

@@ -60,7 +60,7 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({snapshot, Data}, #{pending := Pending} = State) ->
+handle_cast({snapshot, Data}, #{pending := Pending} = State) when is_map(Data) ->
     Key = {maps:get(world_id, Data), maps:get(coords, Data)},
     {noreply, State#{pending => Pending#{Key => Data}}};
 handle_cast({delete_world, WorldId}, State) ->

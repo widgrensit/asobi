@@ -24,7 +24,7 @@ start_link(Config) ->
 
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
-    gen_statem:call(Pid, {join, PlayerId}).
+    narrow_ok_or_error(gen_statem:call(Pid, {join, PlayerId})).
 
 -spec leave(pid(), binary()) -> ok.
 leave(Pid, PlayerId) ->
@@ -40,11 +40,13 @@ post_tick(Pid, TickN) ->
 
 -spec get_info(pid()) -> map().
 get_info(Pid) ->
-    gen_statem:call(Pid, get_info).
+    case gen_statem:call(Pid, get_info) of
+        M when is_map(M) -> M
+    end.
 
 -spec reconnect(pid(), binary()) -> ok | {error, term()}.
 reconnect(Pid, PlayerId) ->
-    gen_statem:call(Pid, {reconnect, PlayerId}).
+    narrow_ok_or_error(gen_statem:call(Pid, {reconnect, PlayerId})).
 
 -spec cancel(pid()) -> ok.
 cancel(Pid) ->
@@ -60,15 +62,22 @@ spawn_at(Pid, TemplateId, Pos, Overrides) ->
 
 -spec start_vote(pid(), map()) -> {ok, pid()} | {error, term()}.
 start_vote(Pid, VoteConfig) ->
-    gen_statem:call(Pid, {start_vote, VoteConfig}).
+    case gen_statem:call(Pid, {start_vote, VoteConfig}) of
+        {ok, P} when is_pid(P) -> {ok, P};
+        {error, _} = Err -> Err
+    end.
 
 -spec cast_vote(pid(), binary(), binary(), binary()) -> ok | {error, term()}.
 cast_vote(Pid, PlayerId, VoteId, OptionId) ->
-    gen_statem:call(Pid, {cast_vote, PlayerId, VoteId, OptionId}).
+    narrow_ok_or_error(gen_statem:call(Pid, {cast_vote, PlayerId, VoteId, OptionId})).
 
 -spec use_veto(pid(), binary(), binary()) -> ok | {error, term()}.
 use_veto(Pid, PlayerId, VoteId) ->
-    gen_statem:call(Pid, {use_veto, PlayerId, VoteId}).
+    narrow_ok_or_error(gen_statem:call(Pid, {use_veto, PlayerId, VoteId})).
+
+-spec narrow_ok_or_error(term()) -> ok | {error, term()}.
+narrow_ok_or_error(ok) -> ok;
+narrow_ok_or_error({error, _} = Err) -> Err.
 
 -spec whereis(binary()) -> {ok, pid()} | error.
 whereis(WorldId) ->
@@ -235,9 +244,9 @@ running({call, From}, {use_veto, PlayerId, VoteId}, State) ->
     handle_use_veto(From, PlayerId, VoteId, State);
 running(
     cast,
-    {spawn_at, TemplateId, {_X, _Y} = Pos, Overrides},
+    {spawn_at, TemplateId, {X, Y} = Pos, Overrides},
     #{zone_manager_pid := ZMPid, zone_size := ZS} = _State
-) ->
+) when is_binary(TemplateId), is_number(X), is_number(Y), is_map(Overrides) ->
     Coords = pos_to_zone(Pos, ZS),
     case asobi_zone_manager:ensure_zone(ZMPid, Coords) of
         {ok, ZonePid} ->
@@ -274,7 +283,7 @@ running(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state :=
         none ->
             keep_state_and_data
     end;
-running({call, From}, {reconnect, PlayerId}, State) ->
+running({call, From}, {reconnect, PlayerId}, State) when is_binary(PlayerId) ->
     #{
         reconnect_state := RS,
         player_zones := PZ,
@@ -285,20 +294,15 @@ running({call, From}, {reconnect, PlayerId}, State) ->
             {keep_state_and_data, [{reply, From, {error, no_reconnect_policy}}]};
         {_, undefined} ->
             {keep_state_and_data, [{reply, From, {error, not_in_world}}]};
-        {_, #{zone := ZoneCoords, interest := InterestZones}} ->
+        {_, #{zone := {ZX, ZY}, interest := InterestZones}} when
+            is_integer(ZX), is_integer(ZY), is_list(InterestZones)
+        ->
+            ZoneCoords = {ZX, ZY},
             {_Events, RS1} = asobi_reconnect:reconnect(PlayerId, RS),
             PlayerPid = find_player_pid(PlayerId),
             MonRef = erlang:monitor(process, PlayerPid),
             %% Re-subscribe to all interest zones
-            lists:foreach(
-                fun(Coords) ->
-                    case asobi_zone_manager:get_zone(ZMPid, Coords) of
-                        {ok, ZPid} -> asobi_zone:subscribe(ZPid, {PlayerId, PlayerPid});
-                        not_loaded -> ok
-                    end
-                end,
-                InterestZones
-            ),
+            subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
             %% Notify session of world/zone
             ZonePid =
                 case asobi_zone_manager:get_zone(ZMPid, ZoneCoords) of
@@ -430,23 +434,29 @@ spawn_zones(
     %% Pre-warm all zones via zone_manager (uses base config with terrain_store_pid etc.)
     ok = asobi_zone_manager:pre_warm(ZoneManagerPid),
     %% Add recovered entities to zones
-    lists:foreach(
-        fun(Coords) ->
-            RecoveredEnts = maps:get(Coords, Entities, #{}),
-            case map_size(RecoveredEnts) of
-                0 ->
-                    ok;
-                _ ->
-                    {ok, ZonePid} = asobi_zone_manager:ensure_zone(ZoneManagerPid, Coords),
-                    maps:foreach(
-                        fun(EId, EState) -> asobi_zone:add_entity(ZonePid, EId, EState) end,
-                        RecoveredEnts
-                    )
-            end
-        end,
-        AllCoords
-    ),
+    restore_entities(AllCoords, Entities, ZoneManagerPid),
     State#{game_state => GS1}.
+
+-spec restore_entities([term()], map(), pid() | atom()) -> ok.
+restore_entities([], _Entities, _ZoneManagerPid) ->
+    ok;
+restore_entities([{CX, CY} = Coords | Rest], Entities, ZoneManagerPid) when
+    is_integer(CX), is_integer(CY)
+->
+    RecoveredEnts = maps:get(Coords, Entities, #{}),
+    case map_size(RecoveredEnts) of
+        0 ->
+            ok;
+        _ ->
+            {ok, ZonePid} = asobi_zone_manager:ensure_zone(ZoneManagerPid, Coords),
+            maps:foreach(
+                fun(EId, EState) -> asobi_zone:add_entity(ZonePid, EId, EState) end,
+                RecoveredEnts
+            )
+    end,
+    restore_entities(Rest, Entities, ZoneManagerPid);
+restore_entities([_ | Rest], Entities, ZoneManagerPid) ->
+    restore_entities(Rest, Entities, ZoneManagerPid).
 
 generate_zone_states(GameMod, Config) ->
     Seed = maps:get(seed, Config, erlang:system_time(millisecond)),
@@ -563,15 +573,7 @@ place_player(
     asobi_zone:add_entity(ZonePid, PlayerId, #{x => X, y => Y, type => ~"player"}),
     asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
     InterestZones = interest_zones(ZoneCoords, ViewRadius, GridSize),
-    lists:foreach(
-        fun(Coords) ->
-            case asobi_zone_manager:get_zone(ZMPid, Coords) of
-                {ok, ZPid} -> asobi_zone:subscribe(ZPid, {PlayerId, PlayerPid});
-                not_loaded -> ok
-            end
-        end,
-        InterestZones
-    ),
+    subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
     PlayerZones = maps:get(player_zones, State),
     State#{
         player_zones => PlayerZones#{PlayerId => #{zone => ZoneCoords, interest => InterestZones}}
@@ -592,15 +594,7 @@ remove_player_from_zones(
                 {ok, ZonePid} -> asobi_zone:remove_entity(ZonePid, PlayerId);
                 not_loaded -> ok
             end,
-            lists:foreach(
-                fun(Coords) ->
-                    case asobi_zone_manager:get_zone(ZMPid, Coords) of
-                        {ok, ZPid} -> asobi_zone:unsubscribe(ZPid, PlayerId);
-                        not_loaded -> ok
-                    end
-                end,
-                InterestZones
-            ),
+            unsubscribe_interest_zones(InterestZones, ZMPid, PlayerId),
             %% Release primary zone if no other players need it
             asobi_zone_manager:release_zone(ZMPid, ZoneCoords),
             State#{player_zones => maps:remove(PlayerId, PlayerZones)}
@@ -677,23 +671,71 @@ leave_chat(PlayerId, #{player_zones := PlayerZones, chat_state := ChatState}) ->
 
 -spec pos_to_zone({number(), number()}, non_neg_integer()) ->
     {non_neg_integer(), non_neg_integer()}.
-pos_to_zone({X, Y}, ZoneSize) ->
-    {max(0, trunc(X) div ZoneSize), max(0, trunc(Y) div ZoneSize)}.
+pos_to_zone({X, Y}, ZoneSize) when is_number(X), is_number(Y), ZoneSize > 0 ->
+    TX = trunc(X) div ZoneSize,
+    TY = trunc(Y) div ZoneSize,
+    ZX =
+        if
+            TX < 0 -> 0;
+            true -> TX
+        end,
+    ZY =
+        if
+            TY < 0 -> 0;
+            true -> TY
+        end,
+    {ZX, ZY}.
 
 -spec interest_zones({integer(), integer()}, non_neg_integer(), non_neg_integer()) ->
     [{integer(), integer()}].
 interest_zones({ZX, ZY}, Radius, GridSize) ->
+    XLo = clamp_lo(ZX - Radius),
+    XHi = min(GridSize - 1, ZX + Radius),
+    YLo = clamp_lo(ZY - Radius),
+    YHi = min(GridSize - 1, ZY + Radius),
     [
         {X, Y}
-     || X <- lists:seq(max(0, ZX - Radius), min(GridSize - 1, ZX + Radius)),
-        Y <- lists:seq(max(0, ZY - Radius), min(GridSize - 1, ZY + Radius))
+     || X <- lists:seq(XLo, XHi),
+        Y <- lists:seq(YLo, YHi)
     ].
+
+-spec clamp_lo(integer()) -> non_neg_integer().
+clamp_lo(N) when N < 0 -> 0;
+clamp_lo(N) -> N.
 
 find_player_pid(PlayerId) ->
     case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
         [Pid | _] -> Pid;
         [] -> self()
     end.
+
+-spec subscribe_interest_zones([term()], pid() | atom(), binary(), pid()) -> ok.
+subscribe_interest_zones([], _ZMPid, _PlayerId, _PlayerPid) ->
+    ok;
+subscribe_interest_zones([{CX, CY} | Rest], ZMPid, PlayerId, PlayerPid) when
+    is_integer(CX), is_integer(CY)
+->
+    case asobi_zone_manager:get_zone(ZMPid, {CX, CY}) of
+        {ok, ZPid} -> asobi_zone:subscribe(ZPid, {PlayerId, PlayerPid});
+        not_loaded -> ok
+    end,
+    subscribe_interest_zones(Rest, ZMPid, PlayerId, PlayerPid);
+subscribe_interest_zones([_ | Rest], ZMPid, PlayerId, PlayerPid) ->
+    subscribe_interest_zones(Rest, ZMPid, PlayerId, PlayerPid).
+
+-spec unsubscribe_interest_zones([term()], pid() | atom(), binary()) -> ok.
+unsubscribe_interest_zones([], _ZMPid, _PlayerId) ->
+    ok;
+unsubscribe_interest_zones([{CX, CY} | Rest], ZMPid, PlayerId) when
+    is_integer(CX), is_integer(CY)
+->
+    case asobi_zone_manager:get_zone(ZMPid, {CX, CY}) of
+        {ok, ZPid} -> asobi_zone:unsubscribe(ZPid, PlayerId);
+        not_loaded -> ok
+    end,
+    unsubscribe_interest_zones(Rest, ZMPid, PlayerId);
+unsubscribe_interest_zones([_ | Rest], ZMPid, PlayerId) ->
+    unsubscribe_interest_zones(Rest, ZMPid, PlayerId).
 
 %% --- Internal: Voting ---
 
@@ -804,24 +846,25 @@ handle_vote_resolved(
     end.
 
 merge_vote_weights(VoteConfig, PlayerIds, Frustration, FBonus) ->
-    FWeights = lists:foldl(
-        fun(PId, Acc) ->
-            FVal =
-                case maps:get(PId, Frustration, 0) of
-                    N when is_number(N) -> N;
-                    _ -> 0
-                end,
-            Acc#{PId => 1 + FVal * FBonus}
-        end,
-        #{},
-        PlayerIds
-    ),
+    FWeights = build_frustration_weights(PlayerIds, Frustration, FBonus),
     BaseWeights =
         case maps:get(weights, VoteConfig, #{}) of
             BW when is_map(BW) -> BW;
             _ -> #{}
         end,
     maps:merge(FWeights, BaseWeights).
+
+-spec build_frustration_weights([term()], map(), number()) -> #{term() => number()}.
+build_frustration_weights([], _Frustration, _FBonus) ->
+    #{};
+build_frustration_weights([PId | Rest], Frustration, FBonus) ->
+    FVal =
+        case maps:get(PId, Frustration, 0) of
+            N when is_number(N) -> N;
+            _ -> 0
+        end,
+    Acc = build_frustration_weights(Rest, Frustration, FBonus),
+    Acc#{PId => 1 + FVal * FBonus}.
 
 update_frustration(#{winner := undefined}, Frustration) ->
     Frustration;

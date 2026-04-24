@@ -576,24 +576,25 @@ build_vote_config(VoteConfig, MatchId, Players, State) ->
 merge_vote_weights(VoteConfig, PlayerIds, State) ->
     Frustration = maps:get(vote_frustration, State, #{}),
     FBonus = maps:get(frustration_bonus, State, 0),
-    FWeights = lists:foldl(
-        fun(PId, Acc) ->
-            FVal =
-                case maps:get(PId, Frustration, 0) of
-                    N when is_number(N) -> N;
-                    _ -> 0
-                end,
-            Acc#{PId => 1 + FVal * FBonus}
-        end,
-        #{},
-        PlayerIds
-    ),
+    FWeights = build_frustration_weights(PlayerIds, Frustration, FBonus),
     BaseWeights =
         case maps:get(weights, VoteConfig, #{}) of
             BW when is_map(BW) -> BW;
             _ -> #{}
         end,
     maps:merge(FWeights, BaseWeights).
+
+-spec build_frustration_weights([binary()], map(), number()) -> #{binary() => number()}.
+build_frustration_weights([], _Frustration, _FBonus) ->
+    #{};
+build_frustration_weights([PId | Rest], Frustration, FBonus) ->
+    FVal =
+        case maps:get(PId, Frustration, 0) of
+            N when is_number(N) -> N;
+            _ -> 0
+        end,
+    Acc = build_frustration_weights(Rest, Frustration, FBonus),
+    Acc#{PId => 1 + FVal * FBonus}.
 
 notify_vote_started(Mod, GS, State) ->
     case erlang:function_exported(Mod, vote_started, 1) of

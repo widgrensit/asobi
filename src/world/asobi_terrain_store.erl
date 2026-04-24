@@ -16,12 +16,9 @@ start_link(Opts) ->
 -spec get_chunk(pid(), {integer(), integer()}) ->
     {ok, binary()} | {error, term()}.
 get_chunk(Pid, Coords) ->
-    Tab = gen_server:call(Pid, get_ets_tab),
-    case ets:lookup(Tab, Coords) of
-        [{Coords, Data}] ->
-            {ok, Data};
-        [] ->
-            gen_server:call(Pid, {load_chunk, Coords})
+    case gen_server:call(Pid, {get_chunk, Coords}) of
+        {ok, Data} when is_binary(Data) -> {ok, Data};
+        {error, _} = Err -> Err
     end.
 
 -spec preload_chunks(pid(), [{integer(), integer()}]) -> ok.
@@ -34,7 +31,9 @@ evict_chunk(Pid, Coords) ->
 
 -spec stats(pid()) -> map().
 stats(Pid) ->
-    gen_server:call(Pid, stats).
+    case gen_server:call(Pid, stats) of
+        M when is_map(M) -> M
+    end.
 
 %% --- gen_server callbacks ---
 
@@ -53,9 +52,7 @@ init(Opts) ->
     }}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
-handle_call(get_ets_tab, _From, #{ets_tab := Tab} = State) ->
-    {reply, Tab, State};
-handle_call({load_chunk, Coords}, _From, #{ets_tab := Tab} = State) ->
+handle_call({get_chunk, Coords}, _From, #{ets_tab := Tab} = State) ->
     case ets:lookup(Tab, Coords) of
         [{Coords, Data}] ->
             {reply, {ok, Data}, inc_hits(State)};
@@ -69,10 +66,15 @@ handle_call({load_chunk, Coords}, _From, #{ets_tab := Tab} = State) ->
             end
     end;
 handle_call(stats, _From, #{ets_tab := Tab, hits := H, misses := M} = State) ->
+    MemWords =
+        case ets:info(Tab, memory) of
+            N when is_integer(N) -> N;
+            _ -> 0
+        end,
     {reply,
         #{
             cached_chunks => ets:info(Tab, size),
-            memory_bytes => ets:info(Tab, memory) * erlang:system_info(wordsize),
+            memory_bytes => MemWords * erlang:system_info(wordsize),
             hits => H,
             misses => M
         },
@@ -81,25 +83,8 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({preload, CoordsList}, #{ets_tab := Tab} = State) ->
-    State1 = lists:foldl(
-        fun(Coords, SAcc) ->
-            case ets:lookup(Tab, Coords) of
-                [{_, _}] ->
-                    SAcc;
-                [] ->
-                    case load_from_provider(Coords, SAcc) of
-                        {ok, Data, SAcc1} ->
-                            ets:insert(Tab, {Coords, Data}),
-                            SAcc1;
-                        {error, _, SAcc1} ->
-                            SAcc1
-                    end
-            end
-        end,
-        State,
-        CoordsList
-    ),
+handle_cast({preload, CoordsList}, #{ets_tab := Tab} = State) when is_list(CoordsList) ->
+    State1 = preload_chunks_do(CoordsList, Tab, State),
     {noreply, State1};
 handle_cast({evict, Coords}, #{ets_tab := Tab} = State) ->
     ets:delete(Tab, Coords),
@@ -147,3 +132,22 @@ generate_fallback(Coords, #{provider_mod := Mod, provider_state := PS, seed := S
 
 inc_hits(#{hits := H} = State) -> State#{hits => H + 1}.
 inc_misses(#{misses := M} = State) -> State#{misses => M + 1}.
+
+-spec preload_chunks_do([term()], ets:tid(), map()) -> map().
+preload_chunks_do([], _Tab, State) ->
+    State;
+preload_chunks_do([Coords | Rest], Tab, State) ->
+    State1 =
+        case ets:lookup(Tab, Coords) of
+            [{_, _}] ->
+                State;
+            [] ->
+                case load_from_provider(Coords, State) of
+                    {ok, Data, S1} ->
+                        ets:insert(Tab, {Coords, Data}),
+                        S1;
+                    {error, _, S1} ->
+                        S1
+                end
+        end,
+    preload_chunks_do(Rest, Tab, State1).

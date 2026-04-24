@@ -39,9 +39,9 @@ list_worlds(Filters) ->
 find_or_create(Mode) ->
     Worlds = list_worlds(#{mode => Mode, has_capacity => true}),
     case Worlds of
-        [#{world_id := WorldId} | _] ->
+        [#{world_id := WorldId} = First | _] ->
             case asobi_world_server:whereis(WorldId) of
-                {ok, Pid} -> {ok, Pid, hd(Worlds)};
+                {ok, Pid} -> {ok, Pid, First};
                 error -> create_world(Mode)
             end;
         [] ->
@@ -54,7 +54,7 @@ create_world(Mode) ->
     case asobi_game_modes:world_config(Mode) of
         {ok, Config} ->
             case asobi_world_instance_sup:start_world(Config) of
-                {ok, InstancePid} ->
+                {ok, InstancePid} when is_pid(InstancePid) ->
                     WorldPid = wait_for_world_server(InstancePid, 10),
                     case WorldPid of
                         undefined ->

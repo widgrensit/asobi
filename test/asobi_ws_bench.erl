@@ -97,7 +97,7 @@ ws_throughput(Config) ->
     ct:pal("  Blasting ~w msgs each...", [MsgsPerConn]),
     BlastRef = make_ref(),
     lists:foreach(
-        fun({ConnPid, StreamRef}) ->
+        fun({ConnPid, StreamRef}) when is_pid(ConnPid) ->
             spawn_link(fun() ->
                 T0B = erlang:monotonic_time(microsecond),
                 blast_messages(ConnPid, StreamRef, MsgsPerConn),
@@ -162,7 +162,7 @@ ws_throughput(Config) ->
 
     %% Per-worker RTT (total elapsed / msgs)
     WorkerRtts = [
-        E div max(1, S)
+        E div safe_pos(S)
      || {ok, #{elapsed_us := E, sent := S}} <- Successes, is_integer(E), is_integer(S)
     ],
     print_latency_report(WorkerRtts),
@@ -338,3 +338,7 @@ nth_pct(Sorted, Len, P) ->
 
 env_int(Name, Default) ->
     list_to_integer(os:getenv(Name, integer_to_list(Default))).
+
+-spec safe_pos(integer()) -> pos_integer().
+safe_pos(N) when N < 1 -> 1;
+safe_pos(N) -> N.

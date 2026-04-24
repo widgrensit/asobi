@@ -26,7 +26,9 @@ set_zone_manager(TickerPid, ZoneManagerPid, WorldPid) ->
 
 -spec get_tick(pid()) -> non_neg_integer().
 get_tick(TickerPid) ->
-    gen_server:call(TickerPid, get_tick).
+    case gen_server:call(TickerPid, get_tick) of
+        N when is_integer(N), N >= 0 -> N
+    end.
 
 -spec promote_zone(pid(), pid()) -> ok.
 promote_zone(TickerPid, ZonePid) ->
@@ -102,7 +104,7 @@ handle_cast(
         pending := Pending,
         world_pid := WorldPid
     } = State
-) ->
+) when is_integer(TickN) ->
     case TickN =:= CurrentTick of
         true ->
             Pending1 = maps:remove(ZonePid, Pending),
@@ -151,7 +153,7 @@ handle_info(
             false -> Hot
         end,
     Pending = maps:from_keys(ZonesToTick, true),
-    lists:foreach(fun(Z) -> asobi_zone:tick(Z, NextTick) end, ZonesToTick),
+    tick_zones(ZonesToTick, NextTick),
     erlang:send_after(TickRate, self(), tick),
     case map_size(Pending) of
         0 ->
@@ -162,3 +164,12 @@ handle_info(
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
+
+-spec tick_zones([term()], non_neg_integer()) -> ok.
+tick_zones([], _NextTick) ->
+    ok;
+tick_zones([Z | Rest], NextTick) when is_pid(Z) ->
+    asobi_zone:tick(Z, NextTick),
+    tick_zones(Rest, NextTick);
+tick_zones([_ | Rest], NextTick) ->
+    tick_zones(Rest, NextTick).

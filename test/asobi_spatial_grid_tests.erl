@@ -117,11 +117,7 @@ query_radius_vs_brute_force_test() ->
         {list_to_binary(integer_to_list(I)), {float(I rem 64), float(I div 64)}}
      || I <- lists:seq(0, 255)
     ],
-    G = lists:foldl(
-        fun({Id, Pos}, Acc) -> asobi_spatial_grid:insert(Id, Pos, Acc) end,
-        G0,
-        AllEntities
-    ),
+    G = insert_all(AllEntities, G0),
     Center = {32.0, 2.0},
     Radius = 10.0,
     GridResults = lists:sort(asobi_spatial_grid:query_radius(Center, Radius, G)),
@@ -153,14 +149,17 @@ query_rect_vs_brute_force_test() ->
         {list_to_binary(integer_to_list(I)), {float(I rem 64), float(I div 64)}}
      || I <- lists:seq(0, 255)
     ],
-    G = lists:foldl(
-        fun({Id, Pos}, Acc) -> asobi_spatial_grid:insert(Id, Pos, Acc) end,
-        G0,
-        AllEntities
-    ),
+    G = insert_all(AllEntities, G0),
     GridResults = lists:sort(asobi_spatial_grid:query_rect({10.0, 1.0}, {40.0, 3.0}, G)),
     BruteResults = lists:sort(brute_force_rect(AllEntities, {10.0, 1.0}, {40.0, 3.0})),
     ?assertEqual(BruteResults, GridResults).
+
+-spec insert_all([{binary(), asobi_spatial_grid:pos()}], asobi_spatial_grid:grid()) ->
+    asobi_spatial_grid:grid().
+insert_all([], Grid) ->
+    Grid;
+insert_all([{Id, Pos} | Rest], Grid) ->
+    insert_all(Rest, asobi_spatial_grid:insert(Id, Pos, Grid)).
 
 %% -------------------------------------------------------------------
 %% entities_in_cell

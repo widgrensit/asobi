@@ -109,8 +109,16 @@ nearest(Entities, {CX, CY}, N, Opts) ->
     All = collect_with_distance(
         maps:to_list(Entities), CX, CY, TypeFilter, Exclude, CustomFilter, []
     ),
-    Sorted = lists:sort(fun({D1, _, _}, {D2, _, _}) -> D1 =< D2 end, All),
-    format_nearest(lists:sublist(Sorted, N), []).
+    Sorted = keysort_by_distance(All),
+    format_nearest(take(Sorted, N)).
+
+-spec keysort_by_distance([T]) -> [T] when T :: {float(), binary(), map()}.
+keysort_by_distance(L) -> lists:keysort(1, L).
+
+-spec take([T], non_neg_integer()) -> [T].
+take(_, 0) -> [];
+take([], _) -> [];
+take([H | T], N) -> [H | take(T, N - 1)].
 
 -spec collect_with_distance(
     [{binary(), map()}],
@@ -134,12 +142,11 @@ collect_with_distance([{Id, #{x := X, y := Y} = Entity} | Rest], CX, CY, TF, Exc
 collect_with_distance([_ | Rest], CX, CY, TF, Excl, CF, Acc) ->
     collect_with_distance(Rest, CX, CY, TF, Excl, CF, Acc).
 
--spec format_nearest([{float(), binary(), map()}], [{binary(), map(), float()}]) ->
-    [{binary(), map(), float()}].
-format_nearest([], Acc) ->
-    lists:reverse(Acc);
-format_nearest([{D2, Id, E} | Rest], Acc) ->
-    format_nearest(Rest, [{Id, E, math:sqrt(D2)} | Acc]).
+-spec format_nearest([{float(), binary(), map()}]) -> [{binary(), map(), float()}].
+format_nearest([]) ->
+    [];
+format_nearest([{D2, Id, E} | Rest]) ->
+    [{Id, E, math:sqrt(D2)} | format_nearest(Rest)].
 
 %% -------------------------------------------------------------------
 %% Point utilities

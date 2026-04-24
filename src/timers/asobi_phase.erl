@@ -71,7 +71,10 @@ init(Phases) ->
         paused => false,
         complete => false
     },
-    Phase = lists:nth(1, Phases),
+    Phase =
+        case lists:nth(1, Phases) of
+            P when is_map(P) -> P
+        end,
     case maps:get(start, Phase, prev_ended) of
         prev_ended ->
             %% Auto-start first phase immediately
@@ -124,7 +127,7 @@ notify({event, Name}, #{current_started := false} = PS) ->
         {event, Name} -> start_current_phase(PS);
         _ -> {[], PS}
     end;
-notify(Event, #{active_timers := Timers} = PS) ->
+notify(Event, #{active_timers := Timers} = PS) when is_atom(Event) ->
     {AllEvents, Timers1} = maps:fold(
         fun(TId, T, {Evts, Acc}) ->
             {TEvts, T1} = asobi_timer:notify(Event, undefined, T),
@@ -133,7 +136,9 @@ notify(Event, #{active_timers := Timers} = PS) ->
         {[], #{}},
         Timers
     ),
-    {AllEvents, PS#{active_timers => Timers1}}.
+    {AllEvents, PS#{active_timers => Timers1}};
+notify(_Event, PS) ->
+    {[], PS}.
 
 %% -------------------------------------------------------------------
 %% Pause / Resume
@@ -288,7 +293,10 @@ advance_phase(PS) ->
         true ->
             {EndEvents ++ [{all_phases_complete}], PS#{complete => true, active_timers => #{}}};
         false ->
-            NextPhase = lists:nth(NextIdx + 1, Phases),
+            NextPhase =
+                case lists:nth(NextIdx + 1, Phases) of
+                    P when is_map(P) -> P
+                end,
             PS1 = PS#{
                 current_index => NextIdx,
                 current_started => false,
@@ -311,20 +319,22 @@ advance_phase(PS) ->
 current_phase_def(#{phases := Phases, current_index := Idx}) ->
     lists:nth(Idx + 1, Phases).
 
-build_timers(TimerConfigs) ->
-    lists:foldl(
-        fun(Config, Acc) ->
-            Type = maps:get(type, Config),
-            Id = maps:get(id, Config),
-            Timer =
-                case Type of
-                    countdown -> asobi_timer:countdown(Config);
-                    conditional -> asobi_timer:conditional(Config);
-                    cycle -> asobi_timer:cycle(Config);
-                    scheduled -> asobi_timer:scheduled(Config)
-                end,
-            Acc#{Id => Timer}
+-spec build_timers([term()]) -> #{binary() => asobi_timer:timer()}.
+build_timers([]) ->
+    #{};
+build_timers([Config | Rest]) when is_map(Config) ->
+    Type = maps:get(type, Config),
+    Id = maps:get(id, Config),
+    Timer =
+        case Type of
+            countdown -> asobi_timer:countdown(Config);
+            conditional -> asobi_timer:conditional(Config);
+            cycle -> asobi_timer:cycle(Config);
+            scheduled -> asobi_timer:scheduled(Config)
         end,
-        #{},
-        TimerConfigs
-    ).
+    Acc = build_timers(Rest),
+    case Id of
+        IdBin when is_binary(IdBin) -> Acc#{IdBin => Timer}
+    end;
+build_timers([_ | Rest]) ->
+    build_timers(Rest).

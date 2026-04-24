@@ -16,7 +16,6 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 -export([ensure_zone/2, get_zone/2, touch_zone/2, release_zone/2]).
 -export([get_active_zones/1, zone_terminated/2, pre_warm/1]).
 -export([register_zone/3, set_zone_config/2]).
--export([get_ets_tab/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(REAP_INTERVAL, 10_000).
@@ -37,7 +36,10 @@ ensure_zone(Ref, Coords) ->
         {ok, Pid} ->
             {ok, Pid};
         not_loaded ->
-            gen_server:call(Ref, {ensure_zone, Coords})
+            case gen_server:call(Ref, {ensure_zone, Coords}) of
+                {ok, P} when is_pid(P) -> {ok, P};
+                {error, _} = Err -> Err
+            end
     end.
 
 -doc "Non-creating lookup. ETS only.".
@@ -57,9 +59,14 @@ release_zone(Ref, Coords) ->
 
 -doc "Return all active zone pids. For the ticker.".
 -spec get_active_zones(pid() | atom()) -> [pid()].
-get_active_zones(Ref) ->
-    Tab = get_ets_tab(Ref),
-    [Pid || {_Coords, Pid} <- ets:tab2list(Tab)].
+get_active_zones(Ref) when is_atom(Ref) ->
+    [Pid || {_Coords, Pid} <- ets:tab2list(Ref)];
+get_active_zones(Ref) when is_pid(Ref) ->
+    narrow_pid_list(gen_server:call(Ref, get_active_zones)).
+
+-spec narrow_pid_list(term()) -> [pid()].
+narrow_pid_list([]) -> [];
+narrow_pid_list([P | Rest]) when is_pid(P) -> [P | narrow_pid_list(Rest)].
 
 -doc "Called by zone on terminate. Cleans up ETS entry.".
 -spec zone_terminated(pid() | atom(), {integer(), integer()}) -> ok.
@@ -69,36 +76,31 @@ zone_terminated(Ref, Coords) ->
 -doc "Spawn all zones in grid. Backward compat for small grids.".
 -spec pre_warm(pid() | atom()) -> ok.
 pre_warm(Ref) ->
-    gen_server:call(Ref, pre_warm, 60_000).
+    ok = gen_server:call(Ref, pre_warm, 60_000).
 
 -doc "Register an externally-spawned zone with the manager.".
 -spec register_zone(pid() | atom(), {integer(), integer()}, pid()) -> ok.
 register_zone(Ref, Coords, ZonePid) ->
-    gen_server:call(Ref, {register_zone, Coords, ZonePid}).
+    ok = gen_server:call(Ref, {register_zone, Coords, ZonePid}).
 
 -doc "Update the base zone config used when spawning new zones.".
 -spec set_zone_config(pid() | atom(), map()) -> ok.
 set_zone_config(Ref, Config) ->
-    gen_server:call(Ref, {set_zone_config, Config}).
+    ok = gen_server:call(Ref, {set_zone_config, Config}).
 
 %% --- gen_server callbacks ---
-
--doc "Return the ETS table id. Useful for external fast-path reads.".
--spec get_ets_tab(pid() | atom()) -> ets:tid().
-get_ets_tab(Ref) when is_atom(Ref) ->
-    persistent_term:get({?MODULE, Ref});
-get_ets_tab(Ref) when is_pid(Ref) ->
-    gen_server:call(Ref, get_ets_tab).
 
 -spec init(map()) -> {ok, map()}.
 init(Opts) ->
     WorldId = maps:get(world_id, Opts),
-    Tab = ets:new(asobi_zone_mgr, [set, public, {read_concurrency, true}]),
     Name = maps:get(name, Opts, undefined),
-    case Name of
-        undefined -> ok;
-        _ -> persistent_term:put({?MODULE, Name}, Tab)
-    end,
+    Tab =
+        case Name of
+            undefined ->
+                ets:new(asobi_zone_mgr, [set, public, {read_concurrency, true}]);
+            N when is_atom(N) ->
+                ets:new(N, [set, public, named_table, {read_concurrency, true}])
+        end,
     ZoneSup =
         case maps:get(zone_sup, Opts, undefined) of
             undefined ->
@@ -139,21 +141,7 @@ handle_call({ensure_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
     end;
 handle_call(pre_warm, _From, #{grid_size := GridSize} = State) ->
     AllCoords = [{X, Y} || X <- lists:seq(0, GridSize - 1), Y <- lists:seq(0, GridSize - 1)],
-    State1 = lists:foldl(
-        fun(Coords, SAcc) ->
-            case ets:lookup(maps:get(ets_tab, SAcc), Coords) of
-                [{_, _}] ->
-                    SAcc;
-                [] ->
-                    case start_zone(Coords, SAcc) of
-                        {ok, _Pid, SAcc1} -> SAcc1;
-                        {error, _} -> SAcc
-                    end
-            end
-        end,
-        State,
-        AllCoords
-    ),
+    State1 = prewarm_zones(AllCoords, State),
     {reply, ok, State1};
 handle_call(
     {register_zone, Coords, ZonePid},
@@ -163,7 +151,7 @@ handle_call(
         zone_last_active := Active,
         zone_monitors := Monitors
     } = State
-) ->
+) when is_pid(ZonePid) ->
     ets:insert(Tab, {Coords, ZonePid}),
     MonRef = monitor(process, ZonePid),
     Now = erlang:monotonic_time(millisecond),
@@ -174,8 +162,15 @@ handle_call(
     {reply, ok, State1};
 handle_call({set_zone_config, Config}, _From, State) ->
     {reply, ok, State#{zone_config => Config}};
-handle_call(get_ets_tab, _From, #{ets_tab := Tab} = State) ->
-    {reply, Tab, State};
+handle_call({lookup_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
+    Result =
+        case ets:lookup(Tab, Coords) of
+            [{Coords, Pid}] -> {ok, Pid};
+            [] -> not_loaded
+        end,
+    {reply, Result, State};
+handle_call(get_active_zones, _From, #{ets_tab := Tab} = State) ->
+    {reply, [Pid || {_Coords, Pid} <- ets:tab2list(Tab)], State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -211,11 +206,7 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -spec terminate(term(), map()) -> ok.
-terminate(_Reason, #{ets_tab := Tab, name := Name}) ->
-    case Name of
-        undefined -> ok;
-        _ -> persistent_term:erase({?MODULE, Name})
-    end,
+terminate(_Reason, #{ets_tab := Tab}) ->
     ets:delete(Tab),
     ok.
 
@@ -348,14 +339,28 @@ schedule_reap() ->
     Ref.
 
 ets_lookup(Ref, Coords) when is_atom(Ref) ->
-    Tab = persistent_term:get({?MODULE, Ref}),
-    case ets:lookup(Tab, Coords) of
+    case ets:lookup(Ref, Coords) of
         [{Coords, Pid}] -> {ok, Pid};
         [] -> not_loaded
     end;
 ets_lookup(Ref, Coords) when is_pid(Ref) ->
-    Tab = gen_server:call(Ref, get_ets_tab),
-    case ets:lookup(Tab, Coords) of
-        [{Coords, Pid}] -> {ok, Pid};
-        [] -> not_loaded
+    case gen_server:call(Ref, {lookup_zone, Coords}) of
+        {ok, P} when is_pid(P) -> {ok, P};
+        not_loaded -> not_loaded
     end.
+
+-spec prewarm_zones([{integer(), integer()}], map()) -> map().
+prewarm_zones([], State) ->
+    State;
+prewarm_zones([Coords | Rest], #{ets_tab := Tab} = State) ->
+    State1 =
+        case ets:lookup(Tab, Coords) of
+            [{_, _}] ->
+                State;
+            [] ->
+                case start_zone(Coords, State) of
+                    {ok, _Pid, S1} -> S1;
+                    {error, _} -> State
+                end
+        end,
+    prewarm_zones(Rest, State1).

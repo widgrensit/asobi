@@ -62,7 +62,7 @@ default_prespawns_all() ->
     Active = asobi_zone_manager:get_active_zones(Mgr),
     ?assertEqual(9, length(Active)),
     lists:foreach(
-        fun(Coords) ->
+        fun({CX, CY} = Coords) when is_integer(CX), is_integer(CY) ->
             ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, Coords))
         end,
         [{X, Y} || X <- lists:seq(0, 2), Y <- lists:seq(0, 2)]

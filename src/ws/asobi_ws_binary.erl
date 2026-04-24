@@ -50,16 +50,19 @@ is_binary_mode(State) when is_map(State) ->
 
 encode_delta(#{op := Op, entity_id := EntityId, fields := Fields}) ->
     OpByte = op_to_byte(Op),
-    IdBin = unicode:characters_to_binary(EntityId),
+    IdBin = to_binary(unicode:characters_to_binary(EntityId)),
     IdLen = byte_size(IdBin),
     FieldsBin = iolist_to_binary(json:encode(Fields)),
     FieldsLen = byte_size(FieldsBin),
     <<OpByte:8, IdLen:16/big, IdBin/binary, FieldsLen:32/big, FieldsBin/binary>>;
 encode_delta(#{op := Op, entity_id := EntityId}) ->
     OpByte = op_to_byte(Op),
-    IdBin = unicode:characters_to_binary(EntityId),
+    IdBin = to_binary(unicode:characters_to_binary(EntityId)),
     IdLen = byte_size(IdBin),
     <<OpByte:8, IdLen:16/big, IdBin/binary, 0:32/big>>.
+
+-spec to_binary(term()) -> binary().
+to_binary(B) when is_binary(B) -> B.
 
 decode_deltas(Rest, 0, Acc) ->
     {lists:reverse(Acc), Rest};

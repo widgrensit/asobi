@@ -218,7 +218,12 @@ vote_resolved(VoteId, DurationMs, Result) ->
 
 %% --- Internal ---
 
--spec handle_event([atom()], map(), map(), map()) -> ok.
+-spec handle_event(
+    telemetry:event_name(),
+    telemetry:event_measurements(),
+    telemetry:event_metadata(),
+    telemetry:handler_config()
+) -> ok.
 handle_event(EventName, Measurements, Metadata, _Config) ->
     logger:debug(#{
         msg => ~"telemetry_event",

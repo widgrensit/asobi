@@ -23,11 +23,18 @@ unregister_world(WorldId) ->
 
 -spec get_world(binary()) -> {ok, map()} | error.
 get_world(WorldId) ->
-    gen_server:call(?MODULE, {get, WorldId}).
+    case gen_server:call(?MODULE, {get, WorldId}) of
+        {ok, M} when is_map(M) -> {ok, M};
+        error -> error
+    end.
 
 -spec list_worlds() -> [map()].
 list_worlds() ->
-    gen_server:call(?MODULE, list).
+    narrow_map_list(gen_server:call(?MODULE, list)).
+
+-spec narrow_map_list(term()) -> [map()].
+narrow_map_list([]) -> [];
+narrow_map_list([M | Rest]) when is_map(M) -> [M | narrow_map_list(Rest)].
 
 -spec init([]) -> {ok, map()}.
 init([]) ->

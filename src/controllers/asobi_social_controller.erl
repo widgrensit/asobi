@@ -175,7 +175,7 @@ update_member_role(#{
     bindings := #{~"id" := GroupId, ~"player_id" := TargetPlayerId},
     json := #{~"role" := NewRole},
     auth_data := #{player_id := ActorId}
-}) ->
+}) when is_binary(NewRole) ->
     case asobi_group_roles:valid_role(NewRole) of
         false ->
             {json, 400, #{}, #{error => ~"invalid_role"}};
@@ -230,11 +230,7 @@ update_group(#{
                             Updates = maps:with(
                                 [~"name", ~"description", ~"max_members", ~"open"], Params
                             ),
-                            Atomized = maps:fold(
-                                fun(K, V, Acc) -> Acc#{binary_to_existing_atom(K) => V} end,
-                                #{},
-                                Updates
-                            ),
+                            Atomized = atomize_keys(maps:to_list(Updates)),
                             CS = asobi_group:changeset(Group, Atomized),
                             {ok, Updated} = asobi_repo:update(CS),
                             {json, 200, #{}, Updated};
@@ -265,3 +261,12 @@ qs_integer(Key, Params, Default) ->
         V when is_binary(V) -> binary_to_integer(V);
         _ -> Default
     end.
+
+-spec atomize_keys([{term(), term()}]) -> #{atom() => term()}.
+atomize_keys([]) ->
+    #{};
+atomize_keys([{K, V} | Rest]) when is_binary(K) ->
+    Acc = atomize_keys(Rest),
+    Acc#{binary_to_existing_atom(K) => V};
+atomize_keys([_ | Rest]) ->
+    atomize_keys(Rest).

@@ -9,6 +9,12 @@ start_ticker(Overrides) ->
     {ok, Pid} = asobi_world_ticker:start_link(Config),
     Pid.
 
+-spec get_state_map(pid()) -> map().
+get_state_map(Pid) ->
+    case sys:get_state(Pid) of
+        S when is_map(S) -> S
+    end.
+
 ticker_test_() ->
     {foreach, fun() -> ok end, fun(_) -> ok end, [
         {"get_tick starts at 0", fun get_tick_starts_at_zero/0},
@@ -40,7 +46,7 @@ set_zones_all_hot() ->
     end),
     asobi_world_ticker:set_zones(Pid, [Z1, Z2], self()),
     timer:sleep(10),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     ?assertEqual([Z1, Z2], maps:get(hot_zones, State)),
     ?assertEqual([], maps:get(cold_zones, State)).
 
@@ -53,7 +59,7 @@ promote_zone_adds_to_hot() ->
     end),
     asobi_world_ticker:promote_zone(Pid, Z1),
     timer:sleep(10),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     ?assert(lists:member(Z1, maps:get(hot_zones, State))),
     ?assertNot(lists:member(Z1, maps:get(cold_zones, State))).
 
@@ -68,7 +74,7 @@ demote_zone_moves_to_cold() ->
     timer:sleep(10),
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(10),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     ?assertNot(lists:member(Z1, maps:get(hot_zones, State))),
     ?assert(lists:member(Z1, maps:get(cold_zones, State))).
 
@@ -83,7 +89,7 @@ remove_zone_removes() ->
     timer:sleep(10),
     asobi_world_ticker:remove_zone(Pid, Z1),
     timer:sleep(10),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     ?assertNot(lists:member(Z1, maps:get(hot_zones, State))),
     ?assertNot(lists:member(Z1, maps:get(cold_zones, State))).
 
@@ -98,7 +104,7 @@ promote_idempotent() ->
     timer:sleep(10),
     asobi_world_ticker:promote_zone(Pid, Z1),
     timer:sleep(10),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     Hot = maps:get(hot_zones, State),
     ?assertEqual(1, length([Z || Z <- Hot, Z =:= Z1])).
 
@@ -113,16 +119,16 @@ demote_idempotent() ->
     timer:sleep(10),
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(10),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     Cold = maps:get(cold_zones, State),
     ?assertEqual(1, length([Z || Z <- Cold, Z =:= Z1])).
 
 cold_divisor_default() ->
     Pid = start_ticker(),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     ?assertEqual(10, maps:get(cold_tick_divisor, State)).
 
 cold_divisor_configurable() ->
     Pid = start_ticker(#{cold_tick_divisor => 5}),
-    State = sys:get_state(Pid),
+    State = get_state_map(Pid),
     ?assertEqual(5, maps:get(cold_tick_divisor, State)).
