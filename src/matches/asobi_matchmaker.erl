@@ -54,18 +54,25 @@ init([]) ->
     }}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
-handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when is_map(Params) ->
+handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
+    is_binary(PlayerId), is_map(Params)
+->
     TicketId = generate_id(),
+    Mode =
+        case maps:get(mode, Params, ~"default") of
+            M when is_binary(M) -> M;
+            _ -> ~"default"
+        end,
     Ticket = #{
         id => TicketId,
         player_id => PlayerId,
-        mode => maps:get(mode, Params, ~"default"),
+        mode => Mode,
         properties => maps:get(properties, Params, #{}),
         party => maps:get(party, Params, [PlayerId]),
         submitted_at => erlang:system_time(millisecond),
         status => pending
     },
-    asobi_telemetry:matchmaker_queued(PlayerId, maps:get(mode, Ticket)),
+    asobi_telemetry:matchmaker_queued(PlayerId, Mode),
     {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}};
 handle_call({get_ticket, TicketId}, _From, #{tickets := Tickets} = State) ->
     case Tickets of
@@ -102,7 +109,9 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({remove, PlayerId, TicketId}, #{tickets := Tickets} = State) ->
+handle_cast({remove, PlayerId, TicketId}, #{tickets := Tickets} = State) when
+    is_binary(PlayerId)
+->
     asobi_telemetry:matchmaker_removed(PlayerId, cancelled),
     {noreply, State#{tickets => maps:remove(TicketId, Tickets)}};
 handle_cast(_Msg, State) ->
@@ -259,7 +268,7 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                     Now = erlang:system_time(millisecond),
                     AvgWait =
                         lists:sum([Now - maps:get(submitted_at, T) || T <- Group]) div
-                            max(1, length(Group)),
+                            pos_len(Group),
                     asobi_telemetry:matchmaker_formed(Mode, length(PlayerIds), AvgWait),
                     MatchInfo = asobi_match_server:get_info(MatchPid),
                     lists:foreach(
@@ -315,13 +324,18 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                             Now = erlang:system_time(millisecond),
                             AvgWait =
                                 lists:sum([Now - maps:get(submitted_at, T) || T <- SpawnGroup]) div
-                                    max(1, length(SpawnGroup)),
+                                    pos_len(SpawnGroup),
                             asobi_telemetry:matchmaker_formed(
                                 Mode, length(SpawnPlayerIds), AvgWait
                             ),
-                            WorldPid = asobi_world_instance:get_child(
-                                InstancePid, asobi_world_server
-                            ),
+                            WorldPid =
+                                case
+                                    asobi_world_instance:get_child(
+                                        InstancePid, asobi_world_server
+                                    )
+                                of
+                                    WP when is_pid(WP) -> WP
+                                end,
                             logger:notice(#{
                                 msg => ~"world spawn complete",
                                 world_pid => WorldPid,
@@ -400,3 +414,7 @@ generate_id() ->
 -spec ensure_map(term()) -> #{term() => term()}.
 ensure_map(M) when is_map(M) -> M;
 ensure_map(_) -> #{}.
+
+-spec pos_len([term()]) -> pos_integer().
+pos_len([]) -> 1;
+pos_len(L) -> length(L).

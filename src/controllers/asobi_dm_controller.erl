@@ -6,7 +6,7 @@
 send(#{
     json := #{~"recipient_id" := RecipientId, ~"content" := Content},
     auth_data := #{player_id := PlayerId}
-}) ->
+}) when is_binary(RecipientId), is_binary(Content), is_binary(PlayerId) ->
     case asobi_dm:send(PlayerId, RecipientId, Content) of
         ok ->
             {json, 200, #{}, #{
@@ -21,7 +21,7 @@ history(#{
     bindings := #{~"player_id" := OtherPlayerId},
     qs := Qs,
     auth_data := #{player_id := PlayerId}
-}) ->
+}) when is_binary(OtherPlayerId), is_binary(PlayerId) ->
     Params = cow_qs:parse_qs(Qs),
     Limit =
         case proplists:get_value(~"limit", Params) of

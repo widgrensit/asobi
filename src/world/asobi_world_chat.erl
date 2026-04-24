@@ -103,9 +103,9 @@ player_zone_changed(
 -spec channel_id(binary(), atom(), term()) -> binary().
 channel_id(WorldId, world, _) ->
     iolist_to_binary([~"world:", WorldId]);
-channel_id(WorldId, zone, {X, Y}) ->
+channel_id(WorldId, zone, {X, Y}) when is_integer(X), is_integer(Y) ->
     iolist_to_binary([~"zone:", WorldId, ~":", integer_to_binary(X), ~",", integer_to_binary(Y)]);
-channel_id(WorldId, proximity, {X, Y}) ->
+channel_id(WorldId, proximity, {X, Y}) when is_integer(X), is_integer(Y) ->
     iolist_to_binary([~"prox:", WorldId, ~":", integer_to_binary(X), ~",", integer_to_binary(Y)]).
 
 %% --- Internal ---
@@ -154,12 +154,16 @@ leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig) ->
     end,
     ignore_result(PlayerId).
 
-proximity_zones({ZX, ZY}, Radius, GridSize) ->
+proximity_zones({ZX, ZY}, Radius, GridSize) when is_integer(ZX), is_integer(ZY) ->
     [
         {X, Y}
-     || X <- lists:seq(max(0, ZX - Radius), min(GridSize - 1, ZX + Radius)),
-        Y <- lists:seq(max(0, ZY - Radius), min(GridSize - 1, ZY + Radius))
+     || X <- lists:seq(clamp_lo(ZX - Radius), min(GridSize - 1, ZX + Radius)),
+        Y <- lists:seq(clamp_lo(ZY - Radius), min(GridSize - 1, ZY + Radius))
     ].
+
+-spec clamp_lo(integer()) -> non_neg_integer().
+clamp_lo(N) when N < 0 -> 0;
+clamp_lo(N) -> N.
 
 find_player_pid(PlayerId) ->
     case pg:get_members(nova_scope, {player, PlayerId}) of
