@@ -50,8 +50,10 @@ terrain_store_started() ->
     {ok, InstancePid} = asobi_world_instance:start_link(world_config()),
     unlink(InstancePid),
     timer:sleep(100),
-    WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
-    ?assert(is_pid(WorldPid)),
+    WorldPid =
+        case asobi_world_instance:get_child(InstancePid, asobi_world_server) of
+            WP when is_pid(WP) -> WP
+        end,
     ?assertEqual(running, maps:get(status, asobi_world_server:get_info(WorldPid))),
     catch exit(InstancePid, shutdown),
     timer:sleep(50).

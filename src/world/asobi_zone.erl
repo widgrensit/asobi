@@ -643,9 +643,7 @@ apply_spawns([_ | Rest], State) ->
 apply_respawns([], Entities) ->
     Entities;
 apply_respawns([{EntityId, EntityState, _Pos} | Rest], Entities) when is_binary(EntityId) ->
-    apply_respawns(Rest, Entities#{EntityId => EntityState});
-apply_respawns([_ | Rest], Entities) ->
-    apply_respawns(Rest, Entities).
+    apply_respawns(Rest, Entities#{EntityId => EntityState}).
 
 -spec remove_from_grid([term()], asobi_spatial_grid:grid() | undefined) ->
     asobi_spatial_grid:grid() | undefined.

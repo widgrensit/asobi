@@ -8,7 +8,7 @@
 -export([query_radius/3, query_rect/3]).
 -export([entities_in_cell/2, size/1]).
 
--export_type([grid/0, cell_coords/0]).
+-export_type([grid/0, cell_coords/0, pos/0]).
 
 -type cell_coords() :: {integer(), integer()}.
 -type pos() :: {number(), number()}.

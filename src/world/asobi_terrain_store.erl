@@ -16,21 +16,10 @@ start_link(Opts) ->
 -spec get_chunk(pid(), {integer(), integer()}) ->
     {ok, binary()} | {error, term()}.
 get_chunk(Pid, Coords) ->
-    Tab = narrow_tid(gen_server:call(Pid, get_ets_tab)),
-    case ets:lookup(Tab, Coords) of
-        [{Coords, Data}] when is_binary(Data) ->
-            {ok, Data};
-        [{Coords, _}] ->
-            {error, invalid_cache_entry};
-        [] ->
-            case gen_server:call(Pid, {load_chunk, Coords}) of
-                {ok, D} when is_binary(D) -> {ok, D};
-                {error, _} = Err -> Err
-            end
+    case gen_server:call(Pid, {get_chunk, Coords}) of
+        {ok, Data} when is_binary(Data) -> {ok, Data};
+        {error, _} = Err -> Err
     end.
-
--spec narrow_tid(term()) -> ets:tid().
-narrow_tid(T) when is_reference(T) -> T.
 
 -spec preload_chunks(pid(), [{integer(), integer()}]) -> ok.
 preload_chunks(Pid, CoordsList) ->
@@ -63,9 +52,7 @@ init(Opts) ->
     }}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
-handle_call(get_ets_tab, _From, #{ets_tab := Tab} = State) ->
-    {reply, Tab, State};
-handle_call({load_chunk, Coords}, _From, #{ets_tab := Tab} = State) ->
+handle_call({get_chunk, Coords}, _From, #{ets_tab := Tab} = State) ->
     case ets:lookup(Tab, Coords) of
         [{Coords, Data}] ->
             {reply, {ok, Data}, inc_hits(State)};

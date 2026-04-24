@@ -415,6 +415,5 @@ generate_id() ->
 ensure_map(M) when is_map(M) -> M;
 ensure_map(_) -> #{}.
 
--spec pos_len([term()]) -> pos_integer().
-pos_len([]) -> 1;
-pos_len(L) -> length(L).
+-spec pos_len([term(), ...]) -> pos_integer().
+pos_len([_ | _] = L) -> length(L).
