@@ -44,11 +44,15 @@ unsubscribe(Pid, PlayerId) ->
 
 -spec get_entities(pid()) -> map().
 get_entities(Pid) ->
-    gen_server:call(Pid, get_entities).
+    case gen_server:call(Pid, get_entities) of
+        M when is_map(M) -> M
+    end.
 
 -spec get_subscriber_count(pid()) -> non_neg_integer().
 get_subscriber_count(Pid) ->
-    gen_server:call(Pid, get_subscriber_count).
+    case gen_server:call(Pid, get_subscriber_count) of
+        N when is_integer(N), N >= 0 -> N
+    end.
 
 -spec start_entity_timer(pid(), map()) -> ok.
 start_entity_timer(Pid, Config) ->
@@ -76,12 +80,20 @@ despawn_entity(Pid, EntityId) ->
 
 -spec query_radius(pid(), {number(), number()}, number()) -> [{binary(), {number(), number()}}].
 query_radius(Pid, Center, Radius) ->
-    gen_server:call(Pid, {query_radius, Center, Radius}).
+    narrow_id_pos_list(gen_server:call(Pid, {query_radius, Center, Radius})).
 
 -spec query_rect(pid(), {number(), number()}, {number(), number()}) ->
     [{binary(), {number(), number()}}].
 query_rect(Pid, TopLeft, BottomRight) ->
-    gen_server:call(Pid, {query_rect, TopLeft, BottomRight}).
+    narrow_id_pos_list(gen_server:call(Pid, {query_rect, TopLeft, BottomRight})).
+
+-spec narrow_id_pos_list(term()) -> [{binary(), {number(), number()}}].
+narrow_id_pos_list([]) ->
+    [];
+narrow_id_pos_list([{Id, {X, Y}} | Rest]) when
+    is_binary(Id), is_number(X), is_number(Y)
+->
+    [{Id, {X, Y}} | narrow_id_pos_list(Rest)].
 
 %% --- gen_server callbacks ---
 
@@ -143,8 +155,10 @@ handle_call(get_entities, _From, #{entities := Entities} = State) ->
 handle_call(get_subscriber_count, _From, #{subscribers := Subs} = State) ->
     {reply, map_size(Subs), State};
 handle_call(
-    {query_radius, Center, Radius}, _From, #{spatial_grid := Grid, entities := Entities} = State
-) ->
+    {query_radius, {CX, CY} = Center, Radius},
+    _From,
+    #{spatial_grid := Grid, entities := Entities} = State
+) when is_number(CX), is_number(CY), is_number(Radius) ->
     Result =
         case Grid of
             undefined ->
@@ -157,8 +171,10 @@ handle_call(
         end,
     {reply, Result, State};
 handle_call(
-    {query_rect, TopLeft, BottomRight}, _From, #{spatial_grid := Grid, entities := Entities} = State
-) ->
+    {query_rect, {TLX, TLY} = TopLeft, {BRX, BRY} = BottomRight},
+    _From,
+    #{spatial_grid := Grid, entities := Entities} = State
+) when is_number(TLX), is_number(TLY), is_number(BRX), is_number(BRY) ->
     Result =
         case Grid of
             undefined ->
@@ -173,7 +189,7 @@ handle_call(
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
--spec handle_cast(term(), map()) -> {noreply, map()}.
+-spec handle_cast(term(), map()) -> {noreply, map()} | {noreply, map(), hibernate}.
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
     State2 = transfer_out_of_bounds_npcs(State1),
@@ -204,7 +220,7 @@ handle_cast({remove_entity, EntityId}, #{entities := Entities, spatial_grid := G
 handle_cast(
     {subscribe, PlayerId, PlayerPid},
     #{subscribers := Subs, entities := Entities, coords := Coords} = State
-) ->
+) when is_binary(PlayerId), is_pid(PlayerPid) ->
     MonRef = monitor(process, PlayerPid),
     %% Send immediate snapshot so new subscribers see all current entities
     _ =
@@ -236,14 +252,16 @@ handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
             demonitor(MonRef, [flush]),
             {noreply, State#{subscribers => maps:remove(PlayerId, Subs)}}
     end;
-handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) ->
+handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) when is_map(Config) ->
     {noreply, State#{entity_timers => asobi_entity_timer:start_timer(Config, ET)}};
-handle_cast({cancel_entity_timer, EntityId, TimerId}, #{entity_timers := ET} = State) ->
+handle_cast({cancel_entity_timer, EntityId, TimerId}, #{entity_timers := ET} = State) when
+    is_binary(EntityId), is_binary(TimerId)
+->
     {noreply, State#{entity_timers => asobi_entity_timer:cancel_timer(EntityId, TimerId, ET)}};
 handle_cast(
-    {spawn_entity, TemplateId, Pos, Overrides},
+    {spawn_entity, TemplateId, {PX, PY} = Pos, Overrides},
     #{entities := Entities, spawner := Spawner, spatial_grid := Grid} = State
-) ->
+) when is_binary(TemplateId), is_number(PX), is_number(PY), is_map(Overrides) ->
     case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Spawner) of
         {ok, {EntityId, Entity}, Spawner1} ->
             Grid1 = spatial_grid_insert(EntityId, Entity, Grid),
@@ -255,27 +273,12 @@ handle_cast(
         {error, _} ->
             {noreply, State}
     end;
-handle_cast({spawn_entities, Spawns}, State) ->
-    State1 = lists:foldl(
-        fun(
-            {TemplateId, Pos, Overrides}, #{entities := Ents, spawner := Sp, spatial_grid := Gr} = S
-        ) ->
-            case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Sp) of
-                {ok, {EntityId, Entity}, Sp1} ->
-                    Gr1 = spatial_grid_insert(EntityId, Entity, Gr),
-                    S#{entities => Ents#{EntityId => Entity}, spawner => Sp1, spatial_grid => Gr1};
-                {error, _} ->
-                    S
-            end
-        end,
-        State,
-        Spawns
-    ),
-    {noreply, State1};
+handle_cast({spawn_entities, Spawns}, State) when is_list(Spawns) ->
+    {noreply, apply_spawns(Spawns, State)};
 handle_cast(
     {despawn_entity, EntityId},
     #{entities := Entities, spawner := Spawner, spatial_grid := Grid} = State
-) ->
+) when is_binary(EntityId) ->
     Now = erlang:system_time(millisecond),
     Spawner1 = asobi_zone_spawner:entity_removed(EntityId, Now, Spawner),
     Grid1 = spatial_grid_remove(EntityId, Grid),
@@ -344,13 +347,7 @@ do_tick(
     %% Tick spawner — process respawn queue
     Spawner = maps:get(spawner, State),
     {Respawns, Spawner1} = asobi_zone_spawner:tick(Now, Spawner),
-    Entities4 = lists:foldl(
-        fun({EntityId, EntityState, _Pos}, Acc) ->
-            Acc#{EntityId => EntityState}
-        end,
-        Entities3,
-        Respawns
-    ),
+    Entities4 = apply_respawns(Respawns, Entities3),
     %% Only broadcast every Nth tick to reduce network traffic
     State1 =
         case TickN rem BroadcastInterval of
@@ -520,7 +517,7 @@ transfer_out_of_bounds_npcs(
     %% Remove transferred NPCs from this zone
     Entities1 = maps:without(ToRemove, Entities),
     Grid = maps:get(spatial_grid, State, undefined),
-    Grid1 = lists:foldl(fun(Id, G) -> spatial_grid_remove(Id, G) end, Grid, ToRemove),
+    Grid1 = remove_from_grid(ToRemove, Grid),
     State#{entities => Entities1, spatial_grid => Grid1};
 transfer_out_of_bounds_npcs(State) ->
     State.
@@ -619,12 +616,58 @@ spatial_grid_remove(_EntityId, undefined) ->
 spatial_grid_remove(EntityId, Grid) ->
     asobi_spatial_grid:remove(EntityId, Grid).
 
+-spec apply_spawns([term()], map()) -> map().
+apply_spawns([], State) ->
+    State;
+apply_spawns(
+    [{TemplateId, {PX, PY} = Pos, Overrides} | Rest],
+    #{entities := Ents, spawner := Sp, spatial_grid := Gr} = State
+) when is_binary(TemplateId), is_number(PX), is_number(PY), is_map(Overrides) ->
+    State1 =
+        case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Sp) of
+            {ok, {EntityId, Entity}, Sp1} ->
+                Gr1 = spatial_grid_insert(EntityId, Entity, Gr),
+                State#{
+                    entities => Ents#{EntityId => Entity},
+                    spawner => Sp1,
+                    spatial_grid => Gr1
+                };
+            {error, _} ->
+                State
+        end,
+    apply_spawns(Rest, State1);
+apply_spawns([_ | Rest], State) ->
+    apply_spawns(Rest, State).
+
+-spec apply_respawns([{binary(), map(), {number(), number()}}], map()) -> map().
+apply_respawns([], Entities) ->
+    Entities;
+apply_respawns([{EntityId, EntityState, _Pos} | Rest], Entities) when is_binary(EntityId) ->
+    apply_respawns(Rest, Entities#{EntityId => EntityState});
+apply_respawns([_ | Rest], Entities) ->
+    apply_respawns(Rest, Entities).
+
+-spec remove_from_grid([term()], asobi_spatial_grid:grid() | undefined) ->
+    asobi_spatial_grid:grid() | undefined.
+remove_from_grid(_Ids, undefined) ->
+    undefined;
+remove_from_grid(Ids, Grid) ->
+    remove_from_grid_do(Ids, Grid).
+
+-spec remove_from_grid_do([term()], asobi_spatial_grid:grid()) -> asobi_spatial_grid:grid().
+remove_from_grid_do([], Grid) ->
+    Grid;
+remove_from_grid_do([Id | Rest], Grid) when is_binary(Id) ->
+    remove_from_grid_do(Rest, asobi_spatial_grid:remove(Id, Grid));
+remove_from_grid_do([_ | Rest], Grid) ->
+    remove_from_grid_do(Rest, Grid).
+
 sync_spatial_grid(_OldEntities, _NewEntities, undefined) ->
     undefined;
-sync_spatial_grid(OldEntities, NewEntities, Grid) ->
+sync_spatial_grid(OldEntities, NewEntities, Grid) when is_map(Grid) ->
     %% Remove entities that no longer exist
     Removed = maps:keys(OldEntities) -- maps:keys(NewEntities),
-    Grid1 = lists:foldl(fun(Id, G) -> asobi_spatial_grid:remove(Id, G) end, Grid, Removed),
+    Grid1 = remove_from_grid_do(Removed, Grid),
     %% Update/insert entities with changed or new positions
     maps:fold(
         fun
