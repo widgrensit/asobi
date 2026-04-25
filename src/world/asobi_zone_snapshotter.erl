@@ -85,7 +85,12 @@ write_snapshot(#{world_id := WorldId, coords := {ZX, ZY}} = Data) ->
     EntityTimers = maps:get(entity_timers, Data, #{}),
     SpawnerState = maps:get(spawner_state, Data, #{}),
     Tick = maps:get(tick, Data, 0),
-    Now = erlang:system_time(millisecond),
+    %% kura's `utc_datetime` cast wants a calendar:datetime() tuple, not a
+    %% raw millisecond integer; passing an integer rejects the changeset
+    %% with `cannot cast to utc_datetime` and the row is silently dropped.
+    Now = calendar:system_time_to_universal_time(
+        erlang:system_time(millisecond), millisecond
+    ),
     Fields = #{
         id => asobi_id:generate(),
         world_id => WorldId,
@@ -112,9 +117,12 @@ write_snapshot(#{world_id := WorldId, coords := {ZX, ZY}} = Data) ->
     ],
     CS = kura_changeset:cast(asobi_zone_snapshot, #{}, Fields, AllFields),
     ConflictFields = [entities, zone_state, entity_timers, spawner_state, tick, snapshot_at],
+    %% kura's `create_index ... unique => true` emits a unique INDEX,
+    %% not a CONSTRAINT — so postgres accepts `ON CONFLICT (cols)` but
+    %% not `ON CONFLICT ON CONSTRAINT name`. Match by column list.
     Opts = #{
         on_conflict => {
-            {constraint, ~"zone_snapshots_world_id_zone_x_zone_y_index"}, {replace, ConflictFields}
+            {columns, [world_id, zone_x, zone_y]}, {replace, ConflictFields}
         }
     },
     case asobi_repo:insert(CS, Opts) of
