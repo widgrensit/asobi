@@ -21,6 +21,7 @@ init([]) ->
         player_session_sup(),
         match_sup(),
         world_sup(),
+        world_lobby_server_spec(),
         vote_sup(),
         matchmaker_spec(),
         leaderboard_sup(),
@@ -50,6 +51,12 @@ world_sup() ->
         id => asobi_world_sup,
         start => {asobi_world_sup, start_link, []},
         type => supervisor
+    }.
+
+world_lobby_server_spec() ->
+    #{
+        id => asobi_world_lobby_server,
+        start => {asobi_world_lobby_server, start_link, []}
     }.
 
 leaderboard_sup() ->

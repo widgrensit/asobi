@@ -1,6 +1,7 @@
 -module(asobi_world_lobby).
 
 -export([list_worlds/0, list_worlds/1, find_or_create/1, create_world/1]).
+-export([find_or_create_unsafe/1]).
 
 -define(PG_SCOPE, nova_scope).
 
@@ -34,9 +35,26 @@ list_worlds(Filters) ->
     ),
     Worlds.
 
--doc "Find a running world with capacity for the given mode, or create one.".
+-doc """
+Find a running world with capacity for the given mode, or create one.
+
+Calls go through `asobi_world_lobby_server` to serialize concurrent
+requests. The naive list-then-create sequence has a TOCTOU race:
+two callers both see `list_worlds = []`, both call `create_world`,
+and both clients end up in different worlds despite asking for the
+same mode. Serializing closes the window.
+""".
 -spec find_or_create(binary()) -> {ok, pid(), map()} | {error, term()}.
 find_or_create(Mode) ->
+    asobi_world_lobby_server:find_or_create(Mode).
+
+-doc """
+The non-serialized implementation. Only `asobi_world_lobby_server`
+should call this — direct callers race. Exposed because the
+serializer holds no state and just delegates back here.
+""".
+-spec find_or_create_unsafe(binary()) -> {ok, pid(), map()} | {error, term()}.
+find_or_create_unsafe(Mode) ->
     Worlds = list_worlds(#{mode => Mode, has_capacity => true}),
     case Worlds of
         [#{world_id := WorldId} = First | _] ->
@@ -52,7 +70,14 @@ find_or_create(Mode) ->
 -spec create_world(binary()) -> {ok, pid(), map()} | {error, term()}.
 create_world(Mode) ->
     case asobi_game_modes:world_config(Mode) of
-        {ok, Config} ->
+        {ok, Config0} ->
+            %% Pre-allocate the world_id so the zone_manager (started before
+            %% the world_server by asobi_world_instance) has a real id from
+            %% the start. Otherwise zones spawn with world_id=undefined and
+            %% their snapshot writes collide on the
+            %% zone_snapshots_world_id_zone_x_zone_y_index unique constraint.
+            WorldId = asobi_id:generate(),
+            Config = Config0#{world_id => WorldId},
             case asobi_world_instance_sup:start_world(Config) of
                 {ok, InstancePid} when is_pid(InstancePid) ->
                     WorldPid = wait_for_world_server(InstancePid, 10),
