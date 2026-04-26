@@ -345,10 +345,8 @@ handle_message(
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
     case asobi_world_lobby:create_world(Mode) of
-        {ok, WorldPid, Info} ->
-            _ = asobi_world_server:join(WorldPid, PlayerId),
-            Reply = encode_reply(Cid, ~"world.joined", Info),
-            {reply, {text, Reply}, State};
+        {ok, WorldPid, _Info} ->
+            join_and_reply(Cid, WorldPid, PlayerId, State);
         {error, Reason} ->
             Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
             {reply, {text, Reply}, State}
@@ -359,10 +357,8 @@ handle_message(
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
     case asobi_world_lobby:find_or_create(Mode) of
-        {ok, WorldPid, Info} ->
-            _ = asobi_world_server:join(WorldPid, PlayerId),
-            Reply = encode_reply(Cid, ~"world.joined", Info),
-            {reply, {text, Reply}, State};
+        {ok, WorldPid, _Info} ->
+            join_and_reply(Cid, WorldPid, PlayerId, State);
         {error, Reason} ->
             Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
             {reply, {text, Reply}, State}
@@ -377,15 +373,7 @@ handle_message(
             Reply = encode_reply(Cid, ~"error", #{reason => ~"world_not_found"}),
             {reply, {text, Reply}, State};
         {ok, WorldPid} ->
-            case asobi_world_server:join(WorldPid, PlayerId) of
-                ok ->
-                    Info = asobi_world_server:get_info(WorldPid),
-                    Reply = encode_reply(Cid, ~"world.joined", Info),
-                    {reply, {text, Reply}, State};
-                {error, Reason} ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
-                    {reply, {text, Reply}, State}
-            end
+            join_and_reply(Cid, WorldPid, PlayerId, State)
     end;
 handle_message(
     #{~"type" := ~"world.leave"} = Msg,
@@ -459,6 +447,41 @@ reply_error(Msg, Reason, State) ->
     Cid = maps:get(~"cid", Msg, undefined),
     Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
     {reply, {text, Reply}, State}.
+
+join_and_reply(Cid, WorldPid, PlayerId, State) ->
+    case current_player_world(PlayerId) of
+        {ok, ExistingPid} when ExistingPid =/= WorldPid ->
+            %% Player is already in a different (live) world. Force them to
+            %% world.leave first; otherwise they'd appear in two worlds at once.
+            Reply = encode_reply(Cid, ~"error", #{reason => ~"already_in_world"}),
+            {reply, {text, Reply}, State};
+        _ ->
+            case asobi_world_server:join(WorldPid, PlayerId) of
+                ok ->
+                    Info = asobi_world_server:get_info(WorldPid),
+                    Reply = encode_reply(Cid, ~"world.joined", Info),
+                    {reply, {text, Reply}, State};
+                {error, Reason} ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+                    {reply, {text, Reply}, State}
+            end
+    end.
+
+current_player_world(PlayerId) ->
+    case ets:info(asobi_player_worlds) of
+        undefined ->
+            none;
+        _ ->
+            case ets:lookup(asobi_player_worlds, PlayerId) of
+                [{PlayerId, Pid}] when is_pid(Pid) ->
+                    case is_process_alive(Pid) of
+                        true -> {ok, Pid};
+                        false -> none
+                    end;
+                _ ->
+                    none
+            end
+    end.
 
 %% --- Internal ---
 

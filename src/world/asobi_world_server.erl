@@ -107,12 +107,15 @@ init(Config) ->
     VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
     FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
     Persistent = maps:get(persistent, Config, false),
+    EmptyGraceMs = maps:get(empty_grace_ms, Config, 0),
     InstanceSup = maps:get(instance_sup, Config, undefined),
     PhaseState =
         case erlang:function_exported(GameMod, phases, 1) of
             true ->
-                Phases = GameMod:phases(GameConfig),
-                asobi_phase:init(Phases);
+                case GameMod:phases(GameConfig) of
+                    [] -> undefined;
+                    Phases -> asobi_phase:init(Phases)
+                end;
             false ->
                 undefined
         end,
@@ -144,6 +147,7 @@ init(Config) ->
         frustration_bonus => FrustrationBonus,
         active_votes => #{},
         persistent => Persistent,
+        empty_grace_ms => EmptyGraceMs,
         reconnect_state => init_reconnect(Config),
         chat_state => ChatState,
         phase_state => PhaseState
@@ -153,7 +157,7 @@ init(Config) ->
 %% --- loading state ---
 
 -spec loading(gen_statem:event_type() | enter, term(), map()) ->
-    gen_statem:state_enter_result(atom()).
+    gen_statem:state_enter_result(atom()) | gen_statem:event_handler_result(atom()).
 loading(enter, _OldState, _State) ->
     %% Defer zone spawning — supervisor:which_children deadlocks if called during init
     erlang:send(self(), resolve_and_spawn),
@@ -177,6 +181,10 @@ loading(state_timeout, zones_ready, State) ->
     {next_state, running, State#{started_at => erlang:system_time(millisecond)}};
 loading({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(loading, State)}]};
+loading({call, _From}, {join, _PlayerId}, _State) ->
+    %% Postpone join until we transition to running. Otherwise the call
+    %% would crash with function_clause and the caller would time out.
+    {keep_state_and_data, [postpone]};
 loading(cast, cancel, State) ->
     {stop, {shutdown, cancelled}, State}.
 
@@ -233,6 +241,13 @@ running(
             do_start_vote(VoteConfig, State1);
         {finished, Result, GS1} ->
             {next_state, finished, State#{game_state => GS1, result => Result}}
+    end;
+running({timeout, empty_grace}, _Content, #{players := Players} = State) ->
+    case map_size(Players) of
+        0 ->
+            {next_state, finished, State#{result => #{status => ~"empty_grace_expired"}}};
+        _ ->
+            keep_state_and_data
     end;
 running({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(running, State)}]};
@@ -348,8 +363,12 @@ finished(_EventType, _Event, _State) ->
     keep_state_and_data.
 
 -spec terminate(term(), atom(), map()) -> ok.
-terminate(_Reason, _StateName, #{world_id := WorldId}) ->
+terminate(_Reason, _StateName, #{world_id := WorldId} = State) ->
     pg:leave(?PG_SCOPE, {asobi_world_server, WorldId}, self()),
+    %% Clean up player→world ETS entries for any players still in the map.
+    %% Normal handle_leave removes them per-player; this catches abrupt shutdowns.
+    Players = maps:get(players, State, #{}),
+    maps:foreach(fun(PlayerId, _) -> forget_player_world(PlayerId) end, Players),
     ok.
 
 %% --- Internal: Zone Management ---
@@ -508,10 +527,7 @@ handle_join(
                         }
                     },
                     %% Track player→world for reconnection lookup
-                    case ets:info(asobi_player_worlds) of
-                        undefined -> ok;
-                        _ -> ets:insert(asobi_player_worlds, {PlayerId, self()})
-                    end,
+                    remember_player_world(PlayerId, self()),
                     VetoTokens = maps:get(veto_tokens, State2),
                     VetoCount = maps:get(veto_tokens_per_player, State2),
                     State3 = State2#{
@@ -524,7 +540,12 @@ handle_join(
                         PlayerId, ZoneCoords, maps:get(chat_state, State3)
                     ),
                     State4 = notify_phase_player_joined(State3),
-                    {keep_state, State4, [{reply, From, ok}]};
+                    %% Cancel any pending empty_grace timer — this player rescued the world
+                    %% from the grace window. The cancel is a no-op if no timer is pending.
+                    {keep_state, State4, [
+                        {reply, From, ok},
+                        {{timeout, empty_grace}, infinity, undefined}
+                    ]};
                 {error, Reason} ->
                     {keep_state_and_data, [{reply, From, {error, Reason}}]}
             end
@@ -547,13 +568,20 @@ handle_leave(
             leave_chat(PlayerId, State),
             State1 = remove_player_from_zones(PlayerId, State),
             Players1 = maps:remove(PlayerId, Players),
-            case {map_size(Players1), maps:get(persistent, State, false)} of
-                {0, false} ->
-                    {next_state, finished, State1#{
-                        players => Players1, game_state => GS1, result => #{status => ~"empty"}
-                    }};
+            forget_player_world(PlayerId),
+            State2 = State1#{players => Players1, game_state => GS1},
+            Persistent = maps:get(persistent, State2, false),
+            GraceMs = maps:get(empty_grace_ms, State2, 0),
+            case {map_size(Players1), Persistent, GraceMs} of
+                {0, false, 0} ->
+                    {next_state, finished, State2#{result => #{status => ~"empty"}}};
+                {0, false, _} ->
+                    %% Schedule a generic timeout; if a player rejoins before it fires,
+                    %% handle_join cancels it. Generic timeouts persist across events
+                    %% in the same state (unlike state_timeout, which resets).
+                    {keep_state, State2, [{{timeout, empty_grace}, GraceMs, fire}]};
                 _ ->
-                    {keep_state, State1#{players => Players1, game_state => GS1}}
+                    {keep_state, State2}
             end
     end.
 
@@ -707,6 +735,26 @@ find_player_pid(PlayerId) ->
     case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
         [Pid | _] -> Pid;
         [] -> self()
+    end.
+
+-spec remember_player_world(binary(), pid()) -> ok.
+remember_player_world(PlayerId, WorldPid) ->
+    case ets:info(asobi_player_worlds) of
+        undefined ->
+            ok;
+        _ ->
+            ets:insert(asobi_player_worlds, {PlayerId, WorldPid}),
+            ok
+    end.
+
+-spec forget_player_world(binary()) -> ok.
+forget_player_world(PlayerId) ->
+    case ets:info(asobi_player_worlds) of
+        undefined ->
+            ok;
+        _ ->
+            ets:delete(asobi_player_worlds, PlayerId),
+            ok
     end.
 
 -spec subscribe_interest_zones([term()], pid() | atom(), binary(), pid()) -> ok.
@@ -958,10 +1006,7 @@ handle_reconnect_events([{grace_expired, PlayerId, Action} | Rest], State) ->
         case Action of
             remove ->
                 #{world_id := WorldId} = State,
-                case ets:info(asobi_player_worlds) of
-                    undefined -> ok;
-                    _ -> ets:delete(asobi_player_worlds, PlayerId)
-                end,
+                forget_player_world(PlayerId),
                 asobi_telemetry:world_player_left(WorldId, PlayerId),
                 State2 = remove_player_from_zones(PlayerId, State),
                 Players = maps:remove(PlayerId, maps:get(players, State2)),
