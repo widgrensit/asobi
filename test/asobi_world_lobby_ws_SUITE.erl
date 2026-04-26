@@ -114,11 +114,16 @@ sequential_clients_reuse_existing_world(Config) ->
     Config.
 
 different_modes_get_different_worlds(Config) ->
-    {_P, Tok} = register_player(~"d", Config),
-    Conn = ws_connect_authed(Tok, Config),
-    Hub = ws_find_or_create(?MODE_HUB, ~"d1", Conn),
-    Arena = ws_find_or_create(?MODE_ARENA, ~"d2", Conn),
-    nova_test_ws:close(Conn),
+    %% Two clients — a single connected player can no longer be in two
+    %% worlds at once (see join_rejects_when_player_already_in_other_world).
+    {_P1, Tok1} = register_player(~"dh", Config),
+    {_P2, Tok2} = register_player(~"da", Config),
+    Conn1 = ws_connect_authed(Tok1, Config),
+    Conn2 = ws_connect_authed(Tok2, Config),
+    Hub = ws_find_or_create(?MODE_HUB, ~"d1", Conn1),
+    Arena = ws_find_or_create(?MODE_ARENA, ~"d2", Conn2),
+    nova_test_ws:close(Conn1),
+    nova_test_ws:close(Conn2),
     ?assertNotEqual(Hub, Arena),
     Config.
 
@@ -158,21 +163,23 @@ create_reply_reflects_creator_in_player_count(Config) ->
 
 join_rejects_when_player_already_in_other_world(Config) ->
     %% A single player connected via WS must not be able to be in two worlds
-    %% at once. world.join into a different world while still in another must
-    %% reply with `error` and reason=already_in_world.
-    {_P, Tok} = register_player(~"al", Config),
-    Conn = ws_connect_authed(Tok, Config),
-    %% Create world A.
-    {WorldA, _} = ws_create(?MODE_HUB, ~"al1", Conn),
-    %% Create world B (forces a new world by going through full mode capacity).
-    %% Easier path: spawn a second hub world by filling the first... but max=4.
-    %% Instead, use ARENA mode for B so we deterministically get a different world.
-    {WorldB, _} = ws_create(?MODE_ARENA, ~"al2", Conn),
-    %% At this point, player is implicitly in WorldB (the most recent join).
-    %% Now try to world.join WorldA — should be rejected.
-    Result = ws_join(WorldA, ~"al3", Conn),
-    nova_test_ws:close(Conn),
-    ?assertNotEqual(WorldA, WorldB),
+    %% at once. world.join into a different world while already in another
+    %% must reply with `error` and reason=already_in_world.
+    %%
+    %% Setup: client A creates HUB, client B creates ARENA. Client A then
+    %% tries to join ARENA (already-in-world should reject).
+    {_P1, Tok1} = register_player(~"al", Config),
+    {_P2, Tok2} = register_player(~"bl", Config),
+    Conn1 = ws_connect_authed(Tok1, Config),
+    Conn2 = ws_connect_authed(Tok2, Config),
+    {WorldHub, _} = ws_create(?MODE_HUB, ~"al1", Conn1),
+    {WorldArena, _} = ws_create(?MODE_ARENA, ~"bl1", Conn2),
+    %% Sanity: distinct worlds.
+    ?assertNotEqual(WorldHub, WorldArena),
+    %% Client A (in HUB) attempts to join the arena world.
+    Result = ws_join(WorldArena, ~"al2", Conn1),
+    nova_test_ws:close(Conn1),
+    nova_test_ws:close(Conn2),
     case Result of
         {error, Reason} ->
             ?assertEqual(~"already_in_world", Reason);
