@@ -15,7 +15,7 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 -export([start_link/1]).
 -export([ensure_zone/2, get_zone/2, touch_zone/2, release_zone/2]).
 -export([get_active_zones/1, zone_terminated/2, pre_warm/1]).
--export([register_zone/3, set_zone_config/2]).
+-export([register_zone/3, set_zone_config/2, set_initial_zone_states/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(REAP_INTERVAL, 10_000).
@@ -88,6 +88,17 @@ register_zone(Ref, Coords, ZonePid) ->
 set_zone_config(Ref, Config) ->
     ok = gen_server:call(Ref, {set_zone_config, Config}).
 
+-doc """
+Provide per-coord initial zone_state. Used to thread per-zone state from
+`GameMod:generate_world/2` (e.g. lua_state for the asobi_lua_world bridge,
+or station/planet seeds for sc_game) through to each zone's init. Without
+this, zones would all start with empty zone_state and any callback that
+needs per-zone setup would silently no-op.
+""".
+-spec set_initial_zone_states(pid() | atom(), map()) -> ok.
+set_initial_zone_states(Ref, ZoneStates) when is_map(ZoneStates) ->
+    ok = gen_server:call(Ref, {set_initial_zone_states, ZoneStates}).
+
 %% --- gen_server callbacks ---
 
 -spec init(map()) -> {ok, map()}.
@@ -123,6 +134,7 @@ init(Opts) ->
         grid_size => maps:get(grid_size, Opts),
         zone_size => maps:get(zone_size, Opts),
         zone_config => maps:get(zone_config, Opts, #{}),
+        initial_zone_states => maps:get(initial_zone_states, Opts, #{}),
         reap_ref => ReapRef
     }}.
 
@@ -162,6 +174,8 @@ handle_call(
     {reply, ok, State1};
 handle_call({set_zone_config, Config}, _From, State) ->
     {reply, ok, State#{zone_config => Config}};
+handle_call({set_initial_zone_states, ZoneStates}, _From, State) ->
+    {reply, ok, State#{initial_zone_states => ZoneStates}};
 handle_call({lookup_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
     Result =
         case ets:lookup(Tab, Coords) of
@@ -220,14 +234,21 @@ start_zone(
         zone_last_active := Active,
         zone_monitors := Monitors,
         max_active_zones := MaxActive,
-        zone_config := BaseConfig
+        zone_config := BaseConfig,
+        initial_zone_states := InitialStates
     } = State
 ) ->
     case ets:info(Tab, size) >= MaxActive of
         true ->
             {error, max_zones_reached};
         false ->
-            Config = BaseConfig#{coords => Coords},
+            Config0 = BaseConfig#{coords => Coords},
+            Config =
+                case maps:get(Coords, InitialStates, undefined) of
+                    undefined -> Config0;
+                    ZS when is_map(ZS) -> Config0#{zone_state => ZS};
+                    _ -> Config0
+                end,
             case asobi_zone_sup:start_zone(ZoneSup, Config) of
                 {ok, Pid} ->
                     ets:insert(Tab, {Coords, Pid}),

@@ -427,7 +427,7 @@ spawn_zones(
 ) ->
     Persistence = maps:get(persistence, Config, false),
     AllCoords = [{X, Y} || X <- lists:seq(0, GridSize - 1), Y <- lists:seq(0, GridSize - 1)],
-    {_ZoneStates, Entities, _SpawnerStates, GS1} =
+    {ZoneStates, Entities, _SpawnerStates, GS1} =
         case Persistence of
             true ->
                 case asobi_zone_snapshotter:load_snapshots(WorldId) of
@@ -450,6 +450,11 @@ spawn_zones(
             false ->
                 {generate_zone_states(GameMod, Config), #{}, #{}, GS}
         end,
+    %% Thread per-zone state from generate_world/2 (or recovered snapshots) into
+    %% the zone_manager so each zone's init sees its own zone_state. Without
+    %% this, callbacks like asobi_lua_world:handle_input/3 silently no-op
+    %% because the lua_state they need is buried in the discarded ZoneStates.
+    ok = asobi_zone_manager:set_initial_zone_states(ZoneManagerPid, ZoneStates),
     %% Pre-warm all zones via zone_manager (uses base config with terrain_store_pid etc.)
     ok = asobi_zone_manager:pre_warm(ZoneManagerPid),
     %% Add recovered entities to zones
