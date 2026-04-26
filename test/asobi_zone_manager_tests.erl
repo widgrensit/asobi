@@ -166,10 +166,8 @@ initial_zone_states_threaded() ->
     {ok, P11} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
     #{zone_state := ZS00} = sys:get_state(P00),
     #{zone_state := ZS11} = sys:get_state(P11),
-    ?assertEqual(zero_zero, maps:get(marker, ZS00)),
-    ?assertEqual(fake_lua_zero, maps:get(lua_state, ZS00)),
-    ?assertEqual(one_one, maps:get(marker, ZS11)),
-    ?assertEqual(fake_lua_one, maps:get(lua_state, ZS11)),
+    ?assertMatch(#{marker := zero_zero, lua_state := fake_lua_zero}, ZS00),
+    ?assertMatch(#{marker := one_one, lua_state := fake_lua_one}, ZS11),
     stop_manager(Ctx).
 
 initial_zone_states_default() ->
