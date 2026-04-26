@@ -113,7 +113,12 @@ matches_filters(Info, Filters) ->
             false ->
                 true
         end,
-    StatusOk = maps:get(status, Info, undefined) =:= running,
+    %% Include `loading` worlds: a freshly-created world is briefly in this state,
+    %% and joins arriving during loading are postponed by the world_server until
+    %% running. Excluding loading worlds caused races where two clients each
+    %% spawned their own world because neither saw the in-flight one.
+    Status = maps:get(status, Info, undefined),
+    StatusOk = Status =:= running orelse Status =:= loading,
     ModeOk andalso CapOk andalso StatusOk.
 
 -spec take_first([pid()]) -> [pid()].

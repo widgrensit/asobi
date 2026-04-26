@@ -16,6 +16,14 @@ setup() ->
         undefined -> pg:start_link(nova_scope);
         _ -> ok
     end,
+    case ets:info(asobi_player_worlds) of
+        undefined ->
+            ets:new(asobi_player_worlds, [
+                named_table, public, set, {read_concurrency, true}
+            ]);
+        _ ->
+            ets:delete_all_objects(asobi_player_worlds)
+    end,
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     meck:expect(asobi_repo, insert, fun(_CS, _Opts) -> {ok, #{}} end),
@@ -55,7 +63,12 @@ world_server_test_() ->
         {timeout, 15, {"leave last player finishes world", fun leave_last_finishes/0}},
         {"get_info returns world metadata", fun get_info/0},
         {timeout, 15, {"cancel finishes world", fun cancel_world/0}},
-        {"whereis finds world by id", fun whereis_world/0}
+        {"whereis finds world by id", fun whereis_world/0},
+        {"join records player in ETS, leave clears it", fun ets_tracks_player_world/0},
+        {timeout, 15, {"empty grace keeps world alive briefly", fun empty_grace_keeps_alive/0}},
+        {timeout, 15, {"empty grace lapses when no one rejoins", fun empty_grace_lapses/0}},
+        {timeout, 15,
+            {"empty phases() list does not auto-finish", fun empty_phases_does_not_finish/0}}
     ]}.
 
 starts_running() ->
@@ -138,3 +151,62 @@ whereis_world() ->
     WorldId = maps:get(world_id, Info),
     ?assertEqual({ok, Pid}, asobi_world_server:whereis(WorldId)),
     stop_world(Ctx).
+
+ets_tracks_player_world() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    asobi_world_server:join(Pid, <<"p_ets">>),
+    ?assertEqual([{<<"p_ets">>, Pid}], ets:lookup(asobi_player_worlds, <<"p_ets">>)),
+    asobi_world_server:join(Pid, <<"p_ets2">>),
+    asobi_world_server:leave(Pid, <<"p_ets">>),
+    timer:sleep(20),
+    ?assertEqual([], ets:lookup(asobi_player_worlds, <<"p_ets">>)),
+    %% Force a graceful gen_statem stop so terminate runs and cleans up the
+    %% remaining player's ETS entry. (Supervisor-shutdown does NOT call terminate
+    %% on processes that don't trap_exit, so we use gen_statem:stop directly.)
+    ok = gen_statem:stop(Pid),
+    ?assertEqual([], ets:lookup(asobi_player_worlds, <<"p_ets2">>)),
+    stop_world(Ctx).
+
+empty_grace_keeps_alive() ->
+    Ctx = #{world_pid := Pid} = start_world(#{empty_grace_ms => 500}),
+    MonRef = monitor(process, Pid),
+    asobi_world_server:join(Pid, <<"g1">>),
+    asobi_world_server:leave(Pid, <<"g1">>),
+    %% Grace window is 500ms; rejoin within 200ms must keep world alive.
+    timer:sleep(200),
+    ?assertEqual(ok, asobi_world_server:join(Pid, <<"g2">>)),
+    %% Sleep past the original grace window — world must still be alive because grace was cancelled.
+    timer:sleep(500),
+    ?assertEqual(running, maps:get(status, asobi_world_server:get_info(Pid))),
+    demonitor(MonRef, [flush]),
+    stop_world(Ctx).
+
+empty_grace_lapses() ->
+    Ctx = #{world_pid := Pid} = start_world(#{empty_grace_ms => 200}),
+    MonRef = monitor(process, Pid),
+    asobi_world_server:join(Pid, <<"g3">>),
+    asobi_world_server:leave(Pid, <<"g3">>),
+    %% No rejoin: grace fires after 200ms and the world finishes.
+    receive
+        {'DOWN', MonRef, process, Pid, _} -> ok
+    after 10000 ->
+        stop_world(Ctx),
+        ?assert(false)
+    end.
+
+empty_phases_does_not_finish() ->
+    %% Inject phases/1 that returns []. Before the fix, the world would
+    %% transition to `finished` on the first post_tick because asobi_phase:init([])
+    %% returns a state with status=complete.
+    meck:new(asobi_test_world_game, [passthrough, non_strict]),
+    meck:expect(asobi_test_world_game, phases, fun(_GameConfig) -> [] end),
+    try
+        Ctx = #{world_pid := Pid} = start_world(),
+        asobi_world_server:join(Pid, <<"ph1">>),
+        %% Wait several ticks; if the bug is present, world transitions to finished.
+        timer:sleep(300),
+        ?assertEqual(running, maps:get(status, asobi_world_server:get_info(Pid))),
+        stop_world(Ctx)
+    after
+        meck:unload(asobi_test_world_game)
+    end.

@@ -16,7 +16,9 @@ identity returned to the client.
     two_clients_share_hub_world/1,
     sequential_clients_reuse_existing_world/1,
     different_modes_get_different_worlds/1,
-    full_world_spawns_a_new_one/1
+    full_world_spawns_a_new_one/1,
+    create_reply_reflects_creator_in_player_count/1,
+    join_rejects_when_player_already_in_other_world/1
 ]).
 
 -define(MODE_HUB, ~"test_ws_hub").
@@ -28,7 +30,9 @@ all() ->
         two_clients_share_hub_world,
         sequential_clients_reuse_existing_world,
         different_modes_get_different_worlds,
-        full_world_spawns_a_new_one
+        full_world_spawns_a_new_one,
+        create_reply_reflects_creator_in_player_count,
+        join_rejects_when_player_already_in_other_world
     ].
 
 init_per_suite(Config) ->
@@ -135,6 +139,48 @@ full_world_spawns_a_new_one(Config) ->
     ),
     Config.
 
+create_reply_reflects_creator_in_player_count(Config) ->
+    %% Pre-fix, world.create replied with Info captured BEFORE the implicit
+    %% join, so player_count was always 0 even though the creator was about
+    %% to be in the world. Lobby UIs rendering "0/N" on freshly-created
+    %% worlds is the user-visible symptom.
+    {_P, Tok} = register_player(~"crc", Config),
+    Conn = ws_connect_authed(Tok, Config),
+    {WorldId, PlayerCount} = ws_create(?MODE_HUB, ~"crc1", Conn),
+    nova_test_ws:close(Conn),
+    ?assert(is_binary(WorldId)),
+    ?assertEqual(
+        1,
+        PlayerCount,
+        "world.create reply must report player_count=1 because the creator was joined"
+    ),
+    Config.
+
+join_rejects_when_player_already_in_other_world(Config) ->
+    %% A single player connected via WS must not be able to be in two worlds
+    %% at once. world.join into a different world while still in another must
+    %% reply with `error` and reason=already_in_world.
+    {_P, Tok} = register_player(~"al", Config),
+    Conn = ws_connect_authed(Tok, Config),
+    %% Create world A.
+    {WorldA, _} = ws_create(?MODE_HUB, ~"al1", Conn),
+    %% Create world B (forces a new world by going through full mode capacity).
+    %% Easier path: spawn a second hub world by filling the first... but max=4.
+    %% Instead, use ARENA mode for B so we deterministically get a different world.
+    {WorldB, _} = ws_create(?MODE_ARENA, ~"al2", Conn),
+    %% At this point, player is implicitly in WorldB (the most recent join).
+    %% Now try to world.join WorldA — should be rejected.
+    Result = ws_join(WorldA, ~"al3", Conn),
+    nova_test_ws:close(Conn),
+    ?assertNotEqual(WorldA, WorldB),
+    case Result of
+        {error, Reason} ->
+            ?assertEqual(~"already_in_world", Reason);
+        {ok, _} ->
+            ct:fail("world.join must reject when player is already in another world")
+    end,
+    Config.
+
 %% --- helpers ---
 
 register_player(Suffix, Config) ->
@@ -185,6 +231,45 @@ ws_find_or_create(Mode, Cid, Conn) ->
     ),
     Payload = maps:get(~"payload", Joined),
     maps:get(~"world_id", Payload).
+
+ws_create(Mode, Cid, Conn) ->
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"world.create",
+            ~"cid" => Cid,
+            ~"payload" => #{~"mode" => Mode}
+        },
+        Conn
+    ),
+    {ok, Joined} = recv_until(
+        fun(M) ->
+            maps:get(~"type", M, undefined) =:= ~"world.joined" andalso
+                maps:get(~"cid", M, undefined) =:= Cid
+        end,
+        Conn
+    ),
+    Payload = maps:get(~"payload", Joined),
+    {maps:get(~"world_id", Payload), maps:get(~"player_count", Payload, undefined)}.
+
+ws_join(WorldId, Cid, Conn) ->
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"world.join",
+            ~"cid" => Cid,
+            ~"payload" => #{~"world_id" => WorldId}
+        },
+        Conn
+    ),
+    {ok, Reply} = recv_until(
+        fun(M) ->
+            maps:get(~"cid", M, undefined) =:= Cid
+        end,
+        Conn
+    ),
+    case maps:get(~"type", Reply) of
+        ~"world.joined" -> {ok, maps:get(~"payload", Reply)};
+        ~"error" -> {error, maps:get(~"reason", maps:get(~"payload", Reply))}
+    end.
 
 recv_until(Pred, Conn) ->
     recv_until(Pred, Conn, 50).
