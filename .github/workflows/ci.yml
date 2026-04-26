@@ -19,4 +19,10 @@ jobs:
       extra-services-compose: 'docker-compose.yml'
       enable-dependency-submission: true
       enable-summary: true
+      # erlang-ci restores _build from cache keyed on rebar.lock, then runs
+      # `rebar3 clean` which only wipes ebin. Stale test artifacts copied in
+      # by previous runs survive and get executed by rebar3 eunit/ct. That's
+      # how asobi_lua_SUITE.beam (removed in #59) keeps reappearing in CT
+      # and crashing on `luerl:init/0` undef. Force-fresh project test tree.
+      pre-test-command: 'rm -rf _build/default/lib/asobi/test _build/test/lib/asobi/test'
     secrets: inherit
