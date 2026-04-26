@@ -30,7 +30,7 @@ world_config(Mode) ->
     ModeConfig = mode_config(Mode),
     case resolve_game_module(Mode) of
         {ok, GameMod, ExtraConfig} ->
-            {ok, #{
+            Base = #{
                 mode => Mode,
                 game_module => GameMod,
                 game_config => ExtraConfig,
@@ -40,9 +40,19 @@ world_config(Mode) ->
                 tick_rate => maps:get(tick_rate, ModeConfig, 50),
                 view_radius => maps:get(view_radius, ModeConfig, 1),
                 persistent => maps:get(persistent, ModeConfig, false)
-            }};
+            },
+            {ok, forward_optional(ModeConfig, [empty_grace_ms, player_ttl_ms], Base)};
         {error, _} = Err ->
             Err
+    end.
+
+-spec forward_optional(map(), [atom()], map()) -> map().
+forward_optional(_Src, [], Acc) ->
+    Acc;
+forward_optional(Src, [Key | Rest], Acc) ->
+    case Src of
+        #{Key := Val} -> forward_optional(Src, Rest, Acc#{Key => Val});
+        _ -> forward_optional(Src, Rest, Acc)
     end.
 
 -spec ensure_map(term()) -> #{term() => term()}.

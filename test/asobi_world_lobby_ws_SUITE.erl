@@ -44,7 +44,10 @@ init_per_suite(Config) ->
             max_players => 4,
             grid_size => 1,
             zone_size => 100,
-            tick_rate => 50
+            tick_rate => 50,
+            %% Hub-style modes need a grace window so the world survives across
+            %% brief disconnects (sequential clients reusing the lobby).
+            empty_grace_ms => 5000
         },
         ?MODE_ARENA => #{
             type => world,
@@ -52,7 +55,8 @@ init_per_suite(Config) ->
             max_players => 4,
             grid_size => 1,
             zone_size => 100,
-            tick_rate => 50
+            tick_rate => 50,
+            empty_grace_ms => 5000
         },
         ?MODE_SOLO => #{
             type => world,

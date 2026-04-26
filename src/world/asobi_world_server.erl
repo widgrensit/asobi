@@ -148,6 +148,7 @@ init(Config) ->
         active_votes => #{},
         persistent => Persistent,
         empty_grace_ms => EmptyGraceMs,
+        player_ttl_ms => maps:get(player_ttl_ms, Config, 0),
         reconnect_state => init_reconnect(Config),
         chat_state => ChatState,
         phase_state => PhaseState
@@ -283,10 +284,21 @@ running(info, {asobi_message, _}, _State) ->
 running(
     info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := undefined} = State
 ) ->
-    %% No reconnect policy — no action (entity stays, player can rejoin)
+    %% No reconnect policy active. Behavior depends on player_ttl_ms:
+    %%   0  (default): immediate cleanup — remove entity, broadcast op="r"
+    %%   -1: keep entity forever (opt-in for persistent worlds where the
+    %%       game module manages reconnection state itself)
+    %% A positive player_ttl_ms is upgraded to a reconnect_state at world
+    %% init, so that path is handled by the {reconnect_state := RS} clause
+    %% below — never reaches here.
     case find_player_by_pid(DownPid, State) of
-        {ok, _PlayerId} -> keep_state_and_data;
-        none -> keep_state_and_data
+        {ok, PlayerId} ->
+            case maps:get(player_ttl_ms, State, 0) of
+                -1 -> keep_state_and_data;
+                _ -> handle_leave(PlayerId, State)
+            end;
+        none ->
+            keep_state_and_data
     end;
 running(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := RS} = State) ->
     case find_player_by_pid(DownPid, State) of
@@ -991,10 +1003,30 @@ world_info(Status, #{world_id := WorldId, players := Players} = State) ->
 
 %% --- Internal: Reconnection ---
 
+%% Resolution order:
+%%   1. Explicit `reconnect` policy in Config (expert mode — full asobi_reconnect
+%%      policy with during_grace, on_reconnect, on_expire, etc.).
+%%   2. `player_ttl_ms` > 0 — synthesize a simple grace-then-remove policy.
+%%   3. Otherwise undefined — DOWN handler decides based on player_ttl_ms
+%%      (0 = immediate cleanup, -1 = keep forever).
 init_reconnect(Config) ->
     case maps:get(reconnect, Config, undefined) of
-        undefined -> undefined;
-        Policy when is_map(Policy) -> asobi_reconnect:new(Policy)
+        Policy when is_map(Policy) ->
+            asobi_reconnect:new(Policy);
+        undefined ->
+            case maps:get(player_ttl_ms, Config, 0) of
+                Ms when is_integer(Ms), Ms > 0 ->
+                    asobi_reconnect:new(#{
+                        grace_period => Ms,
+                        during_grace => removed,
+                        on_reconnect => respawn,
+                        on_expire => remove,
+                        pause_match => false,
+                        max_offline_total => infinity
+                    });
+                _ ->
+                    undefined
+            end
     end.
 
 tick_reconnect(#{reconnect_state := undefined} = State) ->

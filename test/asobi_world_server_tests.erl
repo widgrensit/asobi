@@ -68,7 +68,16 @@ world_server_test_() ->
         {timeout, 15, {"empty grace keeps world alive briefly", fun empty_grace_keeps_alive/0}},
         {timeout, 15, {"empty grace lapses when no one rejoins", fun empty_grace_lapses/0}},
         {timeout, 15,
-            {"empty phases() list does not auto-finish", fun empty_phases_does_not_finish/0}}
+            {"empty phases() list does not auto-finish", fun empty_phases_does_not_finish/0}},
+        {timeout, 15,
+            {"player_ttl_ms=0 (default): DOWN immediately removes player",
+                fun player_ttl_zero_removes_on_down/0}},
+        {timeout, 15,
+            {"player_ttl_ms=-1: DOWN keeps player (persistent world opt-in)",
+                fun player_ttl_minus_one_keeps_on_down/0}},
+        {timeout, 15,
+            {"player_ttl_ms>0: DOWN starts grace, fires reconnect events",
+                fun player_ttl_grace_starts_grace/0}}
     ]}.
 
 starts_running() ->
@@ -210,3 +219,59 @@ empty_phases_does_not_finish() ->
     after
         meck:unload(asobi_test_world_game)
     end.
+
+%% --- player_ttl_ms ---
+
+%% Spawn a fake player session and register it in the pg group the world
+%% server monitors via find_player_pid/1. Killing this pid triggers the
+%% world_server's 'DOWN' handler.
+fake_session(PlayerId) ->
+    Pid = spawn(fun Loop() ->
+        receive
+            stop -> ok;
+            _ -> Loop()
+        end
+    end),
+    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
+    Pid.
+
+player_ttl_zero_removes_on_down() ->
+    %% Default behavior: WS drop with no reconnect policy should fully clean
+    %% up the player. Without this, the zone accumulates zombie entities.
+    Ctx = #{world_pid := Pid} = start_world(),
+    PlayerId = <<"ttl0">>,
+    SessionPid = fake_session(PlayerId),
+    asobi_world_server:join(Pid, PlayerId),
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    exit(SessionPid, kill),
+    timer:sleep(50),
+    ?assertEqual(0, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    stop_world(Ctx).
+
+player_ttl_minus_one_keeps_on_down() ->
+    %% Persistent-world opt-in: -1 means never auto-remove on disconnect.
+    %% The game module manages reconnection state itself.
+    Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => -1}),
+    PlayerId = <<"ttlneg">>,
+    SessionPid = fake_session(PlayerId),
+    asobi_world_server:join(Pid, PlayerId),
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    exit(SessionPid, kill),
+    timer:sleep(50),
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    stop_world(Ctx).
+
+player_ttl_grace_starts_grace() ->
+    %% Positive ttl synthesizes a reconnect_state. DOWN must trigger the
+    %% grace flow; player count stays at 1 during the grace window.
+    Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => 5_000}),
+    PlayerId = <<"ttlgrace">>,
+    SessionPid = fake_session(PlayerId),
+    asobi_world_server:join(Pid, PlayerId),
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    exit(SessionPid, kill),
+    timer:sleep(100),
+    %% Player remains in the world during grace (entity may be hidden by
+    %% during_grace=removed but the player record is preserved for reconnect).
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    stop_world(Ctx).
