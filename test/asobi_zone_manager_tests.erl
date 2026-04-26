@@ -52,7 +52,9 @@ zone_manager_test_() ->
         {"max_active_zones enforced", fun max_zones_enforced/0},
         {"pre_warm spawns all zones", fun pre_warm_all/0},
         {"touch_zone resets timer", fun touch_zone_resets/0},
-        {"release_zone marks stale", fun release_zone_marks_stale/0}
+        {"release_zone marks stale", fun release_zone_marks_stale/0},
+        {"per-coord initial zone_state reaches zone init", fun initial_zone_states_threaded/0},
+        {"missing per-coord state leaves zone_state default", fun initial_zone_states_default/0}
     ]}.
 
 starts_ok() ->
@@ -147,4 +149,34 @@ release_zone_marks_stale() ->
     ok = asobi_zone_manager:release_zone(Mgr, {0, 0}),
     timer:sleep(10),
     ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, {0, 0})),
+    stop_manager(Ctx).
+
+%% Regression: per-coord state from generate_world/2 must reach the zone's
+%% init. Before this fix, the world server discarded ZoneStates entirely so
+%% callbacks like asobi_lua_world:handle_input/3 (which need lua_state in
+%% zone_state) silently no-opped, breaking any Lua game's input handling.
+initial_zone_states_threaded() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    States = #{
+        {0, 0} => #{marker => zero_zero, lua_state => fake_lua_zero},
+        {1, 1} => #{marker => one_one, lua_state => fake_lua_one}
+    },
+    ok = asobi_zone_manager:set_initial_zone_states(Mgr, States),
+    {ok, P00} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, P11} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
+    #{zone_state := ZS00} = sys:get_state(P00),
+    #{zone_state := ZS11} = sys:get_state(P11),
+    ?assertEqual(zero_zero, maps:get(marker, ZS00)),
+    ?assertEqual(fake_lua_zero, maps:get(lua_state, ZS00)),
+    ?assertEqual(one_one, maps:get(marker, ZS11)),
+    ?assertEqual(fake_lua_one, maps:get(lua_state, ZS11)),
+    stop_manager(Ctx).
+
+initial_zone_states_default() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    %% No set_initial_zone_states call — zone should still start with the
+    %% default empty zone_state, not crash.
+    {ok, P} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    #{zone_state := ZS} = sys:get_state(P),
+    ?assertEqual(#{}, ZS),
     stop_manager(Ctx).
