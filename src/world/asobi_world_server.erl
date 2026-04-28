@@ -1,7 +1,7 @@
 -module(asobi_world_server).
 -behaviour(gen_statem).
 
--export([start_link/1, join/2, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1]).
+-export([start_link/1, join/2, join/3, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1]).
 -export([spawn_at/3, spawn_at/4]).
 -export([reconnect/2]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
@@ -24,7 +24,24 @@ start_link(Config) ->
 
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
-    narrow_ok_or_error(gen_statem:call(Pid, {join, PlayerId})).
+    case gen_statem:call(Pid, {join, PlayerId}) of
+        {ok, _ZonePid} -> ok;
+        {error, _} = Err -> Err
+    end.
+
+%% Variant of join/2 that also synchronously binds zone_pid into the caller's
+%% asobi_player_session via SessionPid before returning. Use this from the WS
+%% handler so an immediately-following world.input isn't dropped while the async
+%% {world_joined,...} notification is still in flight.
+-spec join(pid(), binary(), pid()) -> ok | {error, term()}.
+join(Pid, PlayerId, SessionPid) when is_pid(SessionPid) ->
+    case gen_statem:call(Pid, {join, PlayerId}) of
+        {ok, ZonePid} when is_pid(ZonePid) ->
+            ok = asobi_player_session:set_zone(SessionPid, Pid, ZonePid),
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec leave(pid(), binary()) -> ok.
 leave(Pid, PlayerId) ->
@@ -531,7 +548,7 @@ handle_join(
                 {ok, GS1} ->
                     {ok, SpawnPos} = Mod:spawn_position(PlayerId, GS1),
                     State1 = State#{game_state => GS1},
-                    State2 = place_player(PlayerId, SpawnPos, State1),
+                    {State2, ZonePid} = place_player(PlayerId, SpawnPos, State1),
                     %% Monitor player session for reconnection handling
                     PlayerPid = find_player_pid(PlayerId),
                     MonRef = erlang:monitor(process, PlayerPid),
@@ -560,7 +577,7 @@ handle_join(
                     %% Cancel any pending empty_grace timer — this player rescued the world
                     %% from the grace window. The cancel is a no-op if no timer is pending.
                     {keep_state, State4, [
-                        {reply, From, ok},
+                        {reply, From, {ok, ZonePid}},
                         {{timeout, empty_grace}, infinity, undefined}
                     ]};
                 {error, Reason} ->
@@ -619,10 +636,19 @@ place_player(
     asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
     InterestZones = interest_zones(ZoneCoords, ViewRadius, GridSize),
     subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
+    %% Drain the casts above (add_entity + subscribe) by issuing a sync call to
+    %% the zone. Without this, a world.input cast from the WS handler can race
+    %% past the add_entity cast (different sender = no FIFO) and the zone's
+    %% next tick runs apply_inputs against an entities map missing the player —
+    %% the Lua handle_input's "if not e then return entities end" guard then
+    %% silently drops the input. The sync call forces the zone to process its
+    %% mailbox up to here before we reply {ok, ZonePid} to the WS handler.
+    _ = asobi_zone:get_subscriber_count(ZonePid),
     PlayerZones = maps:get(player_zones, State),
-    State#{
+    State1 = State#{
         player_zones => PlayerZones#{PlayerId => #{zone => ZoneCoords, interest => InterestZones}}
-    }.
+    },
+    {State1, ZonePid}.
 
 remove_player_from_zones(
     PlayerId,
@@ -681,7 +707,7 @@ handle_move(
                     {keep_state, State#{players => Players1}};
                 false ->
                     State1 = remove_player_from_zones(PlayerId, State),
-                    State2 = place_player(PlayerId, NewPos, State1),
+                    {State2, _NewZonePid} = place_player(PlayerId, NewPos, State1),
                     asobi_world_chat:player_zone_changed(
                         PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
                     ),
