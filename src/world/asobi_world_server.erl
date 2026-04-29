@@ -115,7 +115,7 @@ init(Config) ->
     GameMod = maps:get(game_module, Config),
     GameConfig0 = maps:get(game_config, Config, #{}),
     GameConfig = GameConfig0#{match_id => WorldId},
-    {ok, GameState} = GameMod:init(GameConfig),
+    {ok, GameState0} = GameMod:init(GameConfig),
     GridSize = maps:get(grid_size, Config, ?DEFAULT_GRID_SIZE),
     ZoneSize = maps:get(zone_size, Config, ?DEFAULT_ZONE_SIZE),
     TickRate = maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE),
@@ -126,16 +126,19 @@ init(Config) ->
     Persistent = maps:get(persistent, Config, false),
     EmptyGraceMs = maps:get(empty_grace_ms, Config, 0),
     InstanceSup = maps:get(instance_sup, Config, undefined),
-    PhaseState =
+    {PhaseInitEvents, PhaseState} =
         case erlang:function_exported(GameMod, phases, 1) of
             true ->
                 case GameMod:phases(GameConfig) of
-                    [] -> undefined;
+                    [] -> {[], undefined};
                     Phases -> asobi_phase:init(Phases)
                 end;
             false ->
-                undefined
+                {[], undefined}
         end,
+    %% Drive on_phase_started for the auto-started first phase. Without this,
+    %% the first phase's start callback silently never fires.
+    GameState = handle_phase_events(PhaseInitEvents, GameMod, GameState0),
     ChatConfig0 = maps:get(chat, Config, #{}),
     ChatConfig = ChatConfig0#{grid_size => GridSize},
     ChatState = asobi_world_chat:init(WorldId, Config#{chat => ChatConfig}),

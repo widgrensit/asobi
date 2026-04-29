@@ -50,9 +50,9 @@
 %% Init
 %% -------------------------------------------------------------------
 
--spec init([phase_def()]) -> phase_state().
+-spec init([phase_def()]) -> {[phase_event()], phase_state()}.
 init([]) ->
-    #{
+    {[], #{
         phases => [],
         current_index => 0,
         current_started => true,
@@ -60,7 +60,7 @@ init([]) ->
         active_timers => #{},
         paused => false,
         complete => true
-    };
+    }};
 init(Phases) ->
     State = #{
         phases => Phases,
@@ -77,11 +77,13 @@ init(Phases) ->
         end,
     case maps:get(start, Phase, prev_ended) of
         prev_ended ->
-            %% Auto-start first phase immediately
-            {_Events, PS} = start_current_phase(State),
-            PS;
+            %% Auto-start the first phase immediately and return its events
+            %% so the caller can drive on_phase_started callbacks for phase 1.
+            %% Without surfacing these, the first phase's start callback
+            %% silently never fires.
+            start_current_phase(State);
         _ ->
-            State
+            {[], State}
     end.
 
 %% -------------------------------------------------------------------

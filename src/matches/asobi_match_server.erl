@@ -111,17 +111,20 @@ init(Config) ->
             GameMod = maps:get(game_module, Config),
             GameConfig0 = maps:get(game_config, Config, #{}),
             GameConfig = GameConfig0#{match_id => MatchId},
-            {ok, GameState} = GameMod:init(GameConfig),
+            {ok, GameState0} = GameMod:init(GameConfig),
             VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
             FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
-            PhaseState =
+            {PhaseInitEvents, PhaseState} =
                 case erlang:function_exported(GameMod, phases, 1) of
                     true ->
                         Phases = GameMod:phases(GameConfig),
                         asobi_phase:init(Phases);
                     false ->
-                        undefined
+                        {[], undefined}
                 end,
+            %% Drive on_phase_started for the auto-started first phase. Without
+            %% this, the first phase's start callback silently never fires.
+            GameState = handle_phase_events(PhaseInitEvents, GameMod, GameState0),
             State = #{
                 match_id => MatchId,
                 mode => maps:get(mode, Config, undefined),

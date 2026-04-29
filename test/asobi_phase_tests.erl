@@ -11,7 +11,7 @@ simple_phases_test() ->
         #{name => ~"active", duration => 2000},
         #{name => ~"results", duration => 500}
     ],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     ?assertEqual(~"warmup", asobi_phase:current(PS)),
 
     {Events1, PS1} = asobi_phase:tick(1100, PS),
@@ -38,7 +38,7 @@ conditional_player_start_test() ->
         #{name => ~"gathering", start => {players, 5}, duration => 1000},
         #{name => ~"active", duration => 2000}
     ],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     Info = asobi_phase:info(PS),
     ?assertEqual(waiting, maps:get(status, Info)),
 
@@ -57,7 +57,7 @@ conditional_timer_fallback_test() ->
     Phases = [
         #{name => ~"waiting", start => {timer, 2000}, duration => 1000}
     ],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     {[], PS1} = asobi_phase:tick(1000, PS),
     ?assertEqual(waiting, maps:get(status, asobi_phase:info(PS1))),
 
@@ -73,7 +73,7 @@ infinity_duration_test() ->
     Phases = [
         #{name => ~"persistent", duration => infinity}
     ],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     ?assertEqual(infinity, asobi_phase:remaining(PS)),
 
     {[], PS1} = asobi_phase:tick(999999, PS),
@@ -102,7 +102,7 @@ phase_with_cycle_timer_test() ->
             ]
         }
     ],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     TimersInfo = asobi_phase:timers_info(PS),
     ?assertMatch(#{~"daynight" := #{type := cycle}}, TimersInfo),
 
@@ -115,7 +115,7 @@ phase_with_cycle_timer_test() ->
 
 pause_resume_test() ->
     Phases = [#{name => ~"active", duration => 1000}],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     PS1 = asobi_phase:pause(PS),
 
     {[], PS2} = asobi_phase:tick(500, PS1),
@@ -142,7 +142,7 @@ config_test() ->
             config => #{pvp => true}
         }
     ],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     ?assertEqual(#{pvp => false, safe_zones => true}, asobi_phase:config(PS)),
 
     {_, PS1} = asobi_phase:tick(1100, PS),
@@ -153,7 +153,7 @@ config_test() ->
 %% -------------------------------------------------------------------
 
 empty_phases_test() ->
-    PS = asobi_phase:init([]),
+    {_InitEvents, PS} = asobi_phase:init([]),
     ?assertEqual(undefined, asobi_phase:current(PS)),
     ?assertEqual(0, asobi_phase:remaining(PS)),
     {[], PS1} = asobi_phase:tick(1000, PS),
@@ -167,7 +167,7 @@ event_start_test() ->
     Phases = [
         #{name => ~"idle", start => {event, game_ready}, duration => 1000}
     ],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     ?assertEqual(waiting, maps:get(status, asobi_phase:info(PS))),
 
     {[], PS1} = asobi_phase:notify({player_joined, 3}, PS),
@@ -183,20 +183,20 @@ event_start_test() ->
 
 info_waiting_test() ->
     Phases = [#{name => ~"w", start => {players, 5}, duration => 1000}],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     Info = asobi_phase:info(PS),
     ?assertEqual(waiting, maps:get(status, Info)),
     ?assertEqual(~"w", maps:get(phase, Info)).
 
 info_active_test() ->
     Phases = [#{name => ~"a", duration => 5000, config => #{x => 1}}],
-    PS = asobi_phase:init(Phases),
+    {_InitEvents, PS} = asobi_phase:init(Phases),
     Info = asobi_phase:info(PS),
     ?assertEqual(active, maps:get(status, Info)),
     ?assertEqual(~"a", maps:get(phase, Info)),
     ?assertEqual(#{x => 1}, maps:get(config, Info)).
 
 info_complete_test() ->
-    PS = asobi_phase:init([]),
+    {_InitEvents, PS} = asobi_phase:init([]),
     Info = asobi_phase:info(PS),
     ?assertEqual(complete, maps:get(status, Info)).
