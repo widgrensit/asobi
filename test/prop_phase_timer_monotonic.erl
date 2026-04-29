@@ -16,7 +16,7 @@
 %% Catches regressions where a phase boundary is skipped under a coarse
 %% tick delta or where a paused/notify path leaks events.
 
--define(NUMTESTS, 50).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "50"))).
 
 phase_timer_monotonic_test_() ->
     {timeout, 60,

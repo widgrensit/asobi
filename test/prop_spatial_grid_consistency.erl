@@ -11,7 +11,7 @@
 %% after remove, off-by-one cell edges) that are easy to introduce when the
 %% grid layout changes.
 
--define(NUMTESTS, 50).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "50"))).
 
 spatial_grid_consistency_test_() ->
     {timeout, 60,

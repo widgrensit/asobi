@@ -22,7 +22,7 @@ encoding, or swaps association ordering would shrink to a minimal case.
 -export([snapshot_roundtrip_property/1]).
 -export([prop_snapshot_roundtrip/0]).
 
--define(NUMTESTS, 25).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "25"))).
 
 all() ->
     [snapshot_roundtrip_property].

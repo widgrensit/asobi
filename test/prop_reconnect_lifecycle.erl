@@ -17,6 +17,7 @@
 
 -define(MAX_PLAYERS, 5).
 -define(TTL_MS, 60_000).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "25"))).
 -define(BASE_CONFIG, #{
     game_module => asobi_test_world_game,
     grid_size => 2,
@@ -36,7 +37,7 @@ reconnect_lifecycle_test_() ->
             [
                 ?_assert(
                     proper:quickcheck(prop_reconnect_lifecycle(Ctx), [
-                        {numtests, 25}, {to_file, user}
+                        {numtests, ?NUMTESTS}, {to_file, user}
                     ])
                 )
             ]
