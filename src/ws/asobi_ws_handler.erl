@@ -448,7 +448,9 @@ reply_error(Msg, Reason, State) ->
     Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
     {reply, {text, Reply}, State}.
 
-join_and_reply(Cid, WorldPid, PlayerId, State) ->
+join_and_reply(Cid, WorldPid, PlayerId, #{session := SessionPid} = State) when
+    SessionPid =/= undefined
+->
     case current_player_world(PlayerId) of
         {ok, ExistingPid} when ExistingPid =/= WorldPid ->
             %% Player is already in a different (live) world. Force them to
@@ -456,7 +458,10 @@ join_and_reply(Cid, WorldPid, PlayerId, State) ->
             Reply = encode_reply(Cid, ~"error", #{reason => ~"already_in_world"}),
             {reply, {text, Reply}, State};
         _ ->
-            case asobi_world_server:join(WorldPid, PlayerId) of
+            %% join/3 (vs join/2) sets zone_pid synchronously in the player_session
+            %% before returning, so a world.input arriving right after world.joined
+            %% lands on the right zone instead of being silently dropped.
+            case asobi_world_server:join(WorldPid, PlayerId, SessionPid) of
                 ok ->
                     Info = asobi_world_server:get_info(WorldPid),
                     Reply = encode_reply(Cid, ~"world.joined", Info),

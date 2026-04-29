@@ -338,9 +338,17 @@ do_tick(
         entity_timers := ET
     } = State
 ) ->
-    Entities1 = apply_inputs(GameMod, Queue, Entities),
+    %% Run zone_tick BEFORE apply_inputs so bridges that stash per-zone state
+    %% in the proc dict (e.g., asobi_lua_world) have a chance to populate it
+    %% before handle_input/3 reads it. Without this swap, the very first tick
+    %% on a freshly-spawned zone runs apply_inputs against an empty proc dict
+    %% and the bridge silently drops every queued input. The semantic effect
+    %% is that an input arrives one zone-tick later than it would have under
+    %% the previous order; broadcasts still reflect this tick's input because
+    %% the broadcast step runs after both.
     ZoneStateWithTick = ZoneState#{tick => TickN},
-    {Entities2, ZoneState1} = GameMod:zone_tick(Entities1, ZoneStateWithTick),
+    {Entities0, ZoneState1} = GameMod:zone_tick(Entities, ZoneStateWithTick),
+    Entities2 = apply_inputs(GameMod, Queue, Entities0),
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),

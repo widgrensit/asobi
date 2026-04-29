@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/2, stop/1]).
--export([get_state/1, update_presence/2]).
+-export([get_state/1, update_presence/2, set_zone/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -spec start_link(binary(), pid()) -> gen_server:start_ret().
@@ -24,6 +24,14 @@ get_state(Pid) ->
 update_presence(Pid, Status) ->
     gen_server:cast(Pid, {update_presence, Status}).
 
+%% Synchronously bind world_pid + zone_pid into the session before the WS handler
+%% replies world.joined, so an immediately-following world.input is routed to the
+%% right zone instead of being silently dropped while the async {world_joined,...}
+%% message is still in flight.
+-spec set_zone(pid(), pid(), pid() | undefined) -> ok.
+set_zone(Pid, WorldPid, ZonePid) ->
+    ok = gen_server:call(Pid, {set_zone, WorldPid, ZonePid}).
+
 -spec init(map()) -> {ok, map()}.
 init(#{player_id := PlayerId, ws_pid := WsPid}) ->
     process_flag(trap_exit, true),
@@ -41,6 +49,8 @@ init(#{player_id := PlayerId, ws_pid := WsPid}) ->
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call(get_state, _From, State) ->
     {reply, State, State};
+handle_call({set_zone, WorldPid, ZonePid}, _From, State) ->
+    {reply, ok, State#{world_pid => WorldPid, zone_pid => ZonePid}};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 

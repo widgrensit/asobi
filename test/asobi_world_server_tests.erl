@@ -29,6 +29,9 @@ setup() ->
     meck:expect(asobi_repo, insert, fun(_CS, _Opts) -> {ok, #{}} end),
     meck:new(asobi_presence, [non_strict, no_link]),
     meck:expect(asobi_presence, send, fun(_PlayerId, _Msg) -> ok end),
+    meck:expect(asobi_presence, track, fun(_PlayerId, _Pid) -> ok end),
+    meck:expect(asobi_presence, untrack, fun(_PlayerId) -> ok end),
+    meck:expect(asobi_presence, update, fun(_PlayerId, _Status) -> ok end),
     ok.
 
 cleanup(_) ->
@@ -77,7 +80,8 @@ world_server_test_() ->
                 fun player_ttl_minus_one_keeps_on_down/0}},
         {timeout, 15,
             {"player_ttl_ms>0: DOWN starts grace, fires reconnect events",
-                fun player_ttl_grace_starts_grace/0}}
+                fun player_ttl_grace_starts_grace/0}},
+        {"join/3 sets zone_pid in player_session synchronously", fun join_three_sets_zone_pid/0}
     ]}.
 
 starts_running() ->
@@ -274,4 +278,25 @@ player_ttl_grace_starts_grace() ->
     %% Player remains in the world during grace (entity may be hidden by
     %% during_grace=removed but the player record is preserved for reconnect).
     ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    stop_world(Ctx).
+
+join_three_sets_zone_pid() ->
+    %% Regression: world.input sent immediately after world.joined was silently
+    %% dropped because asobi_player_session.zone_pid was set via an async
+    %% {world_joined,...} message that hadn't been processed yet. join/3 sets
+    %% zone_pid synchronously in the player_session before returning.
+    Ctx = #{world_pid := Pid} = start_world(),
+    PlayerId = <<"sync_zone_pid">>,
+    {ok, SessionPid} = asobi_player_session:start_link(PlayerId, self()),
+    unlink(SessionPid),
+    ok = pg:join(nova_scope, {player, PlayerId}, SessionPid),
+    %% Pre-condition: zone_pid is undefined before join.
+    State0 = asobi_player_session:get_state(SessionPid),
+    ?assertEqual(undefined, maps:get(zone_pid, State0, undefined)),
+    %% join/3 must bind zone_pid + world_pid into the session synchronously.
+    ?assertEqual(ok, asobi_world_server:join(Pid, PlayerId, SessionPid)),
+    State1 = asobi_player_session:get_state(SessionPid),
+    ?assert(is_pid(maps:get(zone_pid, State1))),
+    ?assertEqual(Pid, maps:get(world_pid, State1)),
+    asobi_player_session:stop(SessionPid),
     stop_world(Ctx).
