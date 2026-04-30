@@ -1,7 +1,7 @@
 -module(asobi_matchmaker).
 -behaviour(gen_server).
 
--export([start_link/0, add/2, remove/2, get_ticket/1, get_queue_stats/0]).
+-export([start_link/0, add/2, remove/2, get_ticket/1, get_ticket/2, get_queue_stats/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(DEFAULT_TICK, 1000).
@@ -16,10 +16,27 @@ add(PlayerId, Params) ->
         {ok, TicketId} when is_binary(TicketId) -> {ok, TicketId}
     end.
 
--spec remove(binary(), binary()) -> ok.
+-spec remove(binary(), binary()) -> ok | {error, not_found | not_owner}.
 remove(PlayerId, TicketId) ->
-    gen_server:cast(?MODULE, {remove, PlayerId, TicketId}).
+    case gen_server:call(?MODULE, {remove, PlayerId, TicketId}) of
+        ok -> ok;
+        {error, not_found} -> {error, not_found};
+        {error, not_owner} -> {error, not_owner}
+    end.
 
+%% Ticket lookup is owner-scoped. F-8: previously any authenticated
+%% caller could read another player's mode/party/properties.
+-spec get_ticket(binary(), binary()) ->
+    {ok, map()} | {error, not_found | not_owner}.
+get_ticket(PlayerId, TicketId) ->
+    case gen_server:call(?MODULE, {get_ticket, PlayerId, TicketId}) of
+        {ok, Ticket} when is_map(Ticket) -> {ok, Ticket};
+        {error, not_found} -> {error, not_found};
+        {error, not_owner} -> {error, not_owner}
+    end.
+
+%% Legacy single-arg lookup — kept for callers that don't have a
+%% requester id (matchmaker tick path). Internal use only.
 -spec get_ticket(binary()) -> {ok, map()} | {error, not_found}.
 get_ticket(TicketId) ->
     case gen_server:call(?MODULE, {get_ticket, TicketId}) of
@@ -63,21 +80,48 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
             M when is_binary(M) -> M;
             _ -> ~"default"
         end,
+    %% F-7: only the requester themselves is allowed in the party until
+    %% an explicit invite/accept handshake exists. Drop any party
+    %% members the requester didn't pre-clear.
+    SanitisedParty = sanitise_party(maps:get(party, Params, [PlayerId]), PlayerId),
     Ticket = #{
         id => TicketId,
         player_id => PlayerId,
         mode => Mode,
         properties => maps:get(properties, Params, #{}),
-        party => maps:get(party, Params, [PlayerId]),
+        party => SanitisedParty,
         submitted_at => erlang:system_time(millisecond),
         status => pending
     },
     asobi_telemetry:matchmaker_queued(PlayerId, Mode),
     {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}};
+handle_call({get_ticket, PlayerId, TicketId}, _From, #{tickets := Tickets} = State) when
+    is_binary(PlayerId), is_binary(TicketId)
+->
+    case Tickets of
+        #{TicketId := #{player_id := PlayerId} = Ticket} ->
+            {reply, {ok, Ticket}, State};
+        #{TicketId := _Other} ->
+            {reply, {error, not_owner}, State};
+        _ ->
+            {reply, {error, not_found}, State}
+    end;
 handle_call({get_ticket, TicketId}, _From, #{tickets := Tickets} = State) ->
     case Tickets of
         #{TicketId := Ticket} -> {reply, {ok, Ticket}, State};
         _ -> {reply, {error, not_found}, State}
+    end;
+handle_call({remove, PlayerId, TicketId}, _From, #{tickets := Tickets} = State) when
+    is_binary(PlayerId), is_binary(TicketId)
+->
+    case Tickets of
+        #{TicketId := #{player_id := PlayerId}} ->
+            asobi_telemetry:matchmaker_removed(PlayerId, cancelled),
+            {reply, ok, State#{tickets => maps:remove(TicketId, Tickets)}};
+        #{TicketId := _Other} ->
+            {reply, {error, not_owner}, State};
+        _ ->
+            {reply, {error, not_found}, State}
     end;
 handle_call(get_queue_stats, _From, #{tickets := Tickets} = State) ->
     Now = erlang:system_time(millisecond),
@@ -109,11 +153,6 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({remove, PlayerId, TicketId}, #{tickets := Tickets} = State) when
-    is_binary(PlayerId)
-->
-    asobi_telemetry:matchmaker_removed(PlayerId, cancelled),
-    {noreply, State#{tickets => maps:remove(TicketId, Tickets)}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -410,6 +449,20 @@ notify_expired([#{player_id := PlayerId, id := TicketId} | Rest]) ->
 -spec generate_id() -> binary().
 generate_id() ->
     asobi_id:generate().
+
+%% F-7: until a real invite/accept handshake exists, the requester
+%% themselves is the only player allowed in their own party. Strip
+%% anything else and dedupe so the matchmaker can't be tricked into
+%% bringing a non-consenting player into a match.
+-spec sanitise_party(term(), binary()) -> [binary()].
+sanitise_party(Party, PlayerId) when is_list(Party) ->
+    Filtered = [P || P <- Party, is_binary(P), P =:= PlayerId],
+    case Filtered of
+        [] -> [PlayerId];
+        _ -> [PlayerId]
+    end;
+sanitise_party(_, PlayerId) ->
+    [PlayerId].
 
 -spec ensure_map(term()) -> #{term() => term()}.
 ensure_map(M) when is_map(M) -> M;

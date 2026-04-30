@@ -14,16 +14,22 @@ add(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) when
     {ok, TicketId} = asobi_matchmaker:add(PlayerId, MatchParams),
     {json, 200, #{}, #{ticket_id => TicketId, status => ~"pending"}}.
 
--spec remove(cowboy_req:req()) -> {json, map()}.
+-spec remove(cowboy_req:req()) -> {json, map()} | {status, integer()}.
 remove(
     #{bindings := #{~"ticket_id" := TicketId}, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(PlayerId), is_binary(TicketId) ->
-    asobi_matchmaker:remove(PlayerId, TicketId),
-    {json, #{success => true}}.
+    case asobi_matchmaker:remove(PlayerId, TicketId) of
+        ok -> {json, #{success => true}};
+        {error, not_owner} -> {status, 403};
+        {error, not_found} -> {status, 404}
+    end.
 
 -spec status(cowboy_req:req()) -> {json, map()} | {status, integer()}.
-status(#{bindings := #{~"ticket_id" := TicketId}} = _Req) when is_binary(TicketId) ->
-    case asobi_matchmaker:get_ticket(TicketId) of
+status(
+    #{bindings := #{~"ticket_id" := TicketId}, auth_data := #{player_id := PlayerId}} = _Req
+) when is_binary(PlayerId), is_binary(TicketId) ->
+    case asobi_matchmaker:get_ticket(PlayerId, TicketId) of
         {ok, Ticket} -> {json, Ticket};
+        {error, not_owner} -> {status, 403};
         {error, not_found} -> {status, 404}
     end.

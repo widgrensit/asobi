@@ -31,7 +31,9 @@
                 allow_origins => <<"${ASOBI_CORS_ORIGINS}">>
             }},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, #{limiter => asobi_api_limiter}},
+            %% F-19: leave limiter unset so the plugin selects per-path
+            %% (auth/iap/api). See asobi_rate_limit_plugin:select_limiter/1.
+            {pre_request, asobi_rate_limit_plugin, #{}},
             {post_request, asobi_security_headers_plugin, #{}}
         ]}
     ]},

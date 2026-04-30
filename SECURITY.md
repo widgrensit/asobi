@@ -43,3 +43,19 @@ Either of these channels work:
 
 We credit security researchers who report responsibly. Past advisories:
 [Security advisories](https://github.com/widgrensit/asobi/security/advisories).
+
+## Security architecture
+
+Engineering documentation about how the runtime defends itself, and what
+operators are responsible for, is published as part of the project
+guides:
+
+- [Threat model](guides/security-threat-model.md) — what asobi treats
+  as trusted vs. untrusted, the single-node design constraint, BEAM
+  distribution and public-ETS assumptions.
+- [Authentication & rate limiting](guides/security-auth.md) — Apple
+  StoreKit 2 JWS verification chain, per-route rate-limit groups, the
+  brute-force surface, and the integration test suite that pins it.
+- [Known limitations](guides/security-known-limitations.md) — the
+  resource-exhaustion gaps the runtime does **not** close (mostly
+  operator-facing), and the rationale for each.

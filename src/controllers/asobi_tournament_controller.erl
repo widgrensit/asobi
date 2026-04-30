@@ -11,7 +11,7 @@ index(#{qs := Qs} = _Req) when is_binary(Qs) ->
             undefined -> Q0;
             Status -> kura_query:where(Q0, {status, Status})
         end,
-    Limit = qs_integer(~"limit", Params, 50),
+    Limit = asobi_qs:integer(~"limit", Params, 50, 1, 200),
     Q2 = kura_query:limit(kura_query:order_by(Q1, [{start_at, asc}]), Limit),
     {ok, Tournaments} = asobi_repo:all(Q2),
     {json, #{tournaments => Tournaments}}.
@@ -37,10 +37,4 @@ join(#{bindings := #{~"id" := TournamentId}, auth_data := #{player_id := PlayerI
             {json, 409, #{}, #{error => ~"already_joined"}};
         {error, not_found} ->
             {status, 404}
-    end.
-
-qs_integer(Key, Params, Default) ->
-    case proplists:get_value(Key, Params) of
-        V when is_binary(V) -> binary_to_integer(V);
-        _ -> Default
     end.

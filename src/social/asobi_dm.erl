@@ -8,25 +8,44 @@
 
 -export([send/3, history/3, channel_id/2]).
 
+-define(MAX_DM_CONTENT_BYTES, 2000).
+
 -spec send(binary(), binary(), binary()) -> ok | {error, term()}.
-send(SenderId, RecipientId, Content) ->
-    case is_blocked(SenderId, RecipientId) of
-        true ->
-            {error, blocked};
-        false ->
-            ChannelId = channel_id(SenderId, RecipientId),
-            asobi_chat_channel:send_message(ChannelId, SenderId, Content),
-            asobi_presence:send(
-                RecipientId,
-                {dm_message, #{
-                    sender_id => SenderId,
-                    content => Content,
-                    channel_id => ChannelId,
-                    sent_at => erlang:system_time(millisecond)
-                }}
-            ),
-            ok
-    end.
+send(SenderId, RecipientId, Content) when
+    is_binary(SenderId), is_binary(RecipientId), is_binary(Content)
+->
+    case validate_content(Content) of
+        ok ->
+            case is_blocked(SenderId, RecipientId) of
+                true ->
+                    {error, blocked};
+                false ->
+                    ChannelId = channel_id(SenderId, RecipientId),
+                    asobi_chat_channel:send_message(ChannelId, SenderId, Content),
+                    asobi_presence:send(
+                        RecipientId,
+                        {dm_message, #{
+                            sender_id => SenderId,
+                            content => Content,
+                            channel_id => ChannelId,
+                            sent_at => erlang:system_time(millisecond)
+                        }}
+                    ),
+                    ok
+            end;
+        {error, _} = Err ->
+            Err
+    end;
+send(_SenderId, _RecipientId, _Content) ->
+    {error, invalid_input}.
+
+-spec validate_content(binary()) -> ok | {error, content_empty | content_too_large}.
+validate_content(<<>>) ->
+    {error, content_empty};
+validate_content(Content) when byte_size(Content) > ?MAX_DM_CONTENT_BYTES ->
+    {error, content_too_large};
+validate_content(_) ->
+    ok.
 
 -spec history(binary(), binary(), pos_integer()) -> [map()].
 history(PlayerId, OtherPlayerId, Limit) ->

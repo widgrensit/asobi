@@ -7,6 +7,9 @@
 -define(MAX_BUFFER, 100).
 -define(REGISTRY, asobi_chat_registry).
 -define(PG_SCOPE, nova_scope).
+%% F-16: stop channels with no live members after this many ms so an
+%% attacker who joins-then-disconnects cannot leak channel processes.
+-define(IDLE_TIMEOUT_MS, 60000).
 
 -spec start_link(binary(), binary()) -> gen_server:start_ret().
 start_link(ChannelId, ChannelType) ->
@@ -47,26 +50,28 @@ get_history(ChannelId, Limit) when is_integer(Limit) ->
             []
     end.
 
--spec init({binary(), binary()}) -> {ok, map()}.
+-spec init({binary(), binary()}) -> {ok, map(), pos_integer()}.
 init({ChannelId, ChannelType}) ->
     ensure_registry(),
     ets:insert(?REGISTRY, {ChannelId, self()}),
     process_flag(trap_exit, true),
-    {ok, #{
-        channel_id => ChannelId,
-        channel_type => ChannelType,
-        buffer => [],
-        buffer_size => 0
-    }}.
+    {ok,
+        #{
+            channel_id => ChannelId,
+            channel_type => ChannelType,
+            buffer => [],
+            buffer_size => 0
+        },
+        ?IDLE_TIMEOUT_MS}.
 
--spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
+-spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map(), pos_integer()}.
 handle_call({history, Limit}, _From, #{buffer := Buffer} = State) when is_integer(Limit) ->
     History = lists:sublist(Buffer, Limit),
-    {reply, lists:reverse(History), State};
+    {reply, lists:reverse(History), State, ?IDLE_TIMEOUT_MS};
 handle_call(_Request, _From, State) ->
-    {reply, ok, State}.
+    {reply, ok, State, ?IDLE_TIMEOUT_MS}.
 
--spec handle_cast(term(), map()) -> {noreply, map()}.
+-spec handle_cast(term(), map()) -> {noreply, map(), pos_integer()}.
 handle_cast(
     {message, SenderId, Content},
     #{
@@ -92,13 +97,21 @@ handle_cast(
             true -> [Msg | lists:droplast(Buffer)];
             false -> [Msg | Buffer]
         end,
-    {noreply, State#{buffer => Buffer1, buffer_size => min(Size + 1, ?MAX_BUFFER)}};
+    {noreply, State#{buffer => Buffer1, buffer_size => min(Size + 1, ?MAX_BUFFER)},
+        ?IDLE_TIMEOUT_MS};
 handle_cast(_Msg, State) ->
-    {noreply, State}.
+    {noreply, State, ?IDLE_TIMEOUT_MS}.
 
--spec handle_info(term(), map()) -> {noreply, map()}.
+-spec handle_info(term(), map()) -> {noreply, map(), pos_integer()} | {stop, normal, map()}.
+handle_info(timeout, #{channel_id := ChannelId} = State) ->
+    %% F-16: stop only if there are zero live joiners; otherwise keep
+    %% running so persistent broadcasts (e.g. world chat) don't churn.
+    case pg:get_members(?PG_SCOPE, {chat, ChannelId}) of
+        [] -> {stop, normal, State};
+        _ -> {noreply, State, ?IDLE_TIMEOUT_MS}
+    end;
 handle_info(_Info, State) ->
-    {noreply, State}.
+    {noreply, State, ?IDLE_TIMEOUT_MS}.
 
 -spec terminate(term(), map()) -> ok.
 terminate(_Reason, #{channel_id := ChannelId}) ->

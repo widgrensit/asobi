@@ -7,4 +7,5 @@ ebin/
 log/
 .rebar3/
 rebar3.crashdump
+erl_crash.dump
 doc/

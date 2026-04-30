@@ -6,7 +6,16 @@
 -spec pre_request(cowboy_req:req(), map(), map(), term()) ->
     {ok, cowboy_req:req(), term()} | {break, cowboy_req:req(), term()}.
 pre_request(Req, _Env, Options, State) ->
-    Limiter = maps:get(limiter, Options, asobi_api),
+    %% F-19: select a limiter based on the request path so
+    %% `/api/v1/auth/*` runs through `asobi_auth_limiter` (low limit)
+    %% and `/api/v1/iap/*` through `asobi_iap_limiter`. Everything else
+    %% falls back to `asobi_api_limiter`. Configured via Options first,
+    %% then path-derived, then default.
+    Limiter =
+        case maps:get(limiter, Options, undefined) of
+            undefined -> select_limiter(Req);
+            L -> L
+        end,
     Key = rate_limit_key(Req),
     case seki:check(Limiter, Key) of
         {allow, #{remaining := Remaining, reset := Reset}} ->
@@ -62,4 +71,13 @@ peer_ip(Req) ->
     case inet:ntoa(IP) of
         Addr when is_list(Addr) -> list_to_binary(Addr);
         _ -> ~"unknown"
+    end.
+
+-spec select_limiter(cowboy_req:req()) -> atom().
+select_limiter(Req) ->
+    Path = cowboy_req:path(Req),
+    case Path of
+        <<"/api/v1/auth/", _/binary>> -> asobi_auth_limiter;
+        <<"/api/v1/iap/", _/binary>> -> asobi_iap_limiter;
+        _ -> asobi_api_limiter
     end.

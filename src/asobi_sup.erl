@@ -107,9 +107,13 @@ rate_limit_spec() ->
     }.
 
 register_limiters() ->
+    %% F-19: auth and iap routes get tighter per-IP / per-token limits.
+    %% Brute-force resistance: 5 auth requests/sec was the historical
+    %% setting and is reasonable for honest UX; iap is per-purchase so
+    %% 10/sec is plenty. The general-purpose api limiter stays at 300.
     Defaults = #{
-        auth => #{algorithm => sliding_window, limit => 300, window => 1000},
-        iap => #{algorithm => sliding_window, limit => 300, window => 1000},
+        auth => #{algorithm => sliding_window, limit => 5, window => 1000},
+        iap => #{algorithm => sliding_window, limit => 10, window => 1000},
         api => #{algorithm => sliding_window, limit => 300, window => 1000}
     },
     Configured =

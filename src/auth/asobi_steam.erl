@@ -9,27 +9,60 @@
 %% The game client obtains a ticket via ISteamUser::GetAuthSessionTicket
 %% and sends the hex-encoded ticket to this endpoint.
 -spec validate_ticket(binary()) -> {ok, map()} | {error, binary()}.
-validate_ticket(Ticket) ->
-    case steam_api_key() of
-        undefined ->
-            {error, ~"steam_not_configured"};
-        ApiKey ->
-            AppId = steam_app_id(),
-            do_validate_ticket(ApiKey, AppId, Ticket)
-    end.
+validate_ticket(Ticket) when is_binary(Ticket) ->
+    case is_hex_ticket(Ticket) of
+        false ->
+            {error, ~"invalid_ticket_format"};
+        true ->
+            case steam_api_key() of
+                undefined ->
+                    {error, ~"steam_not_configured"};
+                ApiKey ->
+                    AppId = steam_app_id(),
+                    do_validate_ticket(ApiKey, AppId, Ticket)
+            end
+    end;
+validate_ticket(_) ->
+    {error, ~"invalid_ticket_format"}.
 
 %% --- Internal ---
 
+%% F-18: tickets are documented as hex-encoded by Valve. Reject anything
+%% else early so the ticket cannot be used to inject query parameters
+%% even if downstream URL-encoding regresses.
+-spec is_hex_ticket(binary()) -> boolean().
+is_hex_ticket(<<>>) ->
+    false;
+is_hex_ticket(Bin) when byte_size(Bin) > 4096 ->
+    false;
+is_hex_ticket(Bin) ->
+    is_hex_chars(Bin).
+
+is_hex_chars(<<>>) ->
+    true;
+is_hex_chars(<<C, Rest/binary>>) when
+    (C >= $0 andalso C =< $9) orelse
+        (C >= $a andalso C =< $f) orelse
+        (C >= $A andalso C =< $F)
+->
+    is_hex_chars(Rest);
+is_hex_chars(_) ->
+    false.
+
 -spec do_validate_ticket(binary(), binary(), binary()) -> {ok, map()} | {error, binary()}.
 do_validate_ticket(ApiKey, AppId, Ticket) ->
+    %% F-18: defense in depth — even though we already validated the
+    %% ticket character class above, URL-encode every dynamic component
+    %% so an accidental rule loosening can't be exploited to inject
+    %% additional query parameters into the Steam request.
     Url = iolist_to_binary([
         ?STEAM_API_URL,
         ~"?key=",
-        ApiKey,
+        url_encode(ApiKey),
         ~"&appid=",
-        AppId,
+        url_encode(AppId),
         ~"&ticket=",
-        Ticket
+        url_encode(Ticket)
     ]),
     case
         httpc:request(get, {binary_to_list(Url), []}, [{timeout, 10000}], [{body_format, binary}])
@@ -82,9 +115,9 @@ fetch_player_summary(SteamId) ->
             Url = iolist_to_binary([
                 ?STEAM_PLAYER_URL,
                 ~"?key=",
-                ApiKey,
+                url_encode(ApiKey),
                 ~"&steamids=",
-                SteamId
+                url_encode(SteamId)
             ]),
             case
                 httpc:request(
@@ -116,3 +149,7 @@ steam_app_id() ->
         V when is_binary(V) -> V;
         _ -> ~"0"
     end.
+
+-spec url_encode(binary()) -> binary().
+url_encode(Bin) when is_binary(Bin) ->
+    iolist_to_binary(uri_string:quote(Bin)).

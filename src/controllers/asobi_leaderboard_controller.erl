@@ -5,7 +5,8 @@
 -spec top(cowboy_req:req()) -> {json, map()}.
 top(#{bindings := #{~"id" := BoardId}, qs := Qs} = _Req) when is_binary(BoardId), is_binary(Qs) ->
     Params = cow_qs:parse_qs(Qs),
-    Limit = qs_integer(~"limit", Params, 100),
+    %% F-21: cap top() limit so an attacker can't trigger O(N) ETS scans.
+    Limit = asobi_qs:integer(~"limit", Params, 100, 1, 100),
     Entries = asobi_leaderboard_server:top(BoardId, Limit),
     {json, #{entries => format_entries(BoardId, Entries)}}.
 
@@ -14,7 +15,9 @@ around(#{bindings := #{~"id" := BoardId, ~"player_id" := PlayerId}, qs := Qs} = 
     is_binary(BoardId), is_binary(PlayerId), is_binary(Qs)
 ->
     Params = cow_qs:parse_qs(Qs),
-    Range = qs_integer(~"range", Params, 5),
+    %% F-21: cap around() range so a single request cannot force an
+    %% expensive ets:first/1 walk.
+    Range = asobi_qs:integer(~"range", Params, 5, 1, 50),
     Entries = asobi_leaderboard_server:around(BoardId, PlayerId, Range),
     {json, #{entries => format_entries(BoardId, Entries)}}.
 
@@ -80,12 +83,6 @@ format_entries(BoardId, Entries) ->
         }
      || {P, S, R} <- Entries
     ].
-
-qs_integer(Key, Params, Default) ->
-    case proplists:get_value(Key, Params) of
-        V when is_binary(V) -> binary_to_integer(V);
-        _ -> Default
-    end.
 
 -spec format_timestamp(integer()) -> binary().
 format_timestamp(Ms) ->

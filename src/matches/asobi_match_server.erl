@@ -1,4 +1,21 @@
 -module(asobi_match_server).
+-moduledoc """
+Per-match `gen_statem` driving the configured game module.
+
+**Trust boundary (F-32)**: asobi is single-tenant by design. The
+configured game module (`Mod:join/2`, `Mod:tick/1`, `Mod:handle_input/3`,
+phase / vote callbacks, etc.) is *trusted code*. We do not wrap
+callbacks in `try/catch` — a crash in the game module is treated as a
+bug worth surfacing, not a security boundary to harden against. The
+match supervisor restarts the match server up to 10 times in 60s
+(transient + intensity 10) before the entire `asobi_match_sup` falls
+over, intentionally taking the lobby with it so an obviously broken
+game cannot keep churning silently.
+
+In multi-tenant or sandboxed contexts (`asobi_lua`) callbacks are run
+through a Lua sandbox that has its own fault-isolation; that wrapper is
+the place to put callback hardening.
+""".
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1]).

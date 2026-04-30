@@ -58,6 +58,25 @@ handle_call(_Request, _From, State) ->
 handle_cast({update_presence, Status}, #{player_id := PlayerId} = State) when is_map(Status) ->
     asobi_presence:update(PlayerId, Status),
     {noreply, State#{presence => Status}};
+handle_cast({reconnect_world, WorldPid}, #{player_id := PlayerId} = State) when
+    is_pid(WorldPid)
+->
+    %% F-28: world reconnects used to spawn an unsupervised helper from
+    %% the WS handler. Running them inside the supervised session
+    %% process means they're cleaned up with the session and a stuck
+    %% reconnect cannot leak a pid.
+    try asobi_world_server:reconnect(WorldPid, PlayerId) of
+        _ -> ok
+    catch
+        Class:Reason ->
+            logger:debug(#{
+                msg => ~"world_reconnect_failed",
+                player_id => PlayerId,
+                class => Class,
+                reason => Reason
+            })
+    end,
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 

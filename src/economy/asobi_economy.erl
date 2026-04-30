@@ -45,7 +45,9 @@ get_or_create_wallet(PlayerId, Currency) ->
     end.
 
 -spec grant(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
-grant(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
+grant(PlayerId, Currency, Amount, Opts) when
+    is_integer(Amount), Amount > 0, is_binary(PlayerId), is_binary(Currency)
+->
     asobi_telemetry:economy_transaction(
         PlayerId,
         Currency,
@@ -54,26 +56,8 @@ grant(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
     ),
     case
         asobi_repo:transaction(fun() ->
-            {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
-            NewBalance = maps:get(balance, Wallet) + Amount,
-            WalletCS = kura_changeset:cast(asobi_wallet, Wallet, #{balance => NewBalance}, [balance]),
-            {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
-            TxCS = kura_changeset:cast(
-                asobi_transaction,
-                #{},
-                #{
-                    wallet_id => maps:get(id, Wallet),
-                    amount => Amount,
-                    balance_after => NewBalance,
-                    reason => maps:get(reason, Opts, ~"admin_grant"),
-                    reference_type => maps:get(reference_type, Opts, undefined),
-                    reference_id => maps:get(reference_id, Opts, undefined),
-                    metadata => maps:get(metadata, Opts, #{})
-                },
-                [wallet_id, amount, balance_after, reason, reference_type, reference_id, metadata]
-            ),
-            {ok, _Tx} = asobi_repo:insert(TxCS),
-            {ok, UpdatedWallet}
+            ok = acquire_wallet_lock(PlayerId, Currency),
+            grant_inner(PlayerId, Currency, Amount, Opts)
         end)
     of
         {ok, W} when is_map(W) -> {ok, W};
@@ -82,7 +66,9 @@ grant(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
     end.
 
 -spec debit(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
-debit(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
+debit(PlayerId, Currency, Amount, Opts) when
+    is_integer(Amount), Amount > 0, is_binary(PlayerId), is_binary(Currency)
+->
     asobi_telemetry:economy_transaction(
         PlayerId,
         Currency,
@@ -91,44 +77,8 @@ debit(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
     ),
     case
         asobi_repo:transaction(fun() ->
-            {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
-            Balance = maps:get(balance, Wallet),
-            case Balance >= Amount of
-                false ->
-                    {error, insufficient_funds};
-                true ->
-                    NewBalance = Balance - Amount,
-                    WalletCS = kura_changeset:cast(
-                        asobi_wallet, Wallet, #{balance => NewBalance}, [
-                            balance
-                        ]
-                    ),
-                    {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
-                    TxCS = kura_changeset:cast(
-                        asobi_transaction,
-                        #{},
-                        #{
-                            wallet_id => maps:get(id, Wallet),
-                            amount => -Amount,
-                            balance_after => NewBalance,
-                            reason => maps:get(reason, Opts, ~"purchase"),
-                            reference_type => maps:get(reference_type, Opts, undefined),
-                            reference_id => maps:get(reference_id, Opts, undefined),
-                            metadata => maps:get(metadata, Opts, #{})
-                        },
-                        [
-                            wallet_id,
-                            amount,
-                            balance_after,
-                            reason,
-                            reference_type,
-                            reference_id,
-                            metadata
-                        ]
-                    ),
-                    {ok, _Tx} = asobi_repo:insert(TxCS),
-                    {ok, UpdatedWallet}
-            end
+            ok = acquire_wallet_lock(PlayerId, Currency),
+            debit_inner(PlayerId, Currency, Amount, Opts)
         end)
     of
         {ok, W} when is_map(W) -> {ok, W};
@@ -136,16 +86,21 @@ debit(PlayerId, Currency, Amount, Opts) when Amount > 0 ->
         _ -> {error, transaction_failed}
     end.
 
+%% Single transaction for the whole purchase flow: acquire the wallet
+%% lock once, then debit + grant the item inline. F-22 (nested
+%% transactions) is closed as a side-effect — `debit_inner/4` doesn't
+%% open its own transaction.
 -spec purchase(binary(), binary()) -> {ok, map()} | {error, term()}.
-purchase(PlayerId, ListingId) ->
+purchase(PlayerId, ListingId) when is_binary(PlayerId), is_binary(ListingId) ->
     case asobi_repo:get(asobi_store_listing, ListingId) of
         {ok,
             #{active := true, currency := Currency, price := Price, item_def_id := ItemDefId} =
                 _Listing} ->
             case
                 asobi_repo:transaction(fun() ->
+                    ok = acquire_wallet_lock(PlayerId, Currency),
                     case
-                        debit(PlayerId, Currency, Price, #{
+                        debit_inner(PlayerId, Currency, Price, #{
                             reason => ~"purchase",
                             reference_type => ~"store_listing",
                             reference_id => ListingId
@@ -177,6 +132,84 @@ purchase(PlayerId, ListingId) ->
             {error, listing_inactive};
         {error, _} = Err ->
             Err
+    end.
+
+%% --- Internal ---
+
+%% Postgres advisory transaction lock keyed by (player_id, currency) —
+%% blocks any concurrent transaction trying the same wallet until ours
+%% commits or rolls back. Closes F-5 (wallet double-spend race) without
+%% requiring a `SELECT … FOR UPDATE` rewrite of the kura query layer.
+%% Must be called inside an open transaction.
+-spec acquire_wallet_lock(binary(), binary()) -> ok.
+acquire_wallet_lock(PlayerId, Currency) ->
+    %% pg_advisory_xact_lock returns void, which pgo can't decode — wrap
+    %% it in a subselect so the row pgo sees is plain int.
+    SQL =
+        ~"SELECT 1 AS locked FROM (SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))) AS _l",
+    #{rows := [_ | _]} = kura_db:query(asobi_repo, SQL, [PlayerId, Currency]),
+    ok.
+
+-spec grant_inner(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
+grant_inner(PlayerId, Currency, Amount, Opts) ->
+    {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
+    NewBalance = maps:get(balance, Wallet) + Amount,
+    WalletCS = kura_changeset:cast(asobi_wallet, Wallet, #{balance => NewBalance}, [balance]),
+    {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
+    TxCS = kura_changeset:cast(
+        asobi_transaction,
+        #{},
+        #{
+            wallet_id => maps:get(id, Wallet),
+            amount => Amount,
+            balance_after => NewBalance,
+            reason => maps:get(reason, Opts, ~"admin_grant"),
+            reference_type => maps:get(reference_type, Opts, undefined),
+            reference_id => maps:get(reference_id, Opts, undefined),
+            metadata => maps:get(metadata, Opts, #{})
+        },
+        [wallet_id, amount, balance_after, reason, reference_type, reference_id, metadata]
+    ),
+    {ok, _Tx} = asobi_repo:insert(TxCS),
+    {ok, UpdatedWallet}.
+
+-spec debit_inner(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
+debit_inner(PlayerId, Currency, Amount, Opts) ->
+    {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
+    Balance = maps:get(balance, Wallet),
+    case Balance >= Amount of
+        false ->
+            {error, insufficient_funds};
+        true ->
+            NewBalance = Balance - Amount,
+            WalletCS = kura_changeset:cast(
+                asobi_wallet, Wallet, #{balance => NewBalance}, [balance]
+            ),
+            {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
+            TxCS = kura_changeset:cast(
+                asobi_transaction,
+                #{},
+                #{
+                    wallet_id => maps:get(id, Wallet),
+                    amount => -Amount,
+                    balance_after => NewBalance,
+                    reason => maps:get(reason, Opts, ~"purchase"),
+                    reference_type => maps:get(reference_type, Opts, undefined),
+                    reference_id => maps:get(reference_id, Opts, undefined),
+                    metadata => maps:get(metadata, Opts, #{})
+                },
+                [
+                    wallet_id,
+                    amount,
+                    balance_after,
+                    reason,
+                    reference_type,
+                    reference_id,
+                    metadata
+                ]
+            ),
+            {ok, _Tx} = asobi_repo:insert(TxCS),
+            {ok, UpdatedWallet}
     end.
 
 -spec get_wallets(binary()) -> {ok, [map()]} | {error, term()}.
