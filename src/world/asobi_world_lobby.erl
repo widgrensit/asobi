@@ -1,9 +1,14 @@
 -module(asobi_world_lobby).
 
--export([list_worlds/0, list_worlds/1, find_or_create/1, create_world/1]).
--export([find_or_create_unsafe/1]).
+-export([
+    list_worlds/0, list_worlds/1, find_or_create/1, find_or_create/2, create_world/1, create_world/2
+]).
+-export([find_or_create_unsafe/1, find_or_create_unsafe/2]).
+-export([player_owned_world_count/1, world_capacity_state/1]).
 
 -define(PG_SCOPE, nova_scope).
+-define(DEFAULT_MAX_WORLDS_PER_PLAYER, 5).
+-define(DEFAULT_MAX_WORLDS, 1000).
 
 -doc "List all running worlds.".
 -spec list_worlds() -> [map()].
@@ -46,7 +51,12 @@ same mode. Serializing closes the window.
 """.
 -spec find_or_create(binary()) -> {ok, pid(), map()} | {error, term()}.
 find_or_create(Mode) ->
-    asobi_world_lobby_server:find_or_create(Mode).
+    find_or_create(Mode, undefined).
+
+-spec find_or_create(binary(), binary() | undefined) ->
+    {ok, pid(), map()} | {error, term()}.
+find_or_create(Mode, PlayerId) ->
+    asobi_world_lobby_server:find_or_create(Mode, PlayerId).
 
 -doc """
 The non-serialized implementation. Only `asobi_world_lobby_server`
@@ -55,20 +65,49 @@ serializer holds no state and just delegates back here.
 """.
 -spec find_or_create_unsafe(binary()) -> {ok, pid(), map()} | {error, term()}.
 find_or_create_unsafe(Mode) ->
+    find_or_create_unsafe(Mode, undefined).
+
+-spec find_or_create_unsafe(binary(), binary() | undefined) ->
+    {ok, pid(), map()} | {error, term()}.
+find_or_create_unsafe(Mode, PlayerId) ->
     Worlds = list_worlds(#{mode => Mode, has_capacity => true}),
     case Worlds of
         [#{world_id := WorldId} = First | _] ->
             case asobi_world_server:whereis(WorldId) of
                 {ok, Pid} -> {ok, Pid, First};
-                error -> create_world(Mode)
+                error -> create_world(Mode, PlayerId)
             end;
         [] ->
-            create_world(Mode)
+            create_world(Mode, PlayerId)
     end.
 
--doc "Create a new world for the given mode.".
+-doc "Create a new world for the given mode (no owner — anonymous create).".
 -spec create_world(binary()) -> {ok, pid(), map()} | {error, term()}.
 create_world(Mode) ->
+    create_world(Mode, undefined).
+
+-doc """
+Create a new world for the given mode and tag the player as owner.
+
+Refuses with `{error, world_capacity_reached}` when the global cap
+(`asobi:world_max`, default 1000) is hit, and `{error, player_world_limit_reached}`
+when the player is already at the per-player cap (`asobi:world_max_per_player`,
+default 5). The cap is enforced via a pg group joined on creation so it
+naturally clears when the world process dies.
+""".
+-spec create_world(binary(), binary() | undefined) ->
+    {ok, pid(), map()} | {error, term()}.
+create_world(Mode, PlayerId) ->
+    case check_world_capacity(PlayerId) of
+        ok ->
+            do_create_world(Mode, PlayerId);
+        {error, _} = Err ->
+            Err
+    end.
+
+-spec do_create_world(binary(), binary() | undefined) ->
+    {ok, pid(), map()} | {error, term()}.
+do_create_world(Mode, PlayerId) ->
     case asobi_game_modes:world_config(Mode) of
         {ok, Config0} ->
             %% Pre-allocate the world_id so the zone_manager (started before
@@ -80,11 +119,11 @@ create_world(Mode) ->
             Config = Config0#{world_id => WorldId},
             case asobi_world_instance_sup:start_world(Config) of
                 {ok, InstancePid} when is_pid(InstancePid) ->
-                    WorldPid = wait_for_world_server(InstancePid, 10),
-                    case WorldPid of
+                    case wait_for_world_server(InstancePid, 10) of
                         undefined ->
                             {error, world_server_not_started};
-                        _ ->
+                        WorldPid ->
+                            register_world_owner(WorldPid, PlayerId),
                             Info = asobi_world_server:get_info(WorldPid),
                             {ok, WorldPid, Info}
                     end;
@@ -94,6 +133,68 @@ create_world(Mode) ->
         {error, _} = Err ->
             Err
     end.
+
+%% F-9: track per-player and global concurrent-world caps via pg.
+%% Joining the world pid into `{asobi_owned_worlds, PlayerId}` and
+%% `asobi_owned_worlds_global` ties the count to the world process
+%% lifetime — when the world dies the pg group entry vanishes
+%% automatically.
+-spec check_world_capacity(binary() | undefined) -> ok | {error, term()}.
+check_world_capacity(PlayerId) ->
+    GlobalCount = global_world_count(),
+    GlobalMax = application:get_env(asobi, world_max, ?DEFAULT_MAX_WORLDS),
+    case GlobalCount >= GlobalMax of
+        true ->
+            {error, world_capacity_reached};
+        false ->
+            check_per_player_cap(PlayerId)
+    end.
+
+-spec check_per_player_cap(binary() | undefined) -> ok | {error, term()}.
+check_per_player_cap(undefined) ->
+    %% Anonymous creates (internal callers, not request-driven) bypass
+    %% the per-player cap. The global cap above still applies.
+    ok;
+check_per_player_cap(PlayerId) when is_binary(PlayerId) ->
+    PlayerCount = player_owned_world_count(PlayerId),
+    PlayerMax =
+        application:get_env(asobi, world_max_per_player, ?DEFAULT_MAX_WORLDS_PER_PLAYER),
+    case PlayerCount >= PlayerMax of
+        true -> {error, player_world_limit_reached};
+        false -> ok
+    end.
+
+-spec register_world_owner(pid(), binary() | undefined) -> ok.
+register_world_owner(WorldPid, undefined) ->
+    pg:join(?PG_SCOPE, asobi_owned_worlds_global, WorldPid),
+    ok;
+register_world_owner(WorldPid, PlayerId) when is_binary(PlayerId) ->
+    pg:join(?PG_SCOPE, asobi_owned_worlds_global, WorldPid),
+    pg:join(?PG_SCOPE, {asobi_owned_worlds, PlayerId}, WorldPid),
+    ok.
+
+-spec player_owned_world_count(binary()) -> non_neg_integer().
+player_owned_world_count(PlayerId) when is_binary(PlayerId) ->
+    length(pg:get_members(?PG_SCOPE, {asobi_owned_worlds, PlayerId})).
+
+-spec global_world_count() -> non_neg_integer().
+global_world_count() ->
+    length(pg:get_members(?PG_SCOPE, asobi_owned_worlds_global)).
+
+-spec world_capacity_state(binary() | undefined) -> map().
+world_capacity_state(PlayerId) ->
+    Per =
+        case PlayerId of
+            undefined -> 0;
+            _ -> player_owned_world_count(PlayerId)
+        end,
+    #{
+        global => global_world_count(),
+        global_max => application:get_env(asobi, world_max, ?DEFAULT_MAX_WORLDS),
+        player => Per,
+        player_max =>
+            application:get_env(asobi, world_max_per_player, ?DEFAULT_MAX_WORLDS_PER_PLAYER)
+    }.
 
 %%--------------------------------------------------------------------
 %% Internal

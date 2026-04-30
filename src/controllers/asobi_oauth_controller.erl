@@ -227,8 +227,18 @@ maybe_value(Value, _Default) -> Value.
 -spec init_player_stats(binary()) -> ok.
 init_player_stats(PlayerId) ->
     CS = kura_changeset:cast(asobi_player_stats, #{}, #{player_id => PlayerId}, [player_id]),
-    _ = asobi_repo:insert(CS),
-    ok.
+    %% F-25: log insert errors instead of silently dropping them.
+    case asobi_repo:insert(CS) of
+        {ok, _} ->
+            ok;
+        {error, Reason} ->
+            logger:warning(#{
+                msg => ~"player_stats_init_failed",
+                player_id => PlayerId,
+                reason => Reason
+            }),
+            ok
+    end.
 
 -spec provider_to_atom(binary()) -> atom().
 provider_to_atom(~"google") -> google;

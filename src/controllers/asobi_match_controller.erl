@@ -23,13 +23,7 @@ index(#{qs := Qs} = _Req) when is_binary(Qs) ->
             undefined -> Q1;
             Status -> kura_query:where(Q1, {status, Status})
         end,
-    Limit = qs_integer(~"limit", Params, 50),
+    Limit = asobi_qs:integer(~"limit", Params, 50, 1, 200),
     Q3 = kura_query:limit(kura_query:order_by(Q2, [{inserted_at, desc}]), Limit),
     {ok, Records} = asobi_repo:all(Q3),
     {json, #{matches => Records}}.
-
-qs_integer(Key, Params, Default) ->
-    case proplists:get_value(Key, Params) of
-        V when is_binary(V) -> binary_to_integer(V);
-        _ -> Default
-    end.

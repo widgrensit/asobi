@@ -13,7 +13,7 @@ history(
         _Req
 ) when is_binary(PlayerId), is_binary(Currency), is_binary(Qs) ->
     Params = cow_qs:parse_qs(Qs),
-    Limit = qs_integer(~"limit", Params, 50),
+    Limit = asobi_qs:integer(~"limit", Params, 50, 1, 200),
     {ok, Transactions} = asobi_economy:get_history(PlayerId, Currency, #{limit => Limit}),
     {json, #{transactions => Transactions}}.
 
@@ -42,10 +42,4 @@ purchase(
             {json, 400, #{}, #{error => ~"listing_inactive"}};
         {error, _Reason} ->
             {json, 500, #{}, #{error => ~"purchase_failed"}}
-    end.
-
-qs_integer(Key, Params, Default) ->
-    case proplists:get_value(Key, Params) of
-        V when is_binary(V) -> binary_to_integer(V);
-        _ -> Default
     end.

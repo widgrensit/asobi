@@ -3,7 +3,9 @@
 -export([register/1, login/1, refresh/1]).
 
 -spec register(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-register(#{json := #{~"username" := Username, ~"password" := Password} = Params} = _Req) ->
+register(
+    #{json := #{~"username" := Username, ~"password" := Password} = Params} = _Req
+) when is_binary(Username), is_binary(Password) ->
     RegParams = #{
         username => Username,
         password => Password,
@@ -67,5 +69,17 @@ refresh(_Req) ->
 -spec init_player_stats(binary()) -> ok.
 init_player_stats(PlayerId) ->
     CS = kura_changeset:cast(asobi_player_stats, #{}, #{player_id => PlayerId}, [player_id]),
-    _ = asobi_repo:insert(CS),
-    ok.
+    %% F-25: previously errors were swallowed silently which left players
+    %% registered without a stats row. Log so we notice the regression
+    %% without blocking the registration flow.
+    case asobi_repo:insert(CS) of
+        {ok, _} ->
+            ok;
+        {error, Reason} ->
+            logger:warning(#{
+                msg => ~"player_stats_init_failed",
+                player_id => PlayerId,
+                reason => Reason
+            }),
+            ok
+    end.

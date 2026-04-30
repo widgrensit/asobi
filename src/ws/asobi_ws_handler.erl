@@ -6,6 +6,9 @@
 -define(WS_MSG_LIMIT, 60).
 -define(WS_MSG_WINDOW_MS, 1000).
 -define(WS_MAX_PAYLOAD_BYTES, 65536).
+%% F-16: per-connection cap on simultaneously joined chat channels.
+-define(MAX_JOINED_CHANNELS_PER_CONN, 32).
+-define(MAX_CHANNEL_ID_BYTES, 256).
 
 -spec init(map()) -> {ok, map()}.
 init(State) ->
@@ -108,16 +111,15 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
         {ok, PlayerId} ->
             {ok, SessionPid} = asobi_player_session_sup:start_session(PlayerId, self()),
             asobi_telemetry:session_connected(PlayerId),
-            %% Check for pending world reconnection
-            _ =
-                case ets:lookup(asobi_player_worlds, PlayerId) of
-                    [{PlayerId, WorldPid}] ->
-                        _ = spawn(fun() ->
-                            catch asobi_world_server:reconnect(WorldPid, PlayerId)
-                        end);
-                    [] ->
-                        ok
-                end,
+            %% F-28: drive the world reconnect from the supervised player
+            %% session process rather than an unsupervised spawn — a slow
+            %% or crashing reconnect cannot leak processes anymore.
+            case ets:lookup(asobi_player_worlds, PlayerId) of
+                [{PlayerId, WorldPid}] when is_pid(WorldPid) ->
+                    gen_server:cast(SessionPid, {reconnect_world, WorldPid});
+                _ ->
+                    ok
+            end,
             Reply = encode_reply(Cid, ~"session.connected", #{player_id => PlayerId}),
             {reply, {text, Reply}, State#{session => SessionPid, player_id => PlayerId}};
         {error, Reason} ->
@@ -188,24 +190,41 @@ handle_message(
                 channel_id => asobi_dm:channel_id(PlayerId, RecipientId)
             }),
             {reply, {text, Reply}, State};
-        {error, blocked} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => ~"blocked"}),
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => to_reason_binary(Reason)}),
             {reply, {text, Reply}, State}
     end;
 handle_message(
     #{~"type" := ~"chat.join", ~"payload" := #{~"channel_id" := ChannelId}} = Msg, State
-) ->
+) when is_binary(ChannelId) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    asobi_chat_channel:join(ChannelId, self()),
-    Reply = encode_reply(Cid, ~"chat.joined", #{channel_id => ChannelId}),
-    {reply, {text, Reply}, State};
+    %% F-16: bound channel id length, namespace it, and cap how many channels
+    %% one connection may join. Prevents one socket from spawning unbounded
+    %% chat channel processes on the host.
+    case validate_channel_id(ChannelId) of
+        false ->
+            Reply = encode_reply(Cid, ~"error", #{reason => ~"invalid_channel_id"}),
+            {reply, {text, Reply}, State};
+        true ->
+            Joined = maps:get(joined_channels, State, #{}),
+            case map_size(Joined) >= ?MAX_JOINED_CHANNELS_PER_CONN of
+                true ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => ~"too_many_channels"}),
+                    {reply, {text, Reply}, State};
+                false ->
+                    asobi_chat_channel:join(ChannelId, self()),
+                    Reply = encode_reply(Cid, ~"chat.joined", #{channel_id => ChannelId}),
+                    {reply, {text, Reply}, State#{joined_channels => Joined#{ChannelId => true}}}
+            end
+    end;
 handle_message(
     #{~"type" := ~"chat.leave", ~"payload" := #{~"channel_id" := ChannelId}} = Msg, State
-) ->
+) when is_binary(ChannelId) ->
     Cid = maps:get(~"cid", Msg, undefined),
     asobi_chat_channel:leave(ChannelId, self()),
+    Joined = maps:get(joined_channels, State, #{}),
     Reply = encode_reply(Cid, ~"chat.left", #{channel_id => ChannelId}),
-    {reply, {text, Reply}, State};
+    {reply, {text, Reply}, State#{joined_channels => maps:remove(ChannelId, Joined)}};
 handle_message(
     #{~"type" := ~"matchmaker.add", ~"payload" := Payload} = Msg,
     #{player_id := PlayerId} = State
@@ -223,8 +242,15 @@ handle_message(
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    asobi_matchmaker:remove(PlayerId, TicketId),
-    Reply = encode_reply(Cid, ~"matchmaker.removed", #{success => true}),
+    Reply =
+        case asobi_matchmaker:remove(PlayerId, TicketId) of
+            ok ->
+                encode_reply(Cid, ~"matchmaker.removed", #{success => true});
+            {error, Reason} ->
+                encode_reply(Cid, ~"error", #{
+                    type => ~"matchmaker.remove", reason => atom_to_binary(Reason, utf8)
+                })
+        end,
     {reply, {text, Reply}, State};
 handle_message(
     #{~"type" := ~"presence.update", ~"payload" := Payload} = Msg,
@@ -329,22 +355,25 @@ handle_message(
 handle_message(
     #{~"type" := ~"world.list", ~"payload" := Payload} = Msg,
     #{player_id := _PlayerId} = State
-) ->
+) when is_map(Payload) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    Filters = #{
-        mode => maps:get(~"mode", Payload, undefined),
-        has_capacity => maps:get(~"has_capacity", Payload, false)
-    },
-    Filters1 = maps:filter(fun(_, V) -> V =/= undefined end, Filters),
-    Worlds = asobi_world_lobby:list_worlds(Filters1),
-    Reply = encode_reply(Cid, ~"world.list", #{worlds => Worlds}),
-    {reply, {text, Reply}, State};
+    %% F-29: validate filter values rather than silently degrading on
+    %% bad types.
+    case build_world_filters(Payload) of
+        {ok, Filters} ->
+            Worlds = asobi_world_lobby:list_worlds(Filters),
+            Reply = encode_reply(Cid, ~"world.list", #{worlds => Worlds}),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            {reply, {text, Reply}, State}
+    end;
 handle_message(
     #{~"type" := ~"world.create", ~"payload" := #{~"mode" := Mode}} = Msg,
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    case asobi_world_lobby:create_world(Mode) of
+    case asobi_world_lobby:create_world(Mode, PlayerId) of
         {ok, WorldPid, _Info} ->
             join_and_reply(Cid, WorldPid, PlayerId, State);
         {error, Reason} ->
@@ -356,7 +385,7 @@ handle_message(
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    case asobi_world_lobby:find_or_create(Mode) of
+    case asobi_world_lobby:find_or_create(Mode, PlayerId) of
         {ok, WorldPid, _Info} ->
             join_and_reply(Cid, WorldPid, PlayerId, State);
         {error, Reason} ->
@@ -412,9 +441,13 @@ handle_message(
         exit:{noproc, _} ->
             {ok, State#{session => undefined}}
     end;
-handle_message(#{~"type" := Type} = Msg, State) ->
+handle_message(#{~"type" := _Type} = Msg, State) ->
+    %% F-26: do NOT echo the client-supplied `type` back into the error
+    %% reply or logs — an attacker could craft strings that pollute the
+    %% structured-log pipeline. The client knows what it sent, so the
+    %% reason alone is enough.
     Cid = maps:get(~"cid", Msg, undefined),
-    Reply = encode_reply(Cid, ~"error", #{reason => ~"unknown_type", type => Type}),
+    Reply = encode_reply(Cid, ~"error", #{reason => ~"unknown_type"}),
     {reply, {text, Reply}, State};
 handle_message(_Msg, State) ->
     {ok, State}.
@@ -517,3 +550,48 @@ encode_reply(Cid, Type, Payload) ->
             _ -> Msg0#{~"cid" => Cid}
         end,
     json:encode(Msg).
+
+to_reason_binary(R) when is_atom(R) -> atom_to_binary(R, utf8).
+
+%% F-16: chat.join must require a small, namespaced channel id so an
+%% attacker can't spawn unbounded chat channel gen_servers via WS.
+%% Allowed prefixes mirror the channel id schemes documented in
+%% asobi_chat_controller's classify/1 (`dm:`, `world:`, `zone:`,
+%% `prox:`, plus a `room:` namespace for app-defined group chats).
+validate_channel_id(ChannelId) when is_binary(ChannelId) ->
+    byte_size(ChannelId) > 0 andalso
+        byte_size(ChannelId) =< ?MAX_CHANNEL_ID_BYTES andalso
+        valid_channel_prefix(ChannelId).
+
+valid_channel_prefix(<<"dm:", _/binary>>) -> true;
+valid_channel_prefix(<<"world:", _/binary>>) -> true;
+valid_channel_prefix(<<"zone:", _/binary>>) -> true;
+valid_channel_prefix(<<"prox:", _/binary>>) -> true;
+valid_channel_prefix(<<"room:", _/binary>>) -> true;
+valid_channel_prefix(_) -> false.
+
+%% F-29: world.list filter values must be the right type or we reject the
+%% request rather than silently returning unfiltered results.
+build_world_filters(Payload) ->
+    Acc1 =
+        case maps:find(~"mode", Payload) of
+            error ->
+                {ok, #{}};
+            {ok, undefined} ->
+                {ok, #{}};
+            {ok, Mode} when is_binary(Mode), byte_size(Mode) =< 64 ->
+                {ok, #{mode => Mode}};
+            _ ->
+                {error, ~"invalid_mode_filter"}
+        end,
+    case Acc1 of
+        {error, _} = E1 ->
+            E1;
+        {ok, A1} ->
+            case maps:find(~"has_capacity", Payload) of
+                error -> {ok, A1};
+                {ok, true} -> {ok, A1#{has_capacity => true}};
+                {ok, false} -> {ok, A1};
+                _ -> {error, ~"invalid_has_capacity_filter"}
+            end
+    end.

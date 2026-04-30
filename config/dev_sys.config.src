@@ -34,7 +34,9 @@
                 allow_origins => ~"*"
             }},
             {pre_request, nova_correlation_plugin, #{}},
-            {pre_request, asobi_rate_limit_plugin, #{limiter => asobi_api_limiter}},
+            %% F-19: leave limiter unset so the plugin selects per-path
+            %% (auth/iap/api). See asobi_rate_limit_plugin:select_limiter/1.
+            {pre_request, asobi_rate_limit_plugin, #{}},
             {post_request, asobi_security_headers_plugin, #{}}
         ]}
     ]},
@@ -61,9 +63,15 @@
         }},
         {rate_limits, #{
             %% Per-group rate limits: #{limit => requests, window => milliseconds}
-            %% auth => #{limit => 300, window => 1000},
-            %% iap => #{limit => 300, window => 1000},
-            %% api => #{limit => 300, window => 1000}
+            %%
+            %% In dev/test the per-IP brute-force pressure is absent and CT
+            %% fires a burst of register/login calls against 127.0.0.1. The
+            %% production-default `auth` cap of 5/sec will fail these
+            %% suites; loosen here. Production callers should override
+            %% these via OS env / prod sys config.
+            auth => #{limit => 1000, window => 1000},
+            iap => #{limit => 1000, window => 1000},
+            api => #{limit => 1000, window => 1000}
         }},
         {matchmaker, #{
             tick_interval => 1000,

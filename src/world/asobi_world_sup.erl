@@ -1,4 +1,15 @@
 -module(asobi_world_sup).
+-moduledoc """
+Top-level world supervisor.
+
+**Public ETS trust assumption (F-33)**: `asobi_world_state` and
+`asobi_player_worlds` are `public` named ETS tables. Anything running
+in the same BEAM (game callbacks, plugins, etc.) can read and mutate
+them. asobi is single-tenant and the loaded code is trusted, so this
+is acceptable — but it's an explicit trust boundary worth surfacing
+in the threat model. Any sandboxed runtime layered on top of asobi
+(e.g. `asobi_lua`) MUST keep its sandbox out of these tables.
+""".
 -behaviour(supervisor).
 
 -export([start_link/0]).

@@ -16,6 +16,7 @@
     consume_insufficient_quantity/1,
     consume_not_found/1,
     consume_other_player/1,
+    consume_negative_quantity/1,
     inventory_empty/1
 ]).
 
@@ -36,7 +37,8 @@ groups() ->
             consume_item_fully,
             consume_insufficient_quantity,
             consume_not_found,
-            consume_other_player
+            consume_other_player,
+            consume_negative_quantity
         ]}
     ].
 
@@ -349,6 +351,61 @@ consume_not_found(Config) ->
         Config
     ),
     ?assertStatus(404, Resp),
+    Config.
+
+%% F-6 regression: a negative `quantity` must not duplicate items.
+consume_negative_quantity(Config) ->
+    {ok, InvResp} = nova_test:get(
+        "/api/v1/inventory",
+        #{headers => auth(Config, player1)},
+        Config
+    ),
+    #{~"items" := Items} = nova_test:json(InvResp),
+    case Items of
+        [#{~"id" := ItemId, ~"quantity" := BeforeQty} | _] ->
+            {ok, NegResp} = nova_test:post(
+                "/api/v1/inventory/consume",
+                #{
+                    headers => auth(Config, player1),
+                    json => #{~"item_id" => ItemId, ~"quantity" => -1000}
+                },
+                Config
+            ),
+            ?assertStatus(400, NegResp),
+            {ok, ZeroResp} = nova_test:post(
+                "/api/v1/inventory/consume",
+                #{
+                    headers => auth(Config, player1),
+                    json => #{~"item_id" => ItemId, ~"quantity" => 0}
+                },
+                Config
+            ),
+            ?assertStatus(400, ZeroResp),
+            {ok, FloatResp} = nova_test:post(
+                "/api/v1/inventory/consume",
+                #{
+                    headers => auth(Config, player1),
+                    json => #{~"item_id" => ItemId, ~"quantity" => 1.5}
+                },
+                Config
+            ),
+            ?assertStatus(400, FloatResp),
+            %% Verify quantity didn't change.
+            {ok, AfterResp} = nova_test:get(
+                "/api/v1/inventory",
+                #{headers => auth(Config, player1)},
+                Config
+            ),
+            #{~"items" := AfterItems} = nova_test:json(AfterResp),
+            true = is_list(AfterItems),
+            ItemAfter = [I || I <- AfterItems, is_map(I), maps:get(~"id", I) =:= ItemId],
+            case ItemAfter of
+                [#{~"quantity" := AfterQty}] -> ?assertEqual(BeforeQty, AfterQty);
+                [] -> ok
+            end;
+        [] ->
+            ok
+    end,
     Config.
 
 consume_other_player(Config) ->

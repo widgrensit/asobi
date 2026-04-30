@@ -30,23 +30,59 @@ friends(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) when
             undefined -> Q0;
             Status -> kura_query:where(Q0, {status, Status})
         end,
-    Limit = qs_integer(~"limit", Params, 50),
+    Limit = asobi_qs:integer(~"limit", Params, 50, 1, 200),
     Q2 = kura_query:limit(Q1, Limit),
     {ok, Friendships} = asobi_repo:all(Q2),
     {json, #{friends => Friendships}}.
 
 -spec add_friend(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-add_friend(#{json := #{~"friend_id" := FriendId}, auth_data := #{player_id := PlayerId}} = _Req) ->
-    CS = asobi_friendship:changeset(#{}, #{
-        player_id => PlayerId,
-        friend_id => FriendId,
-        status => ~"pending"
-    }),
-    case asobi_repo:insert(CS) of
-        {ok, Friendship} ->
-            {json, 200, #{}, Friendship};
-        {error, CS1} when is_record(CS1, kura_changeset) ->
-            {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)}}
+add_friend(
+    #{json := #{~"friend_id" := FriendId}, auth_data := #{player_id := PlayerId}} = _Req
+) when
+    is_binary(FriendId), is_binary(PlayerId)
+->
+    %% F-23: reject self-add and verify the target player actually exists.
+    case FriendId =:= PlayerId of
+        true ->
+            {json, 400, #{}, #{error => ~"cannot_friend_self"}};
+        false ->
+            case asobi_repo:get(asobi_player, FriendId) of
+                {error, not_found} ->
+                    {json, 404, #{}, #{error => ~"friend_not_found"}};
+                {ok, _} ->
+                    insert_friendship(PlayerId, FriendId)
+            end
+    end;
+add_friend(_Req) ->
+    {json, 400, #{}, #{error => ~"invalid_request"}}.
+
+%% F-23: idempotent — re-adding an existing friendship returns the row
+%% rather than producing an opaque insert error.
+-spec insert_friendship(binary(), binary()) -> {json, integer(), map(), map()}.
+insert_friendship(PlayerId, FriendId) ->
+    Q = kura_query:where(
+        kura_query:where(kura_query:from(asobi_friendship), {player_id, PlayerId}),
+        {friend_id, FriendId}
+    ),
+    case asobi_repo:all(Q) of
+        {ok, [Existing | _]} ->
+            {json, 200, #{}, Existing};
+        _ ->
+            CS = asobi_friendship:changeset(#{}, #{
+                player_id => PlayerId,
+                friend_id => FriendId,
+                status => ~"pending"
+            }),
+            case asobi_repo:insert(CS) of
+                {ok, Friendship} ->
+                    {json, 200, #{}, Friendship};
+                {error, CS1} when is_record(CS1, kura_changeset) ->
+                    {json, 422, #{}, #{
+                        errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)
+                    }};
+                {error, _Other} ->
+                    {json, 409, #{}, #{error => ~"already_friend"}}
+            end
     end.
 
 -spec update_friend(cowboy_req:req()) -> {json, map()} | {status, integer()}.
@@ -127,7 +163,31 @@ show_group(#{bindings := #{~"id" := GroupId}} = _Req) ->
     end.
 
 -spec join_group(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-join_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := PlayerId}} = _Req) ->
+join_group(
+    #{bindings := #{~"id" := GroupId}, auth_data := #{player_id := PlayerId}} = _Req
+) when is_binary(GroupId), is_binary(PlayerId) ->
+    %% F-12: closed groups (`open=false`) require an invite (not implemented yet
+    %% — for now reject with 403); enforce `max_members` via a count query.
+    case asobi_repo:get(asobi_group, GroupId) of
+        {error, not_found} ->
+            {json, 404, #{}, #{error => ~"group_not_found"}};
+        {ok, Group} ->
+            case maps:get(open, Group, false) of
+                false ->
+                    {json, 403, #{}, #{error => ~"group_closed"}};
+                true ->
+                    Max = maps:get(max_members, Group, 50),
+                    case current_member_count(GroupId) >= Max of
+                        true ->
+                            {json, 409, #{}, #{error => ~"group_full"}};
+                        false ->
+                            insert_group_member(GroupId, PlayerId)
+                    end
+            end
+    end.
+
+-spec insert_group_member(binary(), binary()) -> {json, integer(), map(), map()}.
+insert_group_member(GroupId, PlayerId) ->
     CS = kura_changeset:cast(
         asobi_group_member,
         #{},
@@ -144,6 +204,14 @@ join_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Player
             {json, 200, #{}, #{success => true, group_id => GroupId}};
         {error, _} ->
             {json, 409, #{}, #{error => ~"already_member"}}
+    end.
+
+-spec current_member_count(binary()) -> non_neg_integer().
+current_member_count(GroupId) ->
+    Q = kura_query:where(kura_query:from(asobi_group_member), {group_id, GroupId}),
+    case asobi_repo:all(Q) of
+        {ok, Members} when is_list(Members) -> length(Members);
+        _ -> 0
     end.
 
 -spec leave_group(cowboy_req:req()) -> {json, integer(), map(), map()}.
@@ -254,12 +322,6 @@ get_member(GroupId, PlayerId) ->
     case asobi_repo:all(Q) of
         {ok, [Member]} -> {ok, Member};
         _ -> {error, not_found}
-    end.
-
-qs_integer(Key, Params, Default) ->
-    case proplists:get_value(Key, Params) of
-        V when is_binary(V) -> binary_to_integer(V);
-        _ -> Default
     end.
 
 -spec atomize_keys([{term(), term()}]) -> #{atom() => term()}.

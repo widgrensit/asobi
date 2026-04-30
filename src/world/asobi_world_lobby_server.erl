@@ -20,7 +20,7 @@ typical deployment supports, the queue stays empty.
 """.
 -behaviour(gen_server).
 
--export([start_link/0, find_or_create/1]).
+-export([start_link/0, find_or_create/1, find_or_create/2]).
 -export([init/1, handle_call/3, handle_cast/2]).
 
 -define(CALL_TIMEOUT, 30000).
@@ -36,7 +36,12 @@ directly is racy.
 """.
 -spec find_or_create(binary()) -> {ok, pid(), map()} | {error, term()}.
 find_or_create(Mode) ->
-    case gen_server:call(?MODULE, {find_or_create, Mode}, ?CALL_TIMEOUT) of
+    find_or_create(Mode, undefined).
+
+-spec find_or_create(binary(), binary() | undefined) ->
+    {ok, pid(), map()} | {error, term()}.
+find_or_create(Mode, PlayerId) ->
+    case gen_server:call(?MODULE, {find_or_create, Mode, PlayerId}, ?CALL_TIMEOUT) of
         {ok, Pid, Meta} when is_pid(Pid), is_map(Meta) -> {ok, Pid, Meta};
         {error, Reason} -> {error, Reason};
         Other -> {error, {unexpected_reply, Other}}
@@ -52,8 +57,10 @@ init([]) ->
 
 -spec handle_call(term(), gen_server:from(), map()) ->
     {reply, term(), map()}.
-handle_call({find_or_create, Mode}, _From, State) when is_binary(Mode) ->
-    Result = asobi_world_lobby:find_or_create_unsafe(Mode),
+handle_call({find_or_create, Mode, PlayerId}, _From, State) when
+    is_binary(Mode), (is_binary(PlayerId) orelse PlayerId =:= undefined)
+->
+    Result = asobi_world_lobby:find_or_create_unsafe(Mode, PlayerId),
     {reply, Result, State};
 handle_call(_Other, _From, State) ->
     {reply, {error, unknown_request}, State}.

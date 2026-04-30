@@ -43,4 +43,7 @@ changeset(Data, Params) ->
         name, description, max_members, open, creator_id, metadata
     ]),
     CS1 = kura_changeset:validate_required(CS, [name, creator_id]),
-    kura_changeset:validate_length(CS1, name, [{min, 2}, {max, 64}]).
+    CS2 = kura_changeset:validate_length(CS1, name, [{min, 2}, {max, 64}]),
+    %% F-17: cap description length so an attacker cannot store
+    %% megabytes of text in the groups table.
+    kura_changeset:validate_length(CS2, description, [{max, 1024}]).

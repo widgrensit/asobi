@@ -20,7 +20,11 @@ tests pin that contract so the bug can never sneak back in unnoticed.
     find_or_create_reuses_existing_world/1,
     find_or_create_creates_new_for_different_mode/1,
     find_or_create_creates_new_when_existing_full/1,
-    find_or_create_concurrent_callers_share_world/1
+    find_or_create_concurrent_callers_share_world/1,
+    create_world_player_cap_blocks_after_limit/1,
+    create_world_player_cap_releases_when_world_dies/1,
+    create_world_global_cap_blocks_at_max/1,
+    create_world_anonymous_bypasses_player_cap/1
 ]).
 
 -define(MODE_HUB, ~"test_hub").
@@ -37,7 +41,11 @@ all() ->
         find_or_create_reuses_existing_world,
         find_or_create_creates_new_for_different_mode,
         find_or_create_creates_new_when_existing_full,
-        find_or_create_concurrent_callers_share_world
+        find_or_create_concurrent_callers_share_world,
+        create_world_player_cap_blocks_after_limit,
+        create_world_player_cap_releases_when_world_dies,
+        create_world_global_cap_blocks_at_max,
+        create_world_anonymous_bypasses_player_cap
     ].
 
 init_per_suite(Config) ->
@@ -220,6 +228,94 @@ find_or_create_concurrent_callers_share_world(_Config) ->
     {ok, _, Info} = asobi_world_lobby:find_or_create(?MODE_HUB),
     FollowupId = maps:get(world_id, Info),
     ?assertEqual(hd(Unique), FollowupId).
+
+%% --- F-9: per-player and global concurrent-world caps ---
+
+create_world_player_cap_blocks_after_limit(_Config) ->
+    %% Drop the per-player cap to a small number for the test.
+    application:set_env(asobi, world_max_per_player, 2),
+    try
+        Player = ~"player_cap_test",
+        {ok, _Pid1, _} = asobi_world_lobby:create_world(?MODE_HUB, Player),
+        {ok, _Pid2, _} = asobi_world_lobby:create_world(?MODE_HUB, Player),
+        ?assertEqual(
+            {error, player_world_limit_reached},
+            asobi_world_lobby:create_world(?MODE_HUB, Player)
+        ),
+        %% A different player must still be able to create.
+        ?assertMatch(
+            {ok, _, _},
+            asobi_world_lobby:create_world(?MODE_HUB, ~"other_player")
+        )
+    after
+        application:unset_env(asobi, world_max_per_player)
+    end.
+
+create_world_player_cap_releases_when_world_dies(_Config) ->
+    application:set_env(asobi, world_max_per_player, 1),
+    try
+        Player = ~"player_release_test",
+        {ok, Pid, _} = asobi_world_lobby:create_world(?MODE_HUB, Player),
+        ?assertEqual(
+            {error, player_world_limit_reached},
+            asobi_world_lobby:create_world(?MODE_HUB, Player)
+        ),
+        %% Killing the world must release the slot via pg.
+        Ref = monitor(process, Pid),
+        exit(Pid, kill),
+        receive
+            {'DOWN', Ref, process, Pid, _} -> ok
+        after 2000 -> ct:fail("world process did not die")
+        end,
+        wait_until_player_count(Player, 0, 50),
+        ?assertMatch(
+            {ok, _, _},
+            asobi_world_lobby:create_world(?MODE_HUB, Player)
+        )
+    after
+        application:unset_env(asobi, world_max_per_player)
+    end.
+
+create_world_global_cap_blocks_at_max(_Config) ->
+    application:set_env(asobi, world_max, 1),
+    try
+        {ok, _Pid, _} = asobi_world_lobby:create_world(?MODE_HUB, ~"p_global_a"),
+        ?assertEqual(
+            {error, world_capacity_reached},
+            asobi_world_lobby:create_world(?MODE_HUB, ~"p_global_b")
+        ),
+        %% Anonymous create also blocked by the global cap.
+        ?assertEqual(
+            {error, world_capacity_reached},
+            asobi_world_lobby:create_world(?MODE_HUB)
+        )
+    after
+        application:unset_env(asobi, world_max)
+    end.
+
+create_world_anonymous_bypasses_player_cap(_Config) ->
+    %% Anonymous (PlayerId = undefined) creates are internal callers and
+    %% should not be subject to the per-player cap. The global cap still
+    %% applies and is covered above.
+    application:set_env(asobi, world_max_per_player, 1),
+    try
+        {ok, _Pid1, _} = asobi_world_lobby:create_world(?MODE_HUB),
+        {ok, _Pid2, _} = asobi_world_lobby:create_world(?MODE_HUB),
+        {ok, _Pid3, _} = asobi_world_lobby:create_world(?MODE_HUB)
+    after
+        application:unset_env(asobi, world_max_per_player)
+    end.
+
+wait_until_player_count(_Player, _Target, 0) ->
+    ct:fail("player owned-world count never reached target");
+wait_until_player_count(Player, Target, N) ->
+    case asobi_world_lobby:player_owned_world_count(Player) of
+        Target ->
+            ok;
+        _ ->
+            timer:sleep(20),
+            wait_until_player_count(Player, Target, N - 1)
+    end.
 
 %% --- helpers ---
 

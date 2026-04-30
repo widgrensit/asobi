@@ -2,6 +2,23 @@
 
 -setcookie ${ERLANG_COOKIE}
 
+## F-30: tighten Erlang distribution exposure.
+##
+## asobi is single-node by design — one VM owns the world processes and
+## ETS tables. The distribution port is therefore unnecessary in
+## production and is a serious lateral-movement risk if the cookie
+## leaks. For single-node deployments uncomment the line below to bind
+## EPMD/dist to localhost only:
+##
+##     -kernel inet_dist_use_interface "{127,0,0,1}"
+##
+## For clustered deploys (`asobi_cluster.erl`) constrain the dist port
+## range and enable TLS for distribution:
+##
+##     -kernel inet_dist_listen_min 9100 inet_dist_listen_max 9105
+##     -proto_dist inet_tls
+##     -ssl_dist_optfile /etc/asobi/ssl_dist.config
+
 +K true
 +A30
 

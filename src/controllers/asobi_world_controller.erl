@@ -21,11 +21,18 @@ show(#{bindings := #{~"id" := WorldId}}) ->
             {status, 404}
     end.
 
--spec create(map()) -> {json, map(), integer()} | {status, 400}.
-create(#{json := #{~"mode" := Mode}}) ->
-    case asobi_world_lobby:create_world(Mode) of
+-spec create(map()) ->
+    {json, map(), integer()} | {json, integer(), map(), map()} | {status, 400}.
+create(#{json := #{~"mode" := Mode}, auth_data := #{player_id := PlayerId}}) when
+    is_binary(PlayerId)
+->
+    case asobi_world_lobby:create_world(Mode, PlayerId) of
         {ok, _Pid, Info} ->
             {json, Info, 201};
+        {error, player_world_limit_reached} ->
+            {json, 429, #{}, #{error => ~"player_world_limit_reached"}};
+        {error, world_capacity_reached} ->
+            {json, 503, #{}, #{error => ~"world_capacity_reached"}};
         {error, Reason} ->
             {json, #{error => Reason}, 400}
     end;
