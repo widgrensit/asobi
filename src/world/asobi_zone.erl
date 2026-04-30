@@ -348,7 +348,12 @@ do_tick(
     %% the broadcast step runs after both.
     ZoneStateWithTick = ZoneState#{tick => TickN},
     {Entities0, ZoneState1} = GameMod:zone_tick(Entities, ZoneStateWithTick),
-    Entities2 = apply_inputs(GameMod, Queue, Entities0),
+    %% input_queue is built newest-first via [Input | Queue], so reverse it
+    %% before applying so handle_input sees inputs in arrival order. Without
+    %% this, a burst of moves arriving in one tick window collapses to the
+    %% OLDEST input's state — every later move gets overwritten by the
+    %% next-handle_input call walking the list head-first.
+    Entities2 = apply_inputs(GameMod, lists:reverse(Queue), Entities0),
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),
