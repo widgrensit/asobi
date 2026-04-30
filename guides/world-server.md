@@ -216,14 +216,22 @@ Each zone receives its state via the `zone_state` field in `zone_tick/2`.
 ## Lua Implementation
 
 World scripts follow the same pattern as match scripts but with
-zone-specific callbacks. Set `type = "world"` in your mode config.
+zone-specific callbacks. Set `game_type = "world"` in your mode globals.
+
+> **Gotcha**: the global is **`game_type`**, not `type`. The Erlang
+> `sys.config` form (above) uses the key `type`, but the Lua loader
+> reads `game_type`. A Lua script that sets `type = "world"` is
+> silently ignored — the script registers as a *match* mode and
+> `world.find_or_create` returns `mode_not_found`.
 
 ```lua
 -- lua/world.lua
 
 -- World mode config
-type        = "world"
-match_size  = 10
+game_type   = "world"
+match_size  = 10            -- required by the loader for every mode,
+                            -- including worlds. Use 1 for worlds that
+                            -- don't gate on a minimum player count.
 max_players = 500
 grid_size   = 5
 zone_size   = 400
