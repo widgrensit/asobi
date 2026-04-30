@@ -1,0 +1,143 @@
+-- examples/world-walkers/defold-client/walkers.script
+--
+-- Drop this on a game object in your Defold collection. Bind WASD to
+-- input actions named `key_w`, `key_a`, `key_s`, `key_d`.
+--
+-- Other players are drawn by spawning instances from a factory at
+-- `/avatars#avatar_factory`. The simplest setup: a single sprite go,
+-- saved as a separate .go, referenced by a factory component on
+-- /avatars. (The local player is *this* go.)
+
+local asobi = require("asobi.client")
+
+local SPEED       = 200       -- units per second
+local SEND_HZ     = 20        -- inputs/sec sent to the server
+local SERVER_HOST = "localhost"
+local SERVER_PORT = 8080
+
+local client
+local state = {
+    self_id   = nil,
+    pos       = vmath.vector3(600, 600, 0),
+    others    = {},  -- player_id -> { go_id, pos }
+    input     = { up = false, down = false, left = false, right = false },
+    last_send = 0,
+    connected = false,
+    joined    = false,
+}
+
+local function ensure_other(player_id)
+    if state.others[player_id] then return state.others[player_id] end
+    local id = factory.create("/avatars#avatar_factory", vmath.vector3(0, 0, 0))
+    state.others[player_id] = { go_id = id, pos = vmath.vector3(0, 0, 0) }
+    return state.others[player_id]
+end
+
+local function remove_other(player_id)
+    local o = state.others[player_id]
+    if not o then return end
+    go.delete(o.go_id)
+    state.others[player_id] = nil
+end
+
+-- world.tick payload: { tick = N, updates = [ {op, id, ...fields} ] }
+-- op values: "a" = added (full state), "u" = updated (diff), "r" = removed
+local function on_world_tick(payload)
+    for _, u in ipairs(payload.updates or {}) do
+        if u.id == state.self_id then
+            -- We render ourselves locally; ignore server echo.
+        elseif u.op == "r" then
+            remove_other(u.id)
+        else
+            local o = ensure_other(u.id)
+            if u.x then o.pos.x = u.x end
+            if u.y then o.pos.y = u.y end
+            go.set_position(o.pos, o.go_id)
+        end
+    end
+end
+
+local function join_world()
+    client.realtime.find_or_create_world("walkers", function(payload, err)
+        if err then
+            print("find_or_create_world failed: " .. tostring(err))
+            return
+        end
+        state.joined = true
+        print("joined world: " .. tostring(payload.world_id))
+    end)
+end
+
+local function on_connected()
+    state.connected = true
+    join_world()
+end
+
+function init(self)
+    msg.post(".", "acquire_input_focus")
+
+    client = asobi.create(SERVER_HOST, SERVER_PORT)
+
+    -- Unique guest username per launch so two clients don't clash.
+    local username = "walker_" .. tostring(math.floor(socket.gettime() * 1000))
+
+    client.auth.register(client, username, "secret123", function(data, err)
+        if err then
+            print("register failed: " .. tostring(err.error))
+            return
+        end
+        state.self_id = data.player_id
+        print("registered as " .. data.username .. " (" .. data.player_id .. ")")
+
+        client.realtime.on("connected",      on_connected)
+        client.realtime.on("world_tick",     on_world_tick)
+        client.realtime.on("world_finished", function() print("world finished") end)
+        client.realtime.on("error",          function(p) print("ws error: " .. tostring(p.reason)) end)
+
+        client.realtime.connect()
+    end)
+end
+
+function update(self, dt)
+    if not state.joined then return end
+
+    -- Local prediction: move our own avatar immediately.
+    local dx, dy = 0, 0
+    if state.input.up    then dy = dy + 1 end
+    if state.input.down  then dy = dy - 1 end
+    if state.input.left  then dx = dx - 1 end
+    if state.input.right then dx = dx + 1 end
+    if dx ~= 0 or dy ~= 0 then
+        local len = math.sqrt(dx * dx + dy * dy)
+        state.pos.x = state.pos.x + (dx / len) * SPEED * dt
+        state.pos.y = state.pos.y + (dy / len) * SPEED * dt
+        go.set_position(state.pos)
+    end
+
+    -- Send our position to the server at SEND_HZ.
+    state.last_send = state.last_send + dt
+    if state.last_send >= 1 / SEND_HZ then
+        state.last_send = 0
+        client.realtime.send_world_input({
+            kind = "move",
+            x    = state.pos.x,
+            y    = state.pos.y,
+        })
+    end
+end
+
+function on_input(self, action_id, action)
+    if action_id == hash("key_w") then state.input.up    = not action.released end
+    if action_id == hash("key_s") then state.input.down  = not action.released end
+    if action_id == hash("key_a") then state.input.left  = not action.released end
+    if action_id == hash("key_d") then state.input.right = not action.released end
+end
+
+function final(self)
+    if client and state.joined then
+        client.realtime.leave_world()
+    end
+    if client and state.connected then
+        client.realtime.disconnect()
+    end
+end
