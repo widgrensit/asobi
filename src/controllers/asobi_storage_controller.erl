@@ -152,11 +152,21 @@ delete_storage(
     end.
 
 -spec list_storage(cowboy_req:req()) -> {json, map()}.
-list_storage(#{bindings := #{~"collection" := Col}, qs := Qs} = _Req) when is_binary(Qs) ->
+list_storage(
+    #{bindings := #{~"collection" := Col}, qs := Qs, auth_data := #{player_id := PlayerId}} = _Req
+) when is_binary(Qs), is_binary(PlayerId) ->
     Params = cow_qs:parse_qs(Qs),
     Limit = qs_integer(~"limit", Params, 50),
+    %% Mirror get_storage's ACL: only return rows the caller is allowed
+    %% to read (public objects, or owner-restricted objects they own).
     Q = kura_query:limit(
-        kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
+        kura_query:where(
+            kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
+            {'or', [
+                {read_perm, ~"public"},
+                {'and', [{read_perm, ~"owner"}, {player_id, PlayerId}]}
+            ]}
+        ),
         Limit
     ),
     {ok, Objects} = asobi_repo:all(Q),

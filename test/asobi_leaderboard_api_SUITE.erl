@@ -5,6 +5,7 @@
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1]).
 -export([
     submit_score/1,
+    submit_score_disabled/1,
     get_top/1,
     get_top_with_limit/1,
     get_around/1,
@@ -16,7 +17,12 @@ all() -> [{group, leaderboard_api}].
 groups() ->
     [
         {leaderboard_api, [sequence], [
-            get_top_empty, submit_score, get_top, get_top_with_limit, get_around
+            get_top_empty,
+            submit_score_disabled,
+            submit_score,
+            get_top,
+            get_top_with_limit,
+            get_around
         ]}
     ].
 
@@ -41,9 +47,16 @@ init_per_suite(Config) ->
     BoardId = iolist_to_binary([
         ~"test_board_", integer_to_binary(erlang:unique_integer([positive]))
     ]),
+    DisabledBoardId = iolist_to_binary([
+        ~"test_board_disabled_", integer_to_binary(erlang:unique_integer([positive]))
+    ]),
     {ok, _} = asobi_leaderboard_sup:start_board(BoardId),
+    %% Whitelist this board for client submits — submit_score_disabled
+    %% deliberately uses an un-whitelisted board to confirm the gate.
+    application:set_env(asobi, leaderboard_client_submit, [BoardId]),
     [
         {board_id, BoardId},
+        {disabled_board_id, DisabledBoardId},
         {player1_id, P1Id},
         {player1_token, P1Token},
         {players, Players}
@@ -51,6 +64,7 @@ init_per_suite(Config) ->
     ].
 
 end_per_suite(Config) ->
+    application:unset_env(asobi, leaderboard_client_submit),
     Config.
 
 auth(Token) when is_binary(Token) ->
@@ -68,6 +82,22 @@ get_top_empty(Config) ->
     ),
     ?assertStatus(200, Resp),
     ?assertJson(#{~"entries" := []}, Resp),
+    Config.
+
+submit_score_disabled(Config) ->
+    %% A board not on the whitelist must reject client submits with 403,
+    %% even from an authenticated player.
+    {disabled_board_id, BoardId} = lists:keyfind(disabled_board_id, 1, Config),
+    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    true = is_binary(BoardId),
+    true = is_binary(Token),
+    {ok, Resp} = nova_test:post(
+        "/api/v1/leaderboards/" ++ binary_to_list(BoardId),
+        #{headers => auth(Token), json => #{~"score" => 9001}},
+        Config
+    ),
+    ?assertStatus(403, Resp),
+    ?assertJson(#{~"error" := ~"client_submit_disabled"}, Resp),
     Config.
 
 submit_score(Config) ->

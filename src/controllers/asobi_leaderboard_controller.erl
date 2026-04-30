@@ -22,26 +22,48 @@ around(#{bindings := #{~"id" := BoardId, ~"player_id" := PlayerId}, qs := Qs} = 
 submit(
     #{bindings := #{~"id" := BoardId}, json := Params, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(BoardId), is_binary(PlayerId), is_map(Params) ->
-    Score =
-        case maps:get(~"score", Params) of
-            S when is_number(S) -> S;
-            _ -> 0
-        end,
-    SubScore = maps:get(~"sub_score", Params, 0),
-    asobi_leaderboard_server:submit(BoardId, PlayerId, Score),
-    Rank =
-        case asobi_leaderboard_server:rank(BoardId, PlayerId) of
-            {ok, R} -> R;
-            {error, not_found} -> null
-        end,
-    {json, 200, #{}, #{
-        leaderboard_id => BoardId,
-        player_id => PlayerId,
-        score => Score,
-        sub_score => SubScore,
-        rank => Rank,
-        updated_at => format_timestamp(erlang:system_time(millisecond))
-    }}.
+    case client_submit_allowed(BoardId) of
+        false ->
+            {json, 403, #{}, #{error => ~"client_submit_disabled"}};
+        true ->
+            Score =
+                case maps:get(~"score", Params) of
+                    S when is_number(S) -> S;
+                    _ -> 0
+                end,
+            SubScore = maps:get(~"sub_score", Params, 0),
+            case asobi_leaderboard_server:submit(BoardId, PlayerId, Score) of
+                {error, capacity_reached} ->
+                    {json, 503, #{}, #{error => ~"leaderboard_capacity_reached"}};
+                _ ->
+                    Rank =
+                        case asobi_leaderboard_server:rank(BoardId, PlayerId) of
+                            {ok, R} -> R;
+                            {error, not_found} -> null
+                        end,
+                    {json, 200, #{}, #{
+                        leaderboard_id => BoardId,
+                        player_id => PlayerId,
+                        score => Score,
+                        sub_score => SubScore,
+                        rank => Rank,
+                        updated_at => format_timestamp(erlang:system_time(millisecond))
+                    }}
+            end
+    end.
+
+%% Client score submissions are off by default — server-side game logic
+%% should call asobi_leaderboard_server:submit/3 directly. To opt a board
+%% in for client writes (typical for casual scoreboards where cheating
+%% is acceptable), set `leaderboard_client_submit` to a list of allowed
+%% board ids or to `all`.
+-spec client_submit_allowed(binary()) -> boolean().
+client_submit_allowed(BoardId) ->
+    case application:get_env(asobi, leaderboard_client_submit, []) of
+        all -> true;
+        L when is_list(L) -> lists:member(BoardId, L);
+        _ -> false
+    end.
 
 %% --- Internal ---
 

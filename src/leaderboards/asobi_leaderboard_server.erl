@@ -5,59 +5,95 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(PG_SCOPE, nova_scope).
+-define(DEFAULT_MAX_BOARDS, 1000).
 
 -spec start_link(binary()) -> gen_server:start_ret().
 start_link(BoardId) ->
     gen_server:start_link(?MODULE, BoardId, []).
 
--spec submit(binary(), binary(), integer()) -> ok.
+%% Submit is the only path that spawns a leaderboard process. Reads
+%% return empty results when the board doesn't exist yet — that prevents
+%% an attacker from filling the supervisor with thousands of boards just
+%% by reading random ids.
+-spec submit(binary(), binary(), integer()) -> ok | {error, capacity_reached}.
 submit(BoardId, PlayerId, Score) ->
-    ensure_started(BoardId),
-    gen_server:cast(whereis_board(BoardId), {submit, PlayerId, Score}).
+    case ensure_started(BoardId) of
+        ok ->
+            case whereis_board_optional(BoardId) of
+                {ok, Pid} -> gen_server:cast(Pid, {submit, PlayerId, Score});
+                not_found -> ok
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec top(binary(), pos_integer()) -> [{binary(), number(), pos_integer()}].
 top(BoardId, N) ->
-    ensure_started(BoardId),
-    case gen_server:call(whereis_board(BoardId), {top, N}) of
-        Entries when is_list(Entries) -> validate_entries(Entries);
-        _ -> []
+    case whereis_board_optional(BoardId) of
+        {ok, Pid} ->
+            case gen_server:call(Pid, {top, N}) of
+                Entries when is_list(Entries) -> validate_entries(Entries);
+                _ -> []
+            end;
+        not_found ->
+            []
     end.
 
 -spec rank(binary(), binary()) -> {ok, pos_integer()} | {error, not_found}.
 rank(BoardId, PlayerId) ->
-    ensure_started(BoardId),
-    case gen_server:call(whereis_board(BoardId), {rank, PlayerId}) of
-        {ok, Pos} when is_integer(Pos) -> {ok, Pos};
-        {error, not_found} -> {error, not_found}
+    case whereis_board_optional(BoardId) of
+        {ok, Pid} ->
+            case gen_server:call(Pid, {rank, PlayerId}) of
+                {ok, Pos} when is_integer(Pos) -> {ok, Pos};
+                {error, not_found} -> {error, not_found}
+            end;
+        not_found ->
+            {error, not_found}
     end.
 
 -spec around(binary(), binary(), pos_integer()) -> [{binary(), number(), pos_integer()}].
 around(BoardId, PlayerId, N) ->
-    ensure_started(BoardId),
-    case gen_server:call(whereis_board(BoardId), {around, PlayerId, N}) of
-        Entries when is_list(Entries) -> validate_entries(Entries);
-        _ -> []
+    case whereis_board_optional(BoardId) of
+        {ok, Pid} ->
+            case gen_server:call(Pid, {around, PlayerId, N}) of
+                Entries when is_list(Entries) -> validate_entries(Entries);
+                _ -> []
+            end;
+        not_found ->
+            []
     end.
 
 -spec validate_entries([term()]) -> [{binary(), number(), pos_integer()}].
 validate_entries(Entries) ->
     [{P, S, R} || {P, S, R} <- Entries, is_binary(P), is_number(S), is_integer(R)].
 
--spec ensure_started(binary()) -> ok.
+-spec ensure_started(binary()) -> ok | {error, capacity_reached}.
 ensure_started(BoardId) ->
     case pg:get_members(?PG_SCOPE, {?MODULE, BoardId}) of
         [] ->
-            _ = asobi_leaderboard_sup:start_board(BoardId),
-            ok;
+            case at_capacity() of
+                true ->
+                    {error, capacity_reached};
+                false ->
+                    _ = asobi_leaderboard_sup:start_board(BoardId),
+                    ok
+            end;
         [_ | _] ->
             ok
     end.
 
--spec whereis_board(binary()) -> pid().
-whereis_board(BoardId) ->
+-spec at_capacity() -> boolean().
+at_capacity() ->
+    Max = application:get_env(asobi, leaderboard_max_boards, ?DEFAULT_MAX_BOARDS),
+    Counts = supervisor:count_children(asobi_leaderboard_sup),
+    Active = proplists:get_value(active, Counts, 0),
+    Active >= Max.
+
+-spec whereis_board_optional(binary()) -> {ok, pid()} | not_found.
+whereis_board_optional(BoardId) ->
     case pg:get_members(?PG_SCOPE, {?MODULE, BoardId}) of
-        [Pid | _] -> Pid;
-        [] -> error({leaderboard_not_found, BoardId})
+        [Pid | _] -> {ok, Pid};
+        [] -> not_found
     end.
 
 -spec init(binary()) -> {ok, map()}.
