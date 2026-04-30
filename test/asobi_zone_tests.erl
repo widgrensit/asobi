@@ -38,6 +38,7 @@ zone_test_() ->
         {"tick processes inputs and broadcasts deltas", fun tick_broadcasts/0},
         {"tick with no changes sends no deltas", fun tick_no_changes/0},
         {"tick acks to ticker", fun tick_acks/0},
+        {"queued inputs apply in arrival order", fun inputs_apply_in_arrival_order/0},
         {"subscriber DOWN cleans up", fun subscriber_down_cleanup/0},
         {"tick touches zone_manager when subscribers present", fun tick_touches_zone_manager/0},
         {"tick hibernates when empty", fun tick_hibernates_when_empty/0},
@@ -105,6 +106,26 @@ tick_broadcasts() ->
     after 100 ->
         ok
     end,
+    gen_server:stop(Pid).
+
+inputs_apply_in_arrival_order() ->
+    %% Regression: when several player_input casts arrive between two
+    %% ticks they used to be processed newest-first, so the OLDEST x
+    %% won and every later move was overwritten. Assert the newest
+    %% input wins instead.
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, <<"p1">>, #{x => 0, y => 0, type => ~"player"}),
+    timer:sleep(10),
+    [
+        asobi_zone:player_input(Pid, <<"p1">>, #{
+            ~"action" => ~"move", ~"x" => X, ~"y" => 100
+        })
+     || X <- [10, 20, 30, 40, 50]
+    ],
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
+    Entities = asobi_zone:get_entities(Pid),
+    ?assertMatch(#{x := 50, y := 100}, maps:get(<<"p1">>, Entities)),
     gen_server:stop(Pid).
 
 tick_no_changes() ->
