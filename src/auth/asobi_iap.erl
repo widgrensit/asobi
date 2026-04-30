@@ -1,18 +1,34 @@
 -module(asobi_iap).
 
+-include_lib("public_key/include/public_key.hrl").
+
 -export([verify_apple/1, verify_google/1]).
 
+%% StoreKit 2 always signs JWS with ES256 (ECDSA over P-256, SHA-256).
+%% We refuse any other algorithm — `none`/HS256/RS256 etc. are out.
+-define(APPLE_REQUIRED_ALG, ~"ES256").
+
 %% Apple App Store Server API v2
-%% Validates a signed transaction (JWS) from StoreKit 2.
-%% The client sends the JWS transaction string obtained from StoreKit.
+%% Validates a signed transaction (JWS) from StoreKit 2: verifies the JWS
+%% signature against the leaf certificate from the `x5c` header, validates
+%% the certificate chain against the configured Apple root, then checks
+%% the bundle id and expiry. Refuses to run when not configured —
+%% callers see `{error, apple_iap_not_configured | apple_root_cert_*}`.
 -spec verify_apple(binary()) -> {ok, map()} | {error, binary()}.
-verify_apple(SignedTransaction) ->
+verify_apple(SignedTransaction) when is_binary(SignedTransaction) ->
     case apple_bundle_id() of
         undefined ->
             {error, ~"apple_iap_not_configured"};
         BundleId ->
-            do_verify_apple(SignedTransaction, BundleId)
-    end.
+            case apple_root_certs() of
+                {ok, RootCerts} ->
+                    do_verify_apple(SignedTransaction, BundleId, RootCerts);
+                {error, _} = Err ->
+                    Err
+            end
+    end;
+verify_apple(_) ->
+    {error, ~"invalid_jws"}.
 
 %% Google Play Developer API
 %% Validates a purchase using the purchase token from Google Play Billing.
@@ -30,51 +46,204 @@ verify_google(_) ->
 
 %% --- Apple Internal ---
 
--spec do_verify_apple(binary(), binary()) -> {ok, map()} | {error, binary()}.
-do_verify_apple(SignedTransaction, ExpectedBundleId) ->
-    case decode_jws_payload(SignedTransaction) of
+-spec do_verify_apple(binary(), binary(), [dynamic()]) -> {ok, map()} | {error, binary()}.
+do_verify_apple(JWS, ExpectedBundleId, RootCerts) ->
+    case parse_and_verify_jws(JWS, RootCerts) of
         {ok, Payload} ->
-            BundleId = maps:get(~"bundleId", Payload, undefined),
-            ExpiresMs = maps:get(~"expiresDate", Payload, undefined),
-            case BundleId of
-                ExpectedBundleId ->
-                    Result = #{
-                        product_id => maps:get(~"productId", Payload),
-                        transaction_id => maps:get(~"transactionId", Payload),
-                        original_transaction_id =>
-                            maps:get(~"originalTransactionId", Payload, undefined),
-                        purchase_date => maps:get(~"purchaseDate", Payload, undefined),
-                        expires_date => ExpiresMs,
-                        quantity => maps:get(~"quantity", Payload, 1),
-                        type => maps:get(~"type", Payload, ~"unknown"),
-                        valid => not is_expired(ExpiresMs)
-                    },
-                    {ok, Result};
-                _ ->
-                    {error, ~"bundle_id_mismatch"}
-            end;
-        {error, Reason} ->
-            {error, Reason}
+            check_apple_payload(Payload, ExpectedBundleId);
+        {error, _} = Err ->
+            Err
     end.
 
-%% Decode the payload section of a JWS (base64url-encoded JSON).
-%% Full signature verification against Apple's root CA should be added
-%% for production — this extracts the payload for validation.
--spec decode_jws_payload(binary()) -> {ok, map()} | {error, binary()}.
-decode_jws_payload(JWS) ->
+-spec check_apple_payload(map(), binary()) -> {ok, map()} | {error, binary()}.
+check_apple_payload(Payload, ExpectedBundleId) ->
+    BundleId = maps:get(~"bundleId", Payload, undefined),
+    ExpiresMs = maps:get(~"expiresDate", Payload, undefined),
+    case BundleId of
+        ExpectedBundleId ->
+            Result = #{
+                product_id => maps:get(~"productId", Payload, undefined),
+                transaction_id => maps:get(~"transactionId", Payload, undefined),
+                original_transaction_id =>
+                    maps:get(~"originalTransactionId", Payload, undefined),
+                purchase_date => maps:get(~"purchaseDate", Payload, undefined),
+                expires_date => ExpiresMs,
+                quantity => maps:get(~"quantity", Payload, 1),
+                type => maps:get(~"type", Payload, ~"unknown"),
+                valid => not is_expired(ExpiresMs)
+            },
+            {ok, Result};
+        _ ->
+            {error, ~"bundle_id_mismatch"}
+    end.
+
+%% Parse + verify the JWS in one shot; never returns the payload until
+%% header alg, certificate chain, and signature have all been validated.
+-spec parse_and_verify_jws(binary(), [dynamic()]) -> {ok, map()} | {error, binary()}.
+parse_and_verify_jws(JWS, RootCerts) ->
     case binary:split(JWS, ~".", [global]) of
-        [_, PayloadB64, _] ->
+        [HeaderB64, PayloadB64, SigB64] ->
             try
-                Decoded = base64:decode(PayloadB64, #{mode => urlsafe, padding => false}),
-                case json:decode(Decoded) of
-                    M when is_map(M) -> {ok, M};
-                    _ -> {error, ~"invalid_jws_payload"}
-                end
+                Header = decode_b64_json(HeaderB64),
+                ok = require_alg(Header),
+                {LeafCert, ValidationChain} = require_x5c(Header),
+                ok = verify_chain(ValidationChain, RootCerts),
+                ok = verify_signature(HeaderB64, PayloadB64, SigB64, LeafCert),
+                Payload = decode_b64_json(PayloadB64),
+                {ok, Payload}
             catch
-                _:_ -> {error, ~"invalid_jws"}
+                throw:Reason when is_binary(Reason) ->
+                    {error, Reason};
+                _:_ ->
+                    {error, ~"invalid_jws"}
             end;
         _ ->
             {error, ~"invalid_jws_format"}
+    end.
+
+-spec decode_b64_json(binary()) -> map().
+decode_b64_json(B64) ->
+    Decoded = base64:decode(B64, #{mode => urlsafe, padding => false}),
+    case json:decode(Decoded) of
+        M when is_map(M) -> M;
+        _ -> throw(~"invalid_jws")
+    end.
+
+-spec require_alg(map()) -> ok.
+require_alg(#{~"alg" := ?APPLE_REQUIRED_ALG}) -> ok;
+require_alg(_) -> throw(~"unsupported_alg").
+
+%% Apple JWS x5c is always [leaf, intermediate, root] in DER-base64. We
+%% decode the leaf and intermediate, drop the embedded root (we trust our
+%% own configured root), and return the leaf + the validation-order chain
+%% (`[Intermediate, Leaf]`).
+-spec require_x5c(map()) -> {dynamic(), [dynamic()]}.
+require_x5c(#{~"x5c" := [LeafB64, IntB64, RootB64]}) when
+    is_binary(LeafB64), is_binary(IntB64), is_binary(RootB64)
+->
+    Leaf = decode_x5c_cert(LeafB64),
+    Intermediate = decode_x5c_cert(IntB64),
+    %% RootB64 is intentionally not used: we never trust the chain's
+    %% own embedded root, only the operator-configured one.
+    _ = decode_x5c_cert(RootB64),
+    {Leaf, [Intermediate, Leaf]};
+require_x5c(_) ->
+    throw(~"invalid_x5c").
+
+-spec decode_x5c_cert(binary()) -> dynamic().
+decode_x5c_cert(B64) ->
+    Der = base64:decode(B64, #{mode => standard, padding => true}),
+    public_key:pkix_decode_cert(Der, otp).
+
+-spec verify_chain([dynamic()], [dynamic()]) -> ok.
+verify_chain(Chain, RootCerts) ->
+    case try_roots(RootCerts, Chain) of
+        ok -> ok;
+        error -> throw(~"chain_validation_failed")
+    end.
+
+-spec try_roots([dynamic()], [dynamic()]) -> ok | error.
+try_roots([], _Chain) ->
+    error;
+try_roots([Root | Rest], Chain) ->
+    case public_key:pkix_path_validation(Root, Chain, []) of
+        {ok, _} -> ok;
+        {error, _} -> try_roots(Rest, Chain)
+    end.
+
+-spec verify_signature(binary(), binary(), binary(), dynamic()) -> ok.
+verify_signature(HeaderB64, PayloadB64, SigB64, LeafCert) ->
+    SignInput = <<HeaderB64/binary, ".", PayloadB64/binary>>,
+    RawSig = base64:decode(SigB64, #{mode => urlsafe, padding => false}),
+    DerSig = ecdsa_raw_to_der(RawSig),
+    PubKeyInfo = pubkey_from_cert(LeafCert),
+    case public_key:verify(SignInput, sha256, DerSig, PubKeyInfo) of
+        true -> ok;
+        false -> throw(~"signature_invalid")
+    end.
+
+%% JWS ES256 signatures are 64-byte raw `r || s`. `public_key:verify/4`
+%% wants DER-encoded `Ecdsa-Sig-Value SEQUENCE { r INTEGER, s INTEGER }`.
+-spec ecdsa_raw_to_der(binary()) -> binary().
+ecdsa_raw_to_der(<<R:32/binary, S:32/binary>>) ->
+    Rint = binary:decode_unsigned(R),
+    Sint = binary:decode_unsigned(S),
+    public_key:der_encode('ECDSA-Sig-Value', {'ECDSA-Sig-Value', Rint, Sint});
+ecdsa_raw_to_der(_) ->
+    throw(~"signature_invalid").
+
+-spec pubkey_from_cert(dynamic()) -> dynamic().
+pubkey_from_cert(#'OTPCertificate'{tbsCertificate = TBS}) ->
+    SPKI = TBS#'OTPTBSCertificate'.subjectPublicKeyInfo,
+    Algorithm = SPKI#'OTPSubjectPublicKeyInfo'.algorithm,
+    PubKey = SPKI#'OTPSubjectPublicKeyInfo'.subjectPublicKey,
+    Params = Algorithm#'PublicKeyAlgorithm'.parameters,
+    {PubKey, Params}.
+
+-spec apple_root_certs() -> {ok, [dynamic()]} | {error, binary()}.
+apple_root_certs() ->
+    case application:get_env(asobi, apple_root_certs) of
+        {ok, Certs} when is_list(Certs), Certs =/= [] ->
+            normalise_root_certs(Certs);
+        _ ->
+            case application:get_env(asobi, apple_root_cert_path) of
+                {ok, Path} when is_binary(Path) ->
+                    load_root_cert_file(Path);
+                {ok, Path} when is_list(Path) ->
+                    load_root_cert_file(coerce_path(Path));
+                _ ->
+                    {error, ~"apple_root_cert_not_configured"}
+            end
+    end.
+
+-spec normalise_root_certs([term()]) -> {ok, [dynamic()]} | {error, binary()}.
+normalise_root_certs(Certs) ->
+    try
+        {ok, [normalise_root_cert(C) || C <- Certs]}
+    catch
+        _:_ -> {error, ~"apple_root_cert_invalid"}
+    end.
+
+-spec normalise_root_cert(term()) -> dynamic().
+normalise_root_cert(#'OTPCertificate'{} = C) ->
+    C;
+normalise_root_cert(Bin) when is_binary(Bin) ->
+    case decode_root_pem_or_der(Bin) of
+        {ok, Cert} -> Cert;
+        error -> erlang:error(apple_root_cert_invalid)
+    end.
+
+-spec coerce_path(dynamic()) -> binary().
+coerce_path(L) ->
+    iolist_to_binary(L).
+
+-spec load_root_cert_file(binary()) -> {ok, [dynamic()]} | {error, binary()}.
+load_root_cert_file(Path) ->
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case decode_root_pem_or_der(Bin) of
+                {ok, Cert} -> {ok, [Cert]};
+                error -> {error, ~"apple_root_cert_invalid"}
+            end;
+        {error, _} ->
+            {error, ~"apple_root_cert_not_found"}
+    end.
+
+-spec decode_root_pem_or_der(binary()) -> {ok, dynamic()} | error.
+decode_root_pem_or_der(Bin) ->
+    case public_key:pem_decode(Bin) of
+        [{'Certificate', Der, _} | _] ->
+            try
+                {ok, public_key:pkix_decode_cert(Der, otp)}
+            catch
+                _:_ -> error
+            end;
+        _ ->
+            try
+                {ok, public_key:pkix_decode_cert(Bin, otp)}
+            catch
+                _:_ -> error
+            end
     end.
 
 %% --- Google Internal ---

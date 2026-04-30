@@ -14,6 +14,7 @@
     put_storage/1,
     get_storage/1,
     list_storage/1,
+    list_storage_filters_owner_perm/1,
     delete_storage/1,
     storage_owner_permission/1
 ]).
@@ -26,7 +27,12 @@ groups() ->
             list_saves_empty, create_save, get_save, update_save, save_version_conflict
         ]},
         {generic_storage, [sequence], [
-            put_storage, get_storage, list_storage, delete_storage, storage_owner_permission
+            put_storage,
+            get_storage,
+            list_storage,
+            list_storage_filters_owner_perm,
+            delete_storage,
+            storage_owner_permission
         ]}
     ].
 
@@ -165,6 +171,54 @@ list_storage(Config) ->
     true = is_list(Objects),
     ?assert(length(Objects) >= 1),
     Config.
+
+%% Regression for F-4: list_storage must filter by read_perm. Player1's
+%% owner-restricted object must be invisible to player2 even when listing
+%% the same collection.
+list_storage_filters_owner_perm(Config) ->
+    %% Unique collection/key per run so the asserts aren't polluted by
+    %% leftover rows from previous test runs (the storage table persists
+    %% across runs).
+    Suffix = integer_to_binary(erlang:unique_integer([positive])),
+    Col = <<"private_listing_", Suffix/binary>>,
+    Key = <<"p1_secret_", Suffix/binary>>,
+    {ok, PutResp} = nova_test:put(
+        binary_to_list(<<"/api/v1/storage/", Col/binary, "/", Key/binary>>),
+        #{
+            headers => auth(Config, player1),
+            json => #{~"value" => #{~"data" => ~"player1_only"}}
+        },
+        Config
+    ),
+    ?assertStatus(200, PutResp),
+    {ok, P1Resp} = nova_test:get(
+        binary_to_list(<<"/api/v1/storage/", Col/binary>>),
+        #{headers => auth(Config, player1)},
+        Config
+    ),
+    ?assertStatus(200, P1Resp),
+    #{~"objects" := P1ObjectsRaw} = nova_test:json(P1Resp),
+    P1Objects = ensure_list(P1ObjectsRaw),
+    ?assert(lists:any(fun(O) -> object_has_key(O, Key) end, P1Objects)),
+    {ok, P2Resp} = nova_test:get(
+        binary_to_list(<<"/api/v1/storage/", Col/binary>>),
+        #{headers => auth(Config, player2)},
+        Config
+    ),
+    ?assertStatus(200, P2Resp),
+    #{~"objects" := P2ObjectsRaw} = nova_test:json(P2Resp),
+    P2Objects = ensure_list(P2ObjectsRaw),
+    %% Either empty list or no objects bearing the key — but never the
+    %% private one.
+    ?assertNot(lists:any(fun(O) -> object_has_key(O, Key) end, P2Objects)),
+    Config.
+
+-spec ensure_list(dynamic()) -> [dynamic()].
+ensure_list(L) when is_list(L) -> L.
+
+-spec object_has_key(dynamic(), binary()) -> boolean().
+object_has_key(#{~"key" := K}, K) -> true;
+object_has_key(_, _) -> false.
 
 delete_storage(Config) ->
     {ok, Resp} = nova_test:delete(

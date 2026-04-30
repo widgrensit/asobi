@@ -216,6 +216,9 @@ get_player(Config) ->
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"username" := _}, Body),
+    %% Regression: hashed_password and password must never leak.
+    ?assertEqual(error, maps:find(~"hashed_password", Body)),
+    ?assertEqual(error, maps:find(~"password", Body)),
     Config.
 
 update_player(Config) ->
@@ -234,6 +237,7 @@ update_player(Config) ->
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"display_name" := ~"Updated Name"}, Body),
+    ?assertEqual(error, maps:find(~"hashed_password", Body)),
     Config.
 
 update_player_unauthorized(Config) ->

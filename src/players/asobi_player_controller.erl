@@ -34,8 +34,13 @@ update(
             end
     end.
 
+%% Positive whitelist: only fields safe for any authenticated viewer.
+%% Never expose `hashed_password` (or any future credential fields).
 sanitize(Player) ->
-    maps:without([banned_at], Player).
+    maps:with(
+        [id, username, display_name, avatar_url, metadata, inserted_at, updated_at],
+        Player
+    ).
 
 format_errors(CS) ->
     kura_changeset:traverse_errors(CS, fun(_Field, Msg) -> Msg end).
