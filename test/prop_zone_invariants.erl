@@ -16,6 +16,7 @@
 -define(GAME, asobi_test_world_game).
 -define(MAX_PLAYERS, 8).
 -define(GRID_SIZE, 2).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "25"))).
 -define(BASE_CONFIG, #{
     game_module => ?GAME,
     grid_size => ?GRID_SIZE,
@@ -35,7 +36,9 @@ zone_invariants_test_() ->
         {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
             [
                 ?_assert(
-                    proper:quickcheck(prop_zone_invariants(Ctx), [{numtests, 25}, {to_file, user}])
+                    proper:quickcheck(prop_zone_invariants(Ctx), [
+                        {numtests, ?NUMTESTS}, {to_file, user}
+                    ])
                 )
             ]
         end}}.

@@ -10,7 +10,7 @@
 %%   - groups + leftover preserves the input list (no drops, no dupes)
 %%   - within each group, ticket order matches input order (FCFS)
 
--define(NUMTESTS, 100).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "100"))).
 
 matchmaker_fill_strategy_test_() ->
     {timeout, 30,

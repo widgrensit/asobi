@@ -17,6 +17,7 @@
 -define(MAX_PLAYERS, 6).
 -define(GRID_SIZE, 2).
 -define(WAIT_TICKS_MS, 500).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "25"))).
 -define(BASE_CONFIG, #{
     game_module => ?GAME,
     grid_size => ?GRID_SIZE,
@@ -34,7 +35,7 @@ input_never_dropped_test_() ->
             [
                 ?_assert(
                     proper:quickcheck(prop_input_never_dropped(Ctx), [
-                        {numtests, 25}, {to_file, user}
+                        {numtests, ?NUMTESTS}, {to_file, user}
                     ])
                 )
             ]

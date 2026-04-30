@@ -1,0 +1,111 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 03:00 UTC daily
+  workflow_dispatch:     # manual trigger from Actions UI
+
+concurrency:
+  group: nightly-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  property-soak:
+    name: Property Tests (high numtests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Property modules read this with a per-file default fallback.
+      # Pure props handle 5000 in seconds; fixture-heavy props (world
+      # startup per iteration) cap at ~1000 to stay under ~3 min.
+      PROPER_NUMTESTS: '1000'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: '.tool-versions'
+          version-type: strict
+
+      - name: Cache _build
+        uses: actions/cache@v4
+        with:
+          path: _build
+          key: nightly-prop-${{ hashFiles('rebar.lock') }}
+          restore-keys: |
+            nightly-prop-
+
+      - name: Run property tests at high numtests
+        run: |
+          rebar3 eunit --module=\
+          prop_zone_invariants,\
+          prop_input_never_dropped,\
+          prop_spatial_grid_consistency,\
+          prop_phase_timer_monotonic,\
+          prop_reconnect_lifecycle,\
+          prop_chat_zone_routing,\
+          prop_matchmaker_fill_strategy
+
+      - name: Run snapshot round-trip CT
+        run: rebar3 ct --suite=test/prop_zone_snapshot_roundtrip_SUITE
+
+  soak:
+    name: Multiplayer Soak (placeholder)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: '.tool-versions'
+          version-type: strict
+
+      - name: Run soak suite if present
+        # Requires test/soak_SUITE.erl driving N players for ~10 min and
+        # asserting no leaks (process count stable, ETS sizes stable, no
+        # DOWN cascades). Skip the job until the suite exists.
+        run: |
+          if [ -f test/soak_SUITE.erl ]; then
+            rebar3 ct --suite=test/soak_SUITE
+          else
+            echo "soak_SUITE not yet present — skipping"
+          fi
+
+  notify-failure:
+    name: Open regression issue
+    needs: [property-soak, soak]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Nightly failure: ${new Date().toISOString().slice(0,10)}`;
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `Nightly workflow failed.\n\nRun: ${url}\n\nThis issue is auto-opened by \`.github/workflows/nightly.yml\`.`,
+              labels: ['nightly-regression']
+            });

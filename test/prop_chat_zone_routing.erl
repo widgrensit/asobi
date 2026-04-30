@@ -12,7 +12,7 @@
 %% Catches subscribe/unsubscribe drift (orphaned subscriptions after
 %% leave, double-subscribe on resync, broken proximity expansion).
 
--define(NUMTESTS, 25).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "25"))).
 -define(WORLD_ID, ~"propchat").
 -define(GRID_SIZE, 10).
 -define(PROX_RADIUS, 1).
