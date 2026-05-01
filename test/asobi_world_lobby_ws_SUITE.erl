@@ -18,7 +18,10 @@ identity returned to the client.
     different_modes_get_different_worlds/1,
     full_world_spawns_a_new_one/1,
     create_reply_reflects_creator_in_player_count/1,
-    join_rejects_when_player_already_in_other_world/1
+    join_rejects_when_player_already_in_other_world/1,
+    observer_sees_movers_input_via_world_tick/1,
+    world_tick_diff_is_partial/1,
+    move_burst_collapses_to_latest_in_each_broadcast/1
 ]).
 
 -define(MODE_HUB, ~"test_ws_hub").
@@ -32,7 +35,10 @@ all() ->
         different_modes_get_different_worlds,
         full_world_spawns_a_new_one,
         create_reply_reflects_creator_in_player_count,
-        join_rejects_when_player_already_in_other_world
+        join_rejects_when_player_already_in_other_world,
+        observer_sees_movers_input_via_world_tick,
+        world_tick_diff_is_partial,
+        move_burst_collapses_to_latest_in_each_broadcast
     ].
 
 init_per_suite(Config) ->
@@ -43,7 +49,7 @@ init_per_suite(Config) ->
             module => asobi_test_world_game,
             max_players => 4,
             grid_size => 1,
-            zone_size => 100,
+            zone_size => 1000,
             tick_rate => 50,
             %% Hub-style modes need a grace window so the world survives across
             %% brief disconnects (sequential clients reusing the lobby).
@@ -54,7 +60,7 @@ init_per_suite(Config) ->
             module => asobi_test_world_game,
             max_players => 4,
             grid_size => 1,
-            zone_size => 100,
+            zone_size => 1000,
             tick_rate => 50,
             empty_grace_ms => 5000
         },
@@ -63,7 +69,7 @@ init_per_suite(Config) ->
             module => asobi_test_world_game,
             max_players => 1,
             grid_size => 1,
-            zone_size => 100,
+            zone_size => 1000,
             tick_rate => 50
         }
     }),
@@ -192,6 +198,104 @@ join_rejects_when_player_already_in_other_world(Config) ->
     end,
     Config.
 
+%% Locks the multi-client visibility contract: when two clients are in the
+%% same world, the observer MUST receive a world.tick frame whose `updates`
+%% include the mover's player_id with op="u" and the new x/y. Regression
+%% guard for the cascade of "client doesn't see the other player move"
+%% bugs (zone_pid race, input-order, etc.) — would have caught both.
+observer_sees_movers_input_via_world_tick(Config) ->
+    {P1, Tok1} = register_player(~"obs_a", Config),
+    {_P2, Tok2} = register_player(~"obs_b", Config),
+    Conn1 = ws_connect_authed(Tok1, Config),
+    Conn2 = ws_connect_authed(Tok2, Config),
+    _W1 = ws_find_or_create(?MODE_HUB, ~"o1", Conn1),
+    _W2 = ws_find_or_create(?MODE_HUB, ~"o2", Conn2),
+    %% Drain the initial snapshot frames so the move's delta is the next thing
+    %% Conn2 sees.
+    drain_initial_snapshots(Conn2),
+    %% Client 1 fires a move; client 2 must observe a world.tick whose updates
+    %% contain P1 with the new position.
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"world.input",
+            ~"payload" => #{~"action" => ~"move", ~"x" => 500, ~"y" => 200}
+        },
+        Conn1
+    ),
+    {ok, Tick} = recv_p1_update_with_x(P1, 500, Conn2),
+    nova_test_ws:close(Conn1),
+    nova_test_ws:close(Conn2),
+    ?assertEqual(500, maps:get(~"x", Tick)),
+    Config.
+
+%% Locks the partial-diff contract: when only one field changes between
+%% broadcasts, the observer's update MUST contain only that field, not
+%% the full entity state. Clients must merge — and tests must confirm
+%% the server actually emits partial diffs, not full snapshots-as-updates.
+world_tick_diff_is_partial(Config) ->
+    {P1, Tok1} = register_player(~"par_a", Config),
+    {_P2, Tok2} = register_player(~"par_b", Config),
+    Conn1 = ws_connect_authed(Tok1, Config),
+    Conn2 = ws_connect_authed(Tok2, Config),
+    _W1 = ws_find_or_create(?MODE_HUB, ~"p1", Conn1),
+    _W2 = ws_find_or_create(?MODE_HUB, ~"p2", Conn2),
+    %% Drain initial snapshot frames from Conn2.
+    drain_initial_snapshots(Conn2),
+    %% First move sets x=300, y=400. Wait for the broadcast actually applying
+    %% these values — this also ensures broadcast_entities now matches.
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"world.input",
+            ~"payload" => #{~"action" => ~"move", ~"x" => 300, ~"y" => 400}
+        },
+        Conn1
+    ),
+    {ok, _} = recv_p1_update_with_x(P1, 300, Conn2),
+    %% Second move changes ONLY x. Observer must see a partial diff with
+    %% just x — no y, no type — proving the server is emitting deltas.
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"world.input",
+            ~"payload" => #{~"action" => ~"move", ~"x" => 350, ~"y" => 400}
+        },
+        Conn1
+    ),
+    {ok, Update} = recv_p1_update_with_x(P1, 350, Conn2),
+    nova_test_ws:close(Conn1),
+    nova_test_ws:close(Conn2),
+    ?assertEqual(350, maps:get(~"x", Update)),
+    ?assertNot(maps:is_key(~"y", Update)),
+    ?assertNot(maps:is_key(~"type", Update)),
+    Config.
+
+%% Locks the input-order contract: when many inputs arrive between two
+%% broadcasts, the observer sees the LATEST input's state, not the oldest.
+%% Regression for the head-prepend / head-walk queue bug (PR #95).
+move_burst_collapses_to_latest_in_each_broadcast(Config) ->
+    {P1, Tok1} = register_player(~"bur_a", Config),
+    {_P2, Tok2} = register_player(~"bur_b", Config),
+    Conn1 = ws_connect_authed(Tok1, Config),
+    Conn2 = ws_connect_authed(Tok2, Config),
+    _W1 = ws_find_or_create(?MODE_HUB, ~"b1", Conn1),
+    _W2 = ws_find_or_create(?MODE_HUB, ~"b2", Conn2),
+    %% Fire 5 moves with no delay — they all land in roughly one tick window.
+    [
+        ok = nova_test_ws:send_json(
+            #{
+                ~"type" => ~"world.input",
+                ~"payload" => #{~"action" => ~"move", ~"x" => X, ~"y" => 100}
+            },
+            Conn1
+        )
+     || X <- [10, 20, 30, 40, 50]
+    ],
+    %% The eventual state observed must converge on x=50 (newest input wins).
+    {ok, Update} = recv_p1_update_with_x(P1, 50, Conn2),
+    nova_test_ws:close(Conn1),
+    nova_test_ws:close(Conn2),
+    ?assertEqual(50, maps:get(~"x", Update)),
+    Config.
+
 %% --- helpers ---
 
 register_player(Suffix, Config) ->
@@ -280,6 +384,47 @@ ws_join(WorldId, Cid, Conn) ->
     case maps:get(~"type", Reply) of
         ~"world.joined" -> {ok, maps:get(~"payload", Reply)};
         ~"error" -> {error, maps:get(~"reason", maps:get(~"payload", Reply))}
+    end.
+
+drain_initial_snapshots(Conn) ->
+    drain_initial_snapshots(Conn, 10).
+
+drain_initial_snapshots(_Conn, 0) ->
+    ok;
+drain_initial_snapshots(Conn, N) ->
+    case nova_test_ws:recv_json(Conn, 200) of
+        {ok, _} -> drain_initial_snapshots(Conn, N - 1);
+        {error, timeout} -> ok
+    end.
+
+recv_p1_update_with_x(PlayerId, X, Conn) ->
+    case
+        recv_until(
+            fun(M) ->
+                maps:get(~"type", M, undefined) =:= ~"world.tick" andalso
+                    lists:any(
+                        fun(U) ->
+                            maps:get(~"id", U, undefined) =:= PlayerId andalso
+                                maps:get(~"x", U, undefined) =:= X
+                        end,
+                        maps:get(~"updates", maps:get(~"payload", M), [])
+                    )
+            end,
+            Conn,
+            200
+        )
+    of
+        {ok, M} ->
+            Updates = maps:get(~"updates", maps:get(~"payload", M)),
+            [Update] = [
+                U
+             || U <- Updates,
+                maps:get(~"id", U, undefined) =:= PlayerId,
+                maps:get(~"x", U, undefined) =:= X
+            ],
+            {ok, Update};
+        Err ->
+            Err
     end.
 
 recv_until(Pred, Conn) ->
