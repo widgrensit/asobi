@@ -6,10 +6,11 @@
 -export([
     ws_connect_invalid_token/1,
     ws_heartbeat/1,
-    ws_unknown_type/1
+    ws_unknown_type/1,
+    ws_idle_auth_timeout_closes/1
 ]).
 
-all() -> [ws_connect_invalid_token, ws_heartbeat, ws_unknown_type].
+all() -> [ws_connect_invalid_token, ws_heartbeat, ws_unknown_type, ws_idle_auth_timeout_closes].
 
 init_per_suite(Config) ->
     asobi_test_helpers:start(Config).
@@ -59,4 +60,20 @@ ws_unknown_type(Config) ->
     {ok, Resp} = nova_test_ws:recv_json(Conn),
     ?assertMatch(#{~"type" := ~"error", ~"payload" := #{~"reason" := ~"unknown_type"}}, Resp),
     nova_test_ws:close(Conn),
+    Config.
+
+%% A WS that opens and never sends `session.connect` must be closed by
+%% the server with code 1008 once the idle-auth window elapses.
+ws_idle_auth_timeout_closes(Config) ->
+    Old = application:get_env(asobi, ws_idle_auth_timeout_ms),
+    application:set_env(asobi, ws_idle_auth_timeout_ms, 200),
+    try
+        {ok, Conn} = nova_test_ws:connect("/ws", Config),
+        ?assertEqual({error, {closed, 1008}}, nova_test_ws:recv(Conn, 2000))
+    after
+        case Old of
+            {ok, V} -> application:set_env(asobi, ws_idle_auth_timeout_ms, V);
+            undefined -> application:unset_env(asobi, ws_idle_auth_timeout_ms)
+        end
+    end,
     Config.
