@@ -6,7 +6,14 @@
 -export([world_phase_changed/3]).
 -export([matchmaker_queued/2, matchmaker_removed/2, matchmaker_formed/3]).
 -export([session_connected/1, session_disconnected/2]).
--export([ws_connected/0, ws_disconnected/0, ws_message_in/1, ws_message_out/1]).
+-export([
+    ws_connected/0,
+    ws_disconnected/0,
+    ws_message_in/1,
+    ws_message_out/1,
+    ws_connect_rate_limited/1,
+    ws_idle_auth_timeout/0
+]).
 -export([anticheat_violation/3]).
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).
@@ -157,6 +164,16 @@ ws_connected() ->
 -spec ws_disconnected() -> ok.
 ws_disconnected() ->
     telemetry:execute([asobi, ws, disconnected], #{count => 1}, #{}).
+
+-spec ws_connect_rate_limited(binary()) -> ok.
+ws_connect_rate_limited(PeerIp) ->
+    telemetry:execute(
+        [asobi, ws, connect_rate_limited], #{count => 1}, #{peer_ip => PeerIp}
+    ).
+
+-spec ws_idle_auth_timeout() -> ok.
+ws_idle_auth_timeout() ->
+    telemetry:execute([asobi, ws, idle_auth_timeout], #{count => 1}, #{}).
 
 -spec anticheat_violation(binary(), atom(), map()) -> ok.
 anticheat_violation(PlayerId, Type, Details) ->

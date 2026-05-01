@@ -10,18 +10,52 @@
 -define(MAX_JOINED_CHANNELS_PER_CONN, 32).
 -define(MAX_CHANNEL_ID_BYTES, 256).
 
--spec init(map()) -> {ok, map()}.
-init(State) ->
-    {ok, State#{session => undefined}}.
+%% Default time a freshly-connected WS has to send `session.connect`
+%% before we close it. Mobile TLS handshake on poor networks can be
+%% several seconds; 10s gives margin without leaving idle sockets
+%% holding cowboy acceptors. Override via `asobi.ws_idle_auth_timeout_ms`.
+-define(DEFAULT_IDLE_AUTH_TIMEOUT_MS, 10000).
 
--spec websocket_init(map()) -> {ok, map()}.
+-spec init(map()) -> {ok, map()}.
+init(#{req := Req} = State) ->
+    %% Capture peer IP before the upgrade so websocket_init can run the
+    %% per-IP connect-rate check without re-parsing the req.
+    PeerIp = asobi_peer:client_ip(Req),
+    {ok, State#{session => undefined, peer_ip => PeerIp}};
+init(State) ->
+    {ok, State#{session => undefined, peer_ip => ~"unknown"}}.
+
+-spec websocket_init(map()) -> {ok, map()} | {reply, {close, 1008, binary()}, map()}.
+websocket_init(#{peer_ip := PeerIp} = State) ->
+    case seki:check(asobi_ws_connect_limiter, PeerIp) of
+        {allow, _} ->
+            start_authenticated_session(State);
+        {deny, _} ->
+            asobi_telemetry:ws_connect_rate_limited(PeerIp),
+            {reply, {close, 1008, ~"rate_limited"}, State}
+    end;
 websocket_init(State) ->
+    %% No peer_ip — init/1 ran in a path without a req map. Skip the
+    %% connect-rate gate but still install the idle-auth timer.
+    start_authenticated_session(State).
+
+start_authenticated_session(State) ->
     asobi_telemetry:ws_connected(),
+    Now = erlang:system_time(millisecond),
+    TimeoutMs = idle_auth_timeout_ms(),
+    TimerRef = erlang:send_after(TimeoutMs, self(), idle_auth_timeout),
     {ok, State#{
-        connected_at => erlang:system_time(millisecond),
+        connected_at => Now,
         ws_msg_count => 0,
-        ws_msg_window_start => erlang:system_time(millisecond)
+        ws_msg_window_start => Now,
+        idle_auth_timer => TimerRef
     }}.
+
+idle_auth_timeout_ms() ->
+    case application:get_env(asobi, ws_idle_auth_timeout_ms) of
+        {ok, Ms} when is_integer(Ms), Ms > 0 -> Ms;
+        _ -> ?DEFAULT_IDLE_AUTH_TIMEOUT_MS
+    end.
 
 -spec websocket_handle({text | binary, binary()}, map()) ->
     {ok, map()} | {reply, {text, binary()}, map()}.
@@ -56,7 +90,10 @@ websocket_handle(_Frame, State) ->
     {ok, State}.
 
 -spec websocket_info(term(), map()) ->
-    {ok, map()} | {reply, {text, binary()}, map()} | {stop, map()}.
+    {ok, map()}
+    | {reply, {text, binary()}, map()}
+    | {reply, {close, non_neg_integer(), binary()}, map()}
+    | {stop, map()}.
 websocket_info({asobi_message, {match_state, MatchState}}, State) ->
     Reply = encode_reply(undefined, ~"match.state", MatchState),
     {reply, {text, Reply}, State};
@@ -91,6 +128,16 @@ websocket_info({asobi_message, {notification, Notif}}, State) ->
 websocket_info({session_revoked, Reason}, State) ->
     logger:notice(#{msg => ~"session_revoked", reason => Reason}),
     {stop, State#{session => undefined}};
+websocket_info(idle_auth_timeout, #{session := undefined} = State) ->
+    %% Client opened the WS and never sent session.connect within the
+    %% configured window. Close so the cowboy acceptor isn't held by an
+    %% idle peer that may never authenticate.
+    asobi_telemetry:ws_idle_auth_timeout(),
+    {reply, {close, 1008, ~"idle_auth_timeout"}, State};
+websocket_info(idle_auth_timeout, State) ->
+    %% Race: the timer fired but session.connect already succeeded.
+    %% Ignore.
+    {ok, State};
 websocket_info(_Info, State) ->
     {ok, State}.
 
@@ -121,7 +168,8 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
                     ok
             end,
             Reply = encode_reply(Cid, ~"session.connected", #{player_id => PlayerId}),
-            {reply, {text, Reply}, State#{session => SessionPid, player_id => PlayerId}};
+            State1 = cancel_idle_auth_timer(State),
+            {reply, {text, Reply}, State1#{session => SessionPid, player_id => PlayerId}};
         {error, Reason} ->
             Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
             {reply, {text, Reply}, State}
@@ -522,6 +570,12 @@ current_player_world(PlayerId) ->
     end.
 
 %% --- Internal ---
+
+cancel_idle_auth_timer(#{idle_auth_timer := Ref} = State) when is_reference(Ref) ->
+    _ = erlang:cancel_timer(Ref, [{async, true}, {info, false}]),
+    maps:remove(idle_auth_timer, State);
+cancel_idle_auth_timer(State) ->
+    State.
 
 authenticate(#{~"token" := Token}) ->
     case nova_auth_session:get_user_by_session_token(asobi_auth, Token) of

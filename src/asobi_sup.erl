@@ -111,10 +111,15 @@ register_limiters() ->
     %% Brute-force resistance: 5 auth requests/sec was the historical
     %% setting and is reasonable for honest UX; iap is per-purchase so
     %% 10/sec is plenty. The general-purpose api limiter stays at 300.
+    %% ws_connect protects the WebSocket upgrade path: 60/sec/IP is
+    %% high enough for legitimate mobile reconnect storms (carrier-NAT
+    %% means many real users share one IP) but low enough to bound a
+    %% single-IP flood of fresh connections.
     Defaults = #{
         auth => #{algorithm => sliding_window, limit => 5, window => 1000},
         iap => #{algorithm => sliding_window, limit => 10, window => 1000},
-        api => #{algorithm => sliding_window, limit => 300, window => 1000}
+        api => #{algorithm => sliding_window, limit => 300, window => 1000},
+        ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000}
     },
     Configured =
         case application:get_env(asobi, rate_limits, #{}) of
@@ -138,7 +143,8 @@ register_limiters() ->
 
 limiter_name(auth) -> asobi_auth_limiter;
 limiter_name(iap) -> asobi_iap_limiter;
-limiter_name(api) -> asobi_api_limiter.
+limiter_name(api) -> asobi_api_limiter;
+limiter_name(ws_connect) -> asobi_ws_connect_limiter.
 
 cluster_spec() ->
     #{

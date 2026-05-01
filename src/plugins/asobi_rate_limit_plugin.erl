@@ -59,18 +59,10 @@ rate_limit_key(Req) ->
         <<"Bearer ", _/binary>> ->
             case maps:get(auth_data, Req, undefined) of
                 #{player_id := Id} when is_binary(Id) -> Id;
-                _ -> peer_ip(Req)
+                _ -> asobi_peer:client_ip(Req)
             end;
         _ ->
-            peer_ip(Req)
-    end.
-
--spec peer_ip(cowboy_req:req()) -> binary().
-peer_ip(Req) ->
-    {IP, _Port} = cowboy_req:peer(Req),
-    case inet:ntoa(IP) of
-        Addr when is_list(Addr) -> list_to_binary(Addr);
-        _ -> ~"unknown"
+            asobi_peer:client_ip(Req)
     end.
 
 -spec select_limiter(cowboy_req:req()) -> atom().
