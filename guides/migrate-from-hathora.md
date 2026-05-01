@@ -29,18 +29,18 @@ They get you unblocked even if the full port takes a week:
    ```bash
    curl -s localhost:8080/api/v1/auth/register \
      -H 'content-type: application/json' \
-     -d '{"username":"test","password":"test"}'
-   # → { "token": "eyJ...", "player_id": "01HX..." }
+     -d '{"username":"test","password":"test1234"}'
+   # → { "username": "test", "player_id": "019de3...", "session_token": "wRqvop92/..." }
    ```
-   That `token` is what your client passes in `Authorization: Bearer …` from
-   here on, in place of any Hathora auth token.
+   That `session_token` is what your client passes in `Authorization: Bearer …`
+   from here on, in place of any Hathora auth token.
 3. **Queue for matchmaking** to confirm the matchmaker works end-to-end:
    ```bash
    curl -s localhost:8080/api/v1/matchmaker \
      -H 'content-type: application/json' \
-     -H 'authorization: Bearer eyJ...' \
-     -d '{"mode":"default","properties":{},"party":["01HX..."]}'
-   # → { "ticket_id": "...", "status": "pending" }
+     -H 'authorization: Bearer wRqvop92/...' \
+     -d '{"mode":"default","properties":{},"party":["019de3..."]}'
+   # → { "status": "pending", "ticket_id": "019de3..." }
    ```
 4. **Join the Discord** [`#migrations` channel](https://discord.gg/vYSfYYyXpu).
    Drop your Hathora setup (engine, language, lobby vs matchmaker,
