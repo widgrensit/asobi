@@ -120,12 +120,46 @@ Cancel a matchmaking ticket.
 {"type": "matchmaker.remove", "payload": {"ticket_id": "..."}}
 ```
 
-### `matchmaker.matched` (server push)
+### `match.matched` (server push)
 
-Notification that a match was found.
+Notification that the matchmaker formed a match including this player. Wire
+type is `match.matched` (the matchmaker emits a `{match_event, matched, ...}`
+internally, which the WS handler renders as `match.` + the event atom).
 
 ```json
-{"type": "matchmaker.matched", "payload": {"match_id": "...", "players": [...]}}
+{"type": "match.matched", "payload": {"match_id": "...", "players": [...]}}
+```
+
+> **Note for SDK authors — `match.matched` vs `match.joined`**
+>
+> Both events signal "the client is in a match and `match.state` will follow",
+> but they fire on different paths:
+>
+> - **`match.matched`** is pushed by the matchmaker after a queue forms a match.
+>   The client did not call `match.join`; the server has already placed it.
+> - **`match.joined`** is the reply to a client-initiated `match.join` (e.g.,
+>   joining a friend's match by id, or rejoining after disconnect).
+>
+> SDKs SHOULD subscribe to both and surface them as a single `OnMatchReady`
+> (or equivalent) event so consumers don't have to know which path was taken.
+> A matchmade flow will fire `match.matched` only; a direct-join flow will
+> fire `match.joined` only.
+
+### `match.matchmaker_failed` (server push)
+
+The matchmaker could not form a match for this ticket (e.g. no game module
+configured for the requested mode).
+
+```json
+{"type": "match.matchmaker_failed", "payload": {"reason": "no_game_module"}}
+```
+
+### `match.matchmaker_expired` (server push)
+
+The ticket exceeded the matchmaker's max wait time and was dropped.
+
+```json
+{"type": "match.matchmaker_expired", "payload": {"ticket_id": "..."}}
 ```
 
 ## Worlds
