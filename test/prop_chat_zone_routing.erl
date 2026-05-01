@@ -18,14 +18,14 @@
 -define(PROX_RADIUS, 1).
 
 chat_zone_routing_test_() ->
-    {timeout, 60,
-        {setup, fun setup/0, fun cleanup/1, [
+    {setup, fun setup/0, fun cleanup/1, [
+        {timeout, max(60, ?NUMTESTS div 2),
             ?_assert(
                 proper:quickcheck(prop_chat_zone_routing(), [
                     {numtests, ?NUMTESTS}, {to_file, user}
                 ])
-            )
-        ]}}.
+            )}
+    ]}.
 
 setup() ->
     case whereis(nova_scope) of
