@@ -103,8 +103,8 @@ UDP relay if you need sub-3ms physics.
 |---|---|---|---|
 | **Godot 4.x** (GDScript) | [asobi-godot](https://github.com/widgrensit/asobi-godot) | [Guide](https://asobi.dev/godot) | [Demo](https://github.com/widgrensit/asobi-godot-demo) |
 | **Defold** (Lua) | [asobi-defold](https://github.com/widgrensit/asobi-defold) | [Guide](https://asobi.dev/defold) | [Demo](https://github.com/widgrensit/asobi-defold-demo) |
-| **LÖVE** (Lua) | _asobi-love — ships May 2026_ | — | — |
-| **Phaser** (TypeScript) | _asobi-phaser — ships May 2026_ | — | — |
+| **LÖVE** (Lua) | _planned — [tracking #102](https://github.com/widgrensit/asobi/issues/102)_ | — | — |
+| **Phaser** (TypeScript) | [asobi-js](https://github.com/widgrensit/asobi-js) (browser) | — | _example planned — [#103](https://github.com/widgrensit/asobi/issues/103)_ |
 | **Unity 2021.3+** (C#) | [asobi-unity](https://github.com/widgrensit/asobi-unity) | [Guide](https://asobi.dev/unity) | [Demo](https://github.com/widgrensit/asobi-unity-demo) |
 | **Unreal Engine 5** (C++) | [asobi-unreal](https://github.com/widgrensit/asobi-unreal) | — | — |
 | **TypeScript / JS** (Browser + Node) | [asobi-js](https://github.com/widgrensit/asobi-js) | — | — |

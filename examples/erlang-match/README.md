@@ -32,11 +32,14 @@ Expected:
 
 ```json
 {
-  "player_id": "01HX...",
-  "session_token": "eyJ...",
-  "username": "alice"
+  "username": "alice",
+  "player_id": "019de3...",
+  "session_token": "wRqvop92/QgNe9immJuUzQrL9jelCYk3D3sB0NK7lmQ="
 }
 ```
+
+> The `session_token` is a base64-encoded random secret (not a JWT). Pass it
+> verbatim in `Authorization: Bearer …` on subsequent calls.
 
 Now connect a WebSocket client (`wscat`, Defold, Godot, etc.) and play
 the `hello` mode. See the full client protocol in
