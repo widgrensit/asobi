@@ -18,6 +18,7 @@
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).
 -export([vote_started/2, vote_cast/2, vote_resolved/3]).
+-export([auth_cache_hit/1, auth_cache_miss/1, auth_cache_sweep/0]).
 -export([handle_event/4]).
 
 -spec setup() -> ok.
@@ -232,6 +233,20 @@ vote_resolved(VoteId, DurationMs, Result) ->
     telemetry:execute([asobi, vote, resolved], #{duration_ms => DurationMs, count => 1}, #{
         vote_id => VoteId, result => Result
     }).
+
+%% --- Auth Cache Events ---
+
+-spec auth_cache_hit(positive | negative) -> ok.
+auth_cache_hit(Kind) ->
+    telemetry:execute([asobi, auth_cache, hit], #{count => 1}, #{kind => Kind}).
+
+-spec auth_cache_miss(positive | negative) -> ok.
+auth_cache_miss(Kind) ->
+    telemetry:execute([asobi, auth_cache, miss], #{count => 1}, #{kind => Kind}).
+
+-spec auth_cache_sweep() -> ok.
+auth_cache_sweep() ->
+    telemetry:execute([asobi, auth_cache, sweep], #{count => 1}, #{}).
 
 %% --- Internal ---
 

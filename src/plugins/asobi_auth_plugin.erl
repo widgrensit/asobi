@@ -8,7 +8,7 @@ verify(Req) ->
         undefined ->
             false;
         <<"Bearer ", Token/binary>> ->
-            case nova_auth_session:get_user_by_session_token(asobi_auth, Token) of
+            case asobi_auth_cache:resolve_token(Token) of
                 {ok, Player} ->
                     {true, #{player_id => maps:get(id, Player)}};
                 {error, _} ->
