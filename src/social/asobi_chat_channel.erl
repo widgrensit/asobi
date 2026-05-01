@@ -52,7 +52,6 @@ get_history(ChannelId, Limit) when is_integer(Limit) ->
 
 -spec init({binary(), binary()}) -> {ok, map(), pos_integer()}.
 init({ChannelId, ChannelType}) ->
-    ensure_registry(),
     ets:insert(?REGISTRY, {ChannelId, self()}),
     process_flag(trap_exit, true),
     {ok,
@@ -151,19 +150,9 @@ start_new_channel(ChannelId) ->
     end.
 
 lookup(ChannelId) ->
-    ensure_registry(),
     case ets:lookup(?REGISTRY, ChannelId) of
         [{_, Pid}] -> {ok, Pid};
         [] -> error
-    end.
-
-ensure_registry() ->
-    case ets:whereis(?REGISTRY) of
-        undefined ->
-            _ = ets:new(?REGISTRY, [named_table, public, set, {read_concurrency, true}]),
-            ok;
-        _ ->
-            ok
     end.
 
 %% --- Persistence ---
