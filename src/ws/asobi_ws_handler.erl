@@ -577,13 +577,15 @@ cancel_idle_auth_timer(#{idle_auth_timer := Ref} = State) when is_reference(Ref)
 cancel_idle_auth_timer(State) ->
     State.
 
-authenticate(#{~"token" := Token}) ->
-    case nova_auth_session:get_user_by_session_token(asobi_auth, Token) of
+authenticate(#{~"token" := Token}) when is_binary(Token) ->
+    case asobi_auth_cache:resolve_token(Token) of
         {ok, Player} ->
             {ok, maps:get(id, Player)};
         {error, _} ->
             {error, ~"invalid_token"}
-    end.
+    end;
+authenticate(_) ->
+    {error, ~"invalid_token"}.
 
 check_ws_rate_limit(#{ws_msg_count := Count, ws_msg_window_start := WindowStart} = State) ->
     Now = erlang:system_time(millisecond),

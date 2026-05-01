@@ -17,6 +17,7 @@ init([]) ->
     },
     Children = [
         rate_limit_spec(),
+        auth_cache_spec(),
         cluster_spec(),
         player_session_sup(),
         match_sup(),
@@ -150,6 +151,12 @@ cluster_spec() ->
     #{
         id => asobi_cluster,
         start => {asobi_cluster, start_link, []}
+    }.
+
+auth_cache_spec() ->
+    #{
+        id => asobi_auth_cache,
+        start => {asobi_auth_cache, start_link, []}
     }.
 
 season_manager_spec() ->

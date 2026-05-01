@@ -53,6 +53,7 @@ refresh(#{json := #{~"session_token" := OldToken}} = _Req) when is_binary(OldTok
     case nova_auth_session:get_user_by_session_token(asobi_auth, OldToken) of
         {ok, Player} ->
             nova_auth_session:delete_session_token(asobi_auth, OldToken),
+            asobi_auth_cache:invalidate(OldToken),
             {ok, NewToken} = nova_auth_session:generate_session_token(asobi_auth, Player),
             {json, 200, #{}, #{
                 player_id => maps:get(id, Player),
