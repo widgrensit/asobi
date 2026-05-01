@@ -1,4 +1,5 @@
 -module(asobi_cluster).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(gen_server).
 
 -export([start_link/0]).
@@ -95,7 +96,8 @@ maybe_connect(Node) ->
         false ->
             case net_adm:ping(Node) of
                 pong ->
-                    logger:info(#{msg => ~"cluster node connected", node => Node});
+                    ?LOG_INFO(#{msg => ~"cluster node connected", node => Node}),
+                    ok;
                 pang ->
                     ok
             end

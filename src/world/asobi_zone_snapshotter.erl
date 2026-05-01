@@ -1,4 +1,5 @@
 -module(asobi_zone_snapshotter).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(gen_server).
 
 %% Batched async DB writer for zone entity snapshots.
@@ -129,7 +130,7 @@ write_snapshot(#{world_id := WorldId, coords := {ZX, ZY}} = Data) ->
         {ok, _} ->
             ok;
         {error, Reason} ->
-            logger:warning(#{msg => ~"zone snapshot write failed", reason => Reason}),
+            ?LOG_WARNING(#{msg => ~"zone snapshot write failed", reason => Reason}),
             ok
     end.
 
@@ -139,6 +140,6 @@ do_delete_world(WorldId) ->
         {ok, _} ->
             ok;
         {error, Reason} ->
-            logger:warning(#{msg => ~"zone snapshot cleanup failed", reason => Reason}),
+            ?LOG_WARNING(#{msg => ~"zone snapshot cleanup failed", reason => Reason}),
             ok
     end.

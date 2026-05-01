@@ -1,4 +1,5 @@
 -module(asobi_zone).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(gen_server).
 
 -export([start_link/1]).
@@ -427,7 +428,7 @@ apply_inputs(GameMod, [{PlayerId, Input} | Rest], Entities) ->
         {ok, Entities1} ->
             apply_inputs(GameMod, Rest, Entities1);
         {error, Reason} ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"zone input rejected",
                 player_id => PlayerId,
                 reason => Reason

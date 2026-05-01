@@ -1,4 +1,5 @@
 -module(asobi_matchmaker).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(gen_server).
 
 -export([start_link/0, add/2, remove/2, get_ticket/1, get_ticket/2, get_queue_stats/0]).
@@ -326,7 +327,7 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                     ),
                     spawn_matches(Rest, Failed);
                 {error, Reason} ->
-                    logger:error(#{
+                    ?LOG_ERROR(#{
                         msg => ~"match spawn failed, re-queuing players",
                         mode => Mode,
                         players => PlayerIds,
@@ -375,7 +376,7 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                                 of
                                     WP when is_pid(WP) -> WP
                                 end,
-                            logger:notice(#{
+                            ?LOG_NOTICE(#{
                                 msg => ~"world spawn complete",
                                 world_pid => WorldPid,
                                 instance_pid => InstancePid
@@ -385,7 +386,7 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                             lists:foreach(
                                 fun(PlayerId) when is_binary(PlayerId) ->
                                     JoinResult = asobi_world_server:join(WorldPid, PlayerId),
-                                    logger:notice(#{
+                                    ?LOG_NOTICE(#{
                                         msg => ~"player joined world",
                                         player_id => PlayerId,
                                         result => JoinResult
@@ -402,7 +403,7 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                                 SpawnPlayerIds
                             );
                         {error, Reason} ->
-                            logger:error(#{
+                            ?LOG_ERROR(#{
                                 msg => ~"world spawn failed",
                                 mode => Mode,
                                 players => SpawnPlayerIds,
@@ -411,7 +412,7 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                     end
                 catch
                     Class:Reason2:Stack ->
-                        logger:error(#{
+                        ?LOG_ERROR(#{
                             msg => ~"world spawn crashed",
                             mode => Mode,
                             players => SpawnPlayerIds,
@@ -428,7 +429,7 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
     end.
 
 notify_no_game_module(Mode, PlayerIds) ->
-    logger:warning(#{msg => ~"no game module for mode", mode => Mode}),
+    ?LOG_WARNING(#{msg => ~"no game module for mode", mode => Mode}),
     lists:foreach(
         fun(PlayerId) when is_binary(PlayerId) ->
             asobi_presence:send(

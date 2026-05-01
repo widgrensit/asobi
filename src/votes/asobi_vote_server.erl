@@ -1,4 +1,5 @@
 -module(asobi_vote_server).
+-include_lib("kernel/include/logger.hrl").
 -moduledoc """
 Vote lifecycle state machine.
 
@@ -533,7 +534,7 @@ ranked_eliminate(_Votes, [], _TieBreaker) ->
     undefined;
 ranked_eliminate(Votes, Remaining, TieBreaker) ->
     RemainingSet = sets:from_list(Remaining, [{version, 2}]),
-    InitCounts = lists:foldl(fun(Id, Acc) when is_map(Acc) -> Acc#{Id => 0} end, #{}, Remaining),
+    InitCounts = maps:from_keys(Remaining, 0),
     FirstChoicesRaw = maps:fold(
         fun
             (_VoterId, Ranking, Acc) when is_list(Ranking), is_map(Acc) ->
@@ -675,10 +676,10 @@ merge_spectator_result(PlayerResult, SpectatorResult, SpectatorW, Options, TieBr
     }.
 
 init_counts(Options) ->
-    lists:foldl(fun(#{id := Id}, Acc) when is_map(Acc) -> Acc#{Id => 0} end, #{}, Options).
+    maps:from_list([{Id, 0} || #{id := Id} <- Options]).
 
 init_counts_float(Options) ->
-    lists:foldl(fun(#{id := Id}, Acc) when is_map(Acc) -> Acc#{Id => 0.0} end, #{}, Options).
+    maps:from_list([{Id, 0.0} || #{id := Id} <- Options]).
 
 merge_template(Template, Config) ->
     Templates = ensure_map(application:get_env(asobi, vote_templates, #{})),
@@ -843,7 +844,7 @@ persist_vote(#{
         {ok, _} ->
             ok;
         {error, Reason} ->
-            logger:warning(#{msg => ~"failed to persist vote", vote_id => VoteId, reason => Reason}),
+            ?LOG_WARNING(#{msg => ~"failed to persist vote", vote_id => VoteId, reason => Reason}),
             ok
     end.
 

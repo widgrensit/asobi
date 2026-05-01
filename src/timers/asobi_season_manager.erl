@@ -1,4 +1,5 @@
 -module(asobi_season_manager).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(gen_server).
 
 %% Periodically checks season boundaries and manages transitions.
@@ -58,7 +59,7 @@ activate_upcoming(Now) ->
                                 asobi_season, Season, #{status => ~"active"}, [status]
                             ),
                             _ = asobi_repo:update(CS),
-                            logger:notice(#{
+                            ?LOG_NOTICE(#{
                                 msg => ~"season_activated",
                                 season_id => Id,
                                 name => maps:get(name, Season)
@@ -86,7 +87,7 @@ end_expired(Now) ->
                                 asobi_season, Season, #{status => ~"ended"}, [status]
                             ),
                             _ = asobi_repo:update(CS),
-                            logger:notice(#{
+                            ?LOG_NOTICE(#{
                                 msg => ~"season_ended",
                                 season_id => Id,
                                 name => maps:get(name, Season)

@@ -1,4 +1,5 @@
 -module(asobi_oauth_controller).
+-include_lib("kernel/include/logger.hrl").
 
 -export([authenticate/1, link/1, unlink/1]).
 
@@ -232,7 +233,7 @@ init_player_stats(PlayerId) ->
         {ok, _} ->
             ok;
         {error, Reason} ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"player_stats_init_failed",
                 player_id => PlayerId,
                 reason => Reason

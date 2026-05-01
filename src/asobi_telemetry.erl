@@ -1,4 +1,5 @@
 -module(asobi_telemetry).
+-include_lib("kernel/include/logger.hrl").
 
 -export([setup/0]).
 -export([match_started/2, match_finished/3, match_player_joined/2, match_player_left/2]).
@@ -225,9 +226,10 @@ vote_resolved(VoteId, DurationMs, Result) ->
     telemetry:handler_config()
 ) -> ok.
 handle_event(EventName, Measurements, Metadata, _Config) ->
-    logger:debug(#{
+    ?LOG_DEBUG(#{
         msg => ~"telemetry_event",
         event => EventName,
         measurements => Measurements,
         metadata => Metadata
-    }).
+    }),
+    ok.

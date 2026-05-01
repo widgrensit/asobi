@@ -1,4 +1,5 @@
 -module(asobi_match_server).
+-include_lib("kernel/include/logger.hrl").
 -moduledoc """
 Per-match `gen_statem` driving the configured game module.
 
@@ -122,7 +123,7 @@ init(Config) ->
     pg:join(?PG_SCOPE, {asobi_match_server, MatchId}, self()),
     case recover_state(MatchId) of
         {ok, SavedStatus, SavedState} ->
-            logger:notice(#{msg => ~"match recovered", match_id => MatchId, status => SavedStatus}),
+            ?LOG_NOTICE(#{msg => ~"match recovered", match_id => MatchId, status => SavedStatus}),
             {ok, SavedStatus, SavedState};
         none ->
             GameMod = maps:get(game_module, Config),
@@ -486,7 +487,7 @@ apply_inputs(Mod, [{PlayerId, Input} | Rest], GS) ->
         {ok, GS1} ->
             apply_inputs(Mod, Rest, GS1);
         {error, Reason} ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"game input rejected",
                 player_id => PlayerId,
                 reason => Reason

@@ -1,4 +1,5 @@
 -module(asobi_iap).
+-include_lib("kernel/include/logger.hrl").
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -274,10 +275,10 @@ do_verify_google(PackageName, ProductId, PurchaseToken) ->
                 {ok, {{_, 404, _}, _, _}} ->
                     {error, ~"purchase_not_found"};
                 {ok, {{_, Status, _}, _, _}} ->
-                    logger:warning(#{msg => ~"google_iap_api_error", status => Status}),
+                    ?LOG_WARNING(#{msg => ~"google_iap_api_error", status => Status}),
                     {error, ~"google_api_error"};
                 {error, Reason} ->
-                    logger:warning(#{msg => ~"google_iap_request_failed", reason => Reason}),
+                    ?LOG_WARNING(#{msg => ~"google_iap_request_failed", reason => Reason}),
                     {error, ~"google_api_unavailable"}
             end;
         {error, Reason} ->

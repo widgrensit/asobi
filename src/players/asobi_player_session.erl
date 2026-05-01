@@ -1,4 +1,5 @@
 -module(asobi_player_session).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(gen_server).
 
 -export([start_link/2, stop/1]).
@@ -69,7 +70,7 @@ handle_cast({reconnect_world, WorldPid}, #{player_id := PlayerId} = State) when
         _ -> ok
     catch
         Class:Reason ->
-            logger:debug(#{
+            ?LOG_DEBUG(#{
                 msg => ~"world_reconnect_failed",
                 player_id => PlayerId,
                 class => Class,

@@ -1,4 +1,5 @@
 -module(asobi_steam).
+-include_lib("kernel/include/logger.hrl").
 
 -export([validate_ticket/1]).
 
@@ -70,10 +71,10 @@ do_validate_ticket(ApiKey, AppId, Ticket) ->
         {ok, {{_, 200, _}, _, Body}} when is_binary(Body) ->
             parse_auth_response(Body);
         {ok, {{_, Status, _}, _, _}} ->
-            logger:warning(#{msg => ~"steam_api_error", status => Status}),
+            ?LOG_WARNING(#{msg => ~"steam_api_error", status => Status}),
             {error, ~"steam_api_error"};
         {error, Reason} ->
-            logger:warning(#{msg => ~"steam_api_request_failed", reason => Reason}),
+            ?LOG_WARNING(#{msg => ~"steam_api_request_failed", reason => Reason}),
             {error, ~"steam_api_unavailable"}
     end.
 

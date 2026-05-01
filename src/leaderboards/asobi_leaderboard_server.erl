@@ -1,4 +1,5 @@
 -module(asobi_leaderboard_server).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(gen_server).
 
 -export([start_link/1, submit/3, top/2, rank/2, around/3]).
@@ -274,7 +275,7 @@ flush_entries(BoardId, Table, {_NegScore, PlayerId} = Key) ->
         {ok, _} ->
             ok;
         {error, FlushErr} ->
-            logger:error(#{
+            ?LOG_ERROR(#{
                 msg => ~"leaderboard flush failed",
                 board_id => BoardId,
                 player_id => PlayerId,

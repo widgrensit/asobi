@@ -1,4 +1,5 @@
 -module(asobi_ws_handler).
+-include_lib("kernel/include/logger.hrl").
 -behaviour(nova_websocket).
 
 -export([init/1, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
@@ -89,7 +90,7 @@ websocket_info({asobi_message, {notification, Notif}}, State) ->
     Reply = encode_reply(undefined, ~"notification.new", Notif),
     {reply, {text, Reply}, State};
 websocket_info({session_revoked, Reason}, State) ->
-    logger:notice(#{msg => ~"session_revoked", reason => Reason}),
+    ?LOG_NOTICE(#{msg => ~"session_revoked", reason => Reason}),
     {stop, State#{session => undefined}};
 websocket_info(_Info, State) ->
     {ok, State}.
@@ -467,7 +468,7 @@ safe_handle_message(Msg, State) ->
         error:{case_clause, _}:_Stack ->
             reply_error(Msg, ~"invalid_payload", State);
         Class:Reason:Stack ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"ws_handler_crash",
                 class => Class,
                 reason => Reason,
