@@ -9,7 +9,7 @@
 
 -export([init/1, tick/2]).
 -export([notify/2, pause/1, resume/1]).
--export([current/1, remaining/1, config/1, timers_info/1, info/1]).
+-export([current/1, remaining/1, config/1, timers_info/1, info/1, is_complete/1]).
 
 -export_type([phase_state/0, phase_def/0, phase_event/0]).
 
@@ -189,6 +189,11 @@ config(PS) ->
 -spec timers_info(phase_state()) -> #{binary() => map()}.
 timers_info(#{active_timers := Timers}) ->
     maps:map(fun(_Id, T) -> asobi_timer:info(T) end, Timers).
+
+-spec is_complete(undefined | phase_state() | map()) -> boolean().
+is_complete(undefined) -> false;
+is_complete(#{complete := true}) -> true;
+is_complete(_) -> false.
 
 -spec info(phase_state()) -> map().
 info(#{complete := true}) ->

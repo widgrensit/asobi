@@ -207,20 +207,12 @@ running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue
                     State1 = State#{game_state => GS2, input_queue => []},
                     State2 = maybe_start_vote(Mod, State1),
                     State3 = tick_reconnect(TickRate, tick_phases(TickRate, State2)),
-                    case maps:get(phase_state, State3) of
-                        PS when is_map(PS) ->
-                            case asobi_phase:info(PS) of
-                                #{status := complete} ->
-                                    {next_state, finished, State3#{
-                                        result => #{status => ~"phases_complete"}
-                                    }};
-                                _ ->
-                                    broadcast_state(State3),
-                                    {keep_state, State3, [
-                                        {state_timeout, TickRate, tick}
-                                    ]}
-                            end;
-                        _ ->
+                    case asobi_phase:is_complete(maps:get(phase_state, State3)) of
+                        true ->
+                            {next_state, finished, State3#{
+                                result => #{status => ~"phases_complete"}
+                            }};
+                        false ->
                             broadcast_state(State3),
                             {keep_state, State3, [{state_timeout, TickRate, tick}]}
                     end;
@@ -231,18 +223,12 @@ running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue
             State1 = State#{game_state => GS1, input_queue => []},
             State2 = maybe_start_vote(Mod, State1),
             State3 = tick_phases(TickRate, State2),
-            case maps:get(phase_state, State3) of
-                PS when is_map(PS) ->
-                    case asobi_phase:info(PS) of
-                        #{status := complete} ->
-                            {next_state, finished, State3#{
-                                result => #{status => ~"phases_complete"}
-                            }};
-                        _ ->
-                            broadcast_state(State3),
-                            {keep_state, State3, [{state_timeout, TickRate, tick}]}
-                    end;
-                _ ->
+            case asobi_phase:is_complete(maps:get(phase_state, State3)) of
+                true ->
+                    {next_state, finished, State3#{
+                        result => #{status => ~"phases_complete"}
+                    }};
+                false ->
                     broadcast_state(State3),
                     {keep_state, State3, [{state_timeout, TickRate, tick}]}
             end
@@ -255,14 +241,16 @@ running(cast, cancel, State) ->
     {next_state, finished, State#{result => #{status => ~"cancelled"}}};
 running(
     info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := undefined} = State
-) ->
+) when is_pid(DownPid) ->
     %% No reconnect policy active — a session DOWN is treated as an explicit
     %% leave (player removed from match; match shuts down if empty).
     case find_player_by_pid(DownPid, State) of
         {ok, PlayerId} -> handle_leave(PlayerId, State);
         none -> keep_state_and_data
     end;
-running(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := RS} = State) ->
+running(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := RS} = State) when
+    is_pid(DownPid)
+->
     %% Reconnect policy active — start the grace timer instead of removing
     %% the player. asobi_reconnect:tick/2 (called every match tick by
     %% tick_reconnect/2) will fire grace_expired if the player doesn't come
