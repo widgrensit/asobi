@@ -30,16 +30,16 @@
 }).
 
 input_never_dropped_test_() ->
-    {timeout, 120,
-        {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
-            [
+    {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
+        [
+            {timeout, max(60, ?NUMTESTS div 2),
                 ?_assert(
                     proper:quickcheck(prop_input_never_dropped(Ctx), [
                         {numtests, ?NUMTESTS}, {to_file, user}
                     ])
-                )
-            ]
-        end}}.
+                )}
+        ]
+    end}.
 
 setup() ->
     case whereis(nova_scope) of
