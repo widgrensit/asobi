@@ -19,6 +19,7 @@ the place to put callback hardening.
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1]).
+-export([reconnect/2]).
 -export([whereis/1]).
 
 -define(PG_SCOPE, nova_scope).
@@ -78,6 +79,13 @@ resume(Pid) ->
 -spec cancel(pid()) -> ok.
 cancel(Pid) ->
     gen_statem:cast(Pid, cancel).
+
+-spec reconnect(pid(), binary()) -> ok | {error, term()}.
+reconnect(Pid, PlayerId) when is_binary(PlayerId) ->
+    case gen_statem:call(Pid, {reconnect, PlayerId}) of
+        ok -> ok;
+        {error, _} = Err -> Err
+    end.
 
 -spec start_vote(pid(), map()) -> {ok, pid()} | {error, term()}.
 start_vote(Pid, VoteConfig) ->
@@ -245,6 +253,31 @@ running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 running(cast, cancel, State) ->
     {next_state, finished, State#{result => #{status => ~"cancelled"}}};
+running(
+    info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := undefined} = State
+) ->
+    %% No reconnect policy active — a session DOWN is treated as an explicit
+    %% leave (player removed from match; match shuts down if empty).
+    case find_player_by_pid(DownPid, State) of
+        {ok, PlayerId} -> handle_leave(PlayerId, State);
+        none -> keep_state_and_data
+    end;
+running(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := RS} = State) ->
+    %% Reconnect policy active — start the grace timer instead of removing
+    %% the player. asobi_reconnect:tick/2 (called every match tick by
+    %% tick_reconnect/2) will fire grace_expired if the player doesn't come
+    %% back in time.
+    case find_player_by_pid(DownPid, State) of
+        {ok, PlayerId} ->
+            Now = erlang:system_time(millisecond),
+            {Events, RS1} = asobi_reconnect:disconnect(PlayerId, Now, RS),
+            State1 = handle_reconnect_events(Events, State#{reconnect_state => RS1}),
+            {keep_state, State1};
+        none ->
+            keep_state_and_data
+    end;
+running({call, From}, {reconnect, PlayerId}, State) when is_binary(PlayerId) ->
+    handle_reconnect_call(From, PlayerId, State);
 running({call, From}, pause, State) ->
     {next_state, paused, State, [{reply, From, ok}]};
 running({call, From}, resume, _State) ->
@@ -435,8 +468,17 @@ handle_join(
         false ->
             case Mod:join(PlayerId, GS) of
                 {ok, GS1} ->
+                    %% Monitor the player session so we can run reconnect grace
+                    %% (or immediate cleanup) when the WS process dies. Mirrors
+                    %% asobi_world_server's handle_join monitor setup.
+                    SessionPid = find_player_pid(PlayerId),
+                    MonRef = erlang:monitor(process, SessionPid),
                     Players1 = Players#{
-                        PlayerId => #{joined_at => erlang:system_time(millisecond)}
+                        PlayerId => #{
+                            joined_at => erlang:system_time(millisecond),
+                            session_pid => SessionPid,
+                            monitor_ref => MonRef
+                        }
                     },
                     VetoTokens = maps:get(veto_tokens, State),
                     VetoCount = maps:get(veto_tokens_per_player, State),
@@ -469,6 +511,12 @@ handle_leave(PlayerId, #{players := Players, game_module := Mod, game_state := G
             keep_state_and_data;
         true ->
             asobi_telemetry:match_player_left(maps:get(match_id, State), PlayerId),
+            %% Demonitor the player session if we set one up at join time so
+            %% a stale 'DOWN' message can't trigger a second leave path.
+            case maps:get(monitor_ref, maps:get(PlayerId, Players, #{}), undefined) of
+                undefined -> ok;
+                MonRef -> erlang:demonitor(MonRef, [flush])
+            end,
             {ok, GS1} = Mod:leave(PlayerId, GS),
             Players1 = maps:remove(PlayerId, Players),
             case map_size(Players1) of
@@ -733,6 +781,55 @@ tick_reconnect(DeltaMs, #{reconnect_state := RS} = State) ->
     {Events, RS1} = asobi_reconnect:tick(DeltaMs, RS),
     State1 = State#{reconnect_state => RS1},
     handle_reconnect_events(Events, State1).
+
+handle_reconnect_call(From, PlayerId, #{players := Players, reconnect_state := RS} = State) when
+    RS =/= undefined
+->
+    case maps:is_key(PlayerId, Players) of
+        false ->
+            {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
+        true ->
+            {_Events, RS1} = asobi_reconnect:reconnect(PlayerId, RS),
+            %% Re-monitor: the new session pid is whoever is currently
+            %% registered as the WS owner for this player_id.
+            PlayerMeta0 = maps:get(PlayerId, Players),
+            case maps:get(monitor_ref, PlayerMeta0, undefined) of
+                undefined -> ok;
+                OldRef -> erlang:demonitor(OldRef, [flush])
+            end,
+            NewSessionPid = find_player_pid(PlayerId),
+            NewMonRef = erlang:monitor(process, NewSessionPid),
+            PlayerMeta1 = PlayerMeta0#{
+                session_pid => NewSessionPid,
+                monitor_ref => NewMonRef
+            },
+            Players1 = Players#{PlayerId => PlayerMeta1},
+            {keep_state, State#{reconnect_state => RS1, players => Players1}, [
+                {reply, From, ok}
+            ]}
+    end;
+handle_reconnect_call(From, _PlayerId, _State) ->
+    {keep_state_and_data, [{reply, From, {error, no_reconnect_policy}}]}.
+
+-spec find_player_pid(binary()) -> pid().
+find_player_pid(PlayerId) ->
+    case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
+        [Pid | _] -> Pid;
+        [] -> self()
+    end.
+
+-spec find_player_by_pid(pid(), map()) -> {ok, binary()} | none.
+find_player_by_pid(Pid, #{players := Players}) ->
+    maps:fold(
+        fun
+            (PlayerId, #{session_pid := SPid}, none) when SPid =:= Pid ->
+                {ok, PlayerId};
+            (_, _, Acc) ->
+                Acc
+        end,
+        none,
+        Players
+    ).
 
 handle_reconnect_events([], State) ->
     State;
