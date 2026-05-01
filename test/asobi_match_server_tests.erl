@@ -58,7 +58,11 @@ match_server_test_() ->
         {timeout, 70, {"waiting timeout stops match", fun waiting_timeout/0}},
         {"get_info works in all states", fun get_info_all_states/0},
         {"state backup and recovery", fun state_backup_recovery/0},
-        {"generate_id produces valid uuidv7", fun generate_id_format/0}
+        {"generate_id produces valid uuidv7", fun generate_id_format/0},
+        {"disconnect with reconnect policy starts grace", fun disconnect_starts_grace/0},
+        {"disconnect without policy is immediate leave", fun disconnect_no_policy_leaves/0},
+        {"reconnect within grace keeps player", fun reconnect_within_grace_keeps/0},
+        {"reconnect with no policy returns error", fun reconnect_no_policy_errors/0}
     ]}.
 
 %% --- Tests ---
@@ -277,7 +281,104 @@ generate_id_format() ->
     ),
     ?assertEqual(<<"7">>, binary:part(Id, 14, 1)).
 
+%% --- Reconnect tests ---
+
+disconnect_starts_grace() ->
+    %% With a reconnect policy, killing the player session must NOT remove
+    %% the player from the match — the grace timer holds them in place
+    %% until reconnect/2 returns or grace expires.
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 30_000,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    SessionPid = fake_session(~"p1"),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    timer:sleep(50),
+    %% Match transitioned to running; player count is 1.
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+
+    exit(SessionPid, kill),
+    timer:sleep(50),
+    %% Player still counted — grace is active.
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    stop(Pid).
+
+disconnect_no_policy_leaves() ->
+    %% Without a reconnect policy, session DOWN goes through handle_leave —
+    %% same as an explicit leave/2.
+    Pid = start_match(#{min_players => 1, max_players => 2}),
+    unlink(Pid),
+    PidRef = monitor(process, Pid),
+    SessionPid = fake_session(~"p1"),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    timer:sleep(50),
+
+    exit(SessionPid, kill),
+    %% Single-player match shuts down on last leave.
+    receive
+        {'DOWN', PidRef, process, Pid, {shutdown, empty}} -> ok
+    after 2000 ->
+        ?assert(false)
+    end.
+
+reconnect_within_grace_keeps() ->
+    %% Disconnect → reconnect inside the grace window leaves the player
+    %% counted and re-monitors the new session.
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 30_000,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    SessionPid1 = fake_session(~"p1"),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    timer:sleep(50),
+
+    exit(SessionPid1, kill),
+    timer:sleep(30),
+    %% Replace the registered session with a fresh fake.
+    catch pg:leave(nova_scope, {player, ~"p1"}, SessionPid1),
+    _SessionPid2 = fake_session(~"p1"),
+    ?assertEqual(ok, asobi_match_server:reconnect(Pid, ~"p1")),
+    timer:sleep(30),
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    stop(Pid).
+
+reconnect_no_policy_errors() ->
+    Pid = start_match(#{min_players => 1, max_players => 2}),
+    _SessionPid = fake_session(~"p1"),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    timer:sleep(50),
+    ?assertMatch({error, no_reconnect_policy}, asobi_match_server:reconnect(Pid, ~"p1")),
+    stop(Pid).
+
 %% --- Helpers ---
+
+fake_session(PlayerId) ->
+    %% Spawn a tiny process and register it as the player's session in the
+    %% nova_scope pg group so asobi_match_server:find_player_pid/1 returns it.
+    Pid = spawn(fun L() ->
+        receive
+            stop -> ok;
+            _ -> L()
+        end
+    end),
+    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
+    Pid.
 
 stop(Pid) ->
     case is_process_alive(Pid) of
