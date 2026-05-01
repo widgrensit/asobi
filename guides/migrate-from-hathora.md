@@ -5,6 +5,55 @@ this with a running game on `hathora.dev` or `hathora.cloud`, this guide walks
 you from "we need a new backend by May" to "we're running on asobi and we
 never have to do this again."
 
+## Today, in 15 minutes
+
+Before you read the rest of this guide, do these five things in this order.
+They get you unblocked even if the full port takes a week:
+
+1. **Stand up a local asobi backend.** Drop this `docker-compose.yml` into an
+   empty directory:
+   ```yaml
+   services:
+     postgres:
+       image: postgres:17
+       environment: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: my_game }
+       healthcheck: { test: ["CMD-SHELL", "pg_isready -U postgres"], interval: 5s }
+     asobi:
+       image: ghcr.io/widgrensit/asobi_lua:latest
+       depends_on: { postgres: { condition: service_healthy } }
+       ports: ["8080:8080"]
+       environment: { ASOBI_DB_HOST: postgres, ASOBI_DB_NAME: my_game }
+   ```
+   Then `docker compose up -d`. HTTP is on `:8080`, WebSocket is on `/ws`.
+2. **Register one player** — the asobi equivalent of `HathoraClient.loginAnonymous`:
+   ```bash
+   curl -s localhost:8080/api/v1/auth/register \
+     -H 'content-type: application/json' \
+     -d '{"username":"test","password":"test"}'
+   # → { "token": "eyJ...", "player_id": "01HX..." }
+   ```
+   That `token` is what your client passes in `Authorization: Bearer …` from
+   here on, in place of any Hathora auth token.
+3. **Queue for matchmaking** to confirm the matchmaker works end-to-end:
+   ```bash
+   curl -s localhost:8080/api/v1/matchmaker \
+     -H 'content-type: application/json' \
+     -H 'authorization: Bearer eyJ...' \
+     -d '{"mode":"default","properties":{},"party":["01HX..."]}'
+   # → { "ticket_id": "...", "status": "pending" }
+   ```
+4. **Join the Discord** [`#migrations` channel](https://discord.gg/vYSfYYyXpu).
+   Drop your Hathora setup (engine, language, lobby vs matchmaker,
+   server-authoritative vs P2P) — we will tell you which sections of this
+   guide actually apply to you and which to skip.
+5. **Open a tracking issue** at
+   [github.com/widgrensit/asobi/issues](https://github.com/widgrensit/asobi/issues)
+   so we know you exist. We are prioritising migration help over feature work
+   until 2026-05-05.
+
+That is the panic checklist. You are no longer locked out as of step 1.
+Everything below is the full port.
+
 > **Draft notice.** This guide is a starting point, not a battle-tested
 > playbook — nobody has yet migrated a Hathora game to asobi end-to-end.
 > The asobi-side endpoint and event names below are **verified against the
