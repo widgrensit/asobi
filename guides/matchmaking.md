@@ -9,7 +9,7 @@ groups tickets into matches using a per-mode strategy module.
 2. Matchmaker ticks periodically (default every 1 second).
 3. Each tick groups tickets by mode, and the mode's strategy module decides which tickets form a match.
 4. When a group is formed, a match is spawned.
-5. Players are notified via WebSocket (`matchmaker.matched`).
+5. Players are notified via WebSocket (`match.matched`).
 
 ## Submitting a Ticket
 

@@ -120,13 +120,18 @@ Cancel a matchmaking ticket.
 {"type": "matchmaker.remove", "payload": {"ticket_id": "..."}}
 ```
 
-### `matchmaker.matched` (server push)
+### `match.matched` (server push)
 
-Notification that a match was found.
+Notification that the matchmaker paired you into a match.
 
 ```json
-{"type": "matchmaker.matched", "payload": {"match_id": "...", "players": [...]}}
+{"type": "match.matched", "payload": {"match_id": "...", "players": [...]}}
 ```
+
+> Note: distinct from `match.joined`, which is the server's reply to a
+> client-initiated `match.join` message. Both signal "you're in a match
+> and `match.state` will follow," but only `match.matched` is fired
+> spontaneously by the matchmaker.
 
 ## Worlds
 
