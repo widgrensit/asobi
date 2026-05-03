@@ -49,6 +49,7 @@ Infrastructure settings come from environment variables:
 | `ASOBI_DB_NAME` | `asobi` | Database name |
 | `ASOBI_DB_USER` | `postgres` | Database user |
 | `ASOBI_DB_PASSWORD` | `postgres` | Database password |
+| `ASOBI_DB_SOCKET_OPTS` | `inet` (set by asobi_lua image; empty when consuming asobi directly) | Erlang term fragment spliced into the kura `socket_options` list. Examples: `inet`, `inet6`, `inet, {nodelay, true}`. Set to `inet6` for IPv6-only Postgres networks. |
 | `ASOBI_CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `ASOBI_NODE_HOST` | `127.0.0.1` | Erlang node hostname |
 | `ERLANG_COOKIE` | `asobi_cookie` | Erlang distribution cookie |
