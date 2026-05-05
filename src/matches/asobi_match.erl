@@ -30,6 +30,12 @@
 -callback get_state(PlayerId :: binary(), GameState :: term()) ->
     StateForPlayer :: map().
 
+%% Shared-payload variant. Avoids the per-player encode cost when every
+%% player sees the same world. Mutually exclusive with get_state/2 — export
+%% exactly one.
+-callback get_state(GameState :: term()) ->
+    SharedState :: map().
+
 -callback vote_requested(GameState :: term()) ->
     {ok, VoteConfig :: map()} | none.
 
@@ -46,6 +52,8 @@
 
 -optional_callbacks([
     tick/1,
+    get_state/1,
+    get_state/2,
     vote_requested/1,
     vote_resolved/3,
     phases/1,

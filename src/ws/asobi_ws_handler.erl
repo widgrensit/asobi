@@ -97,6 +97,8 @@ websocket_handle(_Frame, State) ->
 websocket_info({asobi_message, {match_state, MatchState}}, State) ->
     Reply = encode_reply(undefined, ~"match.state", MatchState),
     {reply, {text, Reply}, State};
+websocket_info({asobi_message, {match_state_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
+    {reply, {text, PreEncoded}, State};
 websocket_info({asobi_message, {match_event, Event, Payload}}, State) when is_atom(Event) ->
     Type = iolist_to_binary([~"match.", atom_to_binary(Event)]),
     Reply = encode_reply(undefined, Type, Payload),

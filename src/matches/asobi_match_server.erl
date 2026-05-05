@@ -539,6 +539,25 @@ broadcast_match_event(Event, Payload, #{players := Players}) ->
     ).
 
 broadcast_state(#{players := Players, game_module := Mod, game_state := GS}) ->
+    case erlang:function_exported(Mod, get_state, 1) of
+        true ->
+            broadcast_shared_state(Mod, GS, Players);
+        false ->
+            broadcast_per_player_state(Mod, GS, Players)
+    end.
+
+broadcast_shared_state(Mod, GS, Players) ->
+    SharedState = Mod:get_state(GS),
+    Payload = #{~"type" => ~"match.state", ~"payload" => SharedState},
+    PreEncoded = iolist_to_binary(json:encode(Payload)),
+    maps:foreach(
+        fun(PlayerId, _Meta) ->
+            asobi_presence:send(PlayerId, {match_state_raw, PreEncoded})
+        end,
+        Players
+    ).
+
+broadcast_per_player_state(Mod, GS, Players) ->
     maps:foreach(
         fun(PlayerId, _Meta) ->
             PlayerState = Mod:get_state(PlayerId, GS),

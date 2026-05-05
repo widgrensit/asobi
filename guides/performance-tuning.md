@@ -44,6 +44,27 @@ This is automatic -- no configuration needed. Subscribers receive
 `zone_delta_raw` messages containing pre-encoded JSON, which the
 WebSocket handler forwards directly without re-encoding.
 
+## Match State Broadcast (Shared vs. Per-Player)
+
+By default the match server calls `Mod:get_state(PlayerId, GameState)`
+once per player per tick and JSON-encodes each result. For games where
+every player sees the same world (FFA shooters, racing, party games),
+implement the optional `get_state/1` callback instead:
+
+```erlang
+-callback get_state(GameState) -> SharedState.
+```
+
+When the match server detects `get_state/1` is exported, it calls it once
+per tick, JSON-encodes once, and broadcasts the same pre-encoded binary
+to every player. At 200 players / 10 ticks/sec this drops 2000 encodes/sec
+to 10. Games that need per-player filtering (fog of war, hidden hand)
+keep `get_state/2` and pay the per-player cost.
+
+Lua match scripts opt in by declaring `state_strategy = "shared"` and
+defining a one-arg `get_state(state)`. The asobi_lua bridge then routes
+through `asobi_lua_match_shared`, which exports `get_state/1`.
+
 ## Adaptive Tick Rates
 
 Zones with no subscribers tick at a reduced rate to save CPU:

@@ -264,6 +264,8 @@ resolve_game_module(Mode) ->
     case mode_config(Mode) of
         #{type := world, module := {lua, Script}} ->
             {ok, asobi_lua_world, #{lua_script => Script}};
+        #{module := {lua, Script}, state_strategy := shared} ->
+            {ok, asobi_lua_match_shared, #{lua_script => Script}};
         #{module := {lua, Script}} ->
             {ok, asobi_lua_match, #{lua_script => Script}};
         #{module := Mod} when is_atom(Mod) ->

@@ -105,7 +105,8 @@ Matchmaker              Match Sup            Match Server          Players (via 
 **Server-authoritative:** The match process owns all game state. Clients send
 inputs, the server applies them each tick, and broadcasts the resulting state.
 The game module (`asobi_match` behaviour) provides `init/1`, `join/2`,
-`handle_input/3`, `tick/1`, and `get_state/2`.
+`handle_input/3`, `tick/1`, and either `get_state/2` (per-player) or
+`get_state/1` (shared, broadcast-once — see [Performance Tuning](performance-tuning.md)).
 
 ## Database & Migrations
 
