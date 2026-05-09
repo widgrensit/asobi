@@ -28,6 +28,7 @@ chat_zone_routing_test_() ->
     ]}.
 
 setup() ->
+    {ok, _} = application:ensure_all_started(telemetry),
     case whereis(nova_scope) of
         undefined -> pg:start(nova_scope);
         _ -> ok

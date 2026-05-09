@@ -44,6 +44,7 @@ zone_invariants_test_() ->
     end}.
 
 setup() ->
+    {ok, _} = application:ensure_all_started(telemetry),
     %% Use pg:start (not start_link) so pg outlives the setup process —
     %% the world supervisor itself is unlinked, but its init pg:join calls
     %% will fail if pg dies between setup and test body.
