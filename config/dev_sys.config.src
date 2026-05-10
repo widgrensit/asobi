@@ -42,6 +42,7 @@
     ]},
     {kura, [
         {repo, asobi_repo},
+        {backend, kura_backend_postgres},
         {host, "localhost"},
         {port, 5432},
         {database, "asobi_dev"},
