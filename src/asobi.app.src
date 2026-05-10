@@ -9,7 +9,9 @@
         stdlib,
         telemetry,
         nova,
+        pgo,
         kura,
+        kura_postgres,
         nova_auth,
         nova_resilience,
         shigoto

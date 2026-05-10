@@ -39,6 +39,7 @@
     ]},
     {kura, [
         {repo, asobi_repo},
+        {backend, kura_backend_postgres},
         {host, "${ASOBI_DB_HOST}"},
         {port, 5432},
         {database, "${ASOBI_DB_NAME}"},
