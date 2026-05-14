@@ -7,7 +7,7 @@
  {<<"jose">>,{pkg,<<"jose">>,<<"1.11.12">>},2},
  {<<"kura">>,
   {git,"https://github.com/Taure/kura.git",
-       {ref,"78f71e2e954e11c2f1cf49112dc8123c8dd8cf95"}},
+       {ref,"64c487a02596e082ee0968f7f14b5ac8090ebc02"}},
   0},
  {<<"kura_postgres">>,
   {git,"https://github.com/Taure/kura_postgres.git",
