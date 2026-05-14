@@ -16,7 +16,8 @@
     list_storage/1,
     list_storage_filters_owner_perm/1,
     delete_storage/1,
-    storage_owner_permission/1
+    storage_owner_permission/1,
+    put_storage_per_player_keys_dont_collide/1
 ]).
 
 all() -> [{group, cloud_saves}, {group, generic_storage}].
@@ -32,7 +33,8 @@ groups() ->
             list_storage,
             list_storage_filters_owner_perm,
             delete_storage,
-            storage_owner_permission
+            storage_owner_permission,
+            put_storage_per_player_keys_dont_collide
         ]}
     ].
 
@@ -250,4 +252,54 @@ storage_owner_permission(Config) ->
         Config
     ),
     ?assertStatus(403, Resp),
+    Config.
+
+%% Regression for https://github.com/widgrensit/asobi/issues/122:
+%% the storage unique index used to be `(collection, key)` without
+%% `player_id`, so two players writing the same (collection, key) with
+%% different player_id values would silently collide on insert. The
+%% HTTP /storage path is single-row-per-(collection, key) by design
+%% (it uses ownership-perm semantics), so this test exercises the
+%% schema directly via kura — that's the path `asobi_lua_api`'s
+%% `game.storage.player_set` follows for per-player rows.
+put_storage_per_player_keys_dont_collide(Config) ->
+    Suffix = integer_to_binary(erlang:unique_integer([positive])),
+    Col = <<"shared_", Suffix/binary>>,
+    Key = <<"counter_", Suffix/binary>>,
+    {player1_id, P1} = lists:keyfind(player1_id, 1, Config),
+    %% Register a fresh second player whose id we can capture here.
+    U2 = asobi_test_helpers:unique_username(~"index_collide_p2"),
+    {ok, R2} = nova_test:post(
+        "/api/v1/auth/register",
+        #{json => #{~"username" => U2, ~"password" => ~"testpass123"}},
+        Config
+    ),
+    #{~"player_id" := P2} = nova_test:json(R2),
+    Insert = fun(PlayerId, Value) ->
+        Params = #{
+            collection => Col,
+            key => Key,
+            player_id => PlayerId,
+            value => Value,
+            version => 1,
+            read_perm => ~"owner",
+            write_perm => ~"owner",
+            updated_at => calendar:universal_time()
+        },
+        CS = kura_changeset:cast(asobi_storage, #{}, Params, maps:keys(Params)),
+        asobi_repo:insert(CS)
+    end,
+    ?assertMatch({ok, _}, Insert(P1, #{~"n" => 1})),
+    ?assertMatch({ok, _}, Insert(P2, #{~"n" => 2})),
+    %% Read each back via a player-scoped query and verify isolation.
+    Read = fun(PlayerId) ->
+        Q0 = kura_query:from(asobi_storage),
+        Q1 = kura_query:where(Q0, {collection, Col}),
+        Q2 = kura_query:where(Q1, {key, Key}),
+        Q3 = kura_query:where(Q2, {player_id, PlayerId}),
+        {ok, [Doc]} = asobi_repo:all(Q3),
+        maps:get(value, Doc)
+    end,
+    ?assertEqual(#{~"n" => 1}, Read(P1)),
+    ?assertEqual(#{~"n" => 2}, Read(P2)),
     Config.
