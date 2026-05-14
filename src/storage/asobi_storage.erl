@@ -36,6 +36,9 @@ associations() ->
 -spec indexes() -> [{[atom()], map()}].
 indexes() ->
     [
-        {[collection, key], #{unique => true}},
+        {[collection, key], #{unique => true, where => ~"player_id IS NULL"}},
+        {[collection, key, player_id], #{
+            unique => true, where => ~"player_id IS NOT NULL"
+        }},
         {[player_id], #{}}
     ].
