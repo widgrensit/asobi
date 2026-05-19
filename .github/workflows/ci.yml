@@ -8,13 +8,17 @@ on:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@dc560fbe8e4e39898dd808645fc1d3e69d248429  # main as of 2026-03-31, pinned via Dependabot
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@4f2845c784fb8b91ba8871072fb111421dbd717d  # feat/audit-ignores branch, repins to main after PR #62 merges
     permissions:
       contents: write
       pull-requests: write
     with:
       version-file: '.tool-versions'
       enable-audit: true
+      # GHSA-g2wm-735q-3f56 (LOW, cowlib cookie/1) has no upstream patch
+      # and does not apply: asobi only calls cow_cookie:setcookie via
+      # cowboy. Tracked in docs/security_audit_2026_05_19.md.
+      audit-ignores: 'GHSA-g2wm-735q-3f56'
       enable-ct: true
       extra-services-compose: 'docker-compose.yml'
       enable-dependency-submission: true
