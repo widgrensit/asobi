@@ -3,12 +3,15 @@
 -export([
     list_worlds/0, list_worlds/1, find_or_create/1, find_or_create/2, create_world/1, create_world/2
 ]).
+-export([list_worlds_cached/0, list_worlds_cached/1]).
 -export([find_or_create_unsafe/1, find_or_create_unsafe/2]).
 -export([player_owned_world_count/1, world_capacity_state/1]).
 
 -define(PG_SCOPE, nova_scope).
 -define(DEFAULT_MAX_WORLDS_PER_PLAYER, 5).
 -define(DEFAULT_MAX_WORLDS, 1000).
+-define(LIST_CACHE_TAB, asobi_world_lobby_cache).
+-define(LIST_CACHE_TTL_MS, 500).
 
 -doc "List all running worlds.".
 -spec list_worlds() -> [map()].
@@ -39,6 +42,50 @@ list_worlds(Filters) ->
         WorldGroups
     ),
     Worlds.
+
+-doc """
+H3 (2026-05-19): cached variant of `list_worlds/1` for request paths that
+do not need a fresh enumeration on every call. Each `list_worlds/1` call
+issues one synchronous `gen_server:call` per running world (`get_info/1`);
+WS `world.list` at 60 msg/sec × 1000 worlds = 60k calls/sec/attacker. The
+cache (500 ms TTL, populated lazily, backed by the ETS table owned by
+`asobi_world_lobby_server`) absorbs that fan-out without changing the
+serialization story for `find_or_create_unsafe` which stays uncached.
+""".
+-spec list_worlds_cached() -> [map()].
+list_worlds_cached() ->
+    list_worlds_cached(#{}).
+
+-spec list_worlds_cached(map()) -> [map()].
+list_worlds_cached(Filters) ->
+    Key = Filters,
+    Now = erlang:monotonic_time(millisecond),
+    case cache_lookup(Key, Now) of
+        {hit, Worlds} ->
+            Worlds;
+        miss ->
+            Worlds = list_worlds(Filters),
+            cache_put(Key, Worlds, Now),
+            Worlds
+    end.
+
+-spec cache_lookup(map(), integer()) -> {hit, [map()]} | miss.
+cache_lookup(Key, Now) ->
+    try ets:lookup(?LIST_CACHE_TAB, Key) of
+        [{_, Worlds, ExpiresAt}] when ExpiresAt > Now -> {hit, Worlds};
+        _ -> miss
+    catch
+        error:badarg -> miss
+    end.
+
+-spec cache_put(map(), [map()], integer()) -> ok.
+cache_put(Key, Worlds, Now) ->
+    try
+        ets:insert(?LIST_CACHE_TAB, {Key, Worlds, Now + ?LIST_CACHE_TTL_MS}),
+        ok
+    catch
+        error:badarg -> ok
+    end.
 
 -doc """
 Find a running world with capacity for the given mode, or create one.

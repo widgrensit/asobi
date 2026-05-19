@@ -24,6 +24,7 @@ typical deployment supports, the queue stays empty.
 -export([init/1, handle_call/3, handle_cast/2]).
 
 -define(CALL_TIMEOUT, 30000).
+-define(LIST_CACHE_TAB, asobi_world_lobby_cache).
 
 -spec start_link() -> gen_server:start_ret().
 start_link() ->
@@ -53,6 +54,18 @@ find_or_create(Mode, PlayerId) ->
 
 -spec init([]) -> {ok, #{}}.
 init([]) ->
+    %% H3 (2026-05-19): ETS-backed TTL cache for asobi_world_lobby:list_worlds/1.
+    %% Public read so callers do not have to round-trip this server; only the
+    %% server creates it so it survives crashes of any single caller.
+    case ets:info(?LIST_CACHE_TAB, name) of
+        undefined ->
+            ?LIST_CACHE_TAB = ets:new(?LIST_CACHE_TAB, [
+                set, public, named_table, {read_concurrency, true}, {write_concurrency, true}
+            ]),
+            ok;
+        _ ->
+            ok
+    end,
     {ok, #{}}.
 
 -spec handle_call(term(), gen_server:from(), map()) ->

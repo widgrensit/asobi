@@ -26,6 +26,12 @@
         {bootstrap_application, asobi},
         {json_lib, json},
         {plugins, [
+            %% H2 (2026-05-19): cap HTTP body size before nova_request_plugin
+            %% buffers it into the heap. Default 1 MiB; dev allows the same.
+            {pre_request, asobi_body_cap_plugin, #{
+                max_body => 1048576,
+                require_content_length => true
+            }},
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
                 parse_qs => true

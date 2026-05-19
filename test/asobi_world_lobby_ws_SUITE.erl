@@ -403,9 +403,12 @@ recv_p1_update_with_x(PlayerId, X, Conn) ->
             fun(M) ->
                 maps:get(~"type", M, undefined) =:= ~"world.tick" andalso
                     lists:any(
-                        fun(U) ->
-                            maps:get(~"id", U, undefined) =:= PlayerId andalso
-                                maps:get(~"x", U, undefined) =:= X
+                        fun
+                            (U) when is_map(U) ->
+                                maps:get(~"id", U, undefined) =:= PlayerId andalso
+                                    maps:get(~"x", U, undefined) =:= X;
+                            (_) ->
+                                false
                         end,
                         maps:get(~"updates", maps:get(~"payload", M), [])
                     )
