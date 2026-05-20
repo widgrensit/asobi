@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@dbcfb2edd55044050279207f66ab4819c8ec332e  # feat/audit-ignores branch (audit-ignores input), repins to main after Taure/erlang-ci#62 merges
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@559dea550228fb7042813f6b6359addec11bedcf  # main as of 2026-05-20, pinned via Dependabot
     permissions:
       contents: write
       pull-requests: write
