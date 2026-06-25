@@ -14,7 +14,6 @@ jobs:
       pull-requests: write
     with:
       version-file: '.tool-versions'
-      enable-audit: true
       enable-ct: true
       extra-services-compose: 'docker-compose.yml'
       enable-dependency-submission: true
