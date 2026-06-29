@@ -6,7 +6,7 @@
 
 -export([start_link/0]).
 -export([snapshot/1, snapshot_sync/1, delete_world/1]).
--export([load_snapshots/1]).
+-export([load_snapshots/1, load_snapshot/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(FLUSH_INTERVAL, 1000).
@@ -37,6 +37,29 @@ load_snapshots(WorldId) ->
             {ok, rows_to_map(Rows, #{})};
         {error, _} = Err ->
             Err
+    end.
+
+%% Load a single zone's snapshot. Used on cold (lazy/reaped) zone start so the
+%% load runs in the zone process rather than scanning the whole world.
+-spec load_snapshot(binary(), {integer(), integer()}) ->
+    {ok, map()} | {error, not_found} | {error, term()}.
+load_snapshot(WorldId, {ZX, ZY}) ->
+    Q = kura_query:limit(
+        kura_query:where(
+            kura_query:where(
+                kura_query:where(
+                    kura_query:from(asobi_zone_snapshot), {world_id, WorldId}
+                ),
+                {zone_x, ZX}
+            ),
+            {zone_y, ZY}
+        ),
+        1
+    ),
+    case asobi_repo:all(Q) of
+        {ok, [Row | _]} -> {ok, Row};
+        {ok, []} -> {error, not_found};
+        {error, _} = Err -> Err
     end.
 
 -spec rows_to_map([map()], map()) -> map().
