@@ -56,6 +56,7 @@ dump_zone_state_strips_runtime() ->
     %% real terminate snapshot path; no DB needed.
     meck:new(asobi_zone_snapshotter, [passthrough]),
     Self = self(),
+    meck:expect(asobi_zone_snapshotter, load_snapshot, fun(_, _) -> {error, not_found} end),
     meck:expect(asobi_zone_snapshotter, snapshot_sync, fun(Data) ->
         Self ! {snapshot, Data},
         ok

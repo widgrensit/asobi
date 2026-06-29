@@ -14,7 +14,7 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 
 -export([start_link/1]).
 -export([ensure_zone/2, get_zone/2, touch_zone/2, release_zone/2]).
--export([get_active_zones/1, zone_terminated/2, pre_warm/1]).
+-export([get_active_zones/1, zone_terminated/3, pre_warm/1]).
 -export([register_zone/3, set_zone_config/2, set_initial_zone_states/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -69,9 +69,9 @@ narrow_pid_list([]) -> [];
 narrow_pid_list([P | Rest]) when is_pid(P) -> [P | narrow_pid_list(Rest)].
 
 -doc "Called by zone on terminate. Cleans up ETS entry.".
--spec zone_terminated(pid() | atom(), {integer(), integer()}) -> ok.
-zone_terminated(Ref, Coords) ->
-    gen_server:cast(Ref, {zone_terminated, Coords}).
+-spec zone_terminated(pid() | atom(), {integer(), integer()}, pid()) -> ok.
+zone_terminated(Ref, Coords, ZonePid) ->
+    gen_server:cast(Ref, {zone_terminated, Coords, ZonePid}).
 
 -doc "Spawn all zones in grid. Backward compat for small grids.".
 -spec pre_warm(pid() | atom()) -> ok.
@@ -194,8 +194,13 @@ handle_cast({touch_zone, Coords}, State) ->
 handle_cast({release_zone, Coords}, #{zone_last_active := Active, idle_timeout := Timeout} = State) ->
     Stale = erlang:monotonic_time(millisecond) - Timeout - 1,
     {noreply, State#{zone_last_active => Active#{Coords => Stale}}};
-handle_cast({zone_terminated, Coords}, State) ->
-    {noreply, cleanup_zone(Coords, State)};
+handle_cast({zone_terminated, Coords, ZonePid}, #{ets_tab := Tab} = State) ->
+    %% Only clean up if this coords still maps to the pid that terminated -
+    %% a reaped zone's slot may already have been recreated.
+    case ets:lookup(Tab, Coords) of
+        [{Coords, ZonePid}] -> {noreply, cleanup_zone(Coords, State)};
+        _ -> {noreply, State}
+    end;
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -209,12 +214,22 @@ handle_info({reap_idle, _OldRef}, State) ->
 handle_info(resolve_zone_sup, #{instance_sup := InstanceSup} = State) ->
     ZoneSup = asobi_world_instance:get_child(InstanceSup, asobi_zone_sup),
     {noreply, State#{zone_sup => ZoneSup}};
-handle_info({'DOWN', MonRef, process, _Pid, _Reason}, #{zone_monitors := Monitors} = State) ->
+handle_info(
+    {'DOWN', MonRef, process, Pid, _Reason},
+    #{zone_monitors := Monitors, ets_tab := Tab} = State
+) ->
     case maps:get(MonRef, Monitors, undefined) of
         undefined ->
             {noreply, State};
         Coords ->
-            {noreply, cleanup_zone(Coords, State)}
+            case ets:lookup(Tab, Coords) of
+                [{Coords, Pid}] ->
+                    {noreply, cleanup_zone(Coords, State)};
+                _ ->
+                    %% Stale monitor: the coords was recreated with a new pid.
+                    %% Drop just this monitor mapping, leave the live zone.
+                    {noreply, State#{zone_monitors => maps:remove(MonRef, Monitors)}}
+            end
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -288,11 +303,9 @@ cleanup_zone(
 
 reap_idle_zones(
     #{
-        world_id := WorldId,
         zone_last_active := Active,
         idle_timeout := Timeout,
-        ets_tab := Tab,
-        zone_sup := ZoneSup
+        ets_tab := Tab
     } = State
 ) ->
     Now = erlang:monotonic_time(millisecond),
@@ -310,10 +323,13 @@ reap_idle_zones(
         fun(Coords, SAcc) ->
             case ets:lookup(Tab, Coords) of
                 [{Coords, Pid}] ->
-                    snapshot_before_reap(WorldId, Coords, Pid),
-                    SAcc1 = cleanup_zone(Coords, SAcc),
-                    _ = terminate_zone(ZoneSup, Pid),
-                    SAcc1;
+                    %% Stop gracefully so the zone writes a final snapshot via
+                    %% terminate/2. Keep the ets slot + monitor until it is
+                    %% actually gone: cleanup runs on the pid-guarded DOWN /
+                    %% zone_terminated, so a request can't recreate the zone
+                    %% (and load a stale snapshot) until the old one finished.
+                    asobi_zone:reap(Pid),
+                    SAcc;
                 [] ->
                     cleanup_zone(Coords, SAcc)
             end
@@ -321,34 +337,6 @@ reap_idle_zones(
         State,
         Expired
     ).
-
-snapshot_before_reap(WorldId, Coords, Pid) ->
-    try
-        Entities = asobi_zone:get_entities(Pid),
-        case map_size(Entities) of
-            0 ->
-                ok;
-            _ ->
-                asobi_zone_snapshotter:snapshot_sync(#{
-                    world_id => WorldId,
-                    coords => Coords,
-                    entities => Entities,
-                    zone_state => #{},
-                    entity_timers => #{},
-                    spawner_state => #{},
-                    tick => 0
-                })
-        end
-    catch
-        _:_ -> ok
-    end.
-
-terminate_zone(ZoneSup, Pid) ->
-    try
-        supervisor:terminate_child(ZoneSup, Pid)
-    catch
-        _:_ -> ok
-    end.
 
 touch(Coords, #{zone_last_active := Active} = State) ->
     Now = erlang:monotonic_time(millisecond),

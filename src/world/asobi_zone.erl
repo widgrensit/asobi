@@ -1,7 +1,7 @@
 -module(asobi_zone).
 -behaviour(gen_server).
 
--export([start_link/1]).
+-export([start_link/1, reap/1]).
 -export([tick/2, player_input/3, add_entity/3, remove_entity/2]).
 -export([spawn_entity/3, spawn_entity/4, spawn_entities/2, despawn_entity/2]).
 -export([subscribe/2, unsubscribe/2]).
@@ -10,6 +10,8 @@
 -export([query_radius/3, query_rect/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -define(PG_SCOPE, nova_scope).
 
 %% --- Public API ---
@@ -17,6 +19,14 @@
 -spec start_link(map()) -> gen_server:start_ret().
 start_link(Config) ->
     gen_server:start_link(?MODULE, Config, []).
+
+%% Stop the zone gracefully so terminate/2 runs a final snapshot. The zone
+%% child is `transient`, so a normal stop does not respawn. Used by the zone
+%% manager when reaping idle zones - unlike a supervisor kill, this preserves
+%% the zone's gameplay state.
+-spec reap(pid()) -> ok.
+reap(Pid) ->
+    gen_server:cast(Pid, reap).
 
 -spec tick(pid(), non_neg_integer()) -> ok.
 tick(Pid, TickN) ->
@@ -137,6 +147,7 @@ init(Config) ->
             game_module => GameModule,
             game_config => GameConfig,
             world_server_pid => WorldServerPid,
+            spawn_templates => Templates,
             zone_manager_pid => ZoneManagerPid,
             terrain_store_pid => TerrainStorePid,
             entities => RecoveredEntities,
@@ -159,8 +170,8 @@ init(Config) ->
 %% to self()), regardless of how the zone was created — pre-spawned, lazy, or
 %% recovered. Game modules without the callback keep their zone_state as-is.
 -spec handle_continue(init_zone_state, map()) -> {noreply, map()}.
-handle_continue(
-    init_zone_state,
+handle_continue(init_zone_state, State0) ->
+    State = maybe_restore_from_snapshot(State0),
     #{
         game_module := GameMod,
         world_id := WorldId,
@@ -168,8 +179,7 @@ handle_continue(
         game_config := GameConfig,
         world_server_pid := WorldServerPid,
         zone_state := ZoneState
-    } = State
-) ->
+    } = State,
     ZoneConfig = #{
         world_id => WorldId,
         coords => Coords,
@@ -179,6 +189,71 @@ handle_continue(
     },
     ZoneState1 = call_optional(GameMod, init_zone_state, [ZoneConfig, ZoneState], ZoneState),
     {noreply, State#{zone_state => ZoneState1}}.
+
+%% Lazy zones (and idle-reaped ones) start with a blank zone_state. For a
+%% persistent world, recover the last snapshot here, in the zone process, so
+%% the load doesn't block the zone manager. Entities recovered from the ETS
+%% crash backup win (they are fresher), but zone_state/spawner/tick live only
+%% in the DB snapshot, so we load it whenever zone_state is blank. A pre-spawned
+%% zone arrives with a non-blank zone_state from Config and skips the DB.
+%% init_zone_state then rebuilds the runtime from the restored zone_state.
+-spec maybe_restore_from_snapshot(map()) -> map().
+maybe_restore_from_snapshot(
+    #{
+        persistence := true,
+        zone_state := ZoneState,
+        world_id := WorldId,
+        coords := Coords,
+        spawn_templates := Templates
+    } = State
+) when map_size(ZoneState) =:= 0 ->
+    case safe_load_snapshot(WorldId, Coords) of
+        {ok, Snapshot} ->
+            State#{
+                zone_state => maps:get(zone_state, Snapshot, #{}),
+                spawner => restore_spawner(maps:get(spawner_state, Snapshot, #{}), Templates),
+                tick => restore_tick(maps:get(tick, Snapshot, 0))
+            };
+        not_found ->
+            State;
+        {error, Reason} ->
+            %% A persisted zone whose snapshot we cannot read must NOT start
+            %% blank and then overwrite the good row. Suppress persistence for
+            %% this instance so the row survives; a later clean restart retries.
+            ?LOG_ERROR(#{
+                event => zone_snapshot_load_failed,
+                world_id => WorldId,
+                coords => Coords,
+                reason => Reason
+            }),
+            State#{persistence => false}
+    end;
+maybe_restore_from_snapshot(State) ->
+    State.
+
+-spec safe_load_snapshot(binary(), {integer(), integer()}) ->
+    {ok, map()} | not_found | {error, term()}.
+safe_load_snapshot(WorldId, Coords) ->
+    try asobi_zone_snapshotter:load_snapshot(WorldId, Coords) of
+        {ok, _} = Ok -> Ok;
+        {error, not_found} -> not_found;
+        {error, _} = Err -> Err
+    catch
+        Class:Reason -> {error, {Class, Reason}}
+    end.
+
+-spec restore_spawner(map(), map()) -> asobi_zone_spawner:state().
+restore_spawner(SpawnerState, Templates) when is_map(SpawnerState), map_size(SpawnerState) > 0 ->
+    asobi_zone_spawner:set_templates(Templates, asobi_zone_spawner:deserialise(SpawnerState));
+restore_spawner(_, Templates) ->
+    asobi_zone_spawner:new(Templates).
+
+-spec restore_tick(term()) -> non_neg_integer().
+restore_tick(N) when is_integer(N), N >= 0 ->
+    N;
+restore_tick(Other) ->
+    ?LOG_WARNING(#{event => zone_snapshot_bad_tick, value => Other}),
+    0.
 
 -spec call_optional(module(), atom(), [term()], term()) -> term().
 call_optional(GameMod, Fun, Args, Default) ->
@@ -228,7 +303,12 @@ handle_call(
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
--spec handle_cast(term(), map()) -> {noreply, map()} | {noreply, map(), hibernate}.
+-spec handle_cast(term(), map()) ->
+    {noreply, map()} | {noreply, map(), hibernate} | {stop, normal, map()}.
+handle_cast(reap, State) ->
+    %% Graceful stop so terminate/2 writes a final snapshot. Transient restart
+    %% means a normal stop is not respawned.
+    {stop, normal, State};
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
     State2 = transfer_out_of_bounds_npcs(State1),
@@ -641,7 +721,7 @@ clear_zone_backup(WorldId, Coords) ->
     end.
 
 notify_zone_manager_terminated(#{zone_manager_pid := ZMPid, coords := Coords}) when is_pid(ZMPid) ->
-    asobi_zone_manager:zone_terminated(ZMPid, Coords);
+    asobi_zone_manager:zone_terminated(ZMPid, Coords, self());
 notify_zone_manager_terminated(_) ->
     ok.
 
