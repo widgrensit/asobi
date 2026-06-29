@@ -51,6 +51,14 @@ Terrain is separate from entities. Tile chunks are served as compressed
 binary blobs when a player subscribes to a zone -- not through the
 tick/delta loop.
 
+Asobi does not define what terrain is. You implement a provider that returns
+the bytes of the chunk at a `{X, Y}` coordinate; Asobi caches that blob in
+the terrain store and ships it to clients verbatim. The payload is whatever
+your provider produces -- "the data Asobi chunks" is the data you hand back.
+The `asobi_terrain` helpers below give you a compact tile format, but any
+binary your client can decode works. A complete, runnable provider lives in
+[`examples/world-terrain`](https://github.com/widgrensit/asobi/tree/main/examples/world-terrain).
+
 ### Terrain Provider Behaviour
 
 Implement `asobi_terrain_provider` to supply terrain data:
