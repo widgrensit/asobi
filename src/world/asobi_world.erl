@@ -57,6 +57,17 @@
 -callback on_zone_unloaded(Coords :: {integer(), integer()}, GameState :: term()) ->
     {ok, GameState1 :: term()}.
 
+%% Build this zone's zone_state in the zone process, from the zone Config and
+%% any plain gameplay state restored from a snapshot. This is where a game
+%% module that holds a per-zone runtime (e.g. a Lua VM) constructs it, bound to
+%% the zone process. Runs once, after init, via handle_continue.
+-callback init_zone_state(Config :: map(), ZoneState :: map()) -> map().
+
+%% Reduce zone_state to a JSON-safe map for snapshotting: drop any live runtime
+%% (e.g. a VM that cannot be serialised) and decode engine-held gameplay state
+%% to plain terms. The inverse of init_zone_state's restore path.
+-callback dump_zone_state(ZoneState :: map()) -> map().
+
 -optional_callbacks([
     generate_world/2,
     get_state/2,
@@ -67,5 +78,7 @@
     spawn_templates/1,
     terrain_provider/1,
     on_zone_loaded/2,
-    on_zone_unloaded/2
+    on_zone_unloaded/2,
+    init_zone_state/2,
+    dump_zone_state/1
 ]).

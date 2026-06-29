@@ -8,7 +8,7 @@
 -export([get_entities/1, get_subscriber_count/1]).
 -export([start_entity_timer/2, cancel_entity_timer/3]).
 -export([query_radius/3, query_rect/3]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
 
 -define(PG_SCOPE, nova_scope).
 
@@ -97,12 +97,14 @@ narrow_id_pos_list([{Id, {X, Y}} | Rest]) when
 
 %% --- gen_server callbacks ---
 
--spec init(map()) -> {ok, map()}.
+-spec init(map()) -> {ok, map(), {continue, init_zone_state}}.
 init(Config) ->
     WorldId = maps:get(world_id, Config),
     Coords = maps:get(coords, Config),
     TickerPid = maps:get(ticker_pid, Config),
     GameModule = maps:get(game_module, Config),
+    GameConfig = maps:get(game_config, Config, #{}),
+    WorldServerPid = maps:get(world_server_pid, Config, undefined),
     ZoneState = maps:get(zone_state, Config, #{}),
     ZoneManagerPid = maps:get(zone_manager_pid, Config, undefined),
     TerrainStorePid = maps:get(terrain_store_pid, Config, undefined),
@@ -127,27 +129,64 @@ init(Config) ->
             undefined -> undefined;
             CellSize -> asobi_spatial_grid:new(CellSize)
         end,
-    {ok, #{
+    {ok,
+        #{
+            world_id => WorldId,
+            coords => Coords,
+            ticker_pid => TickerPid,
+            game_module => GameModule,
+            game_config => GameConfig,
+            world_server_pid => WorldServerPid,
+            zone_manager_pid => ZoneManagerPid,
+            terrain_store_pid => TerrainStorePid,
+            entities => RecoveredEntities,
+            prev_entities => #{},
+            broadcast_entities => #{},
+            broadcast_interval => maps:get(broadcast_interval, Config, 3),
+            subscribers => #{},
+            zone_state => ZoneState,
+            input_queue => [],
+            entity_timers => asobi_entity_timer:new(),
+            spawner => Spawner,
+            persistence => Persistence,
+            snapshot_interval => SnapshotInterval,
+            spatial_grid => SpatialGrid,
+            tick => 0
+        },
+        {continue, init_zone_state}}.
+
+%% Build the zone's runtime state in the zone process (so a per-zone VM binds
+%% to self()), regardless of how the zone was created — pre-spawned, lazy, or
+%% recovered. Game modules without the callback keep their zone_state as-is.
+-spec handle_continue(init_zone_state, map()) -> {noreply, map()}.
+handle_continue(
+    init_zone_state,
+    #{
+        game_module := GameMod,
+        world_id := WorldId,
+        coords := Coords,
+        game_config := GameConfig,
+        world_server_pid := WorldServerPid,
+        zone_state := ZoneState
+    } = State
+) ->
+    ZoneConfig = #{
         world_id => WorldId,
         coords => Coords,
-        ticker_pid => TickerPid,
-        game_module => GameModule,
-        zone_manager_pid => ZoneManagerPid,
-        terrain_store_pid => TerrainStorePid,
-        entities => RecoveredEntities,
-        prev_entities => #{},
-        broadcast_entities => #{},
-        broadcast_interval => maps:get(broadcast_interval, Config, 3),
-        subscribers => #{},
-        zone_state => ZoneState,
-        input_queue => [],
-        entity_timers => asobi_entity_timer:new(),
-        spawner => Spawner,
-        persistence => Persistence,
-        snapshot_interval => SnapshotInterval,
-        spatial_grid => SpatialGrid,
-        tick => 0
-    }}.
+        game_module => GameMod,
+        game_config => GameConfig,
+        world_server_pid => WorldServerPid
+    },
+    ZoneState1 = call_optional(GameMod, init_zone_state, [ZoneConfig, ZoneState], ZoneState),
+    {noreply, State#{zone_state => ZoneState1}}.
+
+-spec call_optional(module(), atom(), [term()], term()) -> term().
+call_optional(GameMod, Fun, Args, Default) ->
+    _ = code:ensure_loaded(GameMod),
+    case erlang:function_exported(GameMod, Fun, length(Args)) of
+        true -> apply(GameMod, Fun, Args);
+        false -> Default
+    end.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call(get_entities, _From, #{entities := Entities} = State) ->
@@ -386,7 +425,7 @@ do_tick(
                 world_id => WorldId,
                 coords => Coords,
                 entities => snapshot_entities(Entities4),
-                zone_state => ZoneState1,
+                zone_state => call_optional(GameMod, dump_zone_state, [ZoneState1], ZoneState1),
                 entity_timers => asobi_entity_timer:info(ET1),
                 spawner_state => asobi_zone_spawner:serialise(Spawner1),
                 tick => TickN
@@ -550,6 +589,7 @@ maybe_final_snapshot(#{persistence := true} = State) ->
     #{
         world_id := WorldId,
         coords := Coords,
+        game_module := GameMod,
         entities := Entities,
         zone_state := ZoneState,
         entity_timers := ET,
@@ -561,7 +601,7 @@ maybe_final_snapshot(#{persistence := true} = State) ->
             world_id => WorldId,
             coords => Coords,
             entities => snapshot_entities(Entities),
-            zone_state => ZoneState,
+            zone_state => call_optional(GameMod, dump_zone_state, [ZoneState], ZoneState),
             entity_timers => asobi_entity_timer:info(ET),
             spawner_state => asobi_zone_spawner:serialise(Spawner),
             tick => Tick

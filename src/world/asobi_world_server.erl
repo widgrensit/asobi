@@ -421,6 +421,8 @@ configure_zone_manager(
         world_id => WorldId,
         ticker_pid => TickerPid,
         game_module => GameMod,
+        game_config => maps:get(game_config, Config, #{}),
+        world_server_pid => self(),
         spawn_templates => Templates,
         persistence => Persistence,
         snapshot_interval => maps:get(snapshot_interval, Config, 600),
