@@ -1,0 +1,13 @@
+{application, world_terrain, [
+    {description, "asobi terrain provider example"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {world_terrain_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        asobi
+    ]},
+    {env, []},
+    {modules, []}
+]}.
