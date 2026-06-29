@@ -1,6 +1,8 @@
 -module(asobi_zone_snapshotter).
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% Batched async DB writer for zone entity snapshots.
 %% Deduplicates per zone key, flushes every 1s.
 
@@ -77,7 +79,7 @@ init([]) ->
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call({snapshot_sync, Data}, _From, State) ->
-    write_snapshot(Data),
+    safe_write_snapshot(Data),
     {reply, ok, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -94,13 +96,32 @@ handle_cast(_Msg, State) ->
 
 -spec handle_info(term(), map()) -> {noreply, map()}.
 handle_info(flush, #{pending := Pending} = State) ->
-    maps:foreach(fun(_Key, Data) -> write_snapshot(Data) end, Pending),
+    maps:foreach(fun(_Key, Data) -> safe_write_snapshot(Data) end, Pending),
     erlang:send_after(?FLUSH_INTERVAL, self(), flush),
     {noreply, State#{pending => #{}}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
 %% --- Internal ---
+
+%% One poison zone (e.g. a game_state term jsonb cannot encode) must not crash
+%% the snapshotter or drop every other zone in the same flush. Isolate each
+%% write; a failure costs only that zone's snapshot this round.
+safe_write_snapshot(Data) ->
+    try
+        write_snapshot(Data)
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_WARNING(#{
+                event => zone_snapshot_write_crashed,
+                world_id => maps:get(world_id, Data, undefined),
+                coords => maps:get(coords, Data, undefined),
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            }),
+            ok
+    end.
 
 write_snapshot(#{world_id := WorldId, coords := {ZX, ZY}} = Data) ->
     Entities = maps:get(entities, Data, #{}),
@@ -152,7 +173,7 @@ write_snapshot(#{world_id := WorldId, coords := {ZX, ZY}} = Data) ->
         {ok, _} ->
             ok;
         {error, Reason} ->
-            logger:warning(#{msg => ~"zone snapshot write failed", reason => Reason}),
+            ?LOG_WARNING(#{event => zone_snapshot_write_failed, reason => Reason}),
             ok
     end.
 
@@ -162,6 +183,6 @@ do_delete_world(WorldId) ->
         {ok, _} ->
             ok;
         {error, Reason} ->
-            logger:warning(#{msg => ~"zone snapshot cleanup failed", reason => Reason}),
+            ?LOG_WARNING(#{event => zone_snapshot_cleanup_failed, reason => Reason}),
             ok
     end.

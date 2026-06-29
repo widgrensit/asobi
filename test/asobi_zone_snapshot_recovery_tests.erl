@@ -81,6 +81,7 @@ cold_start_restores() ->
     Snapshot = #{
         zone_state => #{~"saved" => true},
         spawner_state => SpawnerState,
+        entity_timers => timer_state(),
         tick => 42
     },
     meck:new(asobi_zone_snapshotter, [passthrough]),
@@ -96,6 +97,7 @@ cold_start_restores() ->
         ?assertEqual(42, maps:get(tick, State)),
         Spawner = maps:get(spawner, State),
         ?assertEqual(1, maps:get(pending_respawns, asobi_zone_spawner:info(Spawner))),
+        ?assertEqual(1, asobi_entity_timer:active_count(maps:get(entity_timers, State))),
         gen_server:stop(Pid)
     after
         meck:unload(asobi_zone_snapshotter)
@@ -164,6 +166,21 @@ goblin_templates() ->
             respawn => #{strategy => timer, delay => 1000, max_respawns => infinity, jitter => 0}
         }
     }.
+
+timer_state() ->
+    %% A tuple on_complete + a non-general category exercise json_safe/1 and the
+    %% binary_to_existing_atom category round-trip through the real restore path.
+    S = asobi_entity_timer:start_timer(
+        #{
+            entity_id => ~"furnace_1",
+            timer_id => ~"smelt",
+            duration => 60000,
+            on_complete => {craft_complete, ~"iron_ingot"},
+            category => crafting
+        },
+        asobi_entity_timer:new()
+    ),
+    json:decode(iolist_to_binary(json:encode(asobi_entity_timer:serialise(S)))).
 
 pending_respawn_spawner_state(Templates) ->
     S0 = asobi_zone_spawner:new(Templates),

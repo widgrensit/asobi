@@ -212,6 +212,9 @@ maybe_restore_from_snapshot(
             State#{
                 zone_state => maps:get(zone_state, Snapshot, #{}),
                 spawner => restore_spawner(maps:get(spawner_state, Snapshot, #{}), Templates),
+                entity_timers => asobi_entity_timer:deserialise(
+                    maps:get(entity_timers, Snapshot, #{})
+                ),
                 tick => restore_tick(maps:get(tick, Snapshot, 0))
             };
         not_found ->
@@ -506,7 +509,7 @@ do_tick(
                 coords => Coords,
                 entities => snapshot_entities(Entities4),
                 zone_state => call_optional(GameMod, dump_zone_state, [ZoneState1], ZoneState1),
-                entity_timers => asobi_entity_timer:info(ET1),
+                entity_timers => asobi_entity_timer:serialise(ET1),
                 spawner_state => asobi_zone_spawner:serialise(Spawner1),
                 tick => TickN
             });
@@ -682,7 +685,7 @@ maybe_final_snapshot(#{persistence := true} = State) ->
             coords => Coords,
             entities => snapshot_entities(Entities),
             zone_state => call_optional(GameMod, dump_zone_state, [ZoneState], ZoneState),
-            entity_timers => asobi_entity_timer:info(ET),
+            entity_timers => asobi_entity_timer:serialise(ET),
             spawner_state => asobi_zone_spawner:serialise(Spawner),
             tick => Tick
         })
