@@ -7,7 +7,7 @@
  {<<"jose">>,{pkg,<<"jose">>,<<"1.11.12">>},2},
  {<<"kura">>,
   {git,"https://github.com/Taure/kura.git",
-       {ref,"64c487a02596e082ee0968f7f14b5ac8090ebc02"}},
+       {ref,"fdb1abc5fdc0cc48c34b7d33fd8e0d6748c4a7d1"}},
   0},
  {<<"kura_postgres">>,
   {git,"https://github.com/Taure/kura_postgres.git",
@@ -25,7 +25,7 @@
  {<<"routing_tree">>,{pkg,<<"routing_tree">>,<<"1.0.11">>},1},
  {<<"seki">>,{pkg,<<"seki">>,<<"0.4.3">>},0},
  {<<"shigoto">>,{pkg,<<"shigoto">>,<<"1.2.2">>},0},
- {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.4.1">>},1},
+ {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.4.2">>},1},
  {<<"telemetry_registry">>,{pkg,<<"telemetry_registry">>,<<"0.3.2">>},2},
  {<<"thoas">>,{pkg,<<"thoas">>,<<"1.2.1">>},1}]}.
 [
@@ -48,7 +48,7 @@
  {<<"routing_tree">>, <<"72ACEF2095F0EC804F7AFD07EF781DDE5009425A1CA0A28F0706B1DB334A4812">>},
  {<<"seki">>, <<"3A9209AD6154DA08084E8409C8F97586C79855450A748D989EDF23483B90B8B8">>},
  {<<"shigoto">>, <<"7DAA82CD28FDAD50CDEF227B4B4BEE301EAA1F9CC1F5ED585EC756763178EABF">>},
- {<<"telemetry">>, <<"AB6DE178E2B29B58E8256B92B382EA3F590A47152CA3651EA857A6CAE05AC423">>},
+ {<<"telemetry">>, <<"A0CB522801DFFB1C49FE6E30561BADFFC7B6D0E180DB1300DF759FAA22062855">>},
  {<<"telemetry_registry">>, <<"701576890320BE6428189BFF963E865E8F23E0FF3615EADE8F78662BE0FC003C">>},
  {<<"thoas">>, <<"19A25F31177A17E74004D4840F66D791D4298C5738790FA2CC73731EB911F195">>}]},
 {pkg_hash_ext,[
@@ -70,7 +70,7 @@
  {<<"routing_tree">>, <<"85982C7AC502892C5179CD2A591331003BACD2D2A71723640BA7D23F45408E6E">>},
  {<<"seki">>, <<"5493BAC387329DE722AC5BCB967364CACECC104AE3E6ED143863453263DC6DB4">>},
  {<<"shigoto">>, <<"32BC87B8127507F31F2F007CB5B947C3AF4E3D1C9EC73059E72564E2F649A0DC">>},
- {<<"telemetry">>, <<"2172E05A27531D3D31DD9782841065C50DD5C3C7699D95266B2EDD54C2DAFA1C">>},
+ {<<"telemetry">>, <<"928F6495066506077862C0D1646609EED891A4326BEE3126BA54B60AF61FEBB1">>},
  {<<"telemetry_registry">>, <<"E7ED191EB1D115A3034AF8E1E35E4E63D5348851D556646D46CA3D1B4E16BAB9">>},
  {<<"thoas">>, <<"E38697EDFFD6E91BD12CEA41B155115282630075C2A727E7A6B2947F5408B86A">>}]}
 ].
