@@ -14,6 +14,9 @@ jobs:
       pull-requests: write
     with:
       version-file: '.tool-versions'
+      # version-file drives the analysis jobs; the eunit/ct matrix uses
+      # otp-matrix (else it falls back to the otp-version default of 28).
+      otp-matrix: '["29.0.2"]'
       enable-audit: true
       enable-ct: true
       extra-services-compose: 'docker-compose.yml'
