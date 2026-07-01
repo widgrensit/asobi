@@ -62,7 +62,8 @@ do_validate_ticket(ApiKey, AppId, Ticket) ->
         ~"&appid=",
         url_encode(AppId),
         ~"&ticket=",
-        url_encode(Ticket)
+        url_encode(Ticket),
+        identity_param()
     ]),
     case
         httpc:request(get, {binary_to_list(Url), []}, [{timeout, 10000}], [{body_format, binary}])
@@ -80,22 +81,34 @@ do_validate_ticket(ApiKey, AppId, Ticket) ->
 -spec parse_auth_response(binary()) -> {ok, map()} | {error, binary()}.
 parse_auth_response(Body) ->
     case json:decode(Body) of
-        #{~"response" := #{~"params" := #{~"result" := ~"OK", ~"steamid" := SteamId}}} when
+        #{~"response" := #{~"params" := #{~"result" := ~"OK", ~"steamid" := SteamId} = Params}} when
             is_binary(SteamId)
         ->
-            maybe_fetch_profile(SteamId);
+            check_bans(SteamId, Params);
         #{~"response" := #{~"error" := #{~"errordesc" := Desc}}} when is_binary(Desc) ->
             {error, Desc};
         _ ->
             {error, ~"invalid_steam_response"}
     end.
 
--spec maybe_fetch_profile(binary()) -> {ok, map()}.
-maybe_fetch_profile(SteamId) ->
+%% Reject tickets banned from THIS app. `ownersteamid` differing from
+%% `steamid` means Family Sharing (borrowed copy) — surfaced in the claims so
+%% game policy can decide, not hard-rejected here.
+-spec check_bans(binary(), map()) -> {ok, map()} | {error, binary()}.
+check_bans(SteamId, Params) ->
+    case maps:get(~"publisherbanned", Params, false) of
+        true -> {error, ~"publisher_banned"};
+        _ -> maybe_fetch_profile(SteamId, Params)
+    end.
+
+-spec maybe_fetch_profile(binary(), map()) -> {ok, map()}.
+maybe_fetch_profile(SteamId, Params) ->
     Claims = #{
         provider_uid => SteamId,
         provider_email => undefined,
-        provider_display_name => undefined
+        provider_display_name => undefined,
+        owner_steamid => maps:get(~"ownersteamid", Params, SteamId),
+        vac_banned => maps:get(~"vacbanned", Params, false)
     },
     case fetch_player_summary(SteamId) of
         {ok, Summary} ->
@@ -148,6 +161,16 @@ steam_app_id() ->
     case application:get_env(asobi, steam_app_id, ~"0") of
         V when is_binary(V) -> V;
         _ -> ~"0"
+    end.
+
+%% Optional `identity` string binding the ticket to this service. When the game
+%% client passes the same identity to GetAuthSessionTicket, Steam rejects a
+%% ticket minted for a different service — blunting cross-service replay.
+-spec identity_param() -> binary().
+identity_param() ->
+    case application:get_env(asobi, steam_identity, undefined) of
+        V when is_binary(V), V =/= <<>> -> <<"&identity=", (url_encode(V))/binary>>;
+        _ -> <<>>
     end.
 
 -spec url_encode(binary()) -> binary().
