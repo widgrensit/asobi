@@ -50,6 +50,12 @@ start_link() ->
 %% should call this rather than nova_auth_session directly.
 -spec resolve_token(binary()) -> {ok, map()} | {error, term()}.
 resolve_token(Token) when is_binary(Token) ->
+    ensure_active(lookup(Token));
+resolve_token(_) ->
+    {error, invalid_token}.
+
+-spec lookup(binary()) -> {ok, map()} | {error, term()}.
+lookup(Token) ->
     Now = erlang:system_time(millisecond),
     case ets:lookup(?TABLE, Token) of
         [{_, {ok, Player}, ExpiresAt}] when ExpiresAt > Now ->
@@ -60,9 +66,22 @@ resolve_token(Token) when is_binary(Token) ->
             {error, Reason};
         _ ->
             miss(Token)
+    end.
+
+%% Reject sessions belonging to banned players, even when the token itself is
+%% valid and cached. `banned_at` is nil/absent for active players.
+-spec ensure_active({ok, map()} | {error, term()}) -> {ok, map()} | {error, term()}.
+ensure_active({ok, Player} = OK) ->
+    case is_banned(Player) of
+        true -> {error, banned};
+        false -> OK
     end;
-resolve_token(_) ->
-    {error, invalid_token}.
+ensure_active(Other) ->
+    Other.
+
+-spec is_banned(map()) -> boolean().
+is_banned(#{banned_at := V}) -> V =/= nil andalso V =/= undefined;
+is_banned(_) -> false.
 
 -spec invalidate(binary()) -> ok.
 invalidate(Token) when is_binary(Token) ->
