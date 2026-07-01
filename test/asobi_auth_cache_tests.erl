@@ -6,7 +6,9 @@ cache_test_() ->
         {"resolve_token returns cached positive without DB", fun positive_hit/0},
         {"resolve_token caches negative with shorter TTL", fun negative_hit/0},
         {"invalidate clears the entry", fun invalidate_clears/0},
-        {"expired entries are not returned", fun expired_skipped/0}
+        {"expired entries are not returned", fun expired_skipped/0},
+        {"banned players are rejected", fun banned_rejected/0},
+        {"active players (nil banned_at) pass", fun active_passes/0}
     ]}.
 
 setup() ->
@@ -43,6 +45,18 @@ invalidate_clears() ->
     %% would fall back to nova_auth_session, but with the asobi_auth ets
     %% configuration not set up in eunit it will surface as an error.
     ?assertMatch({error, _}, asobi_auth_cache:resolve_token(Token)).
+
+banned_rejected() ->
+    Token = ~"tok-banned",
+    Player = #{id => ~"player-banned", banned_at => {{2026, 1, 1}, {0, 0, 0}}},
+    asobi_auth_cache:put_positive(Token, Player),
+    ?assertEqual({error, banned}, asobi_auth_cache:resolve_token(Token)).
+
+active_passes() ->
+    Token = ~"tok-active",
+    Player = #{id => ~"player-active", banned_at => nil},
+    asobi_auth_cache:put_positive(Token, Player),
+    ?assertEqual({ok, Player}, asobi_auth_cache:resolve_token(Token)).
 
 %% A short-TTL setup confirms expired rows are not served.
 expired_skipped() ->
