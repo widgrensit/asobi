@@ -1,0 +1,37 @@
+name: Dependabot auto-merge
+
+# Merge a dependabot PR (github-actions + docker bumps) once CI is green.
+# Runs on CI completion rather than PR open, so the merge only happens after
+# checks pass. Self-contained: no branch protection or repo settings required.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the dependabot PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          num=$(gh pr list --repo "$REPO" --head "$HEAD" --state open \
+                  --json number --jq '.[0].number // empty')
+          if [ -z "$num" ]; then
+            echo "No open PR for branch $HEAD; nothing to merge."
+            exit 0
+          fi
+          echo "Merging PR #$num (branch $HEAD)"
+          gh pr merge "$num" --repo "$REPO" --squash --delete-branch
