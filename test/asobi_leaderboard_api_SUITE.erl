@@ -38,7 +38,7 @@ init_per_suite(Config) ->
                 #{json => #{~"username" => U, ~"password" => ~"testpass123"}},
                 Config0
             ),
-            #{~"player_id" := PId, ~"session_token" := PToken} = nova_test:json(R),
+            #{~"player_id" := PId, ~"access_token" := PToken} = nova_test:json(R),
             {PId, PToken}
         end,
         lists:seq(1, 5)

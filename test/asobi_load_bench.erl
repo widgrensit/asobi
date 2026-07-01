@@ -91,7 +91,7 @@ worker(I, Config) ->
             Config
         ),
         RegUs = erlang:monotonic_time(microsecond) - RegT0,
-        #{~"session_token" := Token0, ~"player_id" := PlayerId0} = nova_test:json(RegResp),
+        #{~"access_token" := Token0, ~"player_id" := PlayerId0} = nova_test:json(RegResp),
         true = is_binary(Token0),
         true = is_binary(PlayerId0),
         Token = Token0,

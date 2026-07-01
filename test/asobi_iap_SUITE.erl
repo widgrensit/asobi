@@ -49,7 +49,7 @@ init_per_suite(Config) ->
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
-    #{~"session_token" := P1Token} = nova_test:json(R1),
+    #{~"access_token" := P1Token} = nova_test:json(R1),
     Chain = build_test_chain(),
     [
         {player1_token, P1Token},

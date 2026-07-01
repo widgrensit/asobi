@@ -39,7 +39,7 @@ init_per_suite(Config) ->
         },
         Config0
     ),
-    #{~"player_id" := PlayerId, ~"session_token" := Token} = nova_test:json(Resp),
+    #{~"player_id" := PlayerId, ~"access_token" := Token} = nova_test:json(Resp),
     [{player_id, PlayerId}, {session_token, Token} | Config0].
 
 end_per_suite(Config) ->

@@ -58,8 +58,8 @@ init_per_suite(Config) ->
         Config0
     ),
     B2 = nova_test:json(R2),
-    #{~"player_id" := P1Id, ~"session_token" := P1Token} = B1,
-    #{~"player_id" := P2Id, ~"session_token" := P2Token} = B2,
+    #{~"player_id" := P1Id, ~"access_token" := P1Token} = B1,
+    #{~"player_id" := P2Id, ~"access_token" := P2Token} = B2,
     Suffix = integer_to_binary(erlang:unique_integer([positive])),
     ItemCS = asobi_item_def:changeset(#{}, #{
         slug => iolist_to_binary([~"test_sword_", Suffix]),

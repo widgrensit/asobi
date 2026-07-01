@@ -18,6 +18,8 @@
     login_success/1,
     login_invalid_credentials/1,
     refresh_token/1,
+    refresh_reuse_detected/1,
+    logout_revokes_family/1,
     get_player/1,
     update_player/1,
     update_player_unauthorized/1,
@@ -38,7 +40,9 @@ groups() ->
             register_short_password,
             login_success,
             login_invalid_credentials,
-            refresh_token
+            refresh_token,
+            refresh_reuse_detected,
+            logout_revokes_family
         ]},
         {players, [sequence], [
             get_player,
@@ -61,12 +65,17 @@ init_per_suite(Config) ->
         #{json => #{~"username" => PlayerUsername, ~"password" => ~"testpass123"}},
         Config0
     ),
-    #{~"player_id" := PlayerId, ~"session_token" := SessionToken} = nova_test:json(Resp),
+    #{
+        ~"player_id" := PlayerId,
+        ~"access_token" := SessionToken,
+        ~"refresh_token" := RefreshToken
+    } = nova_test:json(Resp),
     [
         {test_username, Username},
         {player_username, PlayerUsername},
         {player_id, PlayerId},
-        {session_token, SessionToken}
+        {session_token, SessionToken},
+        {refresh_token, RefreshToken}
         | Config0
     ].
 
@@ -80,7 +89,7 @@ init_per_group(players, Config) ->
         #{json => #{~"username" => PlayerUsername, ~"password" => ~"testpass123"}},
         Config
     ),
-    #{~"session_token" := SessionToken, ~"player_id" := PlayerId} = nova_test:json(Resp),
+    #{~"access_token" := SessionToken, ~"player_id" := PlayerId} = nova_test:json(Resp),
     [
         {session_token, SessionToken},
         {player_id, PlayerId}
@@ -109,7 +118,7 @@ register_player(Config) ->
     ),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
-    ?assertMatch(#{~"player_id" := _, ~"session_token" := _}, Body),
+    ?assertMatch(#{~"player_id" := _, ~"access_token" := _}, Body),
     Config.
 
 register_duplicate_username(Config) ->
@@ -169,7 +178,7 @@ login_success(Config) ->
     ),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
-    ?assertMatch(#{~"player_id" := _, ~"session_token" := _}, Body),
+    ?assertMatch(#{~"player_id" := _, ~"access_token" := _}, Body),
     Config.
 
 login_invalid_credentials(Config) ->
@@ -188,17 +197,66 @@ login_invalid_credentials(Config) ->
     Config.
 
 refresh_token(Config) ->
-    {session_token, Token} = lists:keyfind(session_token, 1, Config),
+    {refresh_token, Token} = lists:keyfind(refresh_token, 1, Config),
     {ok, Resp} = nova_test:post(
         "/api/v1/auth/refresh",
         #{
-            json => #{~"session_token" => Token}
+            json => #{~"refresh_token" => Token}
         },
         Config
     ),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
-    ?assertMatch(#{~"player_id" := _, ~"session_token" := _}, Body),
+    ?assertMatch(#{~"access_token" := _, ~"refresh_token" := _}, Body),
+    Config.
+
+refresh_reuse_detected(Config) ->
+    Username = asobi_test_helpers:unique_username(~"reuse"),
+    {ok, RegResp} = nova_test:post(
+        "/api/v1/auth/register",
+        #{json => #{~"username" => Username, ~"password" => ~"testpass123"}},
+        Config
+    ),
+    #{~"refresh_token" := R0} = nova_test:json(RegResp),
+    {ok, Rotated} = nova_test:post(
+        "/api/v1/auth/refresh",
+        #{json => #{~"refresh_token" => R0}},
+        Config
+    ),
+    ?assertStatus(200, Rotated),
+    %% Replaying the already-rotated refresh token is detected as theft.
+    {ok, Reused} = nova_test:post(
+        "/api/v1/auth/refresh",
+        #{json => #{~"refresh_token" => R0}},
+        Config
+    ),
+    ?assertStatus(401, Reused),
+    Config.
+
+logout_revokes_family(Config) ->
+    Username = asobi_test_helpers:unique_username(~"logout"),
+    {ok, RegResp} = nova_test:post(
+        "/api/v1/auth/register",
+        #{json => #{~"username" => Username, ~"password" => ~"testpass123"}},
+        Config
+    ),
+    #{~"access_token" := Access, ~"refresh_token" := Refresh} = nova_test:json(RegResp),
+    {ok, Out} = nova_test:post(
+        "/api/v1/auth/logout",
+        #{
+            json => #{~"refresh_token" => Refresh},
+            headers => [{~"authorization", <<"Bearer ", Access/binary>>}]
+        },
+        Config
+    ),
+    ?assertStatus(200, Out),
+    %% Logout revoked the whole family, so the refresh token is now dead.
+    {ok, Dead} = nova_test:post(
+        "/api/v1/auth/refresh",
+        #{json => #{~"refresh_token" => Refresh}},
+        Config
+    ),
+    ?assertStatus(401, Dead),
     Config.
 
 %% --- Player Tests ---

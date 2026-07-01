@@ -36,7 +36,7 @@ init_per_suite(Config) ->
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
-    #{~"session_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
+    #{~"access_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
     BoardId = iolist_to_binary([
         ~"tourney_board_", integer_to_binary(erlang:unique_integer([positive]))
     ]),

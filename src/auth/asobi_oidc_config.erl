@@ -3,7 +3,7 @@
 
 -export([config/0]).
 
--spec config() -> nova_auth_oidc:oidc_config().
+-spec config() -> map().
 config() ->
     Providers = narrow_providers(application:get_env(asobi, oidc_providers, #{})),
     BaseUrl =

@@ -54,8 +54,8 @@ init_per_suite(Config) ->
         Config0
     ),
     B2 = nova_test:json(R2),
-    #{~"player_id" := P1Id, ~"session_token" := P1Token} = B1,
-    #{~"session_token" := P2Token} = B2,
+    #{~"player_id" := P1Id, ~"access_token" := P1Token} = B1,
+    #{~"access_token" := P2Token} = B2,
     [
         {player1_id, P1Id},
         {player1_token, P1Token},

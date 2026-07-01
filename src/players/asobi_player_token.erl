@@ -15,6 +15,8 @@ fields() ->
         #kura_field{name = user_id, type = uuid, nullable = false},
         #kura_field{name = token, type = string, nullable = false},
         #kura_field{name = context, type = string, nullable = false},
+        #kura_field{name = family_id, type = string},
+        #kura_field{name = used_at, type = utc_datetime},
         #kura_field{name = inserted_at, type = utc_datetime, nullable = false}
     ].
 
@@ -31,5 +33,6 @@ associations() ->
 indexes() ->
     [
         {[token, context], #{}},
-        {[user_id], #{}}
+        {[user_id], #{}},
+        {[family_id], #{}}
     ].
