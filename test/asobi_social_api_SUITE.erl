@@ -54,9 +54,9 @@ init_per_suite(Config) ->
         Config0
     ),
     B3 = nova_test:json(R3),
-    #{~"session_token" := P1Token, ~"player_id" := P1Id} = B1,
-    #{~"session_token" := P2Token, ~"player_id" := P2Id} = B2,
-    #{~"session_token" := P3Token, ~"player_id" := P3Id} = B3,
+    #{~"access_token" := P1Token, ~"player_id" := P1Id} = B1,
+    #{~"access_token" := P2Token, ~"player_id" := P2Id} = B2,
+    #{~"access_token" := P3Token, ~"player_id" := P3Id} = B3,
     true = is_binary(P1Id),
     true = is_binary(P2Id),
     true = is_binary(P3Id),

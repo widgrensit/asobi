@@ -277,7 +277,7 @@ register_batches(Remaining, BatchSize, Done, Config, Acc) ->
                         case nova_test:status(Resp) of
                             S when S >= 200, S < 300 ->
                                 Body = nova_test:json(Resp),
-                                #{~"session_token" := Token, ~"player_id" := PlayerId} = Body,
+                                #{~"access_token" := Token, ~"player_id" := PlayerId} = Body,
                                 true = is_binary(Token),
                                 true = is_binary(PlayerId),
                                 {ok, {Token, PlayerId}};

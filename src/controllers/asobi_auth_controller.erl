@@ -1,6 +1,6 @@
 -module(asobi_auth_controller).
 
--export([register/1, login/1, refresh/1]).
+-export([register/1, login/1, refresh/1, logout/1]).
 
 -spec register(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
 register(
@@ -17,13 +17,8 @@ register(
         )
     of
         {ok, Player} ->
-            {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
             init_player_stats(maps:get(id, Player)),
-            {json, 200, #{}, #{
-                player_id => maps:get(id, Player),
-                session_token => Token,
-                username => maps:get(username, Player)
-            }};
+            asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
         {error, CS} ->
             {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS, fun(_F, M) -> M end)}}
     end;
@@ -36,12 +31,7 @@ login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) whe
 ->
     case nova_auth_accounts:authenticate(asobi_auth, Username, Password) of
         {ok, Player} ->
-            {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
-            {json, 200, #{}, #{
-                player_id => maps:get(id, Player),
-                session_token => Token,
-                username => maps:get(username, Player)
-            }};
+            asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
         {error, invalid_credentials} ->
             {json, 401, #{}, #{error => ~"invalid_credentials"}}
     end;
@@ -49,21 +39,24 @@ login(_Req) ->
     {json, 400, #{}, #{error => ~"missing_required_fields"}}.
 
 -spec refresh(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
-refresh(#{json := #{~"session_token" := OldToken}} = _Req) when is_binary(OldToken) ->
-    case nova_auth_session:get_user_by_session_token(asobi_auth, OldToken) of
-        {ok, Player} ->
-            nova_auth_session:delete_session_token(asobi_auth, OldToken),
-            asobi_auth_cache:invalidate(OldToken),
-            {ok, NewToken} = nova_auth_session:generate_session_token(asobi_auth, Player),
-            {json, 200, #{}, #{
-                player_id => maps:get(id, Player),
-                session_token => NewToken
-            }};
+refresh(#{json := #{~"refresh_token" := RefreshToken}} = _Req) when is_binary(RefreshToken) ->
+    case nova_auth_refresh:refresh(asobi_auth, RefreshToken) of
+        {ok, #{access_token := Access, refresh_token := Refresh}} ->
+            {json, 200, #{}, #{access_token => Access, refresh_token => Refresh}};
         {error, _} ->
             {json, 401, #{}, #{error => ~"invalid_token"}}
     end;
 refresh(_Req) ->
     {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+
+-spec logout(cowboy_req:req()) -> {json, integer(), map(), map()}.
+logout(#{json := #{~"refresh_token" := RefreshToken}} = Req) when is_binary(RefreshToken) ->
+    ok = nova_auth_refresh:revoke_family(asobi_auth, RefreshToken),
+    ok = asobi_auth_tokens:revoke_access(Req),
+    {json, 200, #{}, #{success => true}};
+logout(Req) ->
+    ok = asobi_auth_tokens:revoke_access(Req),
+    {json, 200, #{}, #{success => true}}.
 
 %% --- Internal ---
 

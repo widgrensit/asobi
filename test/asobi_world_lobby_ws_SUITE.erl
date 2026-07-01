@@ -305,7 +305,7 @@ register_player(Suffix, Config) ->
         #{json => #{~"username" => Username, ~"password" => ~"testpass123"}},
         Config
     ),
-    #{~"player_id" := PlayerId, ~"session_token" := Token} = nova_test:json(Resp),
+    #{~"player_id" := PlayerId, ~"access_token" := Token} = nova_test:json(Resp),
     {PlayerId, Token}.
 
 unique_name(Suffix) ->

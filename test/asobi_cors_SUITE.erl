@@ -106,7 +106,7 @@ post_register_still_works(Config) ->
     ),
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
-    ?assertMatch(#{~"player_id" := _, ~"session_token" := _}, Body).
+    ?assertMatch(#{~"player_id" := _, ~"access_token" := _}, Body).
 
 %% --- Helpers ---
 

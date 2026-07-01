@@ -26,6 +26,7 @@ auth_routes() ->
             {~"/register", fun asobi_auth_controller:register/1, #{methods => [post, options]}},
             {~"/login", fun asobi_auth_controller:login/1, #{methods => [post, options]}},
             {~"/refresh", fun asobi_auth_controller:refresh/1, #{methods => [post, options]}},
+            {~"/logout", fun asobi_auth_controller:logout/1, #{methods => [post, options]}},
             {~"/oauth", fun asobi_oauth_controller:authenticate/1, #{methods => [post, options]}}
         ]
     }.

@@ -20,7 +20,7 @@ init_per_suite(Config) ->
         #{json => #{~"username" => U, ~"password" => ~"testpass123"}},
         Config0
     ),
-    #{~"session_token" := Token} = nova_test:json(R),
+    #{~"access_token" := Token} = nova_test:json(R),
     true = is_binary(Token),
     [{token, Token} | Config0].
 

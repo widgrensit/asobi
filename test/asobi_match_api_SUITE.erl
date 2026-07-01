@@ -32,7 +32,7 @@ init_per_suite(Config) ->
         #{json => #{~"username" => U1, ~"password" => ~"testpass123"}},
         Config0
     ),
-    #{~"session_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
+    #{~"access_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
     Record1CS = kura_changeset:cast(
         asobi_match_record,
         #{},

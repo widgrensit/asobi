@@ -42,7 +42,7 @@ invalidate_clears() ->
     ?assertEqual({ok, Player}, asobi_auth_cache:resolve_token(Token)),
     asobi_auth_cache:invalidate(Token),
     %% After invalidate the cache no longer holds the entry; resolve_token
-    %% would fall back to nova_auth_session, but with the asobi_auth ets
+    %% would fall back to nova_auth_refresh, but with the asobi_auth ets
     %% configuration not set up in eunit it will surface as an error.
     ?assertMatch({error, _}, asobi_auth_cache:resolve_token(Token)).
 

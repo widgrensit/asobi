@@ -36,8 +36,8 @@ init_per_suite(Config) ->
         Config0
     ),
     B2 = nova_test:json(R2),
-    #{~"player_id" := PlayerId, ~"session_token" := P1Token} = B1,
-    #{~"session_token" := P2Token} = B2,
+    #{~"player_id" := PlayerId, ~"access_token" := P1Token} = B1,
+    #{~"access_token" := P2Token} = B2,
     true = is_binary(PlayerId),
     {ok, Notif1} = asobi_notify:send(PlayerId, ~"system", ~"Welcome", #{~"msg" => ~"hi"}),
     {ok, Notif2} = asobi_notify:send(PlayerId, ~"test", ~"Test", #{~"msg" => ~"test"}),

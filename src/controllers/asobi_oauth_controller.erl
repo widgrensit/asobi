@@ -135,12 +135,7 @@ login_existing_player(Identity) ->
     PlayerId = maps:get(player_id, Identity),
     case asobi_repo:get(asobi_player, PlayerId) of
         {ok, Player} ->
-            {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
-            {json, 200, #{}, #{
-                player_id => PlayerId,
-                session_token => Token,
-                username => maps:get(username, Player)
-            }};
+            asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
         {error, _} ->
             {json, 500, #{}, #{error => ~"player_not_found"}}
     end.
@@ -161,13 +156,7 @@ create_player_with_identity(Provider, Claims) ->
             PlayerId = maps:get(id, Player),
             _ = init_player_stats(PlayerId),
             _ = insert_identity(PlayerId, Provider, Claims),
-            {ok, Token} = nova_auth_session:generate_session_token(asobi_auth, Player),
-            {json, 200, #{}, #{
-                player_id => PlayerId,
-                session_token => Token,
-                username => Username,
-                created => true
-            }};
+            asobi_auth_tokens:issue(Player, 200, #{username => Username, created => true});
         {error, _CS} ->
             {json, 500, #{}, #{error => ~"registration_failed"}}
     end.

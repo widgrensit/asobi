@@ -87,13 +87,13 @@ bench_registration(Config) ->
     ],
     print_stats(~"db_insert", InsertTimes),
 
-    %% Phase 4: Session token generation
-    ct:pal("--- Phase 4: Session token generation ---"),
+    %% Phase 4: Access + refresh token pair generation
+    ct:pal("--- Phase 4: Token pair generation ---"),
     FakePlayer = #{id => asobi_id:generate()},
     TokenTimes = [
         begin
             {T, _} = timer:tc(fun() ->
-                nova_auth_session:generate_session_token(asobi_auth, FakePlayer)
+                nova_auth_refresh:generate_pair(asobi_auth, FakePlayer)
             end),
             T
         end

@@ -1,9 +1,9 @@
 -module(asobi_auth_cache).
 -moduledoc """
-In-memory cache for session-token → player resolution.
+In-memory cache for access-token → player resolution.
 
 The WS connect path and every authenticated HTTP request hit
-`nova_auth_session:get_user_by_session_token/2`, which costs two
+`nova_auth_refresh:get_user_by_access_token/2`, which costs two
 kura queries (one for the token row, one for the user). Under
 mobile-reconnect storms this is the dominant per-connect cost. The
 cache turns a hit into one ETS lookup.
@@ -45,9 +45,9 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %% Single chokepoint helper: cache hit returns immediately, miss falls
-%% back to nova_auth_session and populates the cache. Both call sites
+%% back to nova_auth_refresh and populates the cache. Both call sites
 %% (`asobi_ws_handler:authenticate/1` and `asobi_auth_plugin:verify/1`)
-%% should call this rather than nova_auth_session directly.
+%% should call this rather than nova_auth_refresh directly.
 -spec resolve_token(binary()) -> {ok, map()} | {error, term()}.
 resolve_token(Token) when is_binary(Token) ->
     ensure_active(lookup(Token));
@@ -165,7 +165,7 @@ handle_info(_Info, State) ->
 %% --- Internal ---
 
 miss(Token) ->
-    case nova_auth_session:get_user_by_session_token(asobi_auth, Token) of
+    case nova_auth_refresh:get_user_by_access_token(asobi_auth, Token) of
         {ok, Player} = OK ->
             asobi_telemetry:auth_cache_miss(positive),
             put_positive(Token, Player),

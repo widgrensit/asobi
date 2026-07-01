@@ -12,6 +12,7 @@ config() ->
         user_identity_field => username,
         user_password_field => hashed_password,
         session_validity_days => 30,
+        %% Access/refresh TTLs use nova_auth defaults (60 min / 30 days).
         hash_algorithm => pbkdf2_sha256,
         token_bytes => 32
     }.
