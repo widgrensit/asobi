@@ -54,10 +54,14 @@ suites talk to that container.
 
 ## Pre-push checklist (mandatory)
 
-`fmt` -> `xref` -> `dialyzer` -> `elp eqwalize-all` -> `elp lint` ->
-`eunit`/`ct`, all green, then `fmt --check`. Also run `rebar3 ex_doc` and fix
-every warning. Run the full suite and fix any pre-existing failures before
-starting new work.
+`rebar3 fmt` -> `rebar3 xref` -> `rebar3 dialyzer` -> `rebar3 eunit` ->
+`rebar3 ct` -> `rebar3 ex_doc` (fix every warning) -> `rebar3 fmt --check`, all
+green. Run the full suite and fix any pre-existing failures before starting
+new work.
+
+CI (Taure/erlang-ci) additionally runs dependency audit; eqwalize/lint/mutate
+are not wired in this repo (eqwalize panics on OTP 29) - add them here if that
+changes.
 
 ## Conventions
 
