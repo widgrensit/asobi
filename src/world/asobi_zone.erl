@@ -1,4 +1,10 @@
 -module(asobi_zone).
+-moduledoc """
+One spatial partition of an `asobi_world_server`. A `gen_server` that owns
+the entities in its cell of the grid, ticks their simulation, applies
+player input, manages interest (subscribers), and answers spatial queries
+via `asobi_spatial`. Zones are created and reaped lazily as players move.
+""".
 -behaviour(gen_server).
 
 -export([start_link/1, reap/1]).
