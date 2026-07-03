@@ -1,4 +1,10 @@
 -module(asobi_matchmaker).
+-moduledoc """
+The matchmaking queue. Players submit tickets with a mode and property
+constraints (`add/2`); a pluggable strategy groups compatible tickets,
+spawns a match, and pushes `match.matched` to each player. A single
+`gen_server` owns the queue and ticks it on an interval.
+""".
 -behaviour(gen_server).
 
 -export([start_link/0, add/2, remove/2, get_ticket/1, get_ticket/2, get_queue_stats/0]).

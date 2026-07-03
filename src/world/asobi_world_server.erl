@@ -1,4 +1,11 @@
 -module(asobi_world_server).
+-moduledoc """
+A persistent, zoned world: the `gen_statem` behind large session games
+(`game_type = "world"`). It partitions space into a grid of `asobi_zone`
+processes, moves players between zones as they travel, runs a world-level
+`post_tick`, and drives voting. Use it for MMO-style shared spaces; for
+transient matches use `asobi_match_server` instead.
+""".
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, join/3, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1]).

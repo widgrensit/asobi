@@ -1,7 +1,10 @@
 -module(asobi_spatial).
-
-%% Spatial query primitives for zone entities.
-%% Pure functional — no process, no state. Operates on entity maps.
+-moduledoc """
+Spatial query primitives over zone entities: radius and rectangle queries,
+nearest-neighbour, range and distance helpers. Pure functional - no
+process, no state - operating on entity maps, so `asobi_zone` and game code
+can call it directly.
+""".
 
 -export([query_radius/3, query_radius/4]).
 -export([query_rect/3, query_rect/4]).
