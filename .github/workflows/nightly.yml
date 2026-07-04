@@ -48,9 +48,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build
-          key: nightly-prop-${{ hashFiles('rebar.lock') }}
+          # rebar.config is hashed too: test-profile deps (meck, proper) are not
+          # written to rebar.lock, so a lock-only key never busts when they bump.
+          # The -v2- prefix retires the poisoned pre-OTP-29 caches (stale meck 0.9).
+          key: nightly-prop-v2-${{ hashFiles('rebar.config', 'rebar.lock') }}
           restore-keys: |
-            nightly-prop-
+            nightly-prop-v2-
 
       - name: Run property tests at high numtests
         run: |
