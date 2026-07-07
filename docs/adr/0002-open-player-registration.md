@@ -4,7 +4,7 @@ Date: 2026-07-07
 
 ## Status
 
-Proposed. Mitigations tracked in asobi#157 and asobi#158.
+Accepted. Mitigations tracked in asobi#157 and asobi#158.
 
 ## Context
 
