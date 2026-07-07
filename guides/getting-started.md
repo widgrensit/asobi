@@ -2,6 +2,10 @@
 
 This guide walks you through setting up Asobi and creating your first game backend.
 
+> **Shells**: command blocks that differ per OS are shown for both bash (Linux,
+> macOS, Git Bash, or WSL on Windows) and PowerShell (Windows). Docker and rebar3
+> commands are identical on every platform and are shown once.
+
 Choose your path:
 
 - **[Lua + Docker](#lua--docker)** -- write game logic in Lua, no Erlang needed
@@ -9,13 +13,24 @@ Choose your path:
 
 ## Lua + Docker
 
-The fastest way to start. You need [Docker](https://docs.docker.com/get-docker/) and nothing else.
+The fastest way to start. You need [Docker](https://docs.docker.com/get-docker/) and
+nothing else. On Windows and macOS that is Docker Desktop; on Windows enable the
+WSL2 backend. `localhost` reaches the server the same way on all three.
 
 ### 1. Create your project
+
+bash (Linux, macOS, Git Bash, WSL):
 
 ```bash
 mkdir my_game && cd my_game
 mkdir -p lua/bots
+```
+
+PowerShell (Windows):
+
+```powershell
+mkdir my_game; cd my_game
+mkdir lua/bots
 ```
 
 ### 2. Write your match logic
@@ -121,10 +136,20 @@ database, and starts listening for WebSocket connections on port 8080.
 
 Register a player:
 
+bash (Linux, macOS, Git Bash, WSL):
+
 ```bash
 curl -s localhost:8080/api/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"username":"alice","password":"hunter2"}' | jq
+```
+
+PowerShell (Windows) - no `curl`/`jq` install needed, `Invoke-RestMethod` parses the response:
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/register `
+  -Method Post -ContentType application/json `
+  -Body '{"username":"alice","password":"hunter2"}'
 ```
 
 Expected response:
@@ -264,10 +289,20 @@ is now listening on the configured port.
 
 ## Register a Player
 
+bash (Linux, macOS, Git Bash, WSL):
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"username": "player1", "password": "secret123"}'
+```
+
+PowerShell (Windows):
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/register `
+  -Method Post -ContentType application/json `
+  -Body '{"username": "player1", "password": "secret123"}'
 ```
 
 Response:
