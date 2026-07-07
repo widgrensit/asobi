@@ -4,6 +4,18 @@ All endpoints are under `/api/v1`. Requests and responses use JSON.
 
 Authenticated endpoints require the `Authorization: Bearer <session_token>` header.
 
+> **Windows / PowerShell**: examples below use `curl` (Linux, macOS, Git Bash,
+> WSL). In PowerShell, translate any block by hand once - the shape is the same:
+>
+> ```powershell
+> Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/register `
+>   -Method Post -ContentType application/json `
+>   -Body '{"username": "player1", "password": "secret123"}'
+> ```
+>
+> Add auth with `-Headers @{ Authorization = "Bearer $token" }`.
+> `Invoke-RestMethod` parses the JSON response for you, so no `jq` is needed.
+
 ## Auth
 
 ```
