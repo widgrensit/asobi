@@ -116,8 +116,17 @@ register_limiters() ->
     %% high enough for legitimate mobile reconnect storms (carrier-NAT
     %% means many real users share one IP) but low enough to bound a
     %% single-IP flood of fresh connections.
+    %%
+    %% register gets its OWN bucket (asobi#157): /auth/register runs the
+    %% password KDF (pbkdf2_sha256, 100k iters) as its only cost gate, so
+    %% sharing login's bucket let a signup flood both starve honest logins
+    %% and amplify CPU. A dedicated, tighter limit (registration is a
+    %% one-time event, rarer than login) caps single-IP KDF cost and
+    %% isolates it from login. Per-IP only bounds single-IP cost;
+    %% distributed abuse needs the pre-auth gate tracked in asobi#158.
     Defaults = #{
         auth => #{algorithm => sliding_window, limit => 5, window => 1000},
+        register => #{algorithm => sliding_window, limit => 3, window => 1000},
         iap => #{algorithm => sliding_window, limit => 10, window => 1000},
         api => #{algorithm => sliding_window, limit => 300, window => 1000},
         ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000}
@@ -143,6 +152,7 @@ register_limiters() ->
     ignore.
 
 limiter_name(auth) -> asobi_auth_limiter;
+limiter_name(register) -> asobi_register_limiter;
 limiter_name(iap) -> asobi_iap_limiter;
 limiter_name(api) -> asobi_api_limiter;
 limiter_name(ws_connect) -> asobi_ws_connect_limiter.
