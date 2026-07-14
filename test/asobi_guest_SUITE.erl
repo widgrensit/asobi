@@ -8,6 +8,7 @@
     wrong_secret_rejected_no_new_player/1,
     weak_secret_rejected/1,
     upgrade_then_already_claimed/1,
+    upgrade_rejected_for_non_guest/1,
     reaper_removes_unclaimed_guest_and_children/1
 ]).
 
@@ -17,6 +18,7 @@ all() ->
         wrong_secret_rejected_no_new_player,
         weak_secret_rejected,
         upgrade_then_already_claimed,
+        upgrade_rejected_for_non_guest,
         reaper_removes_unclaimed_guest_and_children
     ].
 
@@ -102,6 +104,31 @@ upgrade_then_already_claimed(Config) ->
         Config
     ),
     ?assertStatus(409, R3),
+    Config.
+
+%% A passwordless account that is NOT a guest (e.g. OAuth-only) must not be able
+%% to use the guest-upgrade path to set a password and rename itself - the gate
+%% is "owns a guest identity AND has no password", not "has no password".
+upgrade_rejected_for_non_guest(Config) ->
+    Username = asobi_test_helpers:unique_username(~"oauthy"),
+    PlayerCS = kura_changeset:validate_required(
+        kura_changeset:cast(asobi_player, #{}, #{username => Username}, [username]),
+        [username]
+    ),
+    {ok, Player} = asobi_repo:insert(PlayerCS),
+    PlayerId = maps:get(id, Player),
+    IdCS = asobi_player_identity:changeset(#{}, #{
+        player_id => PlayerId, provider => ~"google", provider_uid => device_id()
+    }),
+    {ok, _} = asobi_repo:insert(IdCS),
+    {json, 200, _, #{access_token := Token}} = asobi_auth_tokens:issue(Player, 200, #{}),
+    Auth = [{~"authorization", <<"Bearer ", Token/binary>>}],
+    {ok, R} = nova_test:post(
+        "/api/v1/auth/guest/upgrade",
+        #{json => #{~"username" => ~"hijacked", ~"password" => ~"secret1234"}, headers => Auth},
+        Config
+    ),
+    ?assertStatus(409, R),
     Config.
 
 reaper_removes_unclaimed_guest_and_children(Config) ->

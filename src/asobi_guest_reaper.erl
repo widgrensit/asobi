@@ -7,7 +7,7 @@
 %% only removes guests that were never claimed - no password and no non-device
 %% identity - so an upgraded account is never touched.
 
--export([start_link/0, sweep_now/0]).
+-export([start_link/0, sweep_now/0, cached_unlinked_count/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -include_lib("kernel/include/logger.hrl").
@@ -16,6 +16,8 @@
 -define(PROVIDER, ~"guest").
 -define(DEFAULT_INTERVAL_MS, 3600000).
 -define(REAP_BATCH, 500).
+-define(COUNT_CACHE, asobi_guest_count_cache).
+-define(DEFAULT_COUNT_TTL_MS, 2000).
 
 %% Only runs when guest auth is enabled - otherwise no process, no timer on
 %% deployments that don't use guest auth.
@@ -33,8 +35,59 @@ sweep_now() ->
 
 -spec init([]) -> {ok, map()}.
 init([]) ->
+    _ = ensure_count_cache(),
     schedule(),
     {ok, #{}}.
+
+%% Short-TTL cache of the unlinked-guest count, read by the create path's cap
+%% check so an unauthenticated create storm can't turn the guard into a
+%% full-table COUNT per request. Public table (request processes read/refresh
+%% it); created here so it shares the reaper's lifetime.
+-spec ensure_count_cache() -> ets:table().
+ensure_count_cache() ->
+    case ets:whereis(?COUNT_CACHE) of
+        undefined ->
+            ets:new(?COUNT_CACHE, [
+                named_table, public, set, {read_concurrency, true}, {write_concurrency, true}
+            ]);
+        Tid ->
+            Tid
+    end.
+
+%% Read the cached count, refreshing on miss/expiry. Falls back to a live count
+%% (uncached) if the table isn't up yet, so it is safe to call before the reaper
+%% has started. Returns `unknown` on a query failure so the caller fails closed.
+-spec cached_unlinked_count() -> non_neg_integer() | unknown.
+cached_unlinked_count() ->
+    Now = erlang:monotonic_time(millisecond),
+    case ets:whereis(?COUNT_CACHE) of
+        undefined ->
+            live_unlinked_count();
+        _ ->
+            case ets:lookup(?COUNT_CACHE, count) of
+                [{count, N, Expiry}] when Expiry > Now -> N;
+                _ -> refresh_count(Now)
+            end
+    end.
+
+-spec refresh_count(integer()) -> non_neg_integer() | unknown.
+refresh_count(Now) ->
+    case live_unlinked_count() of
+        N when is_integer(N) ->
+            Ttl = application:get_env(asobi, guest_unlinked_count_ttl_ms, ?DEFAULT_COUNT_TTL_MS),
+            true = ets:insert(?COUNT_CACHE, {count, N, Now + Ttl}),
+            N;
+        unknown ->
+            unknown
+    end.
+
+-spec live_unlinked_count() -> non_neg_integer() | unknown.
+live_unlinked_count() ->
+    Q = kura_query:where(kura_query:from(asobi_player_identity), {provider, ?PROVIDER}),
+    case asobi_repo:aggregate(Q, count) of
+        {ok, N} -> N;
+        _ -> unknown
+    end.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call(sweep, _From, State) ->
@@ -113,12 +166,22 @@ reap_one(Identity) ->
 -spec delete_guest_cascade(binary()) -> reaped | skipped.
 delete_guest_cascade(PlayerId) ->
     Fun = fun() ->
-        _ = asobi_repo:delete_all(by_player(asobi_player_stats, PlayerId)),
-        _ = asobi_repo:delete_all(by_player(asobi_player_token, PlayerId)),
-        _ = asobi_repo:delete_all(by_player(asobi_player_identity, PlayerId)),
-        case asobi_repo:get(asobi_player, PlayerId) of
-            {ok, Player} -> asobi_repo:delete(asobi_player, Player);
-            _ -> ok
+        %% Re-check inside the transaction: a guest can call /auth/guest/upgrade
+        %% between the pre-check and here, becoming a claimed account with a
+        %% password and fresh tokens. Deleting it then would be silent loss of a
+        %% real account, so a concurrent upgrade must win - abort the reap.
+        case unclaimed_guest(PlayerId) of
+            false ->
+                {error, claimed_during_sweep};
+            true ->
+                _ = asobi_repo:delete_all(by_player(asobi_player_stats, PlayerId)),
+                %% player_tokens keys players by `user_id`, not `player_id`.
+                _ = asobi_repo:delete_all(by_user(asobi_player_token, PlayerId)),
+                _ = asobi_repo:delete_all(by_player(asobi_player_identity, PlayerId)),
+                case asobi_repo:get(asobi_player, PlayerId) of
+                    {ok, Player} -> asobi_repo:delete(asobi_player, Player);
+                    _ -> ok
+                end
         end
     end,
     try asobi_repo:transaction(Fun) of
@@ -131,6 +194,10 @@ delete_guest_cascade(PlayerId) ->
 -spec by_player(module(), binary()) -> #kura_query{}.
 by_player(Schema, PlayerId) ->
     kura_query:where(kura_query:from(Schema), {player_id, PlayerId}).
+
+-spec by_user(module(), binary()) -> #kura_query{}.
+by_user(Schema, PlayerId) ->
+    kura_query:where(kura_query:from(Schema), {user_id, PlayerId}).
 
 %% A guest is unclaimed only if the player never set a password and has no
 %% identity from another provider (i.e. never upgraded/linked).

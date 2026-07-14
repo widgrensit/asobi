@@ -47,3 +47,19 @@ decode_secret_test() ->
         error, asobi_guest_controller:decode_secret(base64:encode(crypto:strong_rand_bytes(16)))
     ),
     ?assertEqual(error, asobi_guest_controller:decode_secret(~"not valid base64 !!!")).
+
+decode_secret_upper_bound_test() ->
+    %% A secret over the byte cap is rejected (would otherwise be HMAC'd per
+    %% request on an unauthenticated endpoint).
+    ?assertEqual(
+        error, asobi_guest_controller:decode_secret(base64:encode(crypto:strong_rand_bytes(129)))
+    ),
+    %% Oversized base64 input is rejected before it is even decoded.
+    ?assertEqual(
+        error, asobi_guest_controller:decode_secret(binary:copy(~"A", 4096))
+    ).
+
+valid_device_id_test() ->
+    ?assert(asobi_guest_controller:valid_device_id(base64:encode(crypto:strong_rand_bytes(16)))),
+    ?assertNot(asobi_guest_controller:valid_device_id(~"")),
+    ?assertNot(asobi_guest_controller:valid_device_id(binary:copy(~"a", 256))).

@@ -16,7 +16,7 @@
 -export([authenticate/1, upgrade/1]).
 
 -ifdef(TEST).
--export([make_verifier/1, verify/2, decode_secret/1]).
+-export([make_verifier/1, verify/2, decode_secret/1, valid_device_id/1]).
 -endif.
 
 -include_lib("kernel/include/logger.hrl").
@@ -24,6 +24,12 @@
 
 -define(PROVIDER, ~"guest").
 -define(MIN_SECRET_BYTES, 32).
+%% Upper bounds on unauthenticated input: cap the HMAC work per request and keep
+%% the device id within the VARCHAR(255) column. Without these a client can send
+%% a multi-megabyte secret that is base64-decoded and HMAC'd on every call.
+-define(MAX_SECRET_BYTES, 128).
+-define(MAX_SECRET_B64_BYTES, 1024).
+-define(MAX_DEVICE_ID_BYTES, 255).
 
 -spec authenticate(cowboy_req:req()) -> {json, integer(), map(), map()}.
 authenticate(#{json := #{~"device_id" := DeviceId, ~"device_secret" := Secret}} = _Req) when
@@ -35,7 +41,10 @@ authenticate(#{json := #{~"device_id" := DeviceId, ~"device_secret" := Secret}} 
         true ->
             case decode_secret(Secret) of
                 {ok, SecretBin} ->
-                    resolve(DeviceId, SecretBin);
+                    case valid_device_id(DeviceId) of
+                        true -> resolve(DeviceId, SecretBin);
+                        false -> {json, 400, #{}, #{error => ~"invalid_device_id"}}
+                    end;
                 error ->
                     {json, 400, #{}, #{error => ~"weak_device_secret"}}
             end
@@ -58,10 +67,13 @@ upgrade(
         {ok, Player} ->
             %% Only an unclaimed guest may claim an account here. This endpoint
             %% casts `username` (which the normal self-service update excludes),
-            %% so a claimed player must not use it to rename or reset a password.
-            case maps:get(hashed_password, Player, undefined) of
-                undefined -> do_upgrade(Player, PlayerId, Username, Password);
-                _ -> {json, 409, #{}, #{error => ~"already_claimed"}}
+            %% so gate on the real invariant: the caller must own a `guest`
+            %% identity AND have no password. Gating on password-absence alone
+            %% would let a passwordless OAuth-only account use this path to set a
+            %% password and rename itself - a side door around update_changeset.
+            case is_unclaimed_guest(Player, PlayerId) of
+                true -> do_upgrade(Player, PlayerId, Username, Password);
+                false -> {json, 409, #{}, #{error => ~"not_an_unclaimed_guest"}}
             end;
         {error, _} ->
             {json, 404, #{}, #{error => ~"player_not_found"}}
@@ -79,6 +91,12 @@ do_upgrade(Player, PlayerId, Username, Password) ->
     case asobi_repo:update(CS) of
         {ok, Updated} ->
             _ = delete_guest_identity(PlayerId),
+            %% Revoke every token issued to this player before the claim: a
+            %% stolen device secret has already minted an access+refresh pair,
+            %% and upgrade is exactly the "my device was compromised" moment.
+            %% Killing the whole family first, then issuing a fresh pair below,
+            %% means the old (possibly attacker-held) tokens stop working.
+            _ = nova_auth_refresh:revoke_all(asobi_auth, PlayerId),
             asobi_auth_tokens:issue(Updated, 200, #{username => Username, upgraded => true});
         {error, #kura_changeset{} = ECS} ->
             asobi_auth_error:from_changeset_fields(
@@ -102,6 +120,25 @@ delete_guest_identity(PlayerId) ->
             ok;
         _ ->
             ok
+    end.
+
+%% A player may be upgraded here only if it is an actual guest: no password set
+%% and it owns a `guest` provider identity. Both conditions matter - a
+%% passwordless OAuth account satisfies the first but not the second.
+-spec is_unclaimed_guest(map(), binary()) -> boolean().
+is_unclaimed_guest(Player, PlayerId) ->
+    maps:get(hashed_password, Player, undefined) =:= undefined andalso
+        has_guest_identity(PlayerId).
+
+-spec has_guest_identity(binary()) -> boolean().
+has_guest_identity(PlayerId) ->
+    Q = kura_query:where(
+        kura_query:where(kura_query:from(asobi_player_identity), {player_id, PlayerId}),
+        {provider, ?PROVIDER}
+    ),
+    case asobi_repo:all(Q) of
+        {ok, [_ | _]} -> true;
+        _ -> false
     end.
 
 %% --- Create-or-resume (fail closed) ---
@@ -136,9 +173,15 @@ resume(Identity, SecretBin) ->
 create(DeviceId, SecretBin) ->
     %% Row-spam defence (asobi#157): a global throughput bound (caps total
     %% guest-creates regardless of source IP - the per-IP auth limiter can't),
-    %% plus a hard ceiling on total unlinked guests. Both fail closed.
+    %% plus a soft ceiling on total unlinked guests. Both fail closed.
+    %%
+    %% The global limiter is one shared window: it stops a botnet a per-IP limit
+    %% can't, but a single abuser can saturate it and deny guest signup to
+    %% everyone. That is an availability tradeoff, so log capacity events - a
+    %% sustained stream is the signal to distinguish an attack from real growth.
     case global_create_allowed() andalso within_unlinked_cap() of
         false ->
+            ?LOG_WARNING(#{event => guest_capacity_reached}),
             {json, 503, #{}, #{error => ~"guest_capacity_reached"}};
         true ->
             insert_player_and_identity(DeviceId, SecretBin)
@@ -281,29 +324,39 @@ global_create_allowed() ->
 
 -spec within_unlinked_cap() -> boolean().
 within_unlinked_cap() ->
-    %% Finite by default (fail-closed): the mandated hard ceiling must not be
-    %% off by default. Operators raise it or set `infinity` deliberately.
+    %% Finite by default (fail-closed): the ceiling must not be off by default.
+    %% Operators raise it or set `infinity` deliberately. The count is read from
+    %% a short-TTL cache (asobi_guest_reaper) rather than COUNT-ing the whole
+    %% guest table on every unauthenticated create, so the cap is advisory - a
+    %% soft ceiling that can overshoot by up to (TTL x create-rate), not exact.
     case application:get_env(asobi, guest_unlinked_cap, 100000) of
         infinity ->
             true;
         Cap when is_integer(Cap) ->
-            Q = kura_query:where(kura_query:from(asobi_player_identity), {provider, ?PROVIDER}),
-            case asobi_repo:aggregate(Q, count) of
-                {ok, N} -> N < Cap;
-                _ -> false
+            case asobi_guest_reaper:cached_unlinked_count() of
+                N when is_integer(N) -> N < Cap;
+                unknown -> false
             end
     end.
 
 %% --- Helpers ---
 
+-spec valid_device_id(binary()) -> boolean().
+valid_device_id(DeviceId) ->
+    byte_size(DeviceId) > 0 andalso byte_size(DeviceId) =< ?MAX_DEVICE_ID_BYTES.
+
 -spec decode_secret(binary()) -> {ok, binary()} | error.
-decode_secret(B64) ->
+decode_secret(B64) when byte_size(B64) =< ?MAX_SECRET_B64_BYTES ->
     try base64:decode(B64) of
-        Bin when byte_size(Bin) >= ?MIN_SECRET_BYTES -> {ok, Bin};
-        _ -> error
+        Bin when byte_size(Bin) >= ?MIN_SECRET_BYTES, byte_size(Bin) =< ?MAX_SECRET_BYTES ->
+            {ok, Bin};
+        _ ->
+            error
     catch
         _:_ -> error
-    end.
+    end;
+decode_secret(_B64) ->
+    error.
 
 -spec generate_username() -> binary().
 generate_username() ->
