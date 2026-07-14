@@ -7,10 +7,17 @@
 -export([
     allows_under_limit/1,
     blocks_over_limit/1,
-    returns_rate_limit_headers/1
+    returns_rate_limit_headers/1,
+    register_limiter_is_independent/1
 ]).
 
-all() -> [allows_under_limit, blocks_over_limit, returns_rate_limit_headers].
+all() ->
+    [
+        allows_under_limit,
+        blocks_over_limit,
+        returns_rate_limit_headers,
+        register_limiter_is_independent
+    ].
 
 init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
@@ -62,4 +69,20 @@ returns_rate_limit_headers(Config) ->
     ),
     ?assertStatus(200, Resp),
     ?assertNotEqual(undefined, nova_test:header("x-ratelimit-remaining", Resp)),
+    Config.
+
+%% asobi#157: /auth/register has its own bucket so a signup flood cannot
+%% exhaust the login (auth) budget. Exhaust register for a key and assert
+%% the auth limiter still allows the same key.
+register_limiter_is_independent(Config) ->
+    Key = ~"indep_test",
+    seki:reset(asobi_register_limiter, Key),
+    seki:reset(asobi_auth_limiter, Key),
+    {allow, #{remaining := Remaining}} = seki:inspect(asobi_register_limiter, Key),
+    lists:foreach(
+        fun(_) -> seki:check(asobi_register_limiter, Key) end,
+        lists:seq(1, Remaining + 1)
+    ),
+    ?assertMatch({deny, _}, seki:check(asobi_register_limiter, Key)),
+    ?assertMatch({allow, _}, seki:check(asobi_auth_limiter, Key)),
     Config.

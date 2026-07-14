@@ -51,14 +51,19 @@ registration_changeset(Data, Params) ->
     CS2 = kura_changeset:validate_length(CS1, username, [{min, 3}, {max, 32}]),
     CS3 = kura_changeset:validate_format(CS2, username, ~"^[a-zA-Z0-9_-]+$"),
     CS4 = kura_changeset:validate_length(CS3, password, [{min, 8}, {max, 128}]),
-    hash_password(CS4).
+    maybe_hash_password(CS4).
+
+%% Only pay the pbkdf2 cost for a changeset that will actually be inserted -
+%% hashing an invalid one is wasted work and an unauthenticated-DoS lever (#157).
+maybe_hash_password(#kura_changeset{valid = true} = CS) -> hash_password(CS);
+maybe_hash_password(CS) -> CS.
 
 -spec password_changeset(map(), map()) -> #kura_changeset{}.
 password_changeset(Data, Params) ->
     CS = kura_changeset:cast(?MODULE, Data, Params, [password]),
     CS1 = kura_changeset:validate_required(CS, [password]),
     CS2 = kura_changeset:validate_length(CS1, password, [{min, 8}, {max, 128}]),
-    hash_password(CS2).
+    maybe_hash_password(CS2).
 
 -spec hash_password(#kura_changeset{}) -> #kura_changeset{}.
 hash_password(CS) ->

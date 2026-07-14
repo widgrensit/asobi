@@ -67,9 +67,37 @@ rate_limit_key(Req) ->
 
 -spec select_limiter(cowboy_req:req()) -> atom().
 select_limiter(Req) ->
-    Path = cowboy_req:path(Req),
-    case Path of
-        <<"/api/v1/auth/", _/binary>> -> asobi_auth_limiter;
-        <<"/api/v1/iap/", _/binary>> -> asobi_iap_limiter;
+    %% Match on normalised path segments, not the raw byte string: cowboy
+    %% leaves `path` verbatim but the router (routing_tree) collapses `//`
+    %% and leading/trailing slashes, so a literal compare would let e.g.
+    %% `/api/v1//auth/register` reach the register handler yet miss this
+    %% limiter. `trim_all` collapses the same way the router does. Do not
+    %% urldecode - routing_tree does not either, so encoded paths 404
+    %% before the handler. register runs the password KDF and gets its own
+    %% tighter bucket (asobi#157); it must match before the /auth/ prefix.
+    case binary:split(cowboy_req:path(Req), ~"/", [global, trim_all]) of
+        [~"api", ~"v1", ~"auth", ~"register"] -> asobi_register_limiter;
+        [~"api", ~"v1", ~"auth" | _] -> asobi_auth_limiter;
+        [~"api", ~"v1", ~"iap" | _] -> asobi_iap_limiter;
         _ -> asobi_api_limiter
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+select_limiter_test_() ->
+    [
+        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1/auth/register"})),
+        ?_assertEqual(asobi_auth_limiter, select_limiter(#{path => ~"/api/v1/auth/login"})),
+        ?_assertEqual(asobi_auth_limiter, select_limiter(#{path => ~"/api/v1/auth/refresh"})),
+        ?_assertEqual(asobi_iap_limiter, select_limiter(#{path => ~"/api/v1/iap/purchase"})),
+        ?_assertEqual(asobi_api_limiter, select_limiter(#{path => ~"/api/v1/friends"})),
+        %% asobi#157 regression: slash-normalisation variants that the
+        %% router folds onto /auth/register must not escape the register
+        %% bucket onto the looser auth (5/s) or api (300/s) limiter.
+        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1/auth//register"})),
+        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1/auth/register/"})),
+        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1//auth/register"})),
+        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"//api/v1/auth/register"}))
+    ].
+-endif.

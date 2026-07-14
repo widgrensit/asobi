@@ -58,22 +58,31 @@ The ticket validator is invoked from `asobi_oauth_controller` for
 `config/{dev,prod}_sys.config.src`. It selects a Seki limiter group
 based on the request path:
 
-| Path prefix | Limiter | Default limit (req/sec/IP) |
-|-------------|---------|----------------------------|
-| `/api/v1/auth/*` | `asobi_auth_limiter` | 5 |
+| Path | Limiter | Default limit (req/sec/IP) |
+|------|---------|----------------------------|
+| `/api/v1/auth/register` | `asobi_register_limiter` | 3 |
+| `/api/v1/auth/*` (login, refresh, ...) | `asobi_auth_limiter` | 5 |
 | `/api/v1/iap/*` | `asobi_iap_limiter` | 10 |
 | everything else | `asobi_api_limiter` | 300 |
 
-The auth limiter is the brute-force gate: a 5/sec cap plus the bcrypt
-cost on `nova_auth_accounts:authenticate/3` makes online password
-guessing infeasible at internet scale. Operators can override the
-limits via the `asobi, rate_limits` env in their sys config:
+`/api/v1/auth/register` gets its own tighter bucket (asobi#157): it runs
+the password KDF (pbkdf2_sha256, see `pbkdf2_iterations`) as its only
+cost gate, so sharing the login bucket let a signup flood both starve
+honest logins and amplify server CPU. The dedicated 3/sec cap isolates
+register and bounds the per-IP KDF cost. This is per-IP only; distributed
+abuse is deferred to the pre-auth gate in asobi#158.
+
+The auth limiter is the brute-force gate for login: a 5/sec cap plus the
+pbkdf2_sha256 cost on `nova_auth_accounts:authenticate/3` makes online
+password guessing infeasible at internet scale. Operators can override
+the limits via the `asobi, rate_limits` env in their sys config:
 
 ```erlang
 {rate_limits, #{
-    auth => #{limit => 10, window => 1000},
-    iap  => #{limit => 20, window => 1000},
-    api  => #{limit => 600, window => 1000}
+    auth     => #{limit => 10, window => 1000},
+    register => #{limit => 5,  window => 1000},
+    iap      => #{limit => 20, window => 1000},
+    api      => #{limit => 600, window => 1000}
 }}
 ```
 
