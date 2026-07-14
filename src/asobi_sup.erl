@@ -29,9 +29,19 @@ init([]) ->
         chat_sup(),
         tournament_sup(),
         presence_spec(),
-        season_manager_spec()
+        season_manager_spec(),
+        guest_reaper_spec()
     ],
     {ok, {SupFlags, Children}}.
+
+guest_reaper_spec() ->
+    #{
+        id => asobi_guest_reaper,
+        start => {asobi_guest_reaper, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker
+    }.
 
 player_session_sup() ->
     #{
@@ -129,7 +139,11 @@ register_limiters() ->
         register => #{algorithm => sliding_window, limit => 3, window => 1000},
         iap => #{algorithm => sliding_window, limit => 10, window => 1000},
         api => #{algorithm => sliding_window, limit => 300, window => 1000},
-        ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000}
+        ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000},
+        %% Global (not per-IP) bound on guest-create throughput. Guest rows are
+        %% minted unauthenticated and cheaply, so a per-IP limit alone lets a
+        %% botnet spam rows; this caps the total rate. Keyed on a constant.
+        guest_global => #{algorithm => sliding_window, limit => 100, window => 1000}
     },
     Configured =
         case application:get_env(asobi, rate_limits, #{}) of
@@ -155,7 +169,8 @@ limiter_name(auth) -> asobi_auth_limiter;
 limiter_name(register) -> asobi_register_limiter;
 limiter_name(iap) -> asobi_iap_limiter;
 limiter_name(api) -> asobi_api_limiter;
-limiter_name(ws_connect) -> asobi_ws_connect_limiter.
+limiter_name(ws_connect) -> asobi_ws_connect_limiter;
+limiter_name(guest_global) -> asobi_guest_global_limiter.
 
 cluster_spec() ->
     #{
