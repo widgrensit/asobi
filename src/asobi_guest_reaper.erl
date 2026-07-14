@@ -139,8 +139,12 @@ reap_older_than(Cutoff) ->
         ?REAP_BATCH
     ),
     case asobi_repo:all(Q) of
-        {ok, Identities} -> reap_all(Identities, 0);
-        _ -> 0
+        {ok, Identities} ->
+            ?LOG_NOTICE(#{event => guest_reap_candidates, count => length(Identities)}),
+            reap_all(Identities, 0);
+        Other ->
+            ?LOG_NOTICE(#{event => guest_reap_query_failed, result => Other}),
+            0
     end.
 
 -spec reap_all([map()], non_neg_integer()) -> non_neg_integer().
@@ -174,21 +178,42 @@ delete_guest_cascade(PlayerId) ->
             false ->
                 {error, claimed_during_sweep};
             true ->
-                _ = asobi_repo:delete_all(by_player(asobi_player_stats, PlayerId)),
+                %% Assert each delete: a bare `{error,_}` return (not a raise)
+                %% would otherwise let pgo commit a partial cascade (children
+                %% gone, player left). Matching {ok,_} turns that into a badmatch
+                %% that raises, rolling the whole transaction back.
+                {ok, _} = asobi_repo:delete_all(by_player(asobi_player_stats, PlayerId)),
                 %% player_tokens keys players by `user_id`, not `player_id`.
-                _ = asobi_repo:delete_all(by_user(asobi_player_token, PlayerId)),
-                _ = asobi_repo:delete_all(by_player(asobi_player_identity, PlayerId)),
+                {ok, _} = asobi_repo:delete_all(by_user(asobi_player_token, PlayerId)),
+                {ok, _} = asobi_repo:delete_all(by_player(asobi_player_identity, PlayerId)),
                 case asobi_repo:get(asobi_player, PlayerId) of
-                    {ok, Player} -> asobi_repo:delete(asobi_player, Player);
-                    _ -> ok
+                    {ok, Player} ->
+                        {ok, _} = asobi_repo:delete(asobi_player, Player),
+                        ok;
+                    _ ->
+                        ok
                 end
         end
     end,
     try asobi_repo:transaction(Fun) of
-        {error, _} -> skipped;
-        _ -> reaped
+        ok ->
+            reaped;
+        {error, Reason} ->
+            ?LOG_NOTICE(#{event => guest_reap_skipped, player_id => PlayerId, reason => Reason}),
+            skipped;
+        Other ->
+            ?LOG_NOTICE(#{event => guest_reap_unexpected, player_id => PlayerId, result => Other}),
+            skipped
     catch
-        _:_ -> skipped
+        Class:CReason:Stacktrace ->
+            ?LOG_WARNING(#{
+                event => guest_reap_cascade_error,
+                player_id => PlayerId,
+                class => Class,
+                reason => CReason,
+                stacktrace => Stacktrace
+            }),
+            skipped
     end.
 
 -spec by_player(module(), binary()) -> #kura_query{}.
