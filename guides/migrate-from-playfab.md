@@ -114,21 +114,24 @@ curl localhost:8080/api/v1/auth/register \
 
 PlayFab auth paths map 1:1:
 
+`LoginWithCustomID` maps directly to guest auth - Asobi handles create-or-resume
+server-side, so there is no client-generated password to persist:
+
 ```csharp
 // Before (PlayFab)
 PlayFabClientAPI.LoginWithCustomID(new LoginWithCustomIDRequest {
   CustomId = deviceId, CreateAccount = true
 }, OnSuccess, OnError);
 
-// After (asobi) — generate creds once, persist locally, then login
+// After (asobi) — anonymous guest, create-or-resume from a device-held secret
 var client = new AsobiClient("https://api.my-game.com");
-if (!PlayerPrefs.HasKey("asobi_pw")) {
-  PlayerPrefs.SetString("asobi_pw", Guid.NewGuid().ToString("N"));
-  await client.Auth.RegisterAsync(deviceId, PlayerPrefs.GetString("asobi_pw"));
-} else {
-  await client.Auth.LoginAsync(deviceId, PlayerPrefs.GetString("asobi_pw"));
-}
+await client.Auth.GuestAsync(deviceId, deviceSecret);   // POST /auth/guest
+// later, when the player signs up for real:
+// await client.Auth.UpgradeGuestAsync(username, password);
 ```
+
+Store `deviceSecret` (>= 32 random bytes) in secure device storage; see the
+[Authentication guide](authentication.md#guest-anonymous).
 
 OAuth providers (Google, Apple, Steam) go through
 `POST /api/v1/auth/oauth` — same as PlayFab's `LoginWithGoogleAccount` etc.

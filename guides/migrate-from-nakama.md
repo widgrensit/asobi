@@ -65,7 +65,8 @@ Nakama and asobi agree on most of the vocabulary:
 | **Notifications** | Notifications (`/api/v1/notifications`) | Plus WS push. |
 | **Wallets** | Economy wallets (`/api/v1/wallets`) | Multi-currency ledgers. |
 | **Purchases** | Economy store (`/api/v1/store/purchase`) | Integrates with IAP verification. |
-| **Authentication (Custom / Device / Email)** | `/api/v1/auth/register` + `/login` | Username + password (you generate creds client-side for "custom" flows). |
+| **Authentication (Device / Custom)** | `/api/v1/auth/guest` | Create-or-resume anonymous accounts from a device-held secret; upgrade later with `/auth/guest/upgrade`. Maps directly to `AuthenticateDevice`/`AuthenticateCustom`. |
+| **Authentication (Email)** | `/api/v1/auth/register` + `/login` | Username + password. |
 | **Authentication (Google / Apple / Steam / ...)** | `/api/v1/auth/oauth` | OAuth/OIDC. |
 | **RPC endpoints** | Nova controllers (Erlang) or Lua callbacks | For per-match logic, use Lua in `match.lua`. For cross-match workflows, write a Nova controller. |
 | **Hooks (`before_authenticate`, `after_friendAdd`)** | Nova plugins + match lifecycle callbacks | Pre- and post-request middleware in Nova. |
@@ -191,9 +192,9 @@ var session = await client.AuthenticateCustomAsync(deviceId);
 var socket = client.NewSocket();
 await socket.ConnectAsync(session);
 
-// After (asobi)
+// After (asobi) - guest auth is the direct AuthenticateCustom/Device equivalent
 var client = new AsobiClient("https://api.my-game.com");
-await client.Auth.RegisterAsync(deviceId, localPassword);   // or LoginAsync
+await client.Auth.GuestAsync(deviceId, deviceSecret);   // POST /auth/guest, create-or-resume
 await client.WebSocket.ConnectAsync();
 client.WebSocket.SendSessionConnect(client.Session.Token);
 ```

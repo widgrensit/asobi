@@ -19,12 +19,14 @@ Authenticated endpoints require the `Authorization: Bearer <session_token>` head
 ## Auth
 
 ```
-POST   /api/v1/auth/register     Register a new player
-POST   /api/v1/auth/login        Login, returns session token
-POST   /api/v1/auth/refresh      Refresh session token
-POST   /api/v1/auth/oauth        OAuth / Steam token validation
-POST   /api/v1/auth/link         Link a provider to the current account
-DELETE /api/v1/auth/unlink       Unlink a provider
+POST   /api/v1/auth/register        Register a new player
+POST   /api/v1/auth/login           Login, returns session token
+POST   /api/v1/auth/refresh         Refresh session token
+POST   /api/v1/auth/oauth           OAuth / Steam token validation
+POST   /api/v1/auth/guest           Create or resume an anonymous guest
+POST   /api/v1/auth/guest/upgrade   Claim a guest account (username + password)
+POST   /api/v1/auth/link            Link a provider to the current account
+DELETE /api/v1/auth/unlink          Unlink a provider
 ```
 
 ### Register
@@ -49,6 +51,25 @@ curl -X POST /api/v1/auth/login \
 
 ```json
 {"player_id": "...", "session_token": "...", "username": "player1"}
+```
+
+### Guest
+
+Anonymous device-based auth, opt-in via config. `POST /auth/guest` creates a
+player on first call and resumes the same one on later calls; `/auth/guest/upgrade`
+(authenticated) claims it with a username and password. See the
+[Authentication guide](authentication.md#guest-anonymous) for the device-secret
+contract, config, and error codes.
+
+```bash
+curl -X POST /api/v1/auth/guest \
+  -H 'Content-Type: application/json' \
+  -d '{"device_id": "b64-device-id", "device_secret": "b64-32-random-bytes"}'
+```
+
+```json
+{"player_id": "...", "access_token": "...", "refresh_token": "...",
+ "username": "guest_019f615cbc4a", "created": true, "guest": true}
 ```
 
 ## Players

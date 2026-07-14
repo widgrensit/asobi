@@ -8,6 +8,7 @@ How Asobi compares to other open-source game backend platforms.
 |---------|:-----:|:------:|:--------:|:-------:|
 | **Runtime** | BEAM (Erlang/OTP) | Go | Node.js | Cloud |
 | **Authentication** | Built-in | Built-in | Plugin | Built-in |
+| **Anonymous / Guest Auth** | Built-in (upgradeable) | Built-in | Manual | Built-in |
 | **Player Management** | Built-in | Built-in | Manual | Built-in |
 | **Real-Time Multiplayer** | WebSocket | WebSocket | WebSocket | WebSocket |
 | **Server-Authoritative Game Loop** | Built-in (tick-based) | Lua scripting | Room-based | CloudScript |
