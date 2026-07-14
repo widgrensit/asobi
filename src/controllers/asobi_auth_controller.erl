@@ -2,6 +2,12 @@
 
 -export([register/1, login/1, refresh/1, logout/1]).
 
+-include_lib("kura/include/kura.hrl").
+
+%% kura's default message for a unique-index violation (asobi_player:indexes/0).
+%% The 409 contract keys off it; pin it here so the coupling is visible.
+-define(UNIQUE_MSG, ~"has already been taken").
+
 -spec register(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
 register(
     #{json := #{~"username" := Username, ~"password" := Password} = Params} = _Req
@@ -19,11 +25,27 @@ register(
         {ok, Player} ->
             init_player_stats(maps:get(id, Player)),
             asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
-        {error, CS} ->
-            {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS, fun(_F, M) -> M end)}}
+        {error, #kura_changeset{} = CS} ->
+            registration_error(kura_changeset:traverse_errors(CS, fun(_F, M) -> M end))
     end;
 register(_Req) ->
     {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+
+%% A duplicate username is a conflict with the current server state, so it
+%% returns 409 with a stable reason atom - the same shape as every other
+%% conflict endpoint. kura maps the username unique index (declared in
+%% asobi_player:indexes/0) to this changeset error. Any other changeset failure
+%% is malformed input: 422 with per-field detail for form UIs.
+registration_error(#{username := Msgs} = Fields) when is_list(Msgs) ->
+    case lists:member(?UNIQUE_MSG, Msgs) of
+        true -> {json, 409, #{}, #{error => ~"username_taken"}};
+        false -> validation_failed(Fields)
+    end;
+registration_error(Fields) ->
+    validation_failed(Fields).
+
+validation_failed(Fields) ->
+    {json, 422, #{}, #{error => ~"validation_failed", fields => Fields}}.
 
 -spec login(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
 login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) when

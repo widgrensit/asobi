@@ -133,7 +133,8 @@ register_duplicate_username(Config) ->
         },
         Config
     ),
-    ?assertStatus(422, Resp),
+    ?assertStatus(409, Resp),
+    ?assertMatch(#{~"error" := ~"username_taken"}, nova_test:json(Resp)),
     Config.
 
 register_short_username(Config) ->
@@ -148,6 +149,10 @@ register_short_username(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
+    ?assertMatch(
+        #{~"error" := ~"validation_failed", ~"fields" := #{~"username" := _}},
+        nova_test:json(Resp)
+    ),
     Config.
 
 register_short_password(Config) ->
@@ -162,6 +167,10 @@ register_short_password(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
+    ?assertMatch(
+        #{~"error" := ~"validation_failed", ~"fields" := #{~"password" := _}},
+        nova_test:json(Resp)
+    ),
     Config.
 
 login_success(Config) ->
