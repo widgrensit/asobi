@@ -6,6 +6,7 @@
 -export([
     otp_app/0,
     all/1,
+    aggregate/2,
     get/2,
     insert/1,
     insert/2,
@@ -27,6 +28,10 @@ otp_app() -> asobi.
 
 -spec all(#kura_query{}) -> {ok, [map()]} | {error, term()}.
 all(Q) -> kura_repo_worker:all(?MODULE, Q).
+
+-spec aggregate(#kura_query{}, count | {count | sum | avg | min | max, atom()}) ->
+    {ok, number()} | {error, term()}.
+aggregate(Q, Agg) -> kura_repo_worker:aggregate(?MODULE, Q, Agg).
 
 -spec get(module(), term()) -> {ok, map()} | {error, term()}.
 get(Schema, Id) -> kura_repo_worker:get(?MODULE, Schema, Id).

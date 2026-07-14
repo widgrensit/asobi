@@ -24,6 +24,7 @@ auth_routes() ->
         security => false,
         routes => [
             {~"/register", fun asobi_auth_controller:register/1, #{methods => [post, options]}},
+            {~"/guest", fun asobi_guest_controller:authenticate/1, #{methods => [post, options]}},
             {~"/login", fun asobi_auth_controller:login/1, #{methods => [post, options]}},
             {~"/refresh", fun asobi_auth_controller:refresh/1, #{methods => [post, options]}},
             {~"/logout", fun asobi_auth_controller:logout/1, #{methods => [post, options]}},
@@ -47,6 +48,9 @@ api_routes() ->
         security => fun asobi_auth_plugin:verify/1,
         routes => [
             %% Auth - Provider linking
+            {~"/auth/guest/upgrade", fun asobi_guest_controller:upgrade/1, #{
+                methods => [post, options]
+            }},
             {~"/auth/link", fun asobi_oauth_controller:link/1, #{methods => [post, options]}},
             {~"/auth/unlink", fun asobi_oauth_controller:unlink/1, #{methods => [delete, options]}},
 

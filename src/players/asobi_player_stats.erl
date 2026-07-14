@@ -4,6 +4,25 @@
 -include_lib("kura/include/kura.hrl").
 
 -export([table/0, fields/0, associations/0, generate_id/0]).
+-export([init/1]).
+
+-include_lib("kernel/include/logger.hrl").
+
+%% Create the stats row for a newly-created player. Shared by the register,
+%% OAuth, and guest paths. Logs and swallows insert errors so a stats blip
+%% never blocks account creation, but leaves a trace (F-25).
+-spec init(binary()) -> ok.
+init(PlayerId) ->
+    CS = kura_changeset:cast(?MODULE, #{}, #{player_id => PlayerId}, [player_id]),
+    case asobi_repo:insert(CS) of
+        {ok, _} ->
+            ok;
+        {error, Reason} ->
+            ?LOG_WARNING(#{
+                event => player_stats_init_failed, player_id => PlayerId, reason => Reason
+            }),
+            ok
+    end.
 
 -spec table() -> binary().
 table() -> ~"player_stats".
