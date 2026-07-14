@@ -140,10 +140,9 @@ reap_older_than(Cutoff) ->
     ),
     case asobi_repo:all(Q) of
         {ok, Identities} ->
-            ?LOG_NOTICE(#{event => guest_reap_candidates, count => length(Identities)}),
             reap_all(Identities, 0);
         Other ->
-            ?LOG_NOTICE(#{event => guest_reap_query_failed, result => Other}),
+            ?LOG_WARNING(#{event => guest_reap_query_failed, result => Other}),
             0
     end.
 
@@ -199,10 +198,10 @@ delete_guest_cascade(PlayerId) ->
         ok ->
             reaped;
         {error, Reason} ->
-            ?LOG_NOTICE(#{event => guest_reap_skipped, player_id => PlayerId, reason => Reason}),
+            ?LOG_DEBUG(#{event => guest_reap_skipped, player_id => PlayerId, reason => Reason}),
             skipped;
         Other ->
-            ?LOG_NOTICE(#{event => guest_reap_unexpected, player_id => PlayerId, result => Other}),
+            ?LOG_WARNING(#{event => guest_reap_unexpected, player_id => PlayerId, result => Other}),
             skipped
     catch
         Class:CReason:Stacktrace ->

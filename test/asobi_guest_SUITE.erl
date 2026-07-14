@@ -135,7 +135,11 @@ reaper_removes_unclaimed_guest_and_children(Config) ->
     ensure_reaper(),
     {ok, R1} = create(device_id(), secret(), Config),
     #{~"player_id" := Pid} = nova_test:json(R1),
-    timer:sleep(1100),
+    %% guest_reap_after is 1s and the cutoff is computed at whole-second
+    %% granularity (erlang:universaltime/0), so a guest created late in a second
+    %% needs >2s to be strictly older than (sweep_second - 1). Sleep past two
+    %% second-boundaries to make the reap deterministic.
+    timer:sleep(2500),
     {ok, _} = asobi_guest_reaper:sweep_now(),
     ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, Pid)),
     Config.
