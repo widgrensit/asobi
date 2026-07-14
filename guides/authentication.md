@@ -1,9 +1,14 @@
 # Authentication
 
 Asobi supports multiple authentication methods: username/password, OAuth/OIDC
-social login (Google, Apple, Microsoft, Discord), Steam, and device-based auth.
+social login (Google, Apple, Microsoft, Discord), Steam, and anonymous
+[guest](#guest-anonymous) accounts that a player can later upgrade to a real one.
 
 Players can link multiple providers to a single account.
+
+> Auth endpoints return an `access_token` (short-lived) and a `refresh_token`
+> (used against `/auth/refresh`). The `session_token` shown in the shorthand
+> examples below is the access token; use it as the `Bearer` credential.
 
 ## Username & Password
 
@@ -135,6 +140,127 @@ display name from their Steam profile.
 ```
 
 Get your API key from the [Steam Partner site](https://partner.steamgames.com/).
+
+## Guest (Anonymous)
+
+Guest auth lets a player start playing immediately - no email, no password, no
+social sign-in - and claim a real account later without losing progress. It is
+the "device-based auth" option: the client generates a secret once, stores it on
+the device, and presents it to resume the same account on every launch.
+
+Guest auth is **opt-in** and disabled by default. Enable it in `sys.config`
+(see [Configuration](#configuration-2)) before the endpoints respond.
+
+### How it works
+
+1. On first launch the client generates a random `device_secret` (>= 32 bytes
+   from a CSPRNG) and a stable `device_id`, and stores both on the device
+   (Keychain on iOS, Keystore on Android, etc.).
+2. The client posts them to `POST /api/v1/auth/guest`. Asobi creates a player
+   and stores only a **salted, peppered HMAC** of the secret - never the secret
+   itself - then returns a token pair.
+3. On later launches the client posts the same `device_id` + `device_secret`.
+   Asobi verifies the HMAC and resumes the **same** player (create-or-resume).
+4. When the player is ready, they call `POST /api/v1/auth/guest/upgrade` with a
+   username and password. The account becomes a normal password account and the
+   device secret is revoked.
+
+The client must treat `device_secret` like a password: generate it with a
+cryptographic RNG, store it in secure device storage, and never log or transmit
+it anywhere but this endpoint. A guest account is only as safe as that secret,
+so it is low-assurance until upgraded.
+
+### Create or resume
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/guest \
+  -H 'Content-Type: application/json' \
+  -d '{"device_id": "b64-device-id", "device_secret": "b64-32-random-bytes"}'
+```
+
+First call (new account):
+
+```json
+{
+  "player_id": "...",
+  "access_token": "...",
+  "refresh_token": "...",
+  "username": "guest_019f615cbc4a",
+  "created": true,
+  "guest": true
+}
+```
+
+Later calls with the same credentials resume the same player and omit `created`.
+A wrong secret for a known `device_id` returns `401 invalid_device_secret` and
+never creates a second account.
+
+### Upgrade to a real account
+
+Requires the guest's own session (the token from the create-or-resume call).
+Only an unclaimed guest may upgrade - a password account, or an account with a
+non-guest provider, is refused.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/guest/upgrade \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "player1", "password": "secret123"}'
+```
+
+```json
+{
+  "player_id": "...",
+  "access_token": "...",
+  "refresh_token": "...",
+  "username": "player1",
+  "upgraded": true
+}
+```
+
+Upgrade revokes every token the guest held (a fresh pair is returned) and
+deletes the device verifier, so the old device secret can no longer sign in.
+Player id, progress, wallets, and inventory are preserved.
+
+### Errors
+
+| Status | `error` | Meaning |
+|--------|---------|---------|
+| `404`  | `guest_auth_disabled`     | Guest auth is not enabled in config |
+| `400`  | `missing_required_fields` | `device_id` / `device_secret` (or `username` / `password` on upgrade) absent |
+| `400`  | `weak_device_secret`      | Secret decodes to fewer than 32 bytes (or exceeds the size cap) |
+| `400`  | `invalid_device_id`       | `device_id` empty or over 255 bytes |
+| `401`  | `invalid_device_secret`   | Wrong secret for a known device |
+| `401`  | `guest_revoked`           | The device verifier was revoked |
+| `401`  | `guest_upgraded`          | The account was already claimed; log in with its real credentials |
+| `409`  | `not_an_unclaimed_guest`  | Upgrade target is not an unclaimed guest |
+| `409`  | `username_taken`          | Upgrade username is already in use |
+| `422`  | `validation_failed`       | Upgrade fields invalid (see `fields`) |
+| `503`  | `guest_capacity_reached`  | Global create limit or the unlinked-guest cap was hit |
+
+### Configuration
+
+```erlang
+{asobi, [
+    {guest_auth, true},
+    %% Required. A key-id -> pepper map (>= 32 bytes each). Keep old keys for the
+    %% guest retention window so existing guests can still resume after rotation.
+    {guest_verifier_pepper, #{<<"v1">> => <<"a-32-byte-or-longer-secret......">>}},
+    {guest_verifier_key_id, <<"v1">>},
+
+    %% Optional abuse controls.
+    {guest_unlinked_cap, 100000},        %% max unclaimed guests, or `infinity`
+
+    %% Optional retention. Unset = permanent guests (never reaped). Set to a
+    %% number of seconds to delete unclaimed guests older than that.
+    {guest_reap_after, 2592000}          %% e.g. 30 days
+]}
+```
+
+The pepper is a server-side secret that makes a stolen database of verifiers
+useless without it - store it like any other secret (env/secret manager), not in
+source. Guest creation is additionally bounded by a global rate limiter and the
+per-IP auth limiter.
 
 ## Linking Providers
 
