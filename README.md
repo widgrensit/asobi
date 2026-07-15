@@ -103,7 +103,7 @@ UDP relay if you need sub-3ms physics.
 |---|---|---|---|
 | **Godot 4.x** (GDScript) | [asobi-godot](https://github.com/widgrensit/asobi-godot) | [Guide](https://asobi.dev/godot) | [Demo](https://github.com/widgrensit/asobi-godot-demo) |
 | **Defold** (Lua) | [asobi-defold](https://github.com/widgrensit/asobi-defold) | [Guide](https://asobi.dev/defold) | [Demo](https://github.com/widgrensit/asobi-defold-demo) |
-| **LÖVE** (Lua) | _planned — [tracking #102](https://github.com/widgrensit/asobi/issues/102)_ | — | — |
+| **LÖVE** (Lua) | [asobi-love2d](https://github.com/widgrensit/asobi-love2d) | — | _demo planned_ |
 | **Phaser** (TypeScript) | [asobi-js](https://github.com/widgrensit/asobi-js) (browser) | — | _example planned — [#103](https://github.com/widgrensit/asobi/issues/103)_ |
 | **Unity 2021.3+** (C#) | [asobi-unity](https://github.com/widgrensit/asobi-unity) | [Guide](https://asobi.dev/unity) | [Demo](https://github.com/widgrensit/asobi-unity-demo) |
 | **Unreal Engine 5** (C++) | [asobi-unreal](https://github.com/widgrensit/asobi-unreal) | — | — |
@@ -134,7 +134,7 @@ UDP relay if you need sub-3ms physics.
 
 - [**asobi_lua**](https://github.com/widgrensit/asobi_lua) — Lua scripting runtime + Docker image (`ghcr.io/widgrensit/asobi_lua`)
 - [**asobi_admin**](https://github.com/widgrensit/asobi_admin) — admin dashboard
-- Client SDKs: [asobi-godot](https://github.com/widgrensit/asobi-godot) · [asobi-defold](https://github.com/widgrensit/asobi-defold) · [asobi-unity](https://github.com/widgrensit/asobi-unity) · [asobi-unreal](https://github.com/widgrensit/asobi-unreal) · [asobi-js](https://github.com/widgrensit/asobi-js) · [asobi-dart](https://github.com/widgrensit/asobi-dart) · [flame_asobi](https://github.com/widgrensit/flame_asobi)
+- Client SDKs: [asobi-godot](https://github.com/widgrensit/asobi-godot) · [asobi-defold](https://github.com/widgrensit/asobi-defold) · [asobi-love2d](https://github.com/widgrensit/asobi-love2d) · [asobi-unity](https://github.com/widgrensit/asobi-unity) · [asobi-unreal](https://github.com/widgrensit/asobi-unreal) · [asobi-js](https://github.com/widgrensit/asobi-js) · [asobi-dart](https://github.com/widgrensit/asobi-dart) · [flame_asobi](https://github.com/widgrensit/flame_asobi)
 
 ## Stability
 
