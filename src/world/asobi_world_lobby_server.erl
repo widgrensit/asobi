@@ -17,13 +17,18 @@ caller sees the world the first one just spawned.
 Calls are sequential, but `create_world/1` is the slowest step and
 takes <100ms in practice; for the small number of distinct modes a
 typical deployment supports, the queue stays empty.
+
+It also owns the protected ETS table backing
+`asobi_world_lobby:list_worlds_cached/1`. Callers read the table
+directly (protected reads); only this server writes, via `cache_worlds/3`.
 """.
 -behaviour(gen_server).
 
--export([start_link/0, find_or_create/1, find_or_create/2]).
+-export([start_link/0, find_or_create/1, find_or_create/2, cache_worlds/3]).
 -export([init/1, handle_call/3, handle_cast/2]).
 
 -define(CALL_TIMEOUT, 30000).
+-define(LIST_CACHE_TAB, asobi_world_lobby_cache).
 
 -spec start_link() -> gen_server:start_ret().
 start_link() ->
@@ -47,12 +52,34 @@ find_or_create(Mode, PlayerId) ->
         Other -> {error, {unexpected_reply, Other}}
     end.
 
+-doc """
+Store a computed world list against a bounded key (`has_capacity`
+boolean) with an absolute expiry. Async: the caller keeps the value it
+already computed; this only seeds the shared cache for the next reader.
+""".
+-spec cache_worlds(boolean(), [map()], integer()) -> ok.
+cache_worlds(HasCapacity, Worlds, ExpiresAt) when is_boolean(HasCapacity) ->
+    gen_server:cast(?MODULE, {cache_worlds, HasCapacity, Worlds, ExpiresAt}).
+
 %%--------------------------------------------------------------------
 %% gen_server
 %%--------------------------------------------------------------------
 
 -spec init([]) -> {ok, #{}}.
 init([]) ->
+    %% H3 (2026-05-19): ETS-backed TTL cache for asobi_world_lobby:list_worlds/1.
+    %% Protected so any caller can read without a round-trip, but only this
+    %% server writes it (no in-node process can poison the shared list). Survives
+    %% crashes of any single caller because the server owns it.
+    case ets:info(?LIST_CACHE_TAB, name) of
+        undefined ->
+            ?LIST_CACHE_TAB = ets:new(?LIST_CACHE_TAB, [
+                set, protected, named_table, {read_concurrency, true}
+            ]),
+            ok;
+        _ ->
+            ok
+    end,
     {ok, #{}}.
 
 -spec handle_call(term(), gen_server:from(), map()) ->
@@ -66,5 +93,10 @@ handle_call(_Other, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
+handle_cast({cache_worlds, HasCapacity, Worlds, ExpiresAt}, State) when
+    is_boolean(HasCapacity), is_list(Worlds), is_integer(ExpiresAt)
+->
+    ets:insert(?LIST_CACHE_TAB, {HasCapacity, Worlds, ExpiresAt}),
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
