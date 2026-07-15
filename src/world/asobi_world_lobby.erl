@@ -47,10 +47,17 @@ list_worlds(Filters) ->
 H3 (2026-05-19): cached variant of `list_worlds/1` for request paths that
 do not need a fresh enumeration on every call. Each `list_worlds/1` call
 issues one synchronous `gen_server:call` per running world (`get_info/1`);
-WS `world.list` at 60 msg/sec × 1000 worlds = 60k calls/sec/attacker. The
-cache (500 ms TTL, populated lazily, backed by the ETS table owned by
+WS `world.list` at 60 msg/sec x 1000 worlds = 60k calls/sec/attacker. The
+cache (500 ms TTL, backed by the ETS table owned by
 `asobi_world_lobby_server`) absorbs that fan-out without changing the
 serialization story for `find_or_create_unsafe` which stays uncached.
+
+The cache key is the `has_capacity` boolean only, never the raw filter
+map: `mode` is attacker-controlled and unbounded, so keying on it would
+let a client cycle distinct modes to force a miss on every request
+(defeating the cache) and grow the table without bound. Instead the full
+enumeration is cached under at most two keys and `mode` is applied
+in-memory on the cached list.
 """.
 -spec list_worlds_cached() -> [map()].
 list_worlds_cached() ->
@@ -58,33 +65,31 @@ list_worlds_cached() ->
 
 -spec list_worlds_cached(map()) -> [map()].
 list_worlds_cached(Filters) ->
-    Key = Filters,
+    HasCapacity = maps:get(has_capacity, Filters, false),
     Now = erlang:monotonic_time(millisecond),
-    case cache_lookup(Key, Now) of
-        {hit, Worlds} ->
-            Worlds;
-        miss ->
-            Worlds = list_worlds(Filters),
-            cache_put(Key, Worlds, Now),
-            Worlds
+    All =
+        case cache_lookup(HasCapacity, Now) of
+            {hit, Worlds} ->
+                Worlds;
+            miss ->
+                Worlds = list_worlds(#{has_capacity => HasCapacity}),
+                asobi_world_lobby_server:cache_worlds(
+                    HasCapacity, Worlds, Now + ?LIST_CACHE_TTL_MS
+                ),
+                Worlds
+        end,
+    case maps:get(mode, Filters, undefined) of
+        undefined -> All;
+        Mode -> [W || W <- All, maps:get(mode, W, undefined) =:= Mode]
     end.
 
--spec cache_lookup(map(), integer()) -> {hit, [map()]} | miss.
+-spec cache_lookup(boolean(), integer()) -> {hit, [map()]} | miss.
 cache_lookup(Key, Now) ->
     try ets:lookup(?LIST_CACHE_TAB, Key) of
         [{_, Worlds, ExpiresAt}] when ExpiresAt > Now -> {hit, Worlds};
         _ -> miss
     catch
         error:badarg -> miss
-    end.
-
--spec cache_put(map(), [map()], integer()) -> ok.
-cache_put(Key, Worlds, Now) ->
-    try
-        ets:insert(?LIST_CACHE_TAB, {Key, Worlds, Now + ?LIST_CACHE_TTL_MS}),
-        ok
-    catch
-        error:badarg -> ok
     end.
 
 -doc """

@@ -53,7 +53,7 @@ oversized_body_rejected_413() ->
     meck:expect(cowboy_req, has_body, fun(_) -> true end),
     meck:expect(cowboy_req, body_length, fun(_) -> 2 * 1048576 end),
     Req = fake_req(#{method => ~"POST"}),
-    {break, ReplyReq, undefined} = asobi_body_cap_plugin:pre_request(
+    {stop, ReplyReq, undefined} = asobi_body_cap_plugin:pre_request(
         Req, #{}, #{max_body => 1048576}, undefined
     ),
     ?assertEqual(413, maps:get(reply_status, ReplyReq)).
@@ -62,7 +62,7 @@ chunked_without_length_rejected_411() ->
     meck:expect(cowboy_req, has_body, fun(_) -> true end),
     meck:expect(cowboy_req, body_length, fun(_) -> undefined end),
     Req = fake_req(#{method => ~"POST"}),
-    {break, ReplyReq, undefined} = asobi_body_cap_plugin:pre_request(
+    {stop, ReplyReq, undefined} = asobi_body_cap_plugin:pre_request(
         Req, #{}, #{require_content_length => true}, undefined
     ),
     ?assertEqual(411, maps:get(reply_status, ReplyReq)).

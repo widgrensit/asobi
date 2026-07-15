@@ -48,10 +48,13 @@ create(_Req) ->
 -spec build_filters(map()) -> map().
 build_filters(QS) ->
     F0 = #{},
+    %% Bound `mode` to the same 64-byte cap the WS path enforces
+    %% (asobi_ws_handler:build_world_filters/1); a longer value matches no
+    %% registered mode, so drop the filter rather than scan with it.
     F1 =
         case maps:get(~"mode", QS, undefined) of
-            undefined -> F0;
-            Mode -> F0#{mode => Mode}
+            Mode when is_binary(Mode), byte_size(Mode) =< 64 -> F0#{mode => Mode};
+            _ -> F0
         end,
     case maps:get(~"has_capacity", QS, undefined) of
         ~"true" -> F1#{has_capacity => true};

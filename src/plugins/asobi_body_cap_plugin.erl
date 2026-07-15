@@ -20,7 +20,7 @@ Options:
 -define(DEFAULT_MAX_BODY, 1048576).
 
 -spec pre_request(cowboy_req:req(), map(), map(), term()) ->
-    {ok, cowboy_req:req(), term()} | {break, cowboy_req:req(), term()}.
+    {ok, cowboy_req:req(), term()} | {stop, cowboy_req:req(), term()}.
 pre_request(Req, _Env, Options, State) ->
     Max = maps:get(max_body, Options, ?DEFAULT_MAX_BODY),
     RequireCL = maps:get(require_content_length, Options, true),
@@ -51,7 +51,7 @@ needs_check(Req) ->
     cowboy_req:has_body(Req).
 
 -spec check_size(cowboy_req:req(), non_neg_integer(), boolean(), term()) ->
-    {ok, cowboy_req:req(), term()} | {break, cowboy_req:req(), term()}.
+    {ok, cowboy_req:req(), term()} | {stop, cowboy_req:req(), term()}.
 check_size(Req, Max, RequireCL, State) ->
     case cowboy_req:body_length(Req) of
         undefined when RequireCL ->
@@ -64,8 +64,13 @@ check_size(Req, Max, RequireCL, State) ->
             {ok, Req, State}
     end.
 
+%% We send the response ourselves, then return {stop, Req, State}. nova maps a
+%% pre_request {break, ...} to a 2-tuple {ok, Req} that cowboy's stream handler
+%% has no clause for (case_clause -> request-process crash + crash report on
+%% every rejection - log/CPU amplification on the path meant to reduce DoS).
+%% {stop, ...} maps to {stop, Req}, which cowboy handles cleanly.
 -spec reject(integer(), binary(), cowboy_req:req(), term()) ->
-    {break, cowboy_req:req(), term()}.
+    {stop, cowboy_req:req(), term()}.
 reject(Status, Reason, Req, State) ->
     Body = json:encode(#{~"error" => Reason}),
     Req1 = cowboy_req:reply(
@@ -74,4 +79,4 @@ reject(Status, Reason, Req, State) ->
         Body,
         Req
     ),
-    {break, Req1, State}.
+    {stop, Req1, State}.
