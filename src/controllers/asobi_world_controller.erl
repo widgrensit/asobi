@@ -5,10 +5,12 @@
 -spec index(map()) -> {json, map()}.
 index(#{parsed_qs := QS}) ->
     Filters = build_filters(QS),
-    Worlds = asobi_world_lobby:list_worlds(Filters),
+    %% H3 (2026-05-19): use cached enumeration; freshness is 500ms which is
+    %% well below the granularity a polling client perceives.
+    Worlds = asobi_world_lobby:list_worlds_cached(Filters),
     {json, #{worlds => Worlds}};
 index(_Req) ->
-    Worlds = asobi_world_lobby:list_worlds(),
+    Worlds = asobi_world_lobby:list_worlds_cached(),
     {json, #{worlds => Worlds}}.
 
 -spec show(map()) -> {json, map()} | {status, 404}.

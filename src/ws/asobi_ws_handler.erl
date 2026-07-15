@@ -217,17 +217,27 @@ handle_message(
             {ok, State#{session => undefined}}
     end;
 handle_message(
-    #{~"type" := ~"chat.send", ~"payload" := Payload}, #{player_id := PlayerId} = State
+    #{~"type" := ~"chat.send", ~"payload" := Payload} = Msg, #{player_id := PlayerId} = State
 ) when
     is_binary(PlayerId)
 ->
+    Cid = maps:get(~"cid", Msg, undefined),
     #{~"channel_id" := ChannelId, ~"content" := Content} = Payload,
     case is_binary(Content) andalso byte_size(Content) =< 2000 of
-        true ->
-            asobi_chat_channel:send_message(ChannelId, PlayerId, Content),
-            {ok, State};
         false ->
-            {ok, State}
+            {ok, State};
+        true ->
+            case
+                validate_channel_id(ChannelId) andalso
+                    asobi_chat_acl:authorized(ChannelId, PlayerId)
+            of
+                true ->
+                    asobi_chat_channel:send_message(ChannelId, PlayerId, Content),
+                    {ok, State};
+                false ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => ~"not_authorized"}),
+                    {reply, {text, Reply}, State}
+            end
     end;
 handle_message(
     #{~"type" := ~"dm.send", ~"payload" := Payload} = Msg, #{player_id := PlayerId} = State
@@ -245,26 +255,37 @@ handle_message(
             {reply, {text, Reply}, State}
     end;
 handle_message(
-    #{~"type" := ~"chat.join", ~"payload" := #{~"channel_id" := ChannelId}} = Msg, State
-) when is_binary(ChannelId) ->
+    #{~"type" := ~"chat.join", ~"payload" := #{~"channel_id" := ChannelId}} = Msg,
+    #{player_id := PlayerId} = State
+) when is_binary(ChannelId), is_binary(PlayerId) ->
     Cid = maps:get(~"cid", Msg, undefined),
     %% F-16: bound channel id length, namespace it, and cap how many channels
     %% one connection may join. Prevents one socket from spawning unbounded
     %% chat channel processes on the host.
+    %% H1 (2026-05-19): every join must pass asobi_chat_acl:authorized/2 so a
+    %% third party cannot silently join `dm:<alice>:<bob>` and eavesdrop.
     case validate_channel_id(ChannelId) of
         false ->
             Reply = encode_reply(Cid, ~"error", #{reason => ~"invalid_channel_id"}),
             {reply, {text, Reply}, State};
         true ->
-            Joined = maps:get(joined_channels, State, #{}),
-            case map_size(Joined) >= ?MAX_JOINED_CHANNELS_PER_CONN of
-                true ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => ~"too_many_channels"}),
-                    {reply, {text, Reply}, State};
+            case asobi_chat_acl:authorized(ChannelId, PlayerId) of
                 false ->
-                    asobi_chat_channel:join(ChannelId, self()),
-                    Reply = encode_reply(Cid, ~"chat.joined", #{channel_id => ChannelId}),
-                    {reply, {text, Reply}, State#{joined_channels => Joined#{ChannelId => true}}}
+                    Reply = encode_reply(Cid, ~"error", #{reason => ~"not_authorized"}),
+                    {reply, {text, Reply}, State};
+                true ->
+                    Joined = maps:get(joined_channels, State, #{}),
+                    case map_size(Joined) >= ?MAX_JOINED_CHANNELS_PER_CONN of
+                        true ->
+                            Reply = encode_reply(Cid, ~"error", #{reason => ~"too_many_channels"}),
+                            {reply, {text, Reply}, State};
+                        false ->
+                            asobi_chat_channel:join(ChannelId, self()),
+                            Reply = encode_reply(Cid, ~"chat.joined", #{channel_id => ChannelId}),
+                            {reply, {text, Reply}, State#{
+                                joined_channels => Joined#{ChannelId => true}
+                            }}
+                    end
             end
     end;
 handle_message(
@@ -411,7 +432,10 @@ handle_message(
     %% bad types.
     case build_world_filters(Payload) of
         {ok, Filters} ->
-            Worlds = asobi_world_lobby:list_worlds(Filters),
+            %% H3 (2026-05-19): cached variant absorbs the per-world
+            %% get_info fan-out so a flood of world.list messages cannot
+            %% stall every world's mailbox.
+            Worlds = asobi_world_lobby:list_worlds_cached(Filters),
             Reply = encode_reply(Cid, ~"world.list", #{worlds => Worlds}),
             {reply, {text, Reply}, State};
         {error, Reason} ->
