@@ -21,6 +21,15 @@ where the responsibility lies.
 - For multi-tenant or sandboxed scenarios, layer `asobi_lua` or your
   own sandbox on top — that is the place to put callback hardening.
 
+Because callbacks run inline with full BEAM access, a game module can read
+public ETS, spawn arbitrary processes, reach clustered nodes, and crash the
+lobby. Treat the game-module source as part of the trusted compute base — code
+review and sign its releases the same way you would the asobi binary itself. For
+untrusted scripting (community maps, modder content), use the
+[Lua sandbox](https://github.com/widgrensit/asobi_lua/blob/main/guides/security-sandbox.md):
+Luerl runs scripts in a hardened state with OS/IO/code-loading APIs stripped and
+a wall-clock budget per callback.
+
 If you need callback isolation in your custom game module, run the
 hot-path logic in a worker process so a crash is contained.
 
@@ -67,3 +76,16 @@ Enforcement of those happens at the OS / container layer:
   bound BEAM-level resources.
 - A long-running plugin or game module that allocates without bound
   will pressure the OS allocator before any in-VM mechanism notices.
+
+## Container release tree is writable
+
+The published `asobi_lua` image runs as the non-root `asobi` user but does not
+declare `--read-only`. The README example mounts `/app/game` as `:ro`, but that
+is the operator's responsibility, not the runtime's. For a hardened deployment,
+run with `docker run --read-only --tmpfs /tmp` and chown only the game directory
+to the runtime user — the rest of `/app` should stay root-owned and read-only.
+
+## Next steps
+
+- [Threat model](security-threat-model.md) - the trust assumptions this page's limits follow from.
+- [Auth & rate limiting](security-auth.md) - the per-request bounds the runtime does enforce.
