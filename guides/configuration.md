@@ -2,6 +2,14 @@
 
 Asobi supports two configuration paths depending on how you use it.
 
+> #### Do you even need this file? {: .info}
+>
+> On Asobi Cloud (`asobi deploy`) and the `asobi_lua` Docker image you write
+> no config file at all - the platform supplies sane defaults and you tune the
+> few knobs that matter through environment variables. You only edit
+> `sys.config` when you build the release from source and embed asobi as an
+> Erlang dependency.
+
 ## Lua (Docker)
 
 For Lua game developers using the Docker image, configuration lives in
@@ -126,13 +134,16 @@ Per-route-group rate limits using sliding window algorithm via
 
 ```erlang
 {rate_limits, #{
-    auth => #{limit => 10, window => 60000},    %% 10 req/min for auth
-    iap  => #{limit => 300, window => 1000},    %% 300 req/sec for IAP
+    auth => #{limit => 5, window => 1000},      %% 5 req/sec for login/refresh
+    iap  => #{limit => 10, window => 1000},     %% 10 req/sec for IAP
     api  => #{limit => 300, window => 1000}     %% 300 req/sec for API
 }}
 ```
 
-Default: 300 requests per second for all groups.
+Each route group has its own per-IP default (window in ms): `auth` 5/1000,
+`register` 3/1000, `iap` 10/1000, `api` 300/1000, `ws_connect` 60/1000, and the
+global (not per-IP) guest-create bound `guest_global` 100/1000. Override any
+group under `rate_limits`; unset groups keep their default.
 
 ## CORS
 
@@ -191,6 +202,14 @@ Optional multi-node clustering via Erlang distribution.
 }}
 ```
 
+`base_url` is the public origin asobi uses to build OAuth/OIDC redirect URIs
+(defaults to `~"http://localhost:8082"`). Set it to your deployed URL so the
+redirect that providers call back to matches what you registered:
+
+```erlang
+{base_url, ~"https://mygame.com"}
+```
+
 ### Steam
 
 ```erlang
@@ -202,9 +221,50 @@ Optional multi-node clustering via Erlang distribution.
 
 ```erlang
 {apple_bundle_id, ~"com.example.mygame"},
+{apple_root_cert_path, ~"/path/to/AppleRootCA-G3.pem"},
 {google_package_name, ~"com.example.mygame"},
 {google_service_account_key, ~"/path/to/service-account.json"}
 ```
+
+`apple_root_cert_path` points at the Apple Root CA (PEM or DER) that
+`asobi_iap:verify_apple/1` validates the StoreKit 2 receipt chain against.
+Without it Apple receipt verification is refused.
+
+## Guest (anonymous) auth
+
+Guest auth lets a device create a throwaway player without credentials and
+upgrade it to a real account later. It is **opt-in and fails closed**: the
+guest endpoints return `404 guest_auth_disabled` until `guest_auth` is `true`
+**and** a `guest_verifier_pepper` is set.
+
+```erlang
+{guest_auth, true},
+%% Required. A key-id -> pepper map (>= 32 bytes each). Keep old key ids for the
+%% guest retention window so existing guests can still resume after rotation.
+{guest_verifier_pepper, #{~"v1" => ~"a-32-byte-or-longer-secret......"}},
+{guest_verifier_key_id, ~"v1"},
+
+%% Optional abuse control: max unclaimed guests, or `infinity`.
+{guest_unlinked_cap, 100000},
+
+%% Optional retention. Unset = permanent guests (never reaped). Seconds after
+%% which unclaimed guests are deleted by the reaper.
+{guest_reap_after, 2592000}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `guest_auth` | `false` | Master switch. Both this and a pepper are required |
+| `guest_verifier_pepper` | none | Key-id -> pepper map (each pepper >= 32 bytes) or a single >= 32-byte binary |
+| `guest_verifier_key_id` | `~"v1"` | Which pepper key id to use when minting new verifiers |
+| `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity` |
+| `guest_reap_after` | unset | Seconds; unset disables the reaper (guests are permanent) |
+
+The pepper is a server-side secret kept **outside** the database - store it in
+an env var or secret manager, never in source. To rotate, add a new key id and
+point `guest_verifier_key_id` at it; keep the old key ids for at least the
+retention window so existing guests can still resume. Guest creation is bounded
+by the per-IP auth limiter plus the global `guest_global` create limit.
 
 ## Vote Templates
 
@@ -227,12 +287,56 @@ Define reusable vote configurations:
 
 Templates are merged with per-vote config from your game module.
 
+## World capacity
+
+Bounds on persistent world creation, enforced as a DoS backstop:
+
+```erlang
+{world_max_per_player, 5},   %% default 5
+{world_max, 1000}            %% default 1000
+```
+
+A player at the per-player cap gets `429`; once the global cap is reached
+further creates get `503`.
+
+## Terrain provider allowlist
+
+For Lua large-world games, only allowlisted terrain generators can be named
+from Lua. This is an `asobi_lua` key (not `asobi`):
+
+```erlang
+{asobi_lua, [
+    {terrain_providers, [asobi_terrain_flat, asobi_terrain_perlin]}
+]}
+```
+
+The default allows `asobi_terrain_flat` and `asobi_terrain_perlin`.
+
+## Per-call upper bounds
+
+These runtime limits bound the cost of a single request. They are not
+configurable - they are documented here so you can size clients accordingly:
+
+| Limit | Value |
+|-------|-------|
+| Cloud save body | 256 KB |
+| Save slots per player | 10 |
+| Inventory consume quantity | 1 .. 1000000 |
+| Leaderboard `top` `?limit` | 1 .. 100 |
+| Leaderboard `around` `?range` | 1 .. 50 |
+| Chat history `?limit` | 1 .. 200 |
+| DM content | 2000 bytes |
+| WS chat channels per connection | 32 |
+| Idle channel timeout | 60s |
+| Lua table decode depth | 64 |
+
 ## Database (Kura)
 
 Database configuration is under the `kura` application key:
 
 ```erlang
 {kura, [
+    {backend, kura_backend_postgres},
     {repo, asobi_repo},
     {host, "localhost"},
     {port, 5432},
@@ -256,6 +360,7 @@ Database configuration is under the `kura` application key:
 ```erlang
 [
     {kura, [
+        {backend, kura_backend_postgres},
         {repo, asobi_repo},
         {host, "localhost"},
         {database, "my_game_dev"},
@@ -345,3 +450,9 @@ function think(bot_id, state)
     -- AI logic
 end
 ```
+
+## Next steps
+
+- [Self-hosting](https://github.com/widgrensit/asobi_lua/blob/main/guides/self-hosting.md) - running the image.
+- [Clustering](clustering.md) - multi-node config.
+- [Performance tuning](performance-tuning.md) - the tick and BEAM knobs.

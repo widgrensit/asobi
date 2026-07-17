@@ -2,7 +2,13 @@
 
 All endpoints are under `/api/v1`. Requests and responses use JSON.
 
-Authenticated endpoints require the `Authorization: Bearer <session_token>` header.
+Authenticated endpoints require the `Authorization: Bearer <access_token>` header.
+
+> #### Real-time flows go over WebSocket {: .info}
+>
+> Use REST for request/response. Matchmaking notifications, chat, votes,
+> presence, and live game state are pushed over the [WebSocket
+> protocol](websocket-protocol.md), not polled here.
 
 > **Windows / PowerShell**: examples below use `curl` (Linux, macOS, Git Bash,
 > WSL). In PowerShell, translate any block by hand once - the shape is the same:
@@ -38,7 +44,7 @@ curl -X POST /api/v1/auth/register \
 ```
 
 ```json
-{"player_id": "...", "session_token": "...", "username": "player1"}
+{"player_id": "...", "access_token": "...", "refresh_token": "...", "username": "player1"}
 ```
 
 ### Login
@@ -50,7 +56,7 @@ curl -X POST /api/v1/auth/login \
 ```
 
 ```json
-{"player_id": "...", "session_token": "...", "username": "player1"}
+{"player_id": "...", "access_token": "...", "refresh_token": "...", "username": "player1"}
 ```
 
 ### Guest
@@ -179,3 +185,9 @@ GET    /api/v1/storage/:collection/:key        Read object
 PUT    /api/v1/storage/:collection/:key        Write object
 DELETE /api/v1/storage/:collection/:key        Delete object
 ```
+
+## Next steps
+
+- [WebSocket protocol](websocket-protocol.md) - the push side of the API.
+- [Authentication](authentication.md) - obtaining and refreshing the bearer token.
+- [Economy & IAP](economy.md) - wallets, the store, and receipt validation.

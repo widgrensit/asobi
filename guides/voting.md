@@ -22,6 +22,14 @@ a vote config to start a vote, or `none`/`nil` to skip. This is the simplest
 approach and works for both Erlang and Lua game modules. Votes can be triggered
 at any point during gameplay - not just between rounds.
 
+<!-- tabs -->
+**Lua**
+```lua
+function vote_requested(state)
+    return { method = "plurality", options = {"map_a", "map_b"}, window_ms = 15000 }
+end
+```
+**Erlang**
 ```erlang
 vote_requested(#{phase := vote_pending} = _GameState) ->
     {ok, #{
@@ -36,6 +44,7 @@ vote_requested(#{phase := vote_pending} = _GameState) ->
 vote_requested(_) ->
     none.
 ```
+<!-- /tabs -->
 
 When a vote starts this way, the optional `vote_started/1` callback is called
 to let the game module update its state (e.g. change phase).
@@ -66,7 +75,7 @@ asobi_match_server:start_vote(MatchPid, #{
 | `options`      | `[map()]`      | required       | List of `#{id, label}` option maps |
 | `template`     | `binary()`     | `"default"`    | Template name (resolved from config) |
 | `window_ms`    | `pos_integer()`| `15000`        | Vote window in milliseconds        |
-| `method`       | `binary()`     | `"plurality"`  | `"plurality"`, `"approval"`, or `"weighted"` |
+| `method`       | `binary()`     | `"plurality"`  | `"plurality"`, `"approval"`, `"weighted"`, or `"ranked"` |
 | `visibility`   | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
 | `tie_breaker`  | `binary()`     | `"random"`     | `"random"` or `"first"`            |
 | `veto_enabled` | `boolean()`    | `false`        | Allow players to veto              |
@@ -481,3 +490,8 @@ server. Returns `{error, no_veto_tokens}` when exhausted.
 
 Votes arriving within 500ms after the window closes are still accepted to
 compensate for network latency.
+
+## Next steps
+
+- [WebSocket protocol](websocket-protocol.md) - the `match.vote_*` push messages.
+- [Configuration](configuration.md) - vote templates.

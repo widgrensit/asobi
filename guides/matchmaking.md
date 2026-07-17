@@ -27,6 +27,8 @@ curl -X POST http://localhost:8084/api/v1/matchmaker \
 
 ### Via WebSocket
 
+<!-- tabs -->
+**WebSocket (JSON)**
 ```json
 {
   "type": "matchmaker.add",
@@ -36,6 +38,11 @@ curl -X POST http://localhost:8084/api/v1/matchmaker \
   }
 }
 ```
+**Erlang**
+```erlang
+{ok, TicketId} = asobi_matchmaker:add(PlayerId, #{mode => <<"arena">>, properties => #{skill => 1200, region => <<"eu-west">>}}).
+```
+<!-- /tabs -->
 
 A ticket currently supports `mode`, `properties`, and `party`. A
 query-language extension (numeric ranges, required keys, automatic skill
@@ -52,6 +59,11 @@ are built in:
 - `skill_based` — sorts tickets by `properties.skill` and pairs within an
   expanding window (configurable via `skill_window` and
   `skill_expand_rate`).
+
+The built-in strategies map to modules: the default `fill` strategy is
+`asobi_matchmaker_fill` and `skill_based` is `asobi_matchmaker_skill`.
+Strategy is configured per game mode only - there is no top-level
+`matchmaker_strategy` key.
 
 ## Custom Strategies
 
@@ -113,9 +125,16 @@ Players can queue as a party. All party members are placed in the same match:
 
 ## Cancelling
 
+<!-- tabs -->
+**WebSocket (JSON)**
 ```json
 {"type": "matchmaker.remove", "payload": {"ticket_id": "..."}}
 ```
+**Erlang**
+```erlang
+asobi_matchmaker:remove(PlayerId, TicketId).
+```
+<!-- /tabs -->
 
 Or via REST:
 
@@ -123,3 +142,8 @@ Or via REST:
 curl -X DELETE http://localhost:8084/api/v1/matchmaker/<ticket_id> \
   -H 'Authorization: Bearer <token>'
 ```
+
+## Next steps
+
+- [WebSocket protocol](websocket-protocol.md) - the `matchmaker.*` and `match.matched` messages.
+- [Configuration](configuration.md) - per-mode matchmaker tuning.

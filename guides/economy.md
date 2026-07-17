@@ -3,6 +3,12 @@
 Asobi provides a full virtual economy system: wallets, transactions, item
 definitions, a store catalog, and player inventory.
 
+> #### Windows {: .info}
+>
+> Run the `curl` examples in Git Bash or WSL, or use PowerShell's
+> `Invoke-RestMethod` with the same URL and a JSON `-Body`. Authenticated calls
+> add `-Headers @{ Authorization = 'Bearer <token>' }`.
+
 ## Wallets
 
 Each player can have multiple wallets, one per currency. All balance changes
@@ -21,6 +27,18 @@ curl http://localhost:8084/api/v1/wallets \
   {"id": "...", "currency": "gems", "balance": 50}
 ]
 ```
+
+<!-- tabs -->
+**Lua**
+```lua
+local balance = game.economy.balance(player_id)
+```
+**Erlang**
+```erlang
+{ok, Wallet} = asobi_economy:get_or_create_wallet(PlayerId, <<"coins">>),
+{ok, _} = asobi_economy:debit(PlayerId, <<"coins">>, 50, #{}).
+```
+<!-- /tabs -->
 
 ### Transaction History
 
@@ -96,6 +114,20 @@ curl -X POST http://localhost:8084/api/v1/store/purchase \
   -d '{"listing_id": "..."}'
 ```
 
+<!-- tabs -->
+**Lua**
+```lua
+game.economy.purchase(player_id, "shop:starter_pack")
+```
+**Erlang**
+```erlang
+{ok, _} = asobi_economy:purchase(PlayerId, <<"shop:starter_pack">>).
+```
+<!-- /tabs -->
+
+Items are granted through the store/purchase flow or by writing an
+`asobi_player_item` row via `asobi_repo` - there is no `grant_item/3` helper.
+
 ## Server-Side Operations
 
 For admin or game logic that needs to grant/debit currency or items
@@ -117,3 +149,8 @@ asobi_economy:debit(PlayerId, ~"gold", 50, #{reason => ~"store_purchase"}).
 
 All economy operations use ACID transactions to prevent double-spending
 or inconsistent state.
+
+## Next steps
+
+- [Authentication](authentication.md) - player identity behind wallets and purchases.
+- [REST API](rest-api.md) - the wallet, store, inventory, and IAP endpoints.

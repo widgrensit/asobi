@@ -192,6 +192,9 @@ Register your world mode in `sys.config`:
 | `tick_rate` | 50 | Milliseconds between ticks (50 = 20 Hz) |
 | `view_radius` | 1 | Zones visible in each direction from player's zone |
 | `max_players` | 500 | Maximum concurrent players per world |
+| `zone_idle_timeout` | 30000 | Milliseconds an empty zone lingers before it is released |
+| `empty_grace_ms` | 0 | Milliseconds a world with no players lingers before it finishes (0 = finish immediately) |
+| `snapshot_interval` | 600 | Ticks between zone snapshots (see [Snapshots](#snapshots)) |
 
 ### Procedural Generation
 
@@ -365,6 +368,64 @@ function post_tick(tick, state)
     return state
 end
 ```
+
+## Spawn templates
+
+Worlds seed non-player entities (NPCs, resources, objects) from **spawn
+templates**. Implement the optional `spawn_templates/1` callback to return a
+map of template id to template definition.
+
+A template has:
+
+- `type` -- the entity type applied to every spawned instance.
+- `base_state` -- a map merged into every entity spawned from the template.
+- `respawn` -- optional respawn policy: `strategy` (currently `timer`),
+  `delay` (milliseconds), `jitter` (milliseconds of random spread added to
+  the delay), and `max_respawns` (cap, or `infinity`).
+- `persistent` -- whether a spawned entity survives a zone snapshot/restore.
+  Lua entities default to `true`.
+
+At runtime, Lua scripts spawn from a template with
+`game.zone.spawn("goblin", x, y, {overrides})`, where the optional table
+overrides fields from the template's `base_state`.
+
+```lua
+function spawn_templates(config)
+    return {
+        goblin = {
+            type       = "npc",
+            base_state = { health = 100, ai = "patrol" },
+            respawn    = { delay = 5000, jitter = 1000, max_respawns = 3 }
+        },
+        chest = {
+            type       = "object",
+            base_state = { loot = "common" }
+        }
+    }
+end
+
+function zone_tick(entities, zone_state)
+    game.zone.spawn("goblin", 500, 500)
+    game.zone.spawn("chest", 620, 600, { loot = "rare" })
+    return entities, zone_state
+end
+```
+
+See the `examples/world-spawns` demo for a complete world script.
+
+## Snapshots
+
+`asobi_zone_snapshotter` periodically persists each zone's entities and
+restores them on restart, before the zone accepts new subscribers. Tune the
+cadence with the `snapshot_interval` config key (default 600, measured in
+**ticks**, not milliseconds).
+
+## Subscriptions
+
+A player subscribes to the 3x3 neighbourhood of zones around their entity.
+Membership is recomputed as the player moves: entering a zone streams a
+snapshot of that zone's currently-visible entities, and leaving a zone stops
+its updates.
 
 ## WebSocket Protocol
 
