@@ -226,16 +226,20 @@ Player id, progress, wallets, and inventory are preserved.
 
 | Status | `error` | Meaning |
 |--------|---------|---------|
-| `404`  | `guest_auth_disabled`     | Guest auth is not enabled in config |
 | `400`  | `missing_required_fields` | `device_id` / `device_secret` (or `username` / `password` on upgrade) absent |
 | `400`  | `weak_device_secret`      | Secret decodes to fewer than 32 bytes (or exceeds the size cap) |
 | `400`  | `invalid_device_id`       | `device_id` empty or over 255 bytes |
 | `401`  | `invalid_device_secret`   | Wrong secret for a known device |
 | `401`  | `guest_revoked`           | The device verifier was revoked |
 | `401`  | `guest_upgraded`          | The account was already claimed; log in with its real credentials |
+| `404`  | `guest_auth_disabled`     | Guest auth is not enabled in config |
+| `404`  | `player_not_found`        | The upgrade token resolves to no player |
+| `409`  | `device_already_registered` | Two creates for the same device raced; retry - the retry resumes the existing guest |
 | `409`  | `not_an_unclaimed_guest`  | Upgrade target is not an unclaimed guest |
 | `409`  | `username_taken`          | Upgrade username is already in use |
 | `422`  | `validation_failed`       | Upgrade fields invalid (see `fields`) |
+| `500`  | `guest_create_failed`     | The player row could not be created |
+| `500`  | `guest_player_missing`    | The device resolves to an identity whose player no longer exists |
 | `503`  | `guest_capacity_reached`  | Global create limit or the unlinked-guest cap was hit |
 
 ### Configuration
