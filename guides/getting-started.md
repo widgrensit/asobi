@@ -115,7 +115,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "8080:8080"
+      - "8084:8084"
     volumes:
       - ./lua:/app/game:ro
     environment:
@@ -130,7 +130,7 @@ docker compose up -d
 ```
 
 Your game backend is running. Asobi reads your Lua scripts, sets up the
-database, and starts listening for WebSocket connections on port 8080.
+database, and starts listening for WebSocket connections on port 8084.
 
 ### 6. Verify it works
 
@@ -139,7 +139,7 @@ Register a player:
 bash (Linux, macOS, Git Bash, WSL):
 
 ```bash
-curl -s localhost:8080/api/v1/auth/register \
+curl -s localhost:8084/api/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"username":"alice","password":"hunter2"}' | jq
 ```
@@ -147,7 +147,7 @@ curl -s localhost:8080/api/v1/auth/register \
 PowerShell (Windows) - no `curl`/`jq` install needed, `Invoke-RestMethod` parses the response:
 
 ```powershell
-Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/register `
+Invoke-RestMethod -Uri http://localhost:8084/api/v1/auth/register `
   -Method Post -ContentType application/json `
   -Body '{"username":"alice","password":"hunter2"}'
 ```
@@ -232,7 +232,7 @@ which DB pool to use, and `kura` needs the connection details:
         {dev_mode, true},
         {bootstrap_application, asobi},
         {json_lib, json},
-        {cowboy_configuration, #{port => 8080}},
+        {cowboy_configuration, #{port => 8084}},
         {plugins, [
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
@@ -292,7 +292,7 @@ is now listening on the configured port.
 bash (Linux, macOS, Git Bash, WSL):
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/register \
+curl -X POST http://localhost:8084/api/v1/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"username": "player1", "password": "secret123"}'
 ```
@@ -300,7 +300,7 @@ curl -X POST http://localhost:8080/api/v1/auth/register \
 PowerShell (Windows):
 
 ```powershell
-Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/register `
+Invoke-RestMethod -Uri http://localhost:8084/api/v1/auth/register `
   -Method Post -ContentType application/json `
   -Body '{"username": "player1", "password": "secret123"}'
 ```
@@ -317,7 +317,7 @@ Response:
 
 ## Connect via WebSocket
 
-Connect to `ws://localhost:8080/ws` and authenticate:
+Connect to `ws://localhost:8084/ws` and authenticate:
 
 ```json
 {

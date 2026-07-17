@@ -16,10 +16,10 @@ rebar3 shell              # pulls deps, runs migrations, boots asobi
 ```
 
 You'll see `Nova application started` once asobi is listening on
-`localhost:8080`. Verify:
+`localhost:8084`. Verify:
 
 ```bash
-curl -s localhost:8080/api/v1/auth/register \
+curl -s localhost:8084/api/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"username":"alice","password":"hunter-2026"}' | jq
 ```

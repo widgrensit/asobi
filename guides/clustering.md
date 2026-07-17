@@ -152,8 +152,8 @@ metadata:
 ```
 backend asobi
     balance roundrobin
-    server node1 10.0.0.1:8080 check
-    server node2 10.0.0.2:8080 check
+    server node1 10.0.0.1:8084 check
+    server node2 10.0.0.2:8084 check
 ```
 
 ## Matchmaking Across Nodes

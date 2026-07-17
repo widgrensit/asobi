@@ -11,7 +11,7 @@ are recorded as transactions for a full audit trail.
 ### List Wallets
 
 ```bash
-curl http://localhost:8080/api/v1/wallets \
+curl http://localhost:8084/api/v1/wallets \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -25,7 +25,7 @@ curl http://localhost:8080/api/v1/wallets \
 ### Transaction History
 
 ```bash
-curl http://localhost:8080/api/v1/wallets/gold/history \
+curl http://localhost:8084/api/v1/wallets/gold/history \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -48,14 +48,14 @@ Item definitions are global -- they describe what an item is:
 ### Player Inventory
 
 ```bash
-curl http://localhost:8080/api/v1/inventory \
+curl http://localhost:8084/api/v1/inventory \
   -H 'Authorization: Bearer <token>'
 ```
 
 ### Consuming Items
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/inventory/consume \
+curl -X POST http://localhost:8084/api/v1/inventory/consume \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{"item_id": "...", "quantity": 1}'
@@ -68,7 +68,7 @@ The store is a catalog of items available for purchase with in-game currency.
 ### Browse Store
 
 ```bash
-curl http://localhost:8080/api/v1/store \
+curl http://localhost:8084/api/v1/store \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -90,7 +90,7 @@ Purchases are atomic: the wallet is debited and the item is granted in a
 single database transaction via Kura Multi.
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/store/purchase \
+curl -X POST http://localhost:8084/api/v1/store/purchase \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{"listing_id": "..."}'

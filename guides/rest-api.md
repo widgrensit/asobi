@@ -8,7 +8,7 @@ Authenticated endpoints require the `Authorization: Bearer <session_token>` head
 > WSL). In PowerShell, translate any block by hand once - the shape is the same:
 >
 > ```powershell
-> Invoke-RestMethod -Uri http://localhost:8080/api/v1/auth/register `
+> Invoke-RestMethod -Uri http://localhost:8084/api/v1/auth/register `
 >   -Method Post -ContentType application/json `
 >   -Body '{"username": "player1", "password": "secret123"}'
 > ```

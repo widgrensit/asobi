@@ -92,7 +92,7 @@ services:
   asobi:
     image: ghcr.io/widgrensit/asobi_lua:latest
     depends_on: [postgres]
-    ports: ["8080:8080"]
+    ports: ["8084:8084"]
     volumes: ["./lua:/app/game:ro"]
     environment:
       ASOBI_DB_HOST: postgres

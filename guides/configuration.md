@@ -44,7 +44,7 @@ Infrastructure settings come from environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ASOBI_PORT` | `8080` | HTTP/WebSocket port |
+| `ASOBI_PORT` | `8084` | HTTP/WebSocket port |
 | `ASOBI_DB_HOST` | `db` | PostgreSQL host |
 | `ASOBI_DB_NAME` | `asobi` | Database name |
 | `ASOBI_DB_USER` | `postgres` | Database user |
@@ -103,7 +103,7 @@ Shorthand (Erlang module only):
 | `strategy` | `fill` | Matchmaking strategy: `fill`, `skill_based`, or custom module |
 | `skill_window` | `200` | Initial skill difference allowed (skill_based only) |
 | `skill_expand_rate` | `50` | Window expansion per 5 seconds (skill_based only) |
-| `bots` | `#{}` | Bot configuration (see [Bots](lua-bots.md)) |
+| `bots` | `#{}` | Bot configuration. Read by [asobi_lua](https://github.com/widgrensit/asobi_lua), not by asobi — see [Bots](lua-bots.md) |
 
 ## Matchmaker
 
@@ -315,7 +315,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "8080:8080"
+      - "8084:8084"
     volumes:
       - ./lua:/app/game:ro
     environment:
