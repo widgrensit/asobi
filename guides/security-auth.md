@@ -8,14 +8,16 @@ trust assumptions see [Threat model](security-threat-model.md).
 
 Every authenticated route is gated by `asobi_auth_plugin:verify/1`,
 which expects an `Authorization: Bearer <token>` header. Tokens are
-issued by `nova_auth_session:generate_session_token/2` after a
-successful `register/1`, `login/1`, `refresh/1`, or OAuth flow. The
-plugin attaches `auth_data => #{player_id => Id, ...}` to the request
-map — controllers should pattern-match on that rather than parsing the
-header themselves.
+issued by `nova_auth_refresh:generate_pair/2` (via
+`asobi_auth_tokens:issue/2,3`) after a successful `register/1`,
+`login/1`, `refresh/1`, or OAuth flow. The caller receives an access
+token plus a single-use rotating refresh token. The plugin attaches
+`auth_data => #{player_id => Id, ...}` to the request map — controllers
+should pattern-match on that rather than parsing the header themselves.
 
-Tokens are stored in `asobi_player_token` and revocable via
-`nova_auth_session:delete_session_token/2`.
+On logout the presented access token is revoked via
+`nova_auth_refresh:delete_access_token/2` (wrapped by
+`asobi_auth_tokens:revoke_access/1`) so it cannot outlive the cache TTL.
 
 ## Apple StoreKit 2 JWS verification
 
@@ -27,9 +29,9 @@ verifies it end-to-end:
 2. The `x5c` chain is decoded (DER-encoded certificates, base64'd in
    JWS order: leaf → intermediate → root).
 3. The chain is validated against a configured Apple Root CA via
-   `public_key:pkix_path_validation/3`. Operators ship the root in
-   `priv/apple_root_ca.pem` (or override the path via
-   `application:get_env(asobi, apple_root_ca_path, ...)`).
+   `public_key:pkix_path_validation/3`. The root is not bundled: operators
+   point `apple_root_cert_path` (or `apple_root_certs`) at it, and
+   verification returns `apple_root_cert_not_configured` if neither is set.
 4. The signature on `<header>.<payload>` is verified with the leaf
    cert's public key. A bit-flipped signature, swapped signature, or
    any chain mismatch fails the verification.
@@ -51,6 +53,52 @@ ticket against the Steam Web API:
 
 The ticket validator is invoked from `asobi_oauth_controller` for
 `provider = "steam"` flows.
+
+## Guest device verifiers
+
+Anonymous/guest auth (`asobi_guest_controller`) lets a device create a
+player from a `{device_id, device_secret}` pair without credentials. It
+is secured to leak nothing useful even if the identity table is dumped:
+
+- **Fails closed.** The controller serves guest routes only when
+  `guest_auth` is `true` **and** a `guest_verifier_pepper` is
+  configured; otherwise every guest endpoint returns `404
+  guest_auth_disabled`.
+- **The device secret is never stored.** The database holds a
+  *verifier*, not the secret. On creation the server draws a 16-byte
+  salt from `crypto:strong_rand_bytes/1` and combines it with a
+  server-side pepper (selected by key id) as
+  `crypto:mac(hmac, sha256, Pepper, <<Salt/binary, Secret/binary>>)`.
+  The result is stored in the identity's `provider_metadata`
+  (`salt` / `key_id` / `verifier` / `revoked`, all base64).
+- **Timing-safe comparison.** Resume verifies with
+  `crypto:hash_equals/2` so a wrong secret can't be recovered by
+  timing.
+- **The pepper lives outside the database.** It is a keyed secret
+  (env/secret manager), so a dumped verifier table is useless without
+  it, and it is rotatable: add a new key id, point
+  `guest_verifier_key_id` at it, and keep old key ids for the retention
+  window so existing guests still resume.
+- **Bounded input.** The secret must base64-decode to at least 32 bytes
+  (under a fixed upper cap) and the `device_id` must be non-empty and
+  at most 255 bytes, so an unauthenticated caller can't force
+  multi-megabyte HMAC work.
+- **Upgrade is compromise-recovery.** Claiming a guest
+  (`/auth/guest/upgrade`) calls `nova_auth_refresh:revoke_all/2` to kill
+  the entire token family a stolen device secret may have minted, then
+  deletes the guest identity so the secret can no longer resume the
+  now-claimed account.
+- **Safe reaping.** The optional `asobi_guest_reaper` (off unless
+  `guest_reap_after` is set) re-checks that a guest is still unclaimed
+  *inside* its delete transaction, so a concurrent upgrade wins the
+  race. The unlinked-guest cap reads a short-TTL cached count and fails
+  closed if the count can't be read.
+
+> #### Assurance level {: .warning}
+>
+> Treat guest accounts as low-assurance until they are upgraded. Anything
+> valuable - purchases, competitive ranking, cross-device identity -
+> should require a claimed account, not a guest session.
 
 ## Per-route rate limits
 
@@ -131,5 +179,7 @@ Regressions for the items above live under `test/`:
 - `asobi_social_api_SUITE.erl` — F-10 chat history membership (DM,
   group, non-member denial).
 - `asobi_dm_tests.erl` — F-11 length cap, empty-content rejection.
+- `asobi_guest_SUITE.erl` — guest create-or-resume, wrong-secret
+  rejection, upgrade + token revocation.
 
 Run with `rebar3 ct,eunit`.

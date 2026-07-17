@@ -270,12 +270,33 @@ match `match.phase_changed` event.
 
 ## Chat
 
+Channel ids are namespaced: every id must start with one of these prefixes, and
+a frame whose channel id is missing or unprefixed is rejected with
+`channel_id_invalid`. The prefix lets the runtime route the message and enforce
+membership without a per-frame registry lookup.
+
+| Prefix   | Used for                                  | Membership rule |
+|----------|-------------------------------------------|-----------------|
+| `dm:`    | Direct messages                           | Both participants only. |
+| `world:` | World-wide chat                           | Players currently joined to the world. |
+| `zone:`  | A specific zone within a world            | Players currently inside that zone. |
+| `prox:`  | Proximity chat (radius around a position) | Players within the configured radius. |
+| `room:`  | Group / lobby / custom rooms              | Group members, or open join per room policy. |
+
+A single connection may join at most **32 channels** at once; a 33rd is rejected
+with `too_many_channels`. Idle channels with no members stop after 60s; rejoining
+is cheap. Message `content` is capped at 2000 bytes and empty or non-binary
+content is rejected with `content_empty` / `content_too_large`.
+
+History (`GET /api/v1/chat/:channel_id/history`) requires membership and clamps
+`?limit` to 200; non-members get `403`.
+
 ### `chat.join`
 
-Join a chat channel.
+Join a chat channel. The channel id must be namespaced.
 
 ```json
-{"type": "chat.join", "payload": {"channel_id": "lobby"}}
+{"type": "chat.join", "payload": {"channel_id": "room:lobby"}}
 ```
 
 ### `chat.send`
@@ -283,7 +304,7 @@ Join a chat channel.
 Send a message to a channel.
 
 ```json
-{"type": "chat.send", "payload": {"channel_id": "lobby", "content": "Hello!"}}
+{"type": "chat.send", "payload": {"channel_id": "room:lobby", "content": "Hello!"}}
 ```
 
 ### `chat.message` (server push)
@@ -294,7 +315,7 @@ A new message in a joined channel.
 {
   "type": "chat.message",
   "payload": {
-    "channel_id": "lobby",
+    "channel_id": "room:lobby",
     "sender_id": "...",
     "content": "Hello!",
     "sent_at": "2025-01-15T10:30:00Z"
@@ -307,7 +328,7 @@ A new message in a joined channel.
 Leave a chat channel.
 
 ```json
-{"type": "chat.leave", "payload": {"channel_id": "lobby"}}
+{"type": "chat.leave", "payload": {"channel_id": "room:lobby"}}
 ```
 
 ## Voting
@@ -428,3 +449,9 @@ A new notification for the player.
   }
 }
 ```
+
+## Next steps
+
+- [REST API](rest-api.md) - the request/response surface alongside this socket protocol.
+- [Authentication](authentication.md) - obtaining the token the socket authenticates with.
+- [Voting](voting.md) - the vote flow whose `match.vote_*` pushes appear above.
