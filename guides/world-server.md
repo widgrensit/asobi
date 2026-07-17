@@ -84,145 +84,17 @@ Zones only send what changed since the last tick:
 - `a` -- added (full entity state)
 - `r` -- removed
 
-## Erlang Implementation
-
-Implement the `asobi_world` behaviour:
-
-```erlang
--module(my_dungeon).
--behaviour(asobi_world).
-
--export([init/1, join/2, leave/2, spawn_position/2]).
--export([zone_tick/2, handle_input/3, post_tick/2]).
-
-init(_Config) ->
-    {ok, #{dungeon_level => 1, boss_hp => 10000}}.
-
-join(PlayerId, State) ->
-    {ok, State}.
-
-leave(PlayerId, State) ->
-    {ok, State}.
-
-spawn_position(_PlayerId, _State) ->
-    %% Random position in the first zone
-    {ok, {50.0 + rand:uniform(100), 50.0 + rand:uniform(100)}}.
-
-zone_tick(Entities, ZoneState) ->
-    %% Run NPC AI, move projectiles, apply effects
-    Entities1 = maps:map(fun(Id, E) ->
-        case maps:get(type, E, ~"player") of
-            ~"goblin" -> ai_wander(E);
-            _ -> E
-        end
-    end, Entities),
-    {Entities1, ZoneState}.
-
-handle_input(PlayerId, #{~"action" := ~"move", ~"x" := X, ~"y" := Y}, Entities) ->
-    case Entities of
-        #{PlayerId := Entity} ->
-            {ok, Entities#{PlayerId => Entity#{x => X, y => Y}}};
-        _ ->
-            {error, not_found}
-    end;
-handle_input(_PlayerId, _Input, Entities) ->
-    {ok, Entities}.
-
-post_tick(TickN, #{boss_hp := HP} = State) when HP =< 0 ->
-    %% Boss defeated -- trigger an upgrade vote
-    {vote, #{
-        template => ~"boon_pick",
-        options => [
-            #{id => ~"shield", label => ~"Shield Boost"},
-            #{id => ~"speed", label => ~"Speed Boost"},
-            #{id => ~"damage", label => ~"Damage Boost"}
-        ],
-        method => ~"plurality",
-        window_ms => 15000
-    }, State#{boss_hp => 10000, dungeon_level => maps:get(dungeon_level, State) + 1}};
-post_tick(TickN, State) when TickN >= 36000 ->
-    %% 30 minutes at 20 Hz
-    {finished, #{reason => ~"time_up"}, State};
-post_tick(_TickN, State) ->
-    {ok, State}.
-```
-
-### Callbacks
-
-| Callback | Required | Description |
-|----------|----------|-------------|
-| `init/1` | yes | Initialize global game state |
-| `join/2` | yes | Player joined the world |
-| `leave/2` | yes | Player left the world |
-| `spawn_position/2` | yes | Return `{ok, {X, Y}}` for new player placement |
-| `zone_tick/2` | yes | Per-zone simulation: `(Entities, ZoneState) -> {Entities, ZoneState}` |
-| `handle_input/3` | yes | Process player input within a zone's entities |
-| `post_tick/2` | yes | Global post-tick: return `{ok, State}`, `{vote, Config, State}`, or `{finished, Result, State}` |
-| `generate_world/2` | no | Procedural generation: `(Seed, Config) -> {ok, #{Coords => ZoneState}}` |
-| `get_state/2` | no | Per-player state view |
-| `vote_resolved/3` | no | Handle vote result (inherited from match voting) |
-
-### Configuration
-
-Register your world mode in `sys.config`:
-
-```erlang
-{asobi, [
-    {game_modes, #{
-        ~"dungeon" => #{
-            type => world,
-            module => my_dungeon,
-            match_size => 10,
-            max_players => 500,
-            grid_size => 10,        %% 10x10 = 100 zones
-            zone_size => 200,       %% each zone covers 200x200 units
-            tick_rate => 50,        %% 50ms = 20 Hz
-            view_radius => 1,       %% subscribe to 1 zone in each direction (3x3 = 9 zones)
-            strategy => fill
-        }
-    }}
-]}
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `type` | `match` | Must be `world` for world server mode |
-| `grid_size` | 10 | Number of zones per axis (total = grid_size^2) |
-| `zone_size` | 200 | Units per zone side (world size = grid_size * zone_size) |
-| `tick_rate` | 50 | Milliseconds between ticks (50 = 20 Hz) |
-| `view_radius` | 1 | Zones visible in each direction from player's zone |
-| `max_players` | 500 | Maximum concurrent players per world |
-| `zone_idle_timeout` | 30000 | Milliseconds an empty zone lingers before it is released |
-| `empty_grace_ms` | 0 | Milliseconds a world with no players lingers before it finishes (0 = finish immediately) |
-| `snapshot_interval` | 600 | Ticks between zone snapshots (see [Snapshots](#snapshots)) |
-
-### Procedural Generation
-
-Implement `generate_world/2` to provide initial state for each zone:
-
-```erlang
-generate_world(Seed, _Config) ->
-    rand:seed(exsss, {Seed, Seed, Seed}),
-    ZoneStates = maps:from_list([
-        {{X, Y}, #{
-            biome => pick_biome(X, Y),
-            npcs => generate_npcs(X, Y),
-            loot => generate_loot(X, Y)
-        }}
-     || X <- lists:seq(0, 9), Y <- lists:seq(0, 9)
-    ]),
-    {ok, ZoneStates}.
-```
-
-Each zone receives its state via the `zone_state` field in `zone_tick/2`.
-
 ## Lua Implementation
+
+Most games write world logic in Lua and run the asobi_lua Docker image - no
+Erlang needed. The [Erlang behaviour](#erlang-implementation) below is the same
+model for teams embedding asobi as a library.
 
 World scripts follow the same pattern as match scripts but with
 zone-specific callbacks. Set `game_type = "world"` in your mode globals.
 
 > **Gotcha**: the global is **`game_type`**, not `type`. The Erlang
-> `sys.config` form (above) uses the key `type`, but the Lua loader
+> `sys.config` form uses the key `type`, but the Lua loader
 > reads `game_type`. A Lua script that sets `type = "world"` is
 > silently ignored — the script registers as a *match* mode and
 > `world.find_or_create` returns `mode_not_found`.
@@ -368,6 +240,138 @@ function post_tick(tick, state)
     return state
 end
 ```
+
+## Erlang Implementation
+
+Implement the `asobi_world` behaviour:
+
+```erlang
+-module(my_dungeon).
+-behaviour(asobi_world).
+
+-export([init/1, join/2, leave/2, spawn_position/2]).
+-export([zone_tick/2, handle_input/3, post_tick/2]).
+
+init(_Config) ->
+    {ok, #{dungeon_level => 1, boss_hp => 10000}}.
+
+join(PlayerId, State) ->
+    {ok, State}.
+
+leave(PlayerId, State) ->
+    {ok, State}.
+
+spawn_position(_PlayerId, _State) ->
+    %% Random position in the first zone
+    {ok, {50.0 + rand:uniform(100), 50.0 + rand:uniform(100)}}.
+
+zone_tick(Entities, ZoneState) ->
+    %% Run NPC AI, move projectiles, apply effects
+    Entities1 = maps:map(fun(Id, E) ->
+        case maps:get(type, E, ~"player") of
+            ~"goblin" -> ai_wander(E);
+            _ -> E
+        end
+    end, Entities),
+    {Entities1, ZoneState}.
+
+handle_input(PlayerId, #{~"action" := ~"move", ~"x" := X, ~"y" := Y}, Entities) ->
+    case Entities of
+        #{PlayerId := Entity} ->
+            {ok, Entities#{PlayerId => Entity#{x => X, y => Y}}};
+        _ ->
+            {error, not_found}
+    end;
+handle_input(_PlayerId, _Input, Entities) ->
+    {ok, Entities}.
+
+post_tick(TickN, #{boss_hp := HP} = State) when HP =< 0 ->
+    %% Boss defeated -- trigger an upgrade vote
+    {vote, #{
+        template => ~"boon_pick",
+        options => [
+            #{id => ~"shield", label => ~"Shield Boost"},
+            #{id => ~"speed", label => ~"Speed Boost"},
+            #{id => ~"damage", label => ~"Damage Boost"}
+        ],
+        method => ~"plurality",
+        window_ms => 15000
+    }, State#{boss_hp => 10000, dungeon_level => maps:get(dungeon_level, State) + 1}};
+post_tick(TickN, State) when TickN >= 36000 ->
+    %% 30 minutes at 20 Hz
+    {finished, #{reason => ~"time_up"}, State};
+post_tick(_TickN, State) ->
+    {ok, State}.
+```
+
+### Callbacks
+
+| Callback | Required | Description |
+|----------|----------|-------------|
+| `init/1` | yes | Initialize global game state |
+| `join/2` | yes | Player joined the world |
+| `leave/2` | yes | Player left the world |
+| `spawn_position/2` | yes | Return `{ok, {X, Y}}` for new player placement |
+| `zone_tick/2` | yes | Per-zone simulation: `(Entities, ZoneState) -> {Entities, ZoneState}` |
+| `handle_input/3` | yes | Process player input within a zone's entities |
+| `post_tick/2` | yes | Global post-tick: return `{ok, State}`, `{vote, Config, State}`, or `{finished, Result, State}` |
+| `generate_world/2` | no | Procedural generation: `(Seed, Config) -> {ok, #{Coords => ZoneState}}` |
+| `get_state/2` | no | Per-player state view |
+| `vote_resolved/3` | no | Handle vote result (inherited from match voting) |
+
+### Configuration
+
+Register your world mode in `sys.config`:
+
+```erlang
+{asobi, [
+    {game_modes, #{
+        ~"dungeon" => #{
+            type => world,
+            module => my_dungeon,
+            match_size => 10,
+            max_players => 500,
+            grid_size => 10,        %% 10x10 = 100 zones
+            zone_size => 200,       %% each zone covers 200x200 units
+            tick_rate => 50,        %% 50ms = 20 Hz
+            view_radius => 1,       %% subscribe to 1 zone in each direction (3x3 = 9 zones)
+            strategy => fill
+        }
+    }}
+]}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `type` | `match` | Must be `world` for world server mode |
+| `grid_size` | 10 | Number of zones per axis (total = grid_size^2) |
+| `zone_size` | 200 | Units per zone side (world size = grid_size * zone_size) |
+| `tick_rate` | 50 | Milliseconds between ticks (50 = 20 Hz) |
+| `view_radius` | 1 | Zones visible in each direction from player's zone |
+| `max_players` | 500 | Maximum concurrent players per world |
+| `zone_idle_timeout` | 30000 | Milliseconds an empty zone lingers before it is released |
+| `empty_grace_ms` | 0 | Milliseconds a world with no players lingers before it finishes (0 = finish immediately) |
+| `snapshot_interval` | 600 | Ticks between zone snapshots (see [Snapshots](#snapshots)) |
+
+### Procedural Generation
+
+Implement `generate_world/2` to provide initial state for each zone:
+
+```erlang
+generate_world(Seed, _Config) ->
+    rand:seed(exsss, {Seed, Seed, Seed}),
+    ZoneStates = maps:from_list([
+        {{X, Y}, #{
+            biome => pick_biome(X, Y),
+            npcs => generate_npcs(X, Y),
+            loot => generate_loot(X, Y)
+        }}
+     || X <- lists:seq(0, 9), Y <- lists:seq(0, 9)
+    ]),
+    {ok, ZoneStates}.
+```
+
+Each zone receives its state via the `zone_state` field in `zone_tick/2`.
 
 ## Spawn templates
 
