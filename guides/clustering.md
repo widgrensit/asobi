@@ -1,215 +1,115 @@
 # Clustering
 
-Asobi runs on a single BEAM node by default. This guide covers how to run
-multiple independent nodes behind a load balancer — the typical setup for
-Kubernetes, ECS, or any cloud deployment.
+Run multiple asobi nodes as one cluster for horizontal scale of connections and
+matches, plus automatic failover. Presence, chat, and cross-match messaging are
+cluster-safe out of the box via the BEAM's process groups (`pg`).
 
-## Architecture
+> #### asobi is single-node by design for gameplay {: .info}
+>
+> A match lives on one node; the world server's zones for a given world live on
+> one node. Clustering is for connection termination, cross-node messaging, and
+> failover - not for live cross-node zone migration. Shard heavy load at the app
+> level (for example, route players to a region's cluster).
 
-Each Asobi node is standalone — no distributed Erlang required. Nodes share
-a PostgreSQL database and use PostgreSQL LISTEN/NOTIFY (via Shigoto) for
-cross-node messaging.
+## What's cluster-safe
 
-```
-              Load Balancer (sticky sessions for WebSocket)
-              ┌───────────┬───────────┬───────────┐
-              ▼           ▼           ▼           ▼
-           Node A      Node B      Node C      Node D
-           ┌────┐      ┌────┐      ┌────┐      ┌────┐
-           │ pg │      │ pg │      │ pg │      │ pg │
-           └──┬─┘      └──┬─┘      └──┬─┘      └──┬─┘
-              │           │           │           │
-              └─────┬─────┴─────┬─────┘           │
-                    ▼           ▼                  │
-              ┌──────────┐  ┌──────────┐          │
-              │ NOTIFY   │  │ NOTIFY   │◄─────────┘
-              └────┬─────┘  └────┬─────┘
-                   │             │
-                   ▼             ▼
-              ┌─────────────────────┐
-              │     PostgreSQL      │
-              └─────────────────────┘
-```
+- **`pg`-scoped process groups** - presence, chat channels, and world/match
+  `whereis` lookups resolve across nodes.
+- **Player sessions** - a session on node A can send to a match on node B; the
+  send is proxied via a `pg` lookup of the match's owning process.
+- **Storage** - Postgres is shared, so everything persistent is consistent
+  across nodes.
+- **Matchmaker** - replicated: one `gen_server` per node, with tickets held in
+  Postgres, so any node can form a match.
 
-- **`pg`** handles pub/sub within a single node (player sessions, chat channels, presence)
-- **PostgreSQL NOTIFY** handles fan-out between nodes (via Shigoto's notifier)
-- **Sticky sessions** ensure a player's WebSocket stays on the same node
+## What isn't
 
-## How Cross-Node Messaging Works
+- **Matches and worlds do not migrate between nodes.** If the owning node dies,
+  its active matches are lost (their state persists in Postgres for post-mortem,
+  but play does not resume elsewhere).
+- **ETS caches** (zone entity snapshots, rate-limit counters) are per-node. Hot
+  paths assume local access.
+- **Luerl VMs** are per-process and per-node - there is no shared script state
+  across nodes.
 
-When a player sends a chat message:
+## Forming a cluster
 
-1. Player A is connected to Node 1
-2. Node 1 persists the message to PostgreSQL
-3. Node 1 sends `pg_notify('asobi:chat:lobby', payload)`
-4. PostgreSQL delivers the notification to all listening connections
-5. Each node's Shigoto notifier receives it
-6. Each node broadcasts locally via `pg` to connected players in that channel
-
-The same pattern works for presence updates, notifications, and any event
-that needs to reach players on other nodes.
-
-## What Stays Node-Local
-
-Not everything needs cross-node messaging:
-
-| Component | Scope | Why |
-|-----------|-------|-----|
-| **Match Server** | Single node | Match process lives on one node. Players migrate to that node when the match starts (see below). |
-| **Player Session** | Single node | One process per connected player, tied to the WebSocket connection. |
-| **Leaderboards (ETS)** | Single node | Hot reads from local ETS. Persisted to PostgreSQL for durability. Each node builds its own ETS cache on startup. |
-| **Chat broadcast** | Cross-node | Players in the same channel may be on different nodes. |
-| **Presence updates** | Cross-node | Friends on different nodes need to see status changes. |
-| **Notifications** | Cross-node | Target player may be on any node. |
-
-## Player Migration for Matches
-
-When the matchmaker forms a match, the matched players may be on different
-nodes. Rather than routing game traffic through PostgreSQL NOTIFY (which
-adds latency on every tick), Asobi migrates players to the node hosting the
-match server.
-
-The flow:
-
-1. Matchmaker pairs players and spawns a match server on a node
-2. Server sends `match.migrate` to each matched player with a connection
-   hint (the match node's address or a node-specific route)
-3. Client disconnects from current node and reconnects to the match node
-4. Client authenticates on the new node, player session is re-created
-5. Client joins the match — all communication is now node-local via `pg`
-6. When the match ends, client can stay on the current node or reconnect
-   to any node via the load balancer
+asobi uses the BEAM's distribution protocol. Give each node a long name, share a
+cookie, and let the `asobi_cluster` discovery loop connect them. The image reads
+only `ASOBI_PORT`, `ASOBI_DB_*`, and `ASOBI_CORS_ORIGINS` from the environment;
+set the node name and cookie with the standard VM flags:
 
 ```
-Before match:
-  Node A: Player 1, Player 3
-  Node B: Player 2, Player 4
-
-Matchmaker forms match on Node A:
-
-  1. Node B players receive: {"type": "match.migrate", "payload": {"url": "ws://node-a/ws"}}
-  2. Players 2 & 4 disconnect from Node B, reconnect to Node A
-  3. All 4 players now on Node A — match runs with local pg broadcast
-
-After match:
-  Players reconnect to any node via load balancer
+-name asobi@10.0.0.1 -setcookie <shared-secret>
 ```
 
-This keeps match traffic at zero extra latency (local `pg` broadcast) while
-only paying the migration cost once at match start. The reconnection takes
-a fraction of a second — well within the normal "loading match" screen time.
+`asobi_cluster` is a `gen_server` that periodically resolves its peers and
+connects to any it isn't already connected to. It never disconnects a node;
+failover is left to the BEAM and the load balancer.
 
-### Load Balancer Configuration for Migration
+## Service discovery
 
-To support migration, you need a way for clients to connect to a specific
-node. Options:
+Clustering is opt-in: with no `cluster` key set, `asobi_cluster` does not start
+and the node runs standalone. Configure the discovery strategy under the `asobi`
+app's `cluster` key to enable it. Two strategies are supported.
 
-- **Per-node hostnames** — each node has a stable DNS name (e.g.,
-  `node-1.asobi.internal`). The `match.migrate` payload includes the hostname.
-- **Node-affinity cookie** — the match server returns a cookie value that
-  the load balancer uses to route to the correct node.
-- **Headless service (k8s)** — each pod gets a stable address via a headless
-  Service. Clients connect directly to the pod IP.
-
-## Configuration
-
-Enable the Shigoto notifier in your `sys.config`:
-
+<!-- tabs -->
+**DNS (Kubernetes headless service)**
 ```erlang
-{shigoto, [
-    {pool, asobi_repo},
-    {notifier, #{
-        host => "localhost",
-        port => 5432,
-        database => "my_game",
-        user => "postgres",
-        password => "postgres"
+{asobi, [
+    {cluster, #{
+        strategy => dns,
+        dns_name => <<"asobi-headless.default.svc.cluster.local">>,
+        poll_interval => 10000
     }}
 ]}
 ```
-
-The notifier opens a dedicated PostgreSQL connection for LISTEN/NOTIFY
-(separate from the query pool, since LISTEN requires a persistent connection).
-
-## Load Balancer Setup
-
-WebSocket connections are long-lived. The load balancer should support
-WebSocket upgrades and distribute new connections evenly across nodes.
-Sticky sessions are not required — player migration handles match
-co-location, and chat/presence use NOTIFY for cross-node delivery.
-
-**Kubernetes (Ingress):**
-
-```yaml
-metadata:
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-```
-
-**HAProxy:**
-
-```
-backend asobi
-    balance roundrobin
-    server node1 10.0.0.1:8084 check
-    server node2 10.0.0.2:8084 check
-```
-
-## Matchmaking Across Nodes
-
-The matchmaker needs a global view of all queued tickets. Two approaches:
-
-### Shared PostgreSQL Queue (Recommended)
-
-Matchmaker tickets are stored in PostgreSQL. One node runs the matchmaker
-tick (elected via `pg_advisory_lock`). When a match is formed, the matched
-players are notified via NOTIFY and each node's Shigoto notifier delivers
-the event to the local player sessions.
-
+**EPMD (static host list)**
 ```erlang
-%% Only one node runs the matchmaker tick at a time
-case pgo:query("SELECT pg_try_advisory_lock(12345)", [], #{pool => asobi_repo}) of
-    #{rows => [#{pg_try_advisory_lock => true}]} ->
-        run_matchmaker_tick();
-    _ ->
-        skip  %% another node holds the lock
-end
+{asobi, [
+    {cluster, #{
+        strategy => epmd,
+        hosts => ['host-a', 'host-b'],
+        poll_interval => 10000
+    }}
+]}
 ```
+<!-- /tabs -->
 
-### Dedicated Matchmaker Node
+DNS resolves the peer addresses of the headless service; EPMD walks a fixed
+`hosts` list. Either way asobi derives each peer's node name by reusing the
+current node's base name (the part before `@`) and connects. `poll_interval` is
+the rediscovery period in milliseconds (default 10000).
 
-Run a dedicated node for matchmaking. Players submit tickets via REST
-(any node can accept). The matchmaker node reads from PostgreSQL and
-notifies matched players via NOTIFY.
+> #### Secure the distribution port {: .warning}
+>
+> EPMD binds `0.0.0.0:4369` and the distribution port range is unbounded by
+> default; the cookie is the only protection. For anything beyond a trusted
+> private network, constrain the port range and enable TLS for distribution in
+> `vm.args` (`inet_dist_listen_min`/`max`, `-proto_dist inet_tls`). See the
+> [Threat model](security-threat-model.md#single-node-beam-distribution).
 
-## Scaling Guidelines
+## Routing players to nodes
 
-| Players | Nodes | Notes |
-|---------|-------|-------|
-| < 50K | 1 | Single node handles everything |
-| 50K - 200K | 2-4 | Add nodes behind load balancer |
-| 200K+ | 4+ | Consider dedicated matchmaker node, read replicas for leaderboards |
+Put a load balancer in front of the cluster with a sticky WebSocket cookie, or
+hash on `player_id`. This keeps a player's session pinned to one node;
+cross-node calls happen only for matches or worlds the player joins on a
+different node.
 
-The main bottleneck is typically PostgreSQL, not the BEAM nodes. Use
-connection pooling, read replicas, and table partitioning for high-volume
-tables (transactions, chat messages) as you scale.
+## Deployment
 
-## Why Not Distributed Erlang?
+Rolling restarts are safe: drain a node (stop accepting new matches, let
+existing ones finish), upgrade it, and let it rejoin. Sessions on the drained
+node reconnect to another node when the load balancer re-routes them.
 
-Distributed Erlang works well on a local network but has challenges in
-cloud/container environments:
+## Observability
 
-- **Service discovery** — nodes need to find each other (requires epmd or custom discovery)
-- **Network partitions** — split-brain scenarios need careful handling
-- **Security** — Erlang distribution uses a shared cookie, not TLS by default
-- **Container orchestration** — pod IPs change, nodes come and go frequently
+`asobi` emits telemetry events (`[asobi, match, *]`, `[asobi, world, *]`,
+`[asobi, matchmaker, *]`). Wire them to Prometheus via
+`telemetry_metrics_prometheus`, or ship them to any OpenTelemetry collector.
 
-PostgreSQL NOTIFY avoids all of these issues. The database is already your
-shared state — using it for cross-node messaging keeps the architecture
-simple and ops-friendly. The latency cost (a few ms per notification) is
-negligible for chat, presence, and matchmaking events.
+## Next steps
 
-For latency-critical use cases (match state updates at 10+ ticks/sec),
-players are migrated to the match node at match start so `pg` handles
-the broadcast locally with no network hop.
+- [Configuration](configuration.md) - the full `cluster` config key.
+- [Performance tuning](performance-tuning.md) - per-node tick and BEAM knobs.
+- [Threat model](security-threat-model.md) - the distribution trust boundary.
