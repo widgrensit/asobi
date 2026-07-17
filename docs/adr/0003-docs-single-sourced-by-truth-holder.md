@@ -24,9 +24,13 @@ They disagree, measurably:
   documented 11 of the 15 atoms `asobi_guest_controller` returns (#176). One
   of the four missing was the retryable `409 device_already_registered`,
   which a client reading the docs would treat as fatal.
-- **Three API ports are documented for the same server.** `guides/`
-  says 8080, asobi.dev and all 7 SDK READMEs say 8084, and asobi's own
-  dev config listens on 8082.
+- **Three API ports are documented for the same server.** `guides/` says
+  8080, asobi.dev and all 7 SDK READMEs say 8084, and asobi's own dev
+  config listens on 8082. Note which was right: the published image
+  defaulted to 8080, so `guides/` matched reality and the client-facing
+  surface was the drift. Counting occurrences would have concluded the
+  opposite — 60 uses of 8084 against 29 of 8080 — which is why ownership
+  follows the code that can be wrong, not the majority of copies.
 
 The obvious fix — make `guides/` the single source and generate asobi.dev
 from it — does not survive contact with the boundaries this project
@@ -75,11 +79,17 @@ Corollaries:
 - **Pages with no truth-holder guide stay hand-written.** Writing a guide
   in `asobi` purely so the site can generate from it inverts the
   relationship: it warps the library to serve the website.
-- **Docs examples agree on port 8084.** The port is not a fact to be
-  discovered — prod reads `${ASOBI_PORT}` and each setup path simply chose
-  differently. It is a convention, so the docs pick one. 8084 wins on
-  count: 7 SDK repos across 34 files, plus 26 uses on the site, against
-  29 uses in `guides/` alone.
+- **Docs examples agree on port 8084, and the image moves to meet them.**
+  The port *is* a fact, and this principle located it: `asobi_lua`'s
+  Dockerfile (`EXPOSE 8080`, `ENV ASOBI_PORT=8080`) is the truth-holder,
+  because the published image is what a quickstart actually runs. So 8080
+  was correct and `guides/` was right; asobi.dev and the 7 SDK READMEs
+  were the drift.
+  We move the image to 8084 anyway, as a deliberate breaking change:
+  8080 collides with most other things on a developer's machine, and
+  moving one image beats moving 34 files across 8 client repos. The
+  truth-holder still decides — it is simply being changed on purpose
+  rather than contradicted.
 
 ## Consequences
 
