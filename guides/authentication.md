@@ -15,7 +15,7 @@ Players can link multiple providers to a single account.
 The simplest method. Register and login to receive a session token:
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/register \
+curl -X POST http://localhost:8084/api/v1/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"username": "player1", "password": "secret123"}'
 ```
@@ -52,7 +52,7 @@ POST /api/v1/auth/oauth
 ### Example
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/oauth \
+curl -X POST http://localhost:8084/api/v1/auth/oauth \
   -H 'Content-Type: application/json' \
   -d '{"provider": "google", "token": "eyJhbGciOiJSUzI1NiIs..."}'
 ```
@@ -122,7 +122,7 @@ Steam uses session tickets instead of OIDC. The game client obtains a ticket
 via `ISteamUser::GetAuthSessionTicket` and sends the hex-encoded ticket.
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/oauth \
+curl -X POST http://localhost:8084/api/v1/auth/oauth \
   -H 'Content-Type: application/json' \
   -d '{"provider": "steam", "token": "14000000..."}'
 ```
@@ -173,7 +173,7 @@ so it is low-assurance until upgraded.
 ### Create or resume
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/guest \
+curl -X POST http://localhost:8084/api/v1/auth/guest \
   -H 'Content-Type: application/json' \
   -d '{"device_id": "b64-device-id", "device_secret": "b64-32-random-bytes"}'
 ```
@@ -202,7 +202,7 @@ Only an unclaimed guest may upgrade - a password account, or an account with a
 non-guest provider, is refused.
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/guest/upgrade \
+curl -X POST http://localhost:8084/api/v1/auth/guest/upgrade \
   -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"username": "player1", "password": "secret123"}'
@@ -273,7 +273,7 @@ the same player).
 Requires an authenticated session.
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/link \
+curl -X POST http://localhost:8084/api/v1/auth/link \
   -H 'Authorization: Bearer <session_token>' \
   -H 'Content-Type: application/json' \
   -d '{"provider": "discord", "token": "eyJhbGciOi..."}'
@@ -288,7 +288,7 @@ curl -X POST http://localhost:8080/api/v1/auth/link \
 Asobi prevents unlinking the last auth method to avoid locking the player out.
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/auth/unlink \
+curl -X DELETE http://localhost:8084/api/v1/auth/unlink \
   -H 'Authorization: Bearer <session_token>' \
   -H 'Content-Type: application/json' \
   -d '{"provider": "discord"}'

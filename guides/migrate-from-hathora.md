@@ -21,13 +21,13 @@ They get you unblocked even if the full port takes a week:
      asobi:
        image: ghcr.io/widgrensit/asobi_lua:latest
        depends_on: { postgres: { condition: service_healthy } }
-       ports: ["8080:8080"]
+       ports: ["8084:8084"]
        environment: { ASOBI_DB_HOST: postgres, ASOBI_DB_NAME: my_game }
    ```
-   Then `docker compose up -d`. HTTP is on `:8080`, WebSocket is on `/ws`.
+   Then `docker compose up -d`. HTTP is on `:8084`, WebSocket is on `/ws`.
 2. **Register one player** — the asobi equivalent of `HathoraClient.loginAnonymous`:
    ```bash
-   curl -s localhost:8080/api/v1/auth/register \
+   curl -s localhost:8084/api/v1/auth/register \
      -H 'content-type: application/json' \
      -d '{"username":"test","password":"test1234"}'
    # → { "username": "test", "player_id": "019de3...", "session_token": "wRqvop92/..." }
@@ -36,7 +36,7 @@ They get you unblocked even if the full port takes a week:
    from here on, in place of any Hathora auth token.
 3. **Queue for matchmaking** to confirm the matchmaker works end-to-end:
    ```bash
-   curl -s localhost:8080/api/v1/matchmaker \
+   curl -s localhost:8084/api/v1/matchmaker \
      -H 'content-type: application/json' \
      -H 'authorization: Bearer wRqvop92/...' \
      -d '{"mode":"default","properties":{},"party":["019de3..."]}'
@@ -153,7 +153,7 @@ services:
   asobi:
     image: ghcr.io/widgrensit/asobi_lua:latest
     depends_on: [postgres]
-    ports: ["8080:8080"]
+    ports: ["8084:8084"]
     volumes: ["./lua:/app/game:ro"]
     environment:
       ASOBI_DB_HOST: postgres
@@ -166,7 +166,7 @@ up:
 
 ```bash
 docker compose up -d
-curl localhost:8080/api/v1/auth/register \
+curl localhost:8084/api/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"username":"test","password":"test1234"}'
 # → { "player_id": "01HX...", "session_token": "...", "username": "test" }

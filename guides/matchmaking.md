@@ -16,7 +16,7 @@ groups tickets into matches using a per-mode strategy module.
 ### Via REST
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/matchmaker \
+curl -X POST http://localhost:8084/api/v1/matchmaker \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -120,6 +120,6 @@ Players can queue as a party. All party members are placed in the same match:
 Or via REST:
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/matchmaker/<ticket_id> \
+curl -X DELETE http://localhost:8084/api/v1/matchmaker/<ticket_id> \
   -H 'Authorization: Bearer <token>'
 ```

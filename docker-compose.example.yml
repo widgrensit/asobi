@@ -10,11 +10,11 @@ services:
   asobi:
     image: ghcr.io/widgrensit/asobi_lua:latest
     ports:
-      - "8080:8080"
+      - "8084:8084"
     volumes:
       - ./game:/app/game
     environment:
-      ASOBI_PORT: 8080
+      ASOBI_PORT: 8084
       ASOBI_DB_HOST: db
       ASOBI_DB_NAME: my_game
       ASOBI_DB_USER: postgres
