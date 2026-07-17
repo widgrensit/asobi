@@ -77,3 +77,8 @@ an obviously broken game module cannot keep churning silently.
 `asobi_world_lobby_server` serializes `find_or_create/1` to close a
 documented TOCTOU race (two concurrent `find_or_create` for the same
 mode no longer spawn duplicate worlds).
+
+## Next steps
+
+- [Auth & rate limiting](security-auth.md) - how clients are authenticated and the brute-force surface is bounded.
+- [Known limitations](security-known-limitations.md) - the sharp edges this design accepts.
