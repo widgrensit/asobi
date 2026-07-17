@@ -10,6 +10,12 @@ Players can link multiple providers to a single account.
 > (used against `/auth/refresh`). The `session_token` shown in the shorthand
 > examples below is the access token; use it as the `Bearer` credential.
 
+> #### Windows {: .info}
+>
+> Run the `curl` examples in Git Bash or WSL, or use PowerShell's
+> `Invoke-RestMethod` with the same URL and a JSON `-Body`. Authenticated calls
+> add `-Headers @{ Authorization = 'Bearer <token>' }`.
+
 ## Username & Password
 
 The simplest method. Register and login to receive a session token:
@@ -29,6 +35,23 @@ Use the session token in subsequent requests:
 ```
 Authorization: Bearer <session_token>
 ```
+
+## Refresh & Rotation
+
+Access tokens are short-lived. When one expires (a `401`), exchange the refresh
+token for a fresh pair at `/api/v1/auth/refresh`. Rotation is single-use: the
+server burns the presented refresh token and returns a new access token _and_ a
+new refresh token, so always store both from the response.
+
+```bash
+curl -X POST http://localhost:8084/api/v1/auth/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"refresh_token": "<refresh_token>"}'
+# => {"access_token": "...", "refresh_token": "..."}
+```
+
+The official SDKs persist the refresh token, attach the access token to every
+call, and refresh-and-retry on a 401 automatically.
 
 ## OAuth / Social Login
 
@@ -318,42 +341,36 @@ The token works the same regardless of which provider was used to obtain it.
 
 ## SDK Integration
 
-### Unity (C#)
+The same Google sign-in flow across the SDKs. The platform SDK returns an ID
+token; hand it to Asobi and the session token is stored internally.
 
+<!-- tabs -->
+**Unity (C#)**
 ```csharp
-// Google Sign-In → Asobi
 string idToken = googleSignIn.IdToken;
 var response = await asobi.Auth.OAuth("google", idToken);
 // response.SessionToken is now set automatically
 ```
-
-### Godot (GDScript)
-
+**Godot (GDScript)**
 ```gdscript
-# Google Sign-In → Asobi
 var id_token = google_sign_in.get_id_token()
 var result = await asobi.auth.oauth("google", id_token)
 # Session token is stored internally
 ```
-
-### Dart / Flutter / Flame
-
+**Dart / Flutter / Flame**
 ```dart
-// Google Sign-In → Asobi
 final idToken = googleSignIn.currentUser!.authentication.idToken!;
 final result = await asobi.auth.oauth('google', idToken);
 // Session token is stored internally
 ```
-
-### Defold (Lua)
-
+**Defold (Lua)**
 ```lua
--- Google Sign-In → Asobi
 local id_token = google_sign_in.get_id_token()
 asobi.auth.oauth("google", id_token, function(result)
     -- Session token is stored internally
 end)
 ```
+<!-- /tabs -->
 
 ## Next Steps
 
