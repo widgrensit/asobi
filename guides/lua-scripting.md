@@ -1,99 +1,29 @@
 # Lua Scripting
 
-Lua scripting support is provided by the [`asobi_lua`](https://hexdocs.pm/asobi_lua) package,
-a standalone runtime that wraps the asobi library with [Luerl](https://github.com/rvirding/luerl)
-for writing game logic in Lua.
+Lua scripting is provided by [asobi_lua](https://github.com/widgrensit/asobi_lua),
+a standalone runtime that wraps this library with
+[Luerl](https://github.com/rvirding/luerl). asobi has no Lua dependency of its
+own, so asobi_lua's own documentation is the reference — this page points to it
+rather than keeping a copy that drifts.
 
-## Quick Start
-
-The fastest way to get started is with the Docker image:
+Start the runtime:
 
 ```bash
-docker run -v ./game:/game -p 8080:8080 ghcr.io/widgrensit/asobi_lua
+docker run -v ./game:/game -p 8084:8084 ghcr.io/widgrensit/asobi_lua
 ```
 
-Place your Lua scripts in the `game/` directory and the runtime picks them up automatically.
+Then read, in asobi_lua:
 
-## Game Callbacks
+- [Lua scripting](https://github.com/widgrensit/asobi_lua/blob/main/guides/lua-scripting.md)
+  — callbacks, match and world modes, script globals, and using it from an
+  Erlang project
+- [Lua bots](https://github.com/widgrensit/asobi_lua/blob/main/guides/lua-bots.md)
+  — AI-controlled players
+- [Self-hosting](https://github.com/widgrensit/asobi_lua/blob/main/guides/self-hosting.md)
+  — running the image
+- [Sandbox](https://github.com/widgrensit/asobi_lua/blob/main/guides/security-sandbox.md),
+  [trust model](https://github.com/widgrensit/asobi_lua/blob/main/guides/security-trust-model.md),
+  and [known limitations](https://github.com/widgrensit/asobi_lua/blob/main/guides/security-known-limitations.md)
+  — what Lua code can and cannot reach
 
-Your Lua scripts implement callbacks that asobi invokes at the right time:
-
-### Match Mode
-
-```lua
-function init(config)
-    return { score = {} }
-end
-
-function join(player_id, state)
-    state.score[player_id] = 0
-    return state
-end
-
-function tick(state)
-    -- To finish the match, set reserved keys on the state and return it:
-    --   state._finished = true
-    --   state._result   = { winner = "..." }
-    return state
-end
-
-function handle_input(player_id, input, state)
-    return state
-end
-```
-
-### World Mode
-
-```lua
-function init(config)
-    return {}
-end
-
-function join(player_id, state)
-    return state
-end
-
-function spawn_position(player_id, state)
-    return { x = 100.0, y = 100.0 }
-end
-
-function zone_tick(entities, zone_state)
-    return entities, zone_state
-end
-
-function handle_input(player_id, input, entities)
-    return entities
-end
-
-function post_tick(tick, state)
-    return state
-end
-```
-
-## Lua API
-
-The `game.*` namespace provides access to engine features from Lua:
-
-| Function | Description |
-|----------|-------------|
-| `game.id()` | Generate a unique ID |
-| `game.broadcast(event, payload)` | Broadcast to all players |
-| `game.send(player_id, message)` | Send to a specific player |
-| `game.economy.grant(player, currency, amount, reason)` | Grant currency |
-| `game.economy.debit(player, currency, amount, reason)` | Debit currency |
-| `game.economy.balance(player_id)` | Return the player's full wallet list |
-| `game.economy.purchase(player, listing_id)` | Purchase store item |
-| `game.leaderboard.submit(board, player, score)` | Submit score |
-| `game.leaderboard.top(board, limit)` | Get top scores |
-| `game.storage.get(collection, key)` | Read storage value |
-| `game.storage.set(collection, key, value)` | Write storage value |
-| `game.chat.send(channel, player, content)` | Send chat message |
-
-## Further Reading
-
-See the full [`asobi_lua` documentation](https://hexdocs.pm/asobi_lua) for:
-
-- Configuration options
-- Bot scripting
-- Advanced patterns
-- Docker deployment
+For what the runtime is configured with, see [Configuration](configuration.md).
