@@ -1,0 +1,38 @@
+name: Docs drift
+
+# Fails if a guide's error table no longer matches the controller it describes:
+# an atom the controller returns but the table omits, or a table row no source
+# backs. The guest table listed 11 of 15 atoms until #176, one of the missing
+# being the retryable 409 device_already_registered.
+#
+# Separate from ci.yml because that delegates wholesale to the erlang-ci
+# reusable workflow and takes no extra steps. Guides and controllers live in
+# this repo, so nothing needs cloning - unlike asobi_site, which runs the same
+# check against its own hand-written docs and must fetch this repo first.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'guides/authentication.md'
+      - 'src/controllers/asobi_guest_controller.erl'
+      - 'src/asobi_auth_error.erl'
+      - 'scripts/check-error-drift.sh'
+      - '.github/workflows/docs-drift.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'guides/authentication.md'
+      - 'src/controllers/asobi_guest_controller.erl'
+      - 'src/asobi_auth_error.erl'
+      - 'scripts/check-error-drift.sh'
+      - '.github/workflows/docs-drift.yml'
+
+jobs:
+  drift:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check error-table-vs-controller drift
+        run: scripts/check-error-drift.sh
