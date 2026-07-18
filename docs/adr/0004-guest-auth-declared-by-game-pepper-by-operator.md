@@ -56,8 +56,10 @@ Split the toggle from the secret.
 - **Per-env control via pepper presence.** The same bundle deploys to dev and
   prod; dev has no pepper (off), prod/demo has one (on). Per-environment
   behaviour without the toggle being per-env.
-- **Simpler provisioner.** asobi_saas injects only a per-env pepper for envs that
-  opt into guest play - it no longer needs to also set a flag.
+- **One operator lever.** The operator's only control is whether a valid pepper is
+  present for a deployment; there is no separate flag to coordinate. How the pepper
+  is supplied - an env var a self-hoster sets, or automated provisioning on a
+  managed host - is outside this decision and out of scope for this library.
 - **Self-host** operators are both parties: they set `guest_auth = true` in Lua
   and provide `ASOBI_GUEST_VERIFIER_PEPPER`.
 - **Fails closed** everywhere: no game global -> `guest_auth` stays at its `false`
