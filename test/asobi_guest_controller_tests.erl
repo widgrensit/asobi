@@ -59,6 +59,19 @@ decode_secret_upper_bound_test() ->
         error, asobi_guest_controller:decode_secret(binary:copy(~"A", 4096))
     ).
 
+authenticate_disabled_returns_403_test() ->
+    application:unset_env(asobi, guest_auth),
+    Req = #{
+        json => #{
+            ~"device_id" => ~"dev-abc",
+            ~"device_secret" => base64:encode(crypto:strong_rand_bytes(32))
+        }
+    },
+    ?assertMatch(
+        {json, 403, _, #{error := ~"guest_auth_disabled", message := _}},
+        asobi_guest_controller:authenticate(Req)
+    ).
+
 valid_device_id_test() ->
     ?assert(asobi_guest_controller:valid_device_id(base64:encode(crypto:strong_rand_bytes(16)))),
     ?assertNot(asobi_guest_controller:valid_device_id(~"")),

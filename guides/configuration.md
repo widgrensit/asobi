@@ -234,7 +234,7 @@ Without it Apple receipt verification is refused.
 
 Guest auth lets a device create a throwaway player without credentials and
 upgrade it to a real account later. It is **opt-in and fails closed**: the
-guest endpoints return `404 guest_auth_disabled` until `guest_auth` is `true`
+guest endpoints return `403 guest_auth_disabled` until `guest_auth` is `true`
 **and** a `guest_verifier_pepper` is set.
 
 ```erlang

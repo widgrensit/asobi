@@ -62,7 +62,7 @@ is secured to leak nothing useful even if the identity table is dumped:
 
 - **Fails closed.** The controller serves guest routes only when
   `guest_auth` is `true` **and** a `guest_verifier_pepper` is
-  configured; otherwise every guest endpoint returns `404
+  configured; otherwise every guest endpoint returns `403
   guest_auth_disabled`.
 - **The device secret is never stored.** The database holds a
   *verifier*, not the secret. On creation the server draws a 16-byte
