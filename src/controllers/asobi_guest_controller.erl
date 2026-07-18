@@ -37,7 +37,10 @@ authenticate(#{json := #{~"device_id" := DeviceId, ~"device_secret" := Secret}} 
 ->
     case guest_enabled() of
         false ->
-            {json, 404, #{}, #{error => ~"guest_auth_disabled"}};
+            {json, 403, #{}, #{
+                error => ~"guest_auth_disabled",
+                message => ~"Guest authentication is not enabled for this deployment."
+            }};
         true ->
             case decode_secret(Secret) of
                 {ok, SecretBin} ->

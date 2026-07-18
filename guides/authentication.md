@@ -255,7 +255,7 @@ Player id, progress, wallets, and inventory are preserved.
 | `401`  | `invalid_device_secret`   | Wrong secret for a known device |
 | `401`  | `guest_revoked`           | The device verifier was revoked |
 | `401`  | `guest_upgraded`          | The account was already claimed; log in with its real credentials |
-| `404`  | `guest_auth_disabled`     | Guest auth is not enabled in config |
+| `403`  | `guest_auth_disabled`     | Guest auth is not enabled in config |
 | `404`  | `player_not_found`        | The upgrade token resolves to no player |
 | `409`  | `device_already_registered` | Two creates for the same device raced; retry - the retry resumes the existing guest |
 | `409`  | `not_an_unclaimed_guest`  | Upgrade target is not an unclaimed guest |
