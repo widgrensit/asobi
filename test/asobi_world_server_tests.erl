@@ -300,3 +300,52 @@ join_three_sets_zone_pid() ->
     ?assertEqual(Pid, maps:get(world_pid, State1)),
     asobi_player_session:stop(SessionPid),
     stop_world(Ctx).
+
+%% --- listing_info/1 (pure projection, no world needed) ---
+
+listing_info_drops_roster_test() ->
+    Info = #{
+        world_id => ~"w1",
+        status => running,
+        player_count => 2,
+        max_players => 4,
+        players => [~"p1", ~"p2"],
+        mode => ~"hub",
+        grid_size => 1,
+        started_at => 123
+    },
+    Listing = asobi_world_server:listing_info(Info),
+    ?assertEqual(
+        lists:sort([world_id, status, player_count, max_players, mode, grid_size, started_at]),
+        lists:sort(maps:keys(Listing))
+    ),
+    ?assertEqual(2, maps:get(player_count, Listing)).
+
+listing_info_drops_unknown_fields_test() ->
+    Listing = asobi_world_server:listing_info(#{
+        world_id => ~"w1", owner_id => ~"p1", spectators => [~"p2"]
+    }),
+    ?assertEqual([world_id], maps:keys(Listing)).
+
+listing_info_projects_nested_phase_test() ->
+    %% asobi_phase:info/1 evolves independently; the projection must not
+    %% pass through whatever it grows next.
+    Listing = asobi_world_server:listing_info(#{
+        world_id => ~"w1",
+        phase => #{
+            status => active,
+            phase => ~"combat",
+            remaining_ms => 500,
+            config => #{answer_key => ~"secret"},
+            timers => [a, b],
+            winner => ~"p1"
+        }
+    }),
+    ?assertEqual(
+        lists:sort([status, phase, remaining_ms]),
+        lists:sort(maps:keys(maps:get(phase, Listing)))
+    ).
+
+listing_info_handles_missing_phase_test() ->
+    ?assertNot(maps:is_key(phase, asobi_world_server:listing_info(#{world_id => ~"w1"}))),
+    ?assertEqual(#{}, asobi_world_server:listing_info(#{})).

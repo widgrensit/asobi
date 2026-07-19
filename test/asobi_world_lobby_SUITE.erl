@@ -151,12 +151,17 @@ list_worlds_omits_player_roster(_Config) ->
     ok = asobi_world_server:join(Pid, ~"player2"),
 
     [Listed] = asobi_world_lobby:list_worlds(),
-    ?assertNot(
-        maps:is_key(players, Listed),
-        "discovery must not expose the player roster"
+    ?assertEqual(
+        lists:sort([world_id, status, player_count, max_players, mode, grid_size, started_at]),
+        lists:sort(maps:keys(Listed)),
+        "listing key set is a security contract - widen it deliberately"
     ),
     ?assertEqual(2, maps:get(player_count, Listed)),
     ?assertEqual(WorldId, maps:get(world_id, Listed)),
+
+    %% The cached path is what every production caller actually hits.
+    [Cached] = asobi_world_lobby:list_worlds_cached(),
+    ?assertNot(maps:is_key(players, Cached)),
 
     Detail = asobi_world_server:get_info(Pid),
     ?assertEqual(
@@ -170,7 +175,9 @@ find_or_create_omits_player_roster(_Config) ->
     wait_until_running(maps:get(world_id, Info)),
     ok = asobi_world_server:join(Pid, ~"player1"),
 
-    {ok, _, Found} = asobi_world_lobby:find_or_create(?MODE_HUB),
+    {ok, FoundPid, Found} = asobi_world_lobby:find_or_create(?MODE_HUB),
+    ?assertEqual(Pid, FoundPid, "must reuse the populated world, not create an empty one"),
+    ?assertEqual(1, maps:get(player_count, Found)),
     ?assertNot(maps:is_key(players, Found)),
 
     {ok, _, Created} = asobi_world_lobby:create_world(?MODE_ARENA),
