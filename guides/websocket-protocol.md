@@ -89,6 +89,33 @@ Joining is WebSocket-only by design: the join binds the match to your
 session so subsequent `match.input` is routed. There is no REST join, the
 same as for worlds.
 
+#### Join context
+
+Both `match.join` and `world.join` accept an optional `ctx`, passed through
+to your game module untouched:
+
+```json
+{"type": "match.join", "payload": {"match_id": "...", "ctx": {"code": "AB12"}}}
+```
+
+Asobi never interprets, echoes, or logs it. It reaches your game's
+`join/3` callback, which decides whether to accept. Games that implement
+only `join/2` are unaffected and a supplied `ctx` is ignored.
+
+This is how you build join codes, invites, passwords and party checks:
+without it there is no channel from a client to your game before
+membership exists, so `join/2` can implement an allowlist but never a code.
+
+Bounded at the server: a flat object, at most 8 keys, keys up to 64 bytes,
+string values up to 256 bytes, plus integers and booleans. No nesting.
+Violations are rejected with `invalid_join_ctx`, `join_ctx_too_many_keys`,
+`join_ctx_key_too_long`, `join_ctx_value_too_long`, or
+`invalid_join_ctx_value`.
+
+**A join context does not make a world private.** Only a game that
+implements `join/3` and rejects unauthorised joins restricts entry; a game
+that ignores it stays open to anyone holding a `world_id`.
+
 ### `match.input`
 
 Send game input to the match server.
