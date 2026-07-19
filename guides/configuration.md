@@ -297,6 +297,27 @@ Bounds on persistent world creation, enforced as a DoS backstop:
 {world_max, 1000}            %% default 1000
 ```
 
+## Join rate
+
+Joins are bounded per player, not per IP:
+
+```erlang
+{rate_limits, #{
+    join => #{algorithm => sliding_window, limit => 10, window => 60000}
+}}
+```
+
+Joining is how a client reaches a world's roster and leaving is free, so an
+unbounded join rate lets one account enumerate every live world by joining,
+reading `world.joined`, and leaving. The default (10 per minute) is generous
+for real play and turns a sweep of a full deployment from seconds into hours
+per identity. Exceeding it returns `join_rate_limited` and emits
+`[asobi, join, rate_limited]`.
+
+This bounds the cost of a sweep; it does not make worlds private. For that,
+implement `join/3` in your game module and reject unauthorised joins - see
+[WebSocket Protocol](websocket-protocol.md).
+
 A player at the per-player cap gets `429`; once the global cap is reached
 further creates get `503`.
 
