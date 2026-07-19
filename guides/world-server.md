@@ -373,6 +373,11 @@ the browser.
 Neither flag gates joining. A client that already knows a `world_id` can
 still `world.join` it. Both flags control discovery only.
 
+Both are properties of the **mode**, not of a world instance, so a player
+cannot host a private world at runtime. A mode is either discoverable or it
+is not, for every world it spawns. Player-hosted private games need join
+authorisation, which does not exist yet.
+
 With `quick_play => false`, `world.find_or_create` returns
 `quick_play_disabled` rather than creating a world, since it could never
 find the one it just made.

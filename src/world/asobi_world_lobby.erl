@@ -32,7 +32,7 @@ list_worlds(Filters) ->
             try asobi_world_server:get_info(Pid) of
                 Info when is_map(Info) ->
                     case matches_filters(Info, Filters) of
-                        true -> {true, Info};
+                        true -> {true, asobi_world_server:listing_info(Info)};
                         false -> false
                     end
             catch
@@ -195,7 +195,7 @@ do_create_world(Mode, PlayerId) ->
                         WorldPid ->
                             register_world_owner(WorldPid, PlayerId),
                             Info = asobi_world_server:get_info(WorldPid),
-                            {ok, WorldPid, Info}
+                            {ok, WorldPid, asobi_world_server:listing_info(Info)}
                     end;
                 {error, _} = Err ->
                     Err

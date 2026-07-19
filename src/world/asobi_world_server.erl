@@ -9,6 +9,8 @@ transient matches use `asobi_match_server` instead.
 -behaviour(gen_statem).
 
 -export([start_link/1, join/2, join/3, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1]).
+-export([listing_info/1]).
+-export_type([listing/0]).
 -export([spawn_at/3, spawn_at/4]).
 -export([reconnect/2]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
@@ -1041,6 +1043,42 @@ world_info(Status, #{world_id := WorldId, players := Players} = State) ->
     case maps:get(phase_state, State, undefined) of
         undefined -> Base;
         PS -> Base#{phase => asobi_phase:info(PS)}
+    end.
+
+-doc "What a non-member may see. Every key is optional: `maps:with/2` keeps only what the world set.".
+-type listing() :: #{
+    world_id => binary(),
+    status => atom(),
+    player_count => non_neg_integer(),
+    max_players => pos_integer(),
+    mode => binary() | undefined,
+    grid_size => non_neg_integer(),
+    started_at => integer() | undefined,
+    phase => map()
+}.
+
+-doc """
+Projection of `get_info/1` for callers who are not members of the world.
+
+`get_info/1` carries the full `players` roster. Discovery and the join
+reply are open to any authenticated player, so they get identity, mode,
+status, capacity and phase only.
+
+The projection descends into `phase`: `asobi_phase:info/1` evolves
+independently and its `config` is game-authored, so allowlisting only the
+top level would leak whatever a future phase field happens to carry.
+""".
+-spec listing_info(map()) -> listing().
+listing_info(Info) ->
+    Base = maps:with(
+        [world_id, status, player_count, max_players, mode, grid_size, started_at],
+        Info
+    ),
+    case maps:get(phase, Info, undefined) of
+        Phase when is_map(Phase) ->
+            Base#{phase => maps:with([status, phase, remaining_ms, start_condition], Phase)};
+        _ ->
+            Base
     end.
 
 %% --- Internal: Reconnection ---
