@@ -140,6 +140,14 @@ register_limiters() ->
         iap => #{algorithm => sliding_window, limit => 10, window => 1000},
         api => #{algorithm => sliding_window, limit => 300, window => 1000},
         ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000},
+        %% Per-player bound on world/match joins (asobi#193). Joining is how a
+        %% client reaches a roster, and leaving is free, so an unbounded join
+        %% rate lets one account sweep every live world by joining, reading
+        %% `world.joined`, and leaving. Keyed on player_id, not IP: the cost we
+        %% are bounding is per-identity, and identities are what an attacker
+        %% would rotate. Generous for real play - a player browsing worlds joins
+        %% a handful of times a minute, not ten times a second.
+        join => #{algorithm => sliding_window, limit => 10, window => 60000},
         %% Global (not per-IP) bound on guest-create throughput. Guest rows are
         %% minted unauthenticated and cheaply, so a per-IP limit alone lets a
         %% botnet spam rows; this caps the total rate. Keyed on a constant.
@@ -170,6 +178,7 @@ limiter_name(register) -> asobi_register_limiter;
 limiter_name(iap) -> asobi_iap_limiter;
 limiter_name(api) -> asobi_api_limiter;
 limiter_name(ws_connect) -> asobi_ws_connect_limiter;
+limiter_name(join) -> asobi_join_limiter;
 limiter_name(guest_global) -> asobi_guest_global_limiter.
 
 cluster_spec() ->

@@ -12,6 +12,7 @@
     ws_message_in/1,
     ws_message_out/1,
     ws_connect_rate_limited/1,
+    join_rate_limited/1,
     ws_idle_auth_timeout/0
 ]).
 -export([anticheat_violation/3]).
@@ -165,6 +166,13 @@ ws_connected() ->
 -spec ws_disconnected() -> ok.
 ws_disconnected() ->
     telemetry:execute([asobi, ws, disconnected], #{count => 1}, #{}).
+
+-doc "asobi#193: a player hit the per-identity join rate cap.".
+-spec join_rate_limited(binary()) -> ok.
+join_rate_limited(PlayerId) ->
+    telemetry:execute(
+        [asobi, join, rate_limited], #{count => 1}, #{player_id => PlayerId}
+    ).
 
 -spec ws_connect_rate_limited(binary()) -> ok.
 ws_connect_rate_limited(PeerIp) ->

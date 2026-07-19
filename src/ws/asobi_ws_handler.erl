@@ -346,19 +346,17 @@ handle_message(
             Reply = encode_reply(Cid, ~"error", #{reason => ~"match_not_found"}),
             {reply, {text, Reply}, State};
         {ok, MatchPid} ->
-            case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
-                {error, CtxErr} ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
+            case check_join_rate(PlayerId) of
+                denied ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => ~"join_rate_limited"}),
                     {reply, {text, Reply}, State};
-                {ok, Ctx} ->
-                    case asobi_match_server:join(MatchPid, PlayerId, Ctx) of
-                        ok ->
-                            Info = asobi_match_server:get_info(MatchPid),
-                            Reply = encode_reply(Cid, ~"match.joined", Info),
+                allowed ->
+                    case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
+                        {error, CtxErr} ->
+                            Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
                             {reply, {text, Reply}, State};
-                        {error, Reason} ->
-                            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
-                            {reply, {text, Reply}, State}
+                        {ok, Ctx} ->
+                            join_match_and_reply(Cid, MatchPid, PlayerId, Ctx, State)
                     end
             end
     end;
@@ -496,12 +494,18 @@ handle_message(
             Reply = encode_reply(Cid, ~"error", #{reason => ~"world_not_found"}),
             {reply, {text, Reply}, State};
         {ok, WorldPid} ->
-            case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
-                {error, CtxErr} ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
+            case check_join_rate(PlayerId) of
+                denied ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => ~"join_rate_limited"}),
                     {reply, {text, Reply}, State};
-                {ok, Ctx} ->
-                    join_and_reply(Cid, WorldPid, PlayerId, Ctx, State)
+                allowed ->
+                    case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
+                        {error, CtxErr} ->
+                            Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
+                            {reply, {text, Reply}, State};
+                        {ok, Ctx} ->
+                            join_and_reply(Cid, WorldPid, PlayerId, Ctx, State)
+                    end
             end
     end;
 handle_message(
@@ -580,6 +584,31 @@ reply_error(Msg, Reason, State) ->
     Cid = maps:get(~"cid", Msg, undefined),
     Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
     {reply, {text, Reply}, State}.
+
+%% asobi#193: joining is how a client reaches a roster and leaving is free,
+%% so an unbounded join rate lets one account sweep every live world. Keyed
+%% on player_id because identity, not IP, is the unit an attacker rotates.
+%% `world.create`/`world.find_or_create` route through join_and_reply too, so
+%% they are covered by the same bucket.
+check_join_rate(PlayerId) ->
+    case seki:check(asobi_join_limiter, PlayerId) of
+        {allow, _} ->
+            allowed;
+        {deny, _} ->
+            asobi_telemetry:join_rate_limited(PlayerId),
+            denied
+    end.
+
+join_match_and_reply(Cid, MatchPid, PlayerId, Ctx, State) ->
+    case asobi_match_server:join(MatchPid, PlayerId, Ctx) of
+        ok ->
+            Info = asobi_match_server:get_info(MatchPid),
+            Reply = encode_reply(Cid, ~"match.joined", Info),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            {reply, {text, Reply}, State}
+    end.
 
 join_and_reply(Cid, WorldPid, PlayerId, State) ->
     join_and_reply(Cid, WorldPid, PlayerId, #{}, State).
