@@ -7,8 +7,8 @@ social login (Google, Apple, Microsoft, Discord), Steam, and anonymous
 Players can link multiple providers to a single account.
 
 > Auth endpoints return an `access_token` (short-lived) and a `refresh_token`
-> (used against `/auth/refresh`). The `session_token` shown in the shorthand
-> examples below is the access token; use it as the `Bearer` credential.
+> (used against `/auth/refresh`). Use the `access_token` as the `Bearer`
+> credential.
 
 > #### Windows {: .info}
 >
@@ -18,7 +18,7 @@ Players can link multiple providers to a single account.
 
 ## Username & Password
 
-The simplest method. Register and login to receive a session token:
+The simplest method. Register and login to receive a token pair:
 
 ```bash
 curl -X POST http://localhost:8084/api/v1/auth/register \
@@ -27,13 +27,13 @@ curl -X POST http://localhost:8084/api/v1/auth/register \
 ```
 
 ```json
-{"player_id": "...", "session_token": "...", "username": "player1"}
+{"player_id": "...", "access_token": "...", "refresh_token": "...", "username": "player1"}
 ```
 
-Use the session token in subsequent requests:
+Use the access token in subsequent requests:
 
 ```
-Authorization: Bearer <session_token>
+Authorization: Bearer <access_token>
 ```
 
 ## Refresh & Rotation
@@ -85,7 +85,8 @@ First-time response (new account created):
 ```json
 {
   "player_id": "...",
-  "session_token": "...",
+  "access_token": "...",
+  "refresh_token": "...",
   "username": "google_abc12345_4821",
   "created": true
 }
@@ -96,7 +97,8 @@ Returning player response:
 ```json
 {
   "player_id": "...",
-  "session_token": "...",
+  "access_token": "...",
+  "refresh_token": "...",
   "username": "player1"
 }
 ```
@@ -171,8 +173,10 @@ social sign-in - and claim a real account later without losing progress. It is
 the "device-based auth" option: the client generates a secret once, stores it on
 the device, and presents it to resume the same account on every launch.
 
-Guest auth is **opt-in** and disabled by default. Enable it in `sys.config`
-(see [Configuration](#configuration-2)) before the endpoints respond.
+Guest auth is **opt-in** and disabled by default. It turns on only when two
+independent parties agree (see [Configuration](#configuration-2)): the **game**
+declares `guest_auth = true` in its Lua config, and the **operator** supplies a
+verifier pepper. Either one alone leaves the endpoints returning `403`.
 
 ### How it works
 
@@ -255,7 +259,7 @@ Player id, progress, wallets, and inventory are preserved.
 | `401`  | `invalid_device_secret`   | Wrong secret for a known device |
 | `401`  | `guest_revoked`           | The device verifier was revoked |
 | `401`  | `guest_upgraded`          | The account was already claimed; log in with its real credentials |
-| `403`  | `guest_auth_disabled`     | Guest auth is not enabled in config |
+| `403`  | `guest_auth_disabled`     | Guest auth is off - the game did not declare `guest_auth`, or no pepper is present |
 | `404`  | `player_not_found`        | The upgrade token resolves to no player |
 | `409`  | `device_already_registered` | Two creates for the same device raced; retry - the retry resumes the existing guest |
 | `409`  | `not_an_unclaimed_guest`  | Upgrade target is not an unclaimed guest |
@@ -267,9 +271,24 @@ Player id, progress, wallets, and inventory are preserved.
 
 ### Configuration
 
+Guest auth is on **iff both** halves below are satisfied; either alone fails
+closed with `403 guest_auth_disabled`. The toggle belongs to the game, the pepper
+to the operator (ADR 0004: guest auth is declared by the game, peppered by the
+operator).
+
+**1. The game declares the toggle.** `guest_auth` is a boolean game global,
+declared like `match_size` or `bots` - in `match.lua` for a single-mode game, or
+`config.lua` for a multi-mode game:
+
+```lua
+guest_auth = true
+```
+
+**2. The operator supplies the pepper** (and any abuse controls). The pepper is
+the one value that must never live in a bundle:
+
 ```erlang
 {asobi, [
-    {guest_auth, true},
     %% Required. A key-id -> pepper map (>= 32 bytes each). Keep old keys for the
     %% guest retention window so existing guests can still resume after rotation.
     {guest_verifier_pepper, #{<<"v1">> => <<"a-32-byte-or-longer-secret......">>}},
@@ -283,6 +302,11 @@ Player id, progress, wallets, and inventory are preserved.
     {guest_reap_after, 2592000}          %% e.g. 30 days
 ]}
 ```
+
+There is no `ASOBI_GUEST_AUTH` env var. A self-hoster owns both sides: set
+`guest_auth = true` in Lua and provide the pepper via
+`ASOBI_GUEST_VERIFIER_PEPPER`. On managed cloud the pepper is provisioned per
+environment, so the same bundle is off in dev (no pepper) and on in prod.
 
 The pepper is a server-side secret that makes a stolen database of verifiers
 useless without it - store it like any other secret (env/secret manager), not in
@@ -301,7 +325,7 @@ Requires an authenticated session.
 
 ```bash
 curl -X POST http://localhost:8084/api/v1/auth/link \
-  -H 'Authorization: Bearer <session_token>' \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"provider": "discord", "token": "eyJhbGciOi..."}'
 ```
@@ -316,7 +340,7 @@ Asobi prevents unlinking the last auth method to avoid locking the player out.
 
 ```bash
 curl -X DELETE http://localhost:8084/api/v1/auth/unlink \
-  -H 'Authorization: Bearer <session_token>' \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"provider": "discord"}'
 ```
@@ -327,13 +351,13 @@ curl -X DELETE http://localhost:8084/api/v1/auth/unlink \
 
 ## WebSocket Authentication
 
-After obtaining a session token (from any auth method), connect to the
+After obtaining an access token (from any auth method), connect to the
 WebSocket and authenticate:
 
 ```json
 {
   "type": "session.connect",
-  "payload": {"token": "<session_token>"}
+  "payload": {"token": "<access_token>"}
 }
 ```
 
@@ -342,7 +366,7 @@ The token works the same regardless of which provider was used to obtain it.
 ## SDK Integration
 
 The same Google sign-in flow across the SDKs. The platform SDK returns an ID
-token; hand it to Asobi and the session token is stored internally.
+token; hand it to Asobi and the access token is stored internally.
 
 <!-- tabs -->
 **Unity (C#)**
