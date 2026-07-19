@@ -158,3 +158,56 @@ extract_captures(Bin, Re) ->
         {match, Matches} -> [B || [B] <- Matches];
         nomatch -> []
     end.
+
+%% The existence and envelope checks above cannot catch a fixture whose
+%% payload has the wrong KEYS. world.list.json shipped for a long time with
+%% `id`/`capacity`/`size` while the server emits
+%% `world_id`/`max_players`/`player_count`. SDKs treat these fixtures as
+%% ground truth for dispatch tests, so a wrong-shaped fixture teaches every
+%% client the wrong contract and nothing fails.
+%%
+%% The two listing events have a pure projection function to compare
+%% against, so pin them exactly.
+listing_fixtures_match_the_projection_test() ->
+    WorldKeys = projection_keys(fun asobi_world_server:listing_info/1, #{
+        world_id => ~"w",
+        status => running,
+        player_count => 1,
+        max_players => 2,
+        mode => ~"m",
+        grid_size => 1,
+        started_at => 0,
+        players => [~"p"]
+    }),
+    ?assertEqual(
+        WorldKeys,
+        fixture_entry_keys("world.list", ~"worlds"),
+        "world.list fixture must match asobi_world_server:listing_info/1"
+    ),
+
+    MatchKeys = projection_keys(fun asobi_match_server:listing_info/1, #{
+        match_id => ~"m",
+        status => waiting,
+        player_count => 1,
+        max_players => 2,
+        mode => ~"m",
+        players => [~"p"],
+        listed => true
+    }),
+    ?assertEqual(
+        MatchKeys,
+        fixture_entry_keys("match.list", ~"matches"),
+        "match.list fixture must match asobi_match_server:listing_info/1"
+    ).
+
+projection_keys(Fun, Sample) ->
+    lists:sort([atom_to_binary(K) || K <- maps:keys(Fun(Sample))]).
+
+fixture_entry_keys(Event, ListKey) ->
+    {ok, Bin} = file:read_file(?FIXTURE_DIR ++ "/" ++ Event ++ ".json"),
+    #{~"payload" := #{ListKey := [Entry | _]}} = json:decode(Bin),
+    entry_keys(Entry).
+
+%% Guard narrows json:decode_value() to a map for eqwalizer.
+entry_keys(Entry) when is_map(Entry) ->
+    lists:sort(maps:keys(Entry)).

@@ -1,1 +1,1 @@
-{"type":"world.joined","cid":"14","payload":{"world_id":"01j8x000000000000000000007","mode":"village"}}
+{"type":"world.joined","cid":"14","payload":{"world_id":"01j8x000000000000000000007","mode":"village","status":"running","player_count":3,"max_players":16,"players":["01j8x000000000000000000000"],"grid_size":10,"started_at":1750000000000}}
