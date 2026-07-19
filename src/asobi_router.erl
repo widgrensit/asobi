@@ -65,6 +65,7 @@ api_routes() ->
 
             %% Matches
             {~"/matches", fun asobi_match_controller:index/1, #{methods => [get, options]}},
+            {~"/matches/live", fun asobi_match_controller:live/1, #{methods => [get, options]}},
             {~"/matches/:id", fun asobi_match_controller:show/1, #{methods => [get, options]}},
 
             %% Matchmaker

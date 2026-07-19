@@ -430,13 +430,27 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     %% F-29: validate filter values rather than silently degrading on
     %% bad types.
-    case build_world_filters(Payload) of
+    case build_listing_filters(Payload) of
         {ok, Filters} ->
             %% H3 (2026-05-19): cached variant absorbs the per-world
             %% get_info fan-out so a flood of world.list messages cannot
             %% stall every world's mailbox.
             Worlds = asobi_world_lobby:list_worlds_cached(Filters),
             Reply = encode_reply(Cid, ~"world.list", #{worlds => Worlds}),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            {reply, {text, Reply}, State}
+    end;
+handle_message(
+    #{~"type" := ~"match.list", ~"payload" := Payload} = Msg,
+    #{player_id := _PlayerId} = State
+) when is_map(Payload) ->
+    Cid = maps:get(~"cid", Msg, undefined),
+    case build_listing_filters(Payload) of
+        {ok, Filters} ->
+            Matches = asobi_match_lobby:list_matches_cached(Filters),
+            Reply = encode_reply(Cid, ~"match.list", #{matches => Matches}),
             {reply, {text, Reply}, State};
         {error, Reason} ->
             Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
@@ -652,9 +666,9 @@ valid_channel_prefix(<<"prox:", _/binary>>) -> true;
 valid_channel_prefix(<<"room:", _/binary>>) -> true;
 valid_channel_prefix(_) -> false.
 
-%% F-29: world.list filter values must be the right type or we reject the
-%% request rather than silently returning unfiltered results.
-build_world_filters(Payload) ->
+%% F-29: world.list/match.list filter values must be the right type or we
+%% reject the request rather than silently returning unfiltered results.
+build_listing_filters(Payload) ->
     Acc1 =
         case maps:find(~"mode", Payload) of
             error ->

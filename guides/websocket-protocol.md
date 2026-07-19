@@ -54,13 +54,40 @@ Keep-alive ping. Send periodically to prevent timeout.
 
 ## Matches
 
+### `match.list`
+
+Browse live, joinable matches. Filters are optional.
+
+```json
+{"type": "match.list", "payload": {"mode": "arena", "has_capacity": true}}
+```
+
+Reply payload is `{"matches": [...]}`, each entry carrying `match_id`,
+`mode`, `status`, `player_count` and `max_players`. The roster is not
+included; see [World Server](world-server.md) for why discovery and
+membership are separate surfaces.
+
+**Matches are unlisted by default.** A matchmaker-spawned match is already
+assigned to its players, so it has no reason to appear in a browser. A mode
+opts in with `listed => true`. This is the inverse of worlds, which default
+to listed.
+
+Distinct from `GET /api/v1/matches`, which reads the match *record* table
+(finished matches, an audit trail). `GET /api/v1/matches/live` is the REST
+equivalent of this message.
+
 ### `match.join`
 
-Join a match (after being matched via matchmaker or direct invite).
+Join a match (after being matched via matchmaker, discovered via
+`match.list`, or a direct invite).
 
 ```json
 {"type": "match.join", "payload": {"match_id": "..."}}
 ```
+
+Joining is WebSocket-only by design: the join binds the match to your
+session so subsequent `match.input` is routed. There is no REST join, the
+same as for worlds.
 
 ### `match.input`
 

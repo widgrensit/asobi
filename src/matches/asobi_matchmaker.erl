@@ -308,7 +308,8 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                 game_module => GameMod,
                 game_config => ExtraConfig,
                 min_players => MatchSize,
-                max_players => MaxPlayers
+                max_players => MaxPlayers,
+                listed => maps:get(listed, ModeConfig, false)
             },
             case asobi_match_sup:start_match(Config) of
                 {ok, MatchPid} when is_pid(MatchPid) ->

@@ -18,30 +18,10 @@
 list_worlds() ->
     list_worlds(#{}).
 
--doc "List running worlds with optional filters: mode, has_capacity.".
+-doc "List running worlds with optional filters: mode, has_capacity, listed, quick_play.".
 -spec list_worlds(map()) -> [map()].
 list_worlds(Filters) ->
-    Groups = pg:which_groups(?PG_SCOPE),
-    WorldGroups = [
-        {WorldId, Pid}
-     || {asobi_world_server, WorldId} = Group <- Groups,
-        Pid <- take_first(pg:get_members(?PG_SCOPE, Group))
-    ],
-    Worlds = lists:filtermap(
-        fun({_WorldId, Pid}) ->
-            try asobi_world_server:get_info(Pid) of
-                Info when is_map(Info) ->
-                    case matches_filters(Info, Filters) of
-                        true -> {true, asobi_world_server:listing_info(Info)};
-                        false -> false
-                    end
-            catch
-                _:_ -> false
-            end
-        end,
-        WorldGroups
-    ),
-    Worlds.
+    asobi_discovery:enumerate(asobi_world_server, Filters, fun matches_filters/2).
 
 -doc """
 H3 (2026-05-19): cached variant of `list_worlds/1` for request paths that
@@ -68,28 +48,19 @@ list_worlds_cached(Filters) ->
     HasCapacity = maps:get(has_capacity, Filters, false),
     Now = erlang:monotonic_time(millisecond),
     All =
-        case cache_lookup(HasCapacity, Now) of
+        case asobi_discovery:cache_lookup({asobi_world_server, HasCapacity}, Now) of
             {hit, Worlds} ->
                 Worlds;
             miss ->
                 Worlds = list_worlds(#{has_capacity => HasCapacity, listed => true}),
-                asobi_world_lobby_server:cache_worlds(
-                    HasCapacity, Worlds, Now + ?LIST_CACHE_TTL_MS
+                asobi_world_lobby_server:cache_listing(
+                    {asobi_world_server, HasCapacity}, Worlds, Now + ?LIST_CACHE_TTL_MS
                 ),
                 Worlds
         end,
     case maps:get(mode, Filters, undefined) of
         undefined -> All;
         Mode -> [W || W <- All, maps:get(mode, W, undefined) =:= Mode]
-    end.
-
--spec cache_lookup(boolean(), integer()) -> {hit, [map()]} | miss.
-cache_lookup(Key, Now) ->
-    try ets:lookup(?LIST_CACHE_TAB, Key) of
-        [{_, Worlds, ExpiresAt}] when ExpiresAt > Now -> {hit, Worlds};
-        _ -> miss
-    catch
-        error:badarg -> miss
     end.
 
 -doc """
@@ -303,10 +274,6 @@ flag_ok(Flag, Info, Filters) ->
         {ok, Want} -> maps:get(Flag, Info, true) =:= Want;
         error -> true
     end.
-
--spec take_first([pid()]) -> [pid()].
-take_first([Pid | _]) -> [Pid];
-take_first([]) -> [].
 
 -spec wait_for_world_server(pid(), non_neg_integer()) -> pid() | undefined.
 wait_for_world_server(_InstancePid, 0) ->

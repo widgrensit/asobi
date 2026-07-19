@@ -13,6 +13,9 @@
 
 -define(TAB, asobi_world_lobby_cache).
 -define(TTL_MS, 500).
+%% The cache is shared with match discovery, so the key is namespaced by
+%% the server module that produced the listing.
+-define(KEY(HasCapacity), {asobi_world_server, HasCapacity}).
 
 cache_test_() ->
     {foreach, fun setup/0, fun teardown/1, [
@@ -43,7 +46,7 @@ returns_cached_entry_within_ttl() ->
     %% rather than recomputed from pg. Default key is has_capacity=false.
     Fake = #{world_id => ~"cached-world-id", mode => ~"barrow"},
     Now = erlang:monotonic_time(millisecond),
-    ets:insert(?TAB, {false, [Fake], Now + ?TTL_MS}),
+    ets:insert(?TAB, {?KEY(false), [Fake], Now + ?TTL_MS}),
     ?assertEqual([Fake], asobi_world_lobby:list_worlds_cached(#{})).
 
 mode_filtered_in_memory() ->
@@ -52,7 +55,7 @@ mode_filtered_in_memory() ->
     Now = erlang:monotonic_time(millisecond),
     A = #{world_id => ~"a", mode => ~"barrow"},
     B = #{world_id => ~"b", mode => ~"corsairs"},
-    ets:insert(?TAB, {false, [A, B], Now + ?TTL_MS}),
+    ets:insert(?TAB, {?KEY(false), [A, B], Now + ?TTL_MS}),
     ?assertEqual([A], asobi_world_lobby:list_worlds_cached(#{mode => ~"barrow"})),
     ?assertEqual([B], asobi_world_lobby:list_worlds_cached(#{mode => ~"corsairs"})),
     ?assertEqual([], asobi_world_lobby:list_worlds_cached(#{mode => ~"nonexistent"})).
@@ -62,7 +65,7 @@ distinct_modes_do_not_grow_table() ->
     %% served from the single has_capacity=false row, never inserting new keys.
     Now = erlang:monotonic_time(millisecond),
     A = #{world_id => ~"a", mode => ~"barrow"},
-    ets:insert(?TAB, {false, [A], Now + ?TTL_MS}),
+    ets:insert(?TAB, {?KEY(false), [A], Now + ?TTL_MS}),
     lists:foreach(
         fun(N) ->
             Mode = integer_to_binary(N),
@@ -76,8 +79,8 @@ has_capacity_keyed_separately() ->
     Now = erlang:monotonic_time(millisecond),
     All = #{world_id => ~"all", mode => ~"barrow"},
     OpenOnly = #{world_id => ~"open", mode => ~"barrow"},
-    ets:insert(?TAB, {false, [All], Now + ?TTL_MS}),
-    ets:insert(?TAB, {true, [OpenOnly], Now + ?TTL_MS}),
+    ets:insert(?TAB, {?KEY(false), [All], Now + ?TTL_MS}),
+    ets:insert(?TAB, {?KEY(true), [OpenOnly], Now + ?TTL_MS}),
     ?assertEqual([All], asobi_world_lobby:list_worlds_cached(#{})),
     ?assertEqual([OpenOnly], asobi_world_lobby:list_worlds_cached(#{has_capacity => true})).
 
@@ -87,7 +90,7 @@ ignores_expired_entry() ->
     %% as a miss by inspecting the row's expiry against "now".
     Fake = #{world_id => ~"stale", mode => ~"barrow"},
     Past = erlang:monotonic_time(millisecond) - 1,
-    ets:insert(?TAB, {false, [Fake], Past}),
-    [{_K, _W, Expires}] = ets:lookup(?TAB, false),
+    ets:insert(?TAB, {?KEY(false), [Fake], Past}),
+    [{_K, _W, Expires}] = ets:lookup(?TAB, ?KEY(false)),
     Now = erlang:monotonic_time(millisecond),
     ?assert(Expires =< Now).

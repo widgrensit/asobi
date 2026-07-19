@@ -20,6 +20,7 @@ the place to put callback hardening.
 
 -export([start_link/1, join/2, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1]).
 -export([reconnect/2]).
+-export([listing_info/1]).
 -export([whereis/1]).
 
 -define(PG_SCOPE, nova_scope).
@@ -161,6 +162,7 @@ init(Config) ->
                 tick_rate => maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE),
                 min_players => maps:get(min_players, Config, ?DEFAULT_MIN_PLAYERS),
                 max_players => maps:get(max_players, Config, ?DEFAULT_MAX_PLAYERS),
+                listed => maps:get(listed, Config, false),
                 started_at => undefined,
                 vote_frustration => #{},
                 veto_tokens => #{},
@@ -602,11 +604,30 @@ match_info(Status, #{match_id := MatchId, players := Players} = State) ->
         status => Status,
         player_count => map_size(Players),
         players => maps:keys(Players),
-        mode => maps:get(mode, State, undefined)
+        mode => maps:get(mode, State, undefined),
+        max_players => maps:get(max_players, State, ?DEFAULT_MAX_PLAYERS),
+        listed => maps:get(listed, State, false)
     },
     case maps:get(phase_state, State, undefined) of
         undefined -> Base;
         PS -> Base#{phase => asobi_phase:info(PS)}
+    end.
+
+-doc """
+Projection of `get_info/1` for callers who are not in the match.
+
+Mirrors `asobi_world_server:listing_info/1`. `get_info/1` carries the full
+`players` roster and the server-side `listed` flag; neither reaches a
+browsing client.
+""".
+-spec listing_info(map()) -> map().
+listing_info(Info) ->
+    Base = maps:with([match_id, status, player_count, max_players, mode], Info),
+    case maps:get(phase, Info, undefined) of
+        Phase when is_map(Phase) ->
+            Base#{phase => maps:with([status, phase, remaining_ms, start_condition], Phase)};
+        _ ->
+            Base
     end.
 
 maybe_start_vote(Mod, #{game_state := GS} = State) ->
