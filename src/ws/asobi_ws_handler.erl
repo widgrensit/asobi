@@ -303,8 +303,7 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     {ok, TicketId} = asobi_matchmaker:add(PlayerId, #{
         mode => maps:get(~"mode", Payload, ~"default"),
-        properties => maps:get(~"properties", Payload, #{}),
-        party => maps:get(~"party", Payload, [PlayerId])
+        properties => maps:get(~"properties", Payload, #{})
     }),
     Reply = encode_reply(Cid, ~"matchmaker.queued", #{ticket_id => TicketId, status => ~"pending"}),
     {reply, {text, Reply}, State};

@@ -31,7 +31,7 @@ remove(PlayerId, TicketId) ->
     end.
 
 %% Ticket lookup is owner-scoped. F-8: previously any authenticated
-%% caller could read another player's mode/party/properties.
+%% caller could read another player's mode/properties.
 -spec get_ticket(binary(), binary()) ->
     {ok, map()} | {error, not_found | not_owner}.
 get_ticket(PlayerId, TicketId) ->
@@ -86,16 +86,11 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
             M when is_binary(M) -> M;
             _ -> ~"default"
         end,
-    %% F-7: only the requester themselves is allowed in the party until
-    %% an explicit invite/accept handshake exists. Drop any party
-    %% members the requester didn't pre-clear.
-    SanitisedParty = sanitise_party(maps:get(party, Params, [PlayerId]), PlayerId),
     Ticket = #{
         id => TicketId,
         player_id => PlayerId,
         mode => Mode,
         properties => maps:get(properties, Params, #{}),
-        party => SanitisedParty,
         submitted_at => erlang:system_time(millisecond),
         status => pending
     },
@@ -458,20 +453,6 @@ notify_expired([#{player_id := PlayerId, id := TicketId} | Rest]) ->
 -spec generate_id() -> binary().
 generate_id() ->
     asobi_id:generate().
-
-%% F-7: until a real invite/accept handshake exists, the requester
-%% themselves is the only player allowed in their own party. Strip
-%% anything else and dedupe so the matchmaker can't be tricked into
-%% bringing a non-consenting player into a match.
--spec sanitise_party(term(), binary()) -> [binary()].
-sanitise_party(Party, PlayerId) when is_list(Party) ->
-    Filtered = [P || P <- Party, is_binary(P), P =:= PlayerId],
-    case Filtered of
-        [] -> [PlayerId];
-        _ -> [PlayerId]
-    end;
-sanitise_party(_, PlayerId) ->
-    [PlayerId].
 
 -spec ensure_map(term()) -> #{term() => term()}.
 ensure_map(M) when is_map(M) -> M;

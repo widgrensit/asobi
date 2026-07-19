@@ -8,7 +8,7 @@
     get_ticket/1,
     get_ticket_not_found/1,
     cancel_ticket/1,
-    party_other_players_dropped/1,
+    supplied_party_is_not_accepted/1,
     other_player_cannot_read_ticket/1,
     other_player_cannot_cancel_ticket/1
 ]).
@@ -19,7 +19,7 @@ all() ->
         get_ticket,
         get_ticket_not_found,
         cancel_ticket,
-        party_other_players_dropped,
+        supplied_party_is_not_accepted,
         other_player_cannot_read_ticket,
         other_player_cannot_cancel_ticket
     ].
@@ -116,8 +116,11 @@ get_ticket_not_found(Config) ->
     ?assertStatus(404, Resp),
     Config.
 
-%% F-7 regression: party entries that aren't the requester are dropped.
-party_other_players_dropped(Config) ->
+%% asobi never supported grouping by a client-supplied party list: the field
+%% was accepted, sanitised and echoed while nothing downstream read it. It is
+%% gone now, and this pins that a supplied `party` is ignored outright rather
+%% than silently accepted - accept-and-do-nothing is worse than rejecting.
+supplied_party_is_not_accepted(Config) ->
     {ok, AddResp} = nova_test:post(
         "/api/v1/matchmaker",
         #{
@@ -137,13 +140,10 @@ party_other_players_dropped(Config) ->
         Config
     ),
     Body = nova_test:json(GetResp),
-    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
-    case Body of
-        #{~"party" := Party} when is_list(Party) ->
-            ?assertEqual([P1Id], Party);
-        _ ->
-            ok
-    end,
+    ?assertNot(
+        maps:is_key(~"party", Body),
+        "a supplied party must not be echoed back as if it did something"
+    ),
     _ = nova_test:delete(
         "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
         #{headers => auth(Config)},

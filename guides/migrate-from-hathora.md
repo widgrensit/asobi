@@ -39,7 +39,7 @@ They get you unblocked even if the full port takes a week:
    curl -s localhost:8084/api/v1/matchmaker \
      -H 'content-type: application/json' \
      -H 'authorization: Bearer wRqvop92/...' \
-     -d '{"mode":"default","properties":{},"party":["019de3..."]}'
+     -d '{"mode":"default","properties":{}}'
    # → { "status": "pending", "ticket_id": "019de3..." }
    ```
 4. **Join the Discord** [`#migrations` channel](https://discord.gg/vYSfYYyXpu).
@@ -121,7 +121,7 @@ that to be you again.
 | Matchmaker (2.0) | `asobi_matchmaker` | Pluggable strategies (`fill`, `skill_based`); custom via `asobi_matchmaker_strategy` behaviour. |
 | `HathoraClient.loginAnonymous` | `POST /api/v1/auth/register` with `username` + `password` | **No anonymous flag today.** You generate a random username/password in the client and persist it locally (or use OAuth). Response fields: `player_id`, `session_token`, `username`. |
 | `HathoraClient.loginGoogle` | `POST /api/v1/auth/oauth` | OAuth/OIDC flow. |
-| `createLobby` / `createRoom` / queue | `POST /api/v1/matchmaker` body `{"mode":"default","properties":{},"party":[playerId]}` | Response: `{"ticket_id":"...","status":"pending"}`. |
+| `createLobby` / `createRoom` / queue | `POST /api/v1/matchmaker` body `{"mode":"default","properties":{}}` | Response: `{"ticket_id":"...","status":"pending"}`. |
 | Ticket poll | `GET /api/v1/matchmaker/:ticket_id` | |
 | Cancel | `DELETE /api/v1/matchmaker/:ticket_id` | |
 | `listActivePublicLobbies` | `GET /api/v1/matches` | Query params filter results. |

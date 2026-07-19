@@ -8,8 +8,7 @@ add(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) when
 ->
     MatchParams = #{
         mode => maps:get(~"mode", Params, ~"default"),
-        properties => maps:get(~"properties", Params, #{}),
-        party => maps:get(~"party", Params, [PlayerId])
+        properties => maps:get(~"properties", Params, #{})
     },
     {ok, TicketId} = asobi_matchmaker:add(PlayerId, MatchParams),
     {json, 200, #{}, #{ticket_id => TicketId, status => ~"pending"}}.

@@ -5,7 +5,7 @@ groups tickets into matches using a per-mode strategy module.
 
 ## How It Works
 
-1. Player submits a matchmaking ticket with a mode, optional properties, and an optional party.
+1. Player submits a matchmaking ticket with a mode and optional properties.
 2. Matchmaker ticks periodically (default every 1 second).
 3. Each tick groups tickets by mode, and the mode's strategy module decides which tickets form a match.
 4. When a group is formed, a match is spawned.
@@ -44,7 +44,7 @@ curl -X POST http://localhost:8084/api/v1/matchmaker \
 ```
 <!-- /tabs -->
 
-A ticket currently supports `mode`, `properties`, and `party`. A
+A ticket supports `mode` and `properties`. A
 query-language extension (numeric ranges, required keys, automatic skill
 window expansion) is on the roadmap but not shipped — do that filtering
 inside your strategy module instead.
@@ -108,20 +108,21 @@ Wire it up per mode:
 ]}
 ```
 
-## Party Support
+## Playing With Friends
 
-Players can queue as a party. All party members are placed in the same match:
+The matchmaker has no party grouping. It queues individual players, and a
+ticket cannot bring other players with it.
 
-```json
-{
-  "type": "matchmaker.add",
-  "payload": {
-    "mode": "arena",
-    "party": ["player_id_2", "player_id_3"],
-    "properties": {"skill": 1200}
-  }
-}
-```
+To play with someone specific, skip the queue: create a match or world,
+share its id or a join code out of band, and have them join directly. Gate
+entry by implementing `join/3` in your game module and checking the join
+context - see [WebSocket Protocol](websocket-protocol.md#join-context). To
+let friends find your session in a browser instead, see
+[World Server](world-server.md).
+
+Matchmaker-mediated party grouping would mean weighting tickets by party
+size, which changes what `match_size` means for every strategy module. It
+is not shipped, and a `party` field on a ticket is not accepted.
 
 ## Cancelling
 
