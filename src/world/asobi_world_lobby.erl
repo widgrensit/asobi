@@ -72,7 +72,7 @@ list_worlds_cached(Filters) ->
             {hit, Worlds} ->
                 Worlds;
             miss ->
-                Worlds = list_worlds(#{has_capacity => HasCapacity}),
+                Worlds = list_worlds(#{has_capacity => HasCapacity, listed => true}),
                 asobi_world_lobby_server:cache_worlds(
                     HasCapacity, Worlds, Now + ?LIST_CACHE_TTL_MS
                 ),
@@ -122,7 +122,25 @@ find_or_create_unsafe(Mode) ->
 -spec find_or_create_unsafe(binary(), binary() | undefined) ->
     {ok, pid(), map()} | {error, term()}.
 find_or_create_unsafe(Mode, PlayerId) ->
-    Worlds = list_worlds(#{mode => Mode, has_capacity => true}),
+    case mode_quick_play(Mode) of
+        true -> do_find_or_create(Mode, PlayerId);
+        false -> {error, quick_play_disabled}
+    end.
+
+%% Without this guard a `quick_play => false` mode would never match the
+%% filter below and so would spawn a fresh world on every call, up to the
+%% global cap.
+-spec mode_quick_play(binary()) -> boolean().
+mode_quick_play(Mode) ->
+    case asobi_game_modes:world_config(Mode) of
+        {ok, Config} -> maps:get(quick_play, Config, true);
+        {error, _} -> true
+    end.
+
+-spec do_find_or_create(binary(), binary() | undefined) ->
+    {ok, pid(), map()} | {error, term()}.
+do_find_or_create(Mode, PlayerId) ->
+    Worlds = list_worlds(#{mode => Mode, has_capacity => true, quick_play => true}),
     case Worlds of
         [#{world_id := WorldId} = First | _] ->
             case asobi_world_server:whereis(WorldId) of
@@ -272,7 +290,19 @@ matches_filters(Info, Filters) ->
     %% spawned their own world because neither saw the in-flight one.
     Status = maps:get(status, Info, undefined),
     StatusOk = Status =:= running orelse Status =:= loading,
-    ModeOk andalso CapOk andalso StatusOk.
+    ModeOk andalso CapOk andalso StatusOk andalso flag_ok(listed, Info, Filters) andalso
+        flag_ok(quick_play, Info, Filters).
+
+%% A visibility flag only constrains the paths that ask for it: the browser
+%% filters on `listed`, quick-play on `quick_play`. Neither filters on the
+%% other, so a world can be browsable but out of quick-play rotation, or
+%% reachable by quick-play while hidden from the browser.
+-spec flag_ok(atom(), map(), map()) -> boolean().
+flag_ok(Flag, Info, Filters) ->
+    case maps:find(Flag, Filters) of
+        {ok, Want} -> maps:get(Flag, Info, true) =:= Want;
+        error -> true
+    end.
 
 -spec take_first([pid()]) -> [pid()].
 take_first([Pid | _]) -> [Pid];

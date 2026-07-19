@@ -349,3 +349,13 @@ listing_info_projects_nested_phase_test() ->
 listing_info_handles_missing_phase_test() ->
     ?assertNot(maps:is_key(phase, asobi_world_server:listing_info(#{world_id => ~"w1"}))),
     ?assertEqual(#{}, asobi_world_server:listing_info(#{})).
+
+listing_info_omits_visibility_flags_test() ->
+    %% `listed`/`quick_play` are server-side discovery filters. They ride in
+    %% world_info/2 so matches_filters/2 can read them, and must not reach a
+    %% browsing client - an unlisted world never appears, so the flag is
+    %% redundant on the wire.
+    Listing = asobi_world_server:listing_info(#{
+        world_id => ~"w1", listed => false, quick_play => false
+    }),
+    ?assertEqual([world_id], maps:keys(Listing)).

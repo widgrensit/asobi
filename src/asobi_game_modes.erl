@@ -41,7 +41,9 @@ world_config(Mode) ->
                 zone_size => maps:get(zone_size, ModeConfig, 200),
                 tick_rate => maps:get(tick_rate, ModeConfig, 50),
                 view_radius => maps:get(view_radius, ModeConfig, 1),
-                persistent => maps:get(persistent, ModeConfig, false)
+                persistent => maps:get(persistent, ModeConfig, false),
+                listed => maps:get(listed, ModeConfig, true),
+                quick_play => maps:get(quick_play, ModeConfig, true)
             },
             {ok, forward_optional(ModeConfig, [empty_grace_ms, player_ttl_ms], Base)};
         {error, _} = Err ->
