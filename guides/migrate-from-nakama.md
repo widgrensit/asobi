@@ -54,8 +54,8 @@ Nakama and asobi agree on most of the vocabulary:
 | **Match** (authoritative) | Match | Same: a BEAM/goroutine process owning state. |
 | **Match handler** (Lua / TS / Go) | `asobi_match` behaviour / `match.lua` | Callbacks: init, join, leave, handle_input, tick, get_state. |
 | **Match Handler's LoopTick** | `tick(state)` | Same cadence (configurable). |
-| **Parties** | Matchmaker tickets with `party` field | Send a list of player_ids in the ticket body. |
-| **MatchmakerAdd** | `POST /api/v1/matchmaker` | Body: `{mode, properties, party}`. |
+| **Parties** | Not supported | No matchmaker party grouping. Play with friends by sharing a match/world id or a join code and joining directly; gate entry in `join/3`. |
+| **MatchmakerAdd** | `POST /api/v1/matchmaker` | Body: `{mode, properties}`. |
 | **Storage Engine** | `/api/v1/storage/:collection/:key` | Collection+key+owner model is the same. Public/Owner/None permissions. |
 | **Leaderboards** | Leaderboards (`/api/v1/leaderboards/:id`) | Submit/top/around queries. |
 | **Tournaments** | Tournaments (`/api/v1/tournaments`) | Scheduled, entry fees, rewards. |

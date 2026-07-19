@@ -163,8 +163,10 @@ exist purely to bound the cost of a single hostile request:
 - **Per-player world creation** — capped via pg group; default 5
   worlds per player, 1000 globally. Tunable via `world_max_per_player`
   / `world_max` env.
-- **Matchmaker** — party entries that don't match the requester are
-  silently dropped; ticket reads / cancellations require ownership.
+- **Matchmaker** — ticket reads and cancellations require ownership, so
+  one player cannot read or cancel another's ticket. A ticket carries only
+  the submitting player, so it cannot pull a non-consenting player into a
+  match.
 
 ## Test coverage
 
@@ -174,7 +176,7 @@ Regressions for the items above live under `test/`:
   (bad alg, missing x5c, swapped signature, expired cert, untrusted
   root, …).
 - `asobi_world_lobby_SUITE.erl` — F-9 per-player + global world caps.
-- `asobi_matchmaker_api_SUITE.erl` — F-7/F-8 party consent + ticket
+- `asobi_matchmaker_api_SUITE.erl` — ticket ownership + party-not-accepted
   ownership.
 - `asobi_social_api_SUITE.erl` — F-10 chat history membership (DM,
   group, non-member denial).
