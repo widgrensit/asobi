@@ -7,8 +7,8 @@ social login (Google, Apple, Microsoft, Discord), Steam, and anonymous
 Players can link multiple providers to a single account.
 
 > Auth endpoints return an `access_token` (short-lived) and a `refresh_token`
-> (used against `/auth/refresh`). The `session_token` shown in the shorthand
-> examples below is the access token; use it as the `Bearer` credential.
+> (used against `/auth/refresh`). Use the `access_token` as the `Bearer`
+> credential.
 
 > #### Windows {: .info}
 >
@@ -18,7 +18,7 @@ Players can link multiple providers to a single account.
 
 ## Username & Password
 
-The simplest method. Register and login to receive a session token:
+The simplest method. Register and login to receive a token pair:
 
 ```bash
 curl -X POST http://localhost:8084/api/v1/auth/register \
@@ -27,13 +27,13 @@ curl -X POST http://localhost:8084/api/v1/auth/register \
 ```
 
 ```json
-{"player_id": "...", "session_token": "...", "username": "player1"}
+{"player_id": "...", "access_token": "...", "refresh_token": "...", "username": "player1"}
 ```
 
-Use the session token in subsequent requests:
+Use the access token in subsequent requests:
 
 ```
-Authorization: Bearer <session_token>
+Authorization: Bearer <access_token>
 ```
 
 ## Refresh & Rotation
@@ -85,7 +85,8 @@ First-time response (new account created):
 ```json
 {
   "player_id": "...",
-  "session_token": "...",
+  "access_token": "...",
+  "refresh_token": "...",
   "username": "google_abc12345_4821",
   "created": true
 }
@@ -96,7 +97,8 @@ Returning player response:
 ```json
 {
   "player_id": "...",
-  "session_token": "...",
+  "access_token": "...",
+  "refresh_token": "...",
   "username": "player1"
 }
 ```
@@ -323,7 +325,7 @@ Requires an authenticated session.
 
 ```bash
 curl -X POST http://localhost:8084/api/v1/auth/link \
-  -H 'Authorization: Bearer <session_token>' \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"provider": "discord", "token": "eyJhbGciOi..."}'
 ```
@@ -338,7 +340,7 @@ Asobi prevents unlinking the last auth method to avoid locking the player out.
 
 ```bash
 curl -X DELETE http://localhost:8084/api/v1/auth/unlink \
-  -H 'Authorization: Bearer <session_token>' \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"provider": "discord"}'
 ```
@@ -349,13 +351,13 @@ curl -X DELETE http://localhost:8084/api/v1/auth/unlink \
 
 ## WebSocket Authentication
 
-After obtaining a session token (from any auth method), connect to the
+After obtaining an access token (from any auth method), connect to the
 WebSocket and authenticate:
 
 ```json
 {
   "type": "session.connect",
-  "payload": {"token": "<session_token>"}
+  "payload": {"token": "<access_token>"}
 }
 ```
 
@@ -364,7 +366,7 @@ The token works the same regardless of which provider was used to obtain it.
 ## SDK Integration
 
 The same Google sign-in flow across the SDKs. The platform SDK returns an ID
-token; hand it to Asobi and the session token is stored internally.
+token; hand it to Asobi and the access token is stored internally.
 
 <!-- tabs -->
 **Unity (C#)**
