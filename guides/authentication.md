@@ -171,8 +171,10 @@ social sign-in - and claim a real account later without losing progress. It is
 the "device-based auth" option: the client generates a secret once, stores it on
 the device, and presents it to resume the same account on every launch.
 
-Guest auth is **opt-in** and disabled by default. Enable it in `sys.config`
-(see [Configuration](#configuration-2)) before the endpoints respond.
+Guest auth is **opt-in** and disabled by default. It turns on only when two
+independent parties agree (see [Configuration](#configuration-2)): the **game**
+declares `guest_auth = true` in its Lua config, and the **operator** supplies a
+verifier pepper. Either one alone leaves the endpoints returning `403`.
 
 ### How it works
 
@@ -255,7 +257,7 @@ Player id, progress, wallets, and inventory are preserved.
 | `401`  | `invalid_device_secret`   | Wrong secret for a known device |
 | `401`  | `guest_revoked`           | The device verifier was revoked |
 | `401`  | `guest_upgraded`          | The account was already claimed; log in with its real credentials |
-| `403`  | `guest_auth_disabled`     | Guest auth is not enabled in config |
+| `403`  | `guest_auth_disabled`     | Guest auth is off - the game did not declare `guest_auth`, or no pepper is present |
 | `404`  | `player_not_found`        | The upgrade token resolves to no player |
 | `409`  | `device_already_registered` | Two creates for the same device raced; retry - the retry resumes the existing guest |
 | `409`  | `not_an_unclaimed_guest`  | Upgrade target is not an unclaimed guest |
@@ -267,9 +269,24 @@ Player id, progress, wallets, and inventory are preserved.
 
 ### Configuration
 
+Guest auth is on **iff both** halves below are satisfied; either alone fails
+closed with `403 guest_auth_disabled`. The toggle belongs to the game, the pepper
+to the operator (ADR 0004: guest auth is declared by the game, peppered by the
+operator).
+
+**1. The game declares the toggle.** `guest_auth` is a boolean game global,
+declared like `match_size` or `bots` - in `match.lua` for a single-mode game, or
+`config.lua` for a multi-mode game:
+
+```lua
+guest_auth = true
+```
+
+**2. The operator supplies the pepper** (and any abuse controls). The pepper is
+the one value that must never live in a bundle:
+
 ```erlang
 {asobi, [
-    {guest_auth, true},
     %% Required. A key-id -> pepper map (>= 32 bytes each). Keep old keys for the
     %% guest retention window so existing guests can still resume after rotation.
     {guest_verifier_pepper, #{<<"v1">> => <<"a-32-byte-or-longer-secret......">>}},
@@ -283,6 +300,11 @@ Player id, progress, wallets, and inventory are preserved.
     {guest_reap_after, 2592000}          %% e.g. 30 days
 ]}
 ```
+
+There is no `ASOBI_GUEST_AUTH` env var. A self-hoster owns both sides: set
+`guest_auth = true` in Lua and provide the pepper via
+`ASOBI_GUEST_VERIFIER_PEPPER`. On managed cloud the pepper is provisioned per
+environment, so the same bundle is off in dev (no pepper) and on in prod.
 
 The pepper is a server-side secret that makes a stolen database of verifiers
 useless without it - store it like any other secret (env/secret manager), not in

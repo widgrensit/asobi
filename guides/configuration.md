@@ -233,12 +233,14 @@ Without it Apple receipt verification is refused.
 ## Guest (anonymous) auth
 
 Guest auth lets a device create a throwaway player without credentials and
-upgrade it to a real account later. It is **opt-in and fails closed**: the
-guest endpoints return `403 guest_auth_disabled` until `guest_auth` is `true`
-**and** a `guest_verifier_pepper` is set.
+upgrade it to a real account later. It is **opt-in and fails closed**: the guest
+endpoints return `403 guest_auth_disabled` until the **game** declares
+`guest_auth = true` in its Lua config **and** the **operator** sets a
+`guest_verifier_pepper` (ADR 0004). The toggle is a game global, not a
+`sys.config` key - see [Authentication](authentication.md#guest-anonymous). This
+page covers the operator half: the pepper and abuse controls.
 
 ```erlang
-{guest_auth, true},
 %% Required. A key-id -> pepper map (>= 32 bytes each). Keep old key ids for the
 %% guest retention window so existing guests can still resume after rotation.
 {guest_verifier_pepper, #{~"v1" => ~"a-32-byte-or-longer-secret......"}},
@@ -254,8 +256,7 @@ guest endpoints return `403 guest_auth_disabled` until `guest_auth` is `true`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `guest_auth` | `false` | Master switch. Both this and a pepper are required |
-| `guest_verifier_pepper` | none | Key-id -> pepper map (each pepper >= 32 bytes) or a single >= 32-byte binary |
+| `guest_verifier_pepper` | none | Key-id -> pepper map (each pepper >= 32 bytes) or a single >= 32-byte binary. Presence is the operator's on switch |
 | `guest_verifier_key_id` | `~"v1"` | Which pepper key id to use when minting new verifiers |
 | `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity` |
 | `guest_reap_after` | unset | Seconds; unset disables the reaper (guests are permanent) |
