@@ -3,7 +3,7 @@
 -export([
     list_worlds/0, list_worlds/1, find_or_create/1, find_or_create/2, create_world/1, create_world/2
 ]).
--export([list_worlds_cached/0, list_worlds_cached/1]).
+-export([list_worlds_cached/0, list_worlds_cached/1, listing/1]).
 -export([find_or_create_unsafe/1, find_or_create_unsafe/2]).
 -export([player_owned_world_count/1, world_capacity_state/1]).
 
@@ -32,7 +32,7 @@ list_worlds(Filters) ->
             try asobi_world_server:get_info(Pid) of
                 Info when is_map(Info) ->
                     case matches_filters(Info, Filters) of
-                        true -> {true, Info};
+                        true -> {true, listing(Info)};
                         false -> false
                     end
             catch
@@ -42,6 +42,21 @@ list_worlds(Filters) ->
         WorldGroups
     ),
     Worlds.
+
+-doc """
+Projection of `asobi_world_server:get_info/1` for discovery callers.
+
+`get_info/1` serves the detail view for players already in the world and
+carries the full `players` roster. Discovery is open to any authenticated
+player, so the listing surface exposes only what is needed to choose a
+world: identity, mode, status, capacity and phase.
+""".
+-spec listing(map()) -> map().
+listing(Info) ->
+    maps:with(
+        [world_id, status, player_count, max_players, mode, grid_size, started_at, phase],
+        Info
+    ).
 
 -doc """
 H3 (2026-05-19): cached variant of `list_worlds/1` for request paths that
@@ -177,7 +192,7 @@ do_create_world(Mode, PlayerId) ->
                         WorldPid ->
                             register_world_owner(WorldPid, PlayerId),
                             Info = asobi_world_server:get_info(WorldPid),
-                            {ok, WorldPid, Info}
+                            {ok, WorldPid, listing(Info)}
                     end;
                 {error, _} = Err ->
                     Err
