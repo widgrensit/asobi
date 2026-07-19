@@ -1,6 +1,6 @@
 -module(asobi_match_controller).
 
--export([show/1, index/1]).
+-export([show/1, index/1, live/1]).
 
 -doc """
 Projection of a persisted match record for callers who were not in it.
@@ -15,6 +15,28 @@ summaries. A game that puts per-player data there is choosing to publish it.
 -spec public_record(map()) -> map().
 public_record(Record) ->
     maps:with([id, mode, status, result, started_at, finished_at, inserted_at], Record).
+
+-doc """
+Live, joinable matches. `index/1` reads the record table, which is
+finished-match history; this enumerates running match processes.
+""".
+-spec live(cowboy_req:req()) -> {json, map()}.
+live(#{qs := Qs} = _Req) when is_binary(Qs) ->
+    Params = cow_qs:parse_qs(Qs),
+    Filters0 = #{},
+    Filters1 =
+        case proplists:get_value(~"mode", Params) of
+            undefined -> Filters0;
+            Mode -> Filters0#{mode => Mode}
+        end,
+    Filters =
+        case proplists:get_value(~"has_capacity", Params) of
+            ~"true" -> Filters1#{has_capacity => true};
+            _ -> Filters1
+        end,
+    {json, #{matches => asobi_match_lobby:list_matches_cached(Filters)}};
+live(_Req) ->
+    {json, #{matches => asobi_match_lobby:list_matches_cached(#{})}}.
 
 -spec show(cowboy_req:req()) -> {json, map()} | {status, integer()}.
 show(#{bindings := #{~"id" := MatchId}} = _Req) ->

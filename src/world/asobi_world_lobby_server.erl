@@ -18,13 +18,13 @@ Calls are sequential, but `create_world/1` is the slowest step and
 takes <100ms in practice; for the small number of distinct modes a
 typical deployment supports, the queue stays empty.
 
-It also owns the protected ETS table backing
-`asobi_world_lobby:list_worlds_cached/1`. Callers read the table
-directly (protected reads); only this server writes, via `cache_worlds/3`.
+It also owns the protected ETS table backing the cached discovery
+listings for both worlds and matches. Callers read the table directly
+(protected reads); only this server writes, via `cache_listing/3`.
 """.
 -behaviour(gen_server).
 
--export([start_link/0, find_or_create/1, find_or_create/2, cache_worlds/3]).
+-export([start_link/0, find_or_create/1, find_or_create/2, cache_listing/3]).
 -export([init/1, handle_call/3, handle_cast/2]).
 
 -define(CALL_TIMEOUT, 30000).
@@ -53,13 +53,20 @@ find_or_create(Mode, PlayerId) ->
     end.
 
 -doc """
-Store a computed world list against a bounded key (`has_capacity`
-boolean) with an absolute expiry. Async: the caller keeps the value it
-already computed; this only seeds the shared cache for the next reader.
+Store a computed listing against a bounded key with an absolute expiry.
+Async: the caller keeps the value it already computed; this only seeds the
+shared cache for the next reader.
+
+The key is `{ServerMod, HasCapacity}` - four keys total across worlds and
+matches. It must stay bounded and free of client-controlled values: keying
+on `mode` would let a client cycle distinct modes to miss on every request
+and grow the table without bound.
 """.
--spec cache_worlds(boolean(), [map()], integer()) -> ok.
-cache_worlds(HasCapacity, Worlds, ExpiresAt) when is_boolean(HasCapacity) ->
-    gen_server:cast(?MODULE, {cache_worlds, HasCapacity, Worlds, ExpiresAt}).
+-spec cache_listing({module(), boolean()}, [map()], integer()) -> ok.
+cache_listing({Mod, HasCapacity} = Key, Listing, ExpiresAt) when
+    is_atom(Mod), is_boolean(HasCapacity)
+->
+    gen_server:cast(?MODULE, {cache_listing, Key, Listing, ExpiresAt}).
 
 %%--------------------------------------------------------------------
 %% gen_server
@@ -93,10 +100,10 @@ handle_call(_Other, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({cache_worlds, HasCapacity, Worlds, ExpiresAt}, State) when
-    is_boolean(HasCapacity), is_list(Worlds), is_integer(ExpiresAt)
+handle_cast({cache_listing, Key, Listing, ExpiresAt}, State) when
+    is_tuple(Key), is_list(Listing), is_integer(ExpiresAt)
 ->
-    ets:insert(?LIST_CACHE_TAB, {HasCapacity, Worlds, ExpiresAt}),
+    ets:insert(?LIST_CACHE_TAB, {Key, Listing, ExpiresAt}),
     {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
