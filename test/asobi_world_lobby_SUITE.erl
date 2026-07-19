@@ -16,6 +16,8 @@ tests pin that contract so the bug can never sneak back in unnoticed.
     list_worlds_returns_running_world/1,
     list_worlds_filters_by_mode/1,
     list_worlds_filters_by_capacity/1,
+    list_worlds_omits_player_roster/1,
+    find_or_create_omits_player_roster/1,
     find_or_create_creates_when_none_exist/1,
     find_or_create_reuses_existing_world/1,
     find_or_create_creates_new_for_different_mode/1,
@@ -37,6 +39,8 @@ all() ->
         list_worlds_returns_running_world,
         list_worlds_filters_by_mode,
         list_worlds_filters_by_capacity,
+        list_worlds_omits_player_roster,
+        find_or_create_omits_player_roster,
         find_or_create_creates_when_none_exist,
         find_or_create_reuses_existing_world,
         find_or_create_creates_new_for_different_mode,
@@ -137,6 +141,42 @@ list_worlds_filters_by_capacity(_Config) ->
     %% But still listed without the capacity filter
     ?assertEqual(
         1, length(asobi_world_lobby:list_worlds())
+    ).
+
+list_worlds_omits_player_roster(_Config) ->
+    {ok, Pid, Info} = asobi_world_lobby:create_world(?MODE_HUB),
+    WorldId = maps:get(world_id, Info),
+    wait_until_running(WorldId),
+    ok = asobi_world_server:join(Pid, ~"player1"),
+    ok = asobi_world_server:join(Pid, ~"player2"),
+
+    [Listed] = asobi_world_lobby:list_worlds(),
+    ?assertNot(
+        maps:is_key(players, Listed),
+        "discovery must not expose the player roster"
+    ),
+    ?assertEqual(2, maps:get(player_count, Listed)),
+    ?assertEqual(WorldId, maps:get(world_id, Listed)),
+
+    Detail = asobi_world_server:get_info(Pid),
+    ?assertEqual(
+        [~"player1", ~"player2"],
+        lists:sort(maps:get(players, Detail)),
+        "get_info/1 stays the full detail view for members"
+    ).
+
+find_or_create_omits_player_roster(_Config) ->
+    {ok, Pid, Info} = asobi_world_lobby:create_world(?MODE_HUB),
+    wait_until_running(maps:get(world_id, Info)),
+    ok = asobi_world_server:join(Pid, ~"player1"),
+
+    {ok, _, Found} = asobi_world_lobby:find_or_create(?MODE_HUB),
+    ?assertNot(maps:is_key(players, Found)),
+
+    {ok, _, Created} = asobi_world_lobby:create_world(?MODE_ARENA),
+    ?assertNot(
+        maps:is_key(players, Created),
+        "create and find_or_create must return the same shape"
     ).
 
 %% --- find_or_create ---

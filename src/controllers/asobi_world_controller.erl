@@ -18,7 +18,7 @@ show(#{bindings := #{~"id" := WorldId}}) ->
     case asobi_world_server:whereis(WorldId) of
         {ok, Pid} ->
             Info = asobi_world_server:get_info(Pid),
-            {json, Info};
+            {json, asobi_world_lobby:listing(Info)};
         error ->
             {status, 404}
     end.
