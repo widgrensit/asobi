@@ -24,12 +24,19 @@ tests pin that contract so the bug can never sneak back in unnoticed.
     create_world_player_cap_blocks_after_limit/1,
     create_world_player_cap_releases_when_world_dies/1,
     create_world_global_cap_blocks_at_max/1,
-    create_world_anonymous_bypasses_player_cap/1
+    create_world_anonymous_bypasses_player_cap/1,
+    unlisted_world_hidden_from_browser/1,
+    unlisted_world_hidden_from_cached_browser/1,
+    unlisted_world_still_reachable_by_quick_play/1,
+    no_quick_play_world_hidden_from_find_or_create/1,
+    no_quick_play_world_still_browsable/1
 ]).
 
 -define(MODE_HUB, ~"test_hub").
 -define(MODE_ARENA, ~"test_arena").
 -define(MODE_SOLO, ~"test_solo").
+-define(MODE_UNLISTED, ~"test_unlisted").
+-define(MODE_NO_QUICK_PLAY, ~"test_no_quick_play").
 
 all() ->
     [
@@ -45,7 +52,12 @@ all() ->
         create_world_player_cap_blocks_after_limit,
         create_world_player_cap_releases_when_world_dies,
         create_world_global_cap_blocks_at_max,
-        create_world_anonymous_bypasses_player_cap
+        create_world_anonymous_bypasses_player_cap,
+        unlisted_world_hidden_from_browser,
+        unlisted_world_hidden_from_cached_browser,
+        unlisted_world_still_reachable_by_quick_play,
+        no_quick_play_world_hidden_from_find_or_create,
+        no_quick_play_world_still_browsable
     ].
 
 init_per_suite(Config) ->
@@ -74,6 +86,24 @@ init_per_suite(Config) ->
             grid_size => 1,
             zone_size => 100,
             tick_rate => 50
+        },
+        ?MODE_UNLISTED => #{
+            type => world,
+            module => asobi_test_world_game,
+            max_players => 4,
+            grid_size => 1,
+            zone_size => 100,
+            tick_rate => 50,
+            listed => false
+        },
+        ?MODE_NO_QUICK_PLAY => #{
+            type => world,
+            module => asobi_test_world_game,
+            max_players => 4,
+            grid_size => 1,
+            zone_size => 100,
+            tick_rate => 50,
+            quick_play => false
         }
     }),
     Config1.
@@ -138,6 +168,66 @@ list_worlds_filters_by_capacity(_Config) ->
     ?assertEqual(
         1, length(asobi_world_lobby:list_worlds())
     ).
+
+%% --- visibility flags ---
+
+unlisted_world_hidden_from_browser(_Config) ->
+    {ok, _Pid, Info} = asobi_world_lobby:create_world(?MODE_UNLISTED),
+    wait_until_running(maps:get(world_id, Info)),
+
+    ?assertEqual(
+        [],
+        asobi_world_lobby:list_worlds(#{listed => true}),
+        "the browser filter must not surface an unlisted world"
+    ),
+    ?assertEqual(
+        1,
+        length(asobi_world_lobby:list_worlds()),
+        "the raw enumerator is unfiltered - the flag is applied per caller"
+    ).
+
+unlisted_world_hidden_from_cached_browser(_Config) ->
+    %% list_worlds_cached/1 is what every production browser call hits, so
+    %% pin that it injects `listed => true` itself. The ETS cache is
+    %% process-owned and protected, so the only way to a clean read is to
+    %% outlive the TTL.
+    timer:sleep(600),
+    {ok, _Pid, Info} = asobi_world_lobby:create_world(?MODE_UNLISTED),
+    wait_until_running(maps:get(world_id, Info)),
+    ?assertEqual([], asobi_world_lobby:list_worlds_cached()).
+
+unlisted_world_still_reachable_by_quick_play(_Config) ->
+    %% listed and quick_play are independent axes: hidden from the browser
+    %% does not mean out of quick-play rotation.
+    {ok, Pid, Info} = asobi_world_lobby:create_world(?MODE_UNLISTED),
+    wait_until_running(maps:get(world_id, Info)),
+
+    {ok, FoundPid, _} = asobi_world_lobby:find_or_create(?MODE_UNLISTED),
+    ?assertEqual(Pid, FoundPid, "quick_play must reuse the unlisted world"),
+    ?assertEqual([], asobi_world_lobby:list_worlds(#{listed => true})).
+
+no_quick_play_world_hidden_from_find_or_create(_Config) ->
+    {ok, _Pid, Info} = asobi_world_lobby:create_world(?MODE_NO_QUICK_PLAY),
+    wait_until_running(maps:get(world_id, Info)),
+
+    %% Must refuse rather than spawn a second world it can never find again.
+    ?assertEqual(
+        {error, quick_play_disabled},
+        asobi_world_lobby:find_or_create(?MODE_NO_QUICK_PLAY)
+    ),
+    ?assertEqual(
+        1,
+        length(asobi_world_lobby:list_worlds()),
+        "a refused find_or_create must not have created a world"
+    ).
+
+no_quick_play_world_still_browsable(_Config) ->
+    {ok, _Pid, Info} = asobi_world_lobby:create_world(?MODE_NO_QUICK_PLAY),
+    WorldId = maps:get(world_id, Info),
+    wait_until_running(WorldId),
+
+    [Listed] = asobi_world_lobby:list_worlds(#{listed => true}),
+    ?assertEqual(WorldId, maps:get(world_id, Listed)).
 
 %% --- find_or_create ---
 

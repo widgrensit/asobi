@@ -174,6 +174,8 @@ init(Config) ->
         frustration_bonus => FrustrationBonus,
         active_votes => #{},
         persistent => Persistent,
+        listed => maps:get(listed, Config, true),
+        quick_play => maps:get(quick_play, Config, true),
         empty_grace_ms => EmptyGraceMs,
         player_ttl_ms => maps:get(player_ttl_ms, Config, 0),
         reconnect_state => init_reconnect(Config),
@@ -1032,7 +1034,9 @@ world_info(Status, #{world_id := WorldId, players := Players} = State) ->
         players => maps:keys(Players),
         mode => maps:get(mode, State, undefined),
         grid_size => maps:get(grid_size, State),
-        started_at => maps:get(started_at, State, undefined)
+        started_at => maps:get(started_at, State, undefined),
+        listed => maps:get(listed, State, true),
+        quick_play => maps:get(quick_play, State, true)
     },
     case maps:get(phase_state, State, undefined) of
         undefined -> Base;

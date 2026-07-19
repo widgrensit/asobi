@@ -352,6 +352,30 @@ Register your world mode in `sys.config`:
 | `zone_idle_timeout` | 30000 | Milliseconds an empty zone lingers before it is released |
 | `empty_grace_ms` | 0 | Milliseconds a world with no players lingers before it finishes (0 = finish immediately) |
 | `snapshot_interval` | 600 | Ticks between zone snapshots (see [Snapshots](#snapshots)) |
+| `listed` | `true` | Whether worlds of this mode appear in `world.list` / `GET /api/v1/worlds` |
+| `quick_play` | `true` | Whether `world.find_or_create` may place a player into an existing world of this mode |
+
+### Visibility
+
+`listed` and `quick_play` are independent axes, so a mode can be browsable
+but out of quick-play rotation, or reachable by quick-play while hidden from
+the browser.
+
+```erlang
+~"tutorial" => #{
+    type => world,
+    module => my_tutorial,
+    listed => false,      %% never shows up in the browser
+    quick_play => false   %% and never absorbs a quick-play request
+}
+```
+
+Neither flag gates joining. A client that already knows a `world_id` can
+still `world.join` it. Both flags control discovery only.
+
+With `quick_play => false`, `world.find_or_create` returns
+`quick_play_disabled` rather than creating a world, since it could never
+find the one it just made.
 
 ### Procedural Generation
 
