@@ -18,7 +18,9 @@ the place to put callback hardening.
 """.
 -behaviour(gen_statem).
 
--export([start_link/1, join/2, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1]).
+-export([
+    start_link/1, join/2, join/3, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1
+]).
 -export([reconnect/2]).
 -export([listing_info/1]).
 -export([whereis/1]).
@@ -43,7 +45,15 @@ start_link(Config) ->
 
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
-    case gen_statem:call(Pid, {join, PlayerId}) of
+    join(Pid, PlayerId, #{}).
+
+-doc """
+Join carrying an opaque join context from the client. asobi does not
+interpret it; it reaches the game module's `join/3` if it exports one.
+""".
+-spec join(pid(), binary(), map()) -> ok | {error, term()}.
+join(Pid, PlayerId, Ctx) when is_map(Ctx) ->
+    case gen_statem:call(Pid, {join, PlayerId, Ctx}) of
         ok -> ok;
         {error, _} = Err -> Err
     end.
@@ -180,8 +190,8 @@ init(Config) ->
     gen_statem:state_enter_result(atom()).
 waiting(enter, _OldState, _State) ->
     {keep_state_and_data, [{state_timeout, ?WAITING_TIMEOUT, waiting_timeout}]};
-waiting({call, From}, {join, PlayerId}, State) ->
-    handle_join(From, PlayerId, State);
+waiting({call, From}, {join, PlayerId, Ctx}, State) ->
+    handle_join(From, PlayerId, Ctx, State);
 waiting({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(waiting, State)}]};
 waiting(state_timeout, waiting_timeout, State) ->
@@ -274,8 +284,8 @@ running({call, From}, resume, _State) ->
     {keep_state_and_data, [{reply, From, {error, not_paused}}]};
 running({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(running, State)}]};
-running({call, From}, {join, PlayerId}, State) ->
-    handle_join(From, PlayerId, State);
+running({call, From}, {join, PlayerId, Ctx}, State) ->
+    handle_join(From, PlayerId, Ctx, State);
 running(
     {call, From},
     {start_vote, VoteConfig0},
@@ -450,13 +460,14 @@ terminate(_Reason, StateName, #{match_id := MatchId} = State) ->
 handle_join(
     From,
     PlayerId,
+    Ctx,
     #{players := Players, max_players := Max, game_module := Mod, game_state := GS} = State
 ) ->
     case map_size(Players) >= Max of
         true ->
             {keep_state_and_data, [{reply, From, {error, match_full}}]};
         false ->
-            case Mod:join(PlayerId, GS) of
+            case asobi_game_join:invoke(Mod, PlayerId, Ctx, GS) of
                 {ok, GS1} ->
                     %% Monitor the player session so we can run reconnect grace
                     %% (or immediate cleanup) when the WS process dies. Mirrors

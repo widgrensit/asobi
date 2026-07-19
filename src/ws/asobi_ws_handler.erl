@@ -346,14 +346,20 @@ handle_message(
             Reply = encode_reply(Cid, ~"error", #{reason => ~"match_not_found"}),
             {reply, {text, Reply}, State};
         {ok, MatchPid} ->
-            case asobi_match_server:join(MatchPid, PlayerId) of
-                ok ->
-                    Info = asobi_match_server:get_info(MatchPid),
-                    Reply = encode_reply(Cid, ~"match.joined", Info),
+            case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
+                {error, CtxErr} ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
                     {reply, {text, Reply}, State};
-                {error, Reason} ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
-                    {reply, {text, Reply}, State}
+                {ok, Ctx} ->
+                    case asobi_match_server:join(MatchPid, PlayerId, Ctx) of
+                        ok ->
+                            Info = asobi_match_server:get_info(MatchPid),
+                            Reply = encode_reply(Cid, ~"match.joined", Info),
+                            {reply, {text, Reply}, State};
+                        {error, Reason} ->
+                            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+                            {reply, {text, Reply}, State}
+                    end
             end
     end;
 handle_message(
@@ -490,7 +496,13 @@ handle_message(
             Reply = encode_reply(Cid, ~"error", #{reason => ~"world_not_found"}),
             {reply, {text, Reply}, State};
         {ok, WorldPid} ->
-            join_and_reply(Cid, WorldPid, PlayerId, State)
+            case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
+                {error, CtxErr} ->
+                    Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
+                    {reply, {text, Reply}, State};
+                {ok, Ctx} ->
+                    join_and_reply(Cid, WorldPid, PlayerId, Ctx, State)
+            end
     end;
 handle_message(
     #{~"type" := ~"world.leave"} = Msg,
@@ -569,7 +581,10 @@ reply_error(Msg, Reason, State) ->
     Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
     {reply, {text, Reply}, State}.
 
-join_and_reply(Cid, WorldPid, PlayerId, #{session := SessionPid} = State) when
+join_and_reply(Cid, WorldPid, PlayerId, State) ->
+    join_and_reply(Cid, WorldPid, PlayerId, #{}, State).
+
+join_and_reply(Cid, WorldPid, PlayerId, Ctx, #{session := SessionPid} = State) when
     SessionPid =/= undefined
 ->
     case current_player_world(PlayerId) of
@@ -582,7 +597,7 @@ join_and_reply(Cid, WorldPid, PlayerId, #{session := SessionPid} = State) when
             %% join/3 (vs join/2) sets zone_pid synchronously in the player_session
             %% before returning, so a world.input arriving right after world.joined
             %% lands on the right zone instead of being silently dropped.
-            case asobi_world_server:join(WorldPid, PlayerId, SessionPid) of
+            case asobi_world_server:join(WorldPid, PlayerId, SessionPid, Ctx) of
                 ok ->
                     Info = asobi_world_server:get_info(WorldPid),
                     Reply = encode_reply(Cid, ~"world.joined", Info),

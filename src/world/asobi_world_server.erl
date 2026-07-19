@@ -8,7 +8,9 @@ transient matches use `asobi_match_server` instead.
 """.
 -behaviour(gen_statem).
 
--export([start_link/1, join/2, join/3, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1]).
+-export([
+    start_link/1, join/2, join/3, join/4, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1
+]).
 -export([listing_info/1]).
 -export_type([listing/0]).
 -export([spawn_at/3, spawn_at/4]).
@@ -33,7 +35,7 @@ start_link(Config) ->
 
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
-    case gen_statem:call(Pid, {join, PlayerId}) of
+    case gen_statem:call(Pid, {join, PlayerId, #{}}) of
         {ok, _ZonePid} -> ok;
         {error, _} = Err -> Err
     end.
@@ -44,7 +46,15 @@ join(Pid, PlayerId) ->
 %% {world_joined,...} notification is still in flight.
 -spec join(pid(), binary(), pid()) -> ok | {error, term()}.
 join(Pid, PlayerId, SessionPid) when is_pid(SessionPid) ->
-    case gen_statem:call(Pid, {join, PlayerId}) of
+    join(Pid, PlayerId, SessionPid, #{}).
+
+-doc """
+As `join/3`, plus an opaque join context from the client. asobi does not
+interpret it; it reaches the game module's `join/3` if it exports one.
+""".
+-spec join(pid(), binary(), pid(), map()) -> ok | {error, term()}.
+join(Pid, PlayerId, SessionPid, Ctx) when is_pid(SessionPid), is_map(Ctx) ->
+    case gen_statem:call(Pid, {join, PlayerId, Ctx}) of
         {ok, ZonePid} when is_pid(ZonePid) ->
             ok = asobi_player_session:set_zone(SessionPid, Pid, ZonePid),
             ok;
@@ -236,8 +246,8 @@ running(
     asobi_world_ticker:set_zone_manager(TickerPid, ZoneManagerPid, self()),
     asobi_telemetry:world_started(WorldId, maps:get(mode, State, undefined)),
     keep_state_and_data;
-running({call, From}, {join, PlayerId}, State) ->
-    handle_join(From, PlayerId, State);
+running({call, From}, {join, PlayerId, Ctx}, State) ->
+    handle_join(From, PlayerId, Ctx, State);
 running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 running(cast, {move_player, PlayerId, NewPos}, State) ->
@@ -548,6 +558,7 @@ get_spawn_templates(GameMod, Config) ->
 handle_join(
     From,
     PlayerId,
+    Ctx,
     #{
         world_id := WorldId,
         players := Players,
@@ -560,7 +571,7 @@ handle_join(
         true ->
             {keep_state_and_data, [{reply, From, {error, world_full}}]};
         false ->
-            case Mod:join(PlayerId, GS) of
+            case asobi_game_join:invoke(Mod, PlayerId, Ctx, GS) of
                 {ok, GS1} ->
                     {ok, SpawnPos} = Mod:spawn_position(PlayerId, GS1),
                     State1 = State#{game_state => GS1},

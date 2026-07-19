@@ -17,6 +17,24 @@ are optional hooks (see `-optional_callbacks`).
 -callback join(PlayerId :: binary(), GameState :: term()) ->
     {ok, GameState1 :: term()} | {error, Reason :: term()}.
 
+-doc """
+Optional. Same as `join/2`, but also receives the join context the client
+supplied — a flat map of binaries, bounded by the server, that asobi does
+not interpret.
+
+Implement this to gate entry on something the client presents: a join
+code, an invite token, a party id, a password. Without it there is no
+channel from a client to your game before membership exists, so `join/2`
+can implement an allowlist but never a code.
+
+Export `join/3` and it is used instead of `join/2`. asobi never reads the
+context; validate it against your own `GameState` and return
+`{error, Reason}` to refuse. The context is `#{}` when there is no client
+behind the join.
+""".
+-callback join(PlayerId :: binary(), Ctx :: map(), GameState :: term()) ->
+    {ok, GameState1 :: term()} | {error, Reason :: term()}.
+
 -doc "A player leaves the world.".
 -callback leave(PlayerId :: binary(), GameState :: term()) ->
     {ok, GameState1 :: term()}.
@@ -94,6 +112,7 @@ plain terms. The inverse of `init_zone_state`'s restore path.
 -callback dump_zone_state(ZoneState :: map()) -> map().
 
 -optional_callbacks([
+    join/3,
     generate_world/2,
     get_state/2,
     phases/1,
