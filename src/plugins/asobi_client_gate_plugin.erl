@@ -45,17 +45,70 @@ plugin_info() ->
 
 %% --- Internal ---
 
+-define(DEFAULT_TIMEOUT, 5000).
+
 -spec decision(cowboy_req:req()) -> pass | {deny, binary()}.
 decision(Req) ->
     case gate_applies(Req) andalso gate_module() of
         false -> pass;
         undefined -> pass;
-        Mod -> invoke(Mod, Req)
+        Mod -> invoke(Mod, context(Req))
     end.
 
--spec invoke(module(), cowboy_req:req()) -> pass | {deny, binary()}.
-invoke(Mod, Req) ->
-    try Mod:verify(Req) of
+%% A gate legitimately needs the client IP, headers and a challenge token, but
+%% never the plaintext password the request map still carries here. Hand it a
+%% minimized context so a third-party gate cannot log or forward credentials.
+-spec context(cowboy_req:req()) -> asobi_client_gate:context().
+context(Req) ->
+    Json = maps:get(json, Req, #{}),
+    #{
+        ip => asobi_peer:client_ip(Req),
+        headers => maps:get(headers, Req, #{}),
+        path => cowboy_req:path(Req),
+        token => token(Json)
+    }.
+
+-spec token(dynamic()) -> binary().
+token(Json) when is_map(Json) ->
+    case maps:get(~"client_gate_token", Json, ~"") of
+        T when is_binary(T) -> T;
+        _ -> ~""
+    end;
+token(_) ->
+    ~"".
+
+%% Bound the gate call: a hanging siteverify (vendor slow, TCP blackhole, TLS
+%% stall) is the dominant real-world failure and the one an attacker can induce.
+%% Without a deadline it pins the request process indefinitely. Run it in a
+%% monitored worker and treat a timeout like any other failure - fail closed by
+%% default (on_error/0).
+-spec invoke(module(), asobi_client_gate:context()) -> pass | {deny, binary()}.
+invoke(Mod, Context) ->
+    Timeout = gate_timeout(),
+    {Pid, MRef} = spawn_monitor(fun() -> exit({gate_result, run(Mod, Context)}) end),
+    receive
+        {'DOWN', MRef, process, Pid, {gate_result, Result}} ->
+            Result;
+        {'DOWN', MRef, process, Pid, Reason} ->
+            ?LOG_ERROR(#{event => client_gate_error, module => Mod, reason => Reason}),
+            on_error()
+    after Timeout ->
+        erlang:demonitor(MRef, [flush]),
+        exit(Pid, kill),
+        ?LOG_ERROR(#{event => client_gate_timeout, module => Mod, timeout_ms => Timeout}),
+        on_error()
+    end.
+
+-spec gate_timeout() -> non_neg_integer().
+gate_timeout() ->
+    case application:get_env(asobi, client_gate_timeout, ?DEFAULT_TIMEOUT) of
+        T when is_integer(T), T >= 0 -> T;
+        _ -> ?DEFAULT_TIMEOUT
+    end.
+
+-spec run(module(), asobi_client_gate:context()) -> pass | {deny, binary()}.
+run(Mod, Context) ->
+    try Mod:verify(Context) of
         skip ->
             pass;
         {deny, Reason} when is_binary(Reason) ->
@@ -89,8 +142,16 @@ on_error() ->
 -spec gate_module() -> module() | undefined.
 gate_module() ->
     case application:get_env(asobi, client_gate, undefined) of
-        Mod when is_atom(Mod), Mod =/= undefined -> Mod;
-        _ -> undefined
+        Mod when is_atom(Mod), Mod =/= undefined, Mod =/= false ->
+            case code:ensure_loaded(Mod) of
+                {module, Mod} ->
+                    Mod;
+                _ ->
+                    ?LOG_ERROR(#{event => client_gate_unloadable, module => Mod}),
+                    undefined
+            end;
+        _ ->
+            undefined
     end.
 
 -spec gate_applies(cowboy_req:req()) -> boolean().

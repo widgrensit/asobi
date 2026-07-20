@@ -6,10 +6,26 @@
 %% identity leakage structurally impossible. An implementation runs before the
 %% password KDF (asobi#157), so a denial never pays the pbkdf2 cost.
 %%
+%% The input is a minimized context, NOT the raw request: the request map still
+%% carries the registration plaintext password at this point (nova_request_plugin
+%% stashes the decoded body), and a gate has no need for it. The context exposes
+%% only what a traffic gate legitimately uses - client IP, headers (e.g.
+%% cf-turnstile-response), path, and a dedicated challenge token - so a verbose
+%% or buggy gate cannot log or forward credentials.
+%%
 %% CAPTCHA/Turnstile/hCaptcha siteverify is the first consumer and ships
 %% OUTSIDE core (asobi_engine or a contrib plugin) - a vendor round-trip must
 %% not couple the public request path to an external SaaS.
 %%
 %% Wired via `application:set_env(asobi, client_gate, Module)`. Unset = no-op.
 
--callback verify(cowboy_req:req()) -> skip | {deny, Reason :: binary()}.
+-type context() :: #{
+    ip := binary(),
+    headers := #{binary() => iodata()},
+    path := binary(),
+    token := binary()
+}.
+
+-export_type([context/0]).
+
+-callback verify(context()) -> skip | {deny, Reason :: binary()}.
