@@ -31,19 +31,22 @@ init(State) ->
 
 -spec websocket_init(map()) -> {ok, map()} | {reply, {close, 1008, binary()}, map()}.
 websocket_init(#{peer_ip := PeerIp} = State) ->
-    %% Origin first: a disallowed cross-origin page is rejected before it can
-    %% even spend a connect-rate token. Native clients send no Origin and pass.
-    case origin_allowed(maps:get(origin, State, undefined)) of
-        false ->
-            asobi_telemetry:ws_origin_rejected(),
-            {reply, {close, 1008, ~"origin_rejected"}, State};
-        true ->
-            case seki:check(asobi_ws_connect_limiter, PeerIp) of
-                {allow, _} ->
-                    start_authenticated_session(State);
-                {deny, _} ->
-                    asobi_telemetry:ws_connect_rate_limited(PeerIp),
-                    {reply, {close, 1008, ~"rate_limited"}, State}
+    %% Per-IP connect limiter FIRST: spending a token IS the flood defence, so
+    %% every connect must count against the budget, including one we are about
+    %% to reject on Origin. Checking Origin first would let an attacker who
+    %% sets any disallowed Origin spawn ws processes without ever touching the
+    %% limiter - each connect upgrades, emits telemetry, and closes, unbounded.
+    case seki:check(asobi_ws_connect_limiter, PeerIp) of
+        {deny, _} ->
+            asobi_telemetry:ws_connect_rate_limited(PeerIp),
+            {reply, {close, 1008, ~"rate_limited"}, State};
+        {allow, _} ->
+            case origin_allowed(maps:get(origin, State, undefined)) of
+                false ->
+                    asobi_telemetry:ws_origin_rejected(),
+                    {reply, {close, 1008, ~"origin_rejected"}, State};
+                true ->
+                    start_authenticated_session(State)
             end
     end;
 websocket_init(State) ->
@@ -62,11 +65,30 @@ origin_allowed(undefined) ->
     true;
 origin_allowed(Origin) when is_binary(Origin) ->
     case application:get_env(asobi, ws_allowed_origins) of
-        {ok, Allowed} when is_list(Allowed), Allowed =/= [] ->
-            lists:member(Origin, Allowed);
-        _ ->
-            true
+        undefined ->
+            true;
+        {ok, []} ->
+            true;
+        {ok, Allowed} when is_list(Allowed) ->
+            %% Set-but-malformed (e.g. a bare binary instead of a list of
+            %% binaries) must fail CLOSED and loud, not silently allow-all -
+            %% otherwise a dropped-bracket typo nullifies the control while the
+            %% operator believes the socket is locked down.
+            case lists:all(fun is_binary/1, Allowed) of
+                true -> lists:member(Origin, Allowed);
+                false -> misconfigured_origins(Allowed)
+            end;
+        {ok, Other} ->
+            misconfigured_origins(Other)
     end.
+
+-spec misconfigured_origins(term()) -> false.
+misconfigured_origins(Value) ->
+    logger:error(#{
+        msg => ~"ws_allowed_origins must be a list of binaries; failing closed",
+        value => Value
+    }),
+    false.
 
 start_authenticated_session(State) ->
     asobi_telemetry:ws_connected(),

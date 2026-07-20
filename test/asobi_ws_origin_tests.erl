@@ -19,7 +19,10 @@ origin_test_() ->
         {"empty allowlist is treated as unset (default-open)", fun empty_is_open/0},
         {"a configured allowlist admits a listed origin", fun listed_passes/0},
         {"a configured allowlist rejects an unlisted origin", fun unlisted_rejected/0},
-        {"a missing Origin (native client) always passes", fun native_passes/0}
+        {"a missing Origin (native client) always passes", fun native_passes/0},
+        {"a malformed allowlist (bare binary, not a list) fails closed",
+            fun malformed_fails_closed/0},
+        {"a non-list term fails closed", fun non_list_fails_closed/0}
     ]}.
 
 default_open() ->
@@ -43,3 +46,15 @@ native_passes() ->
     %% a non-browser client and cannot be a CSWSH vector.
     application:set_env(asobi, ws_allowed_origins, [~"https://game.studio"]),
     ?assert(asobi_ws_handler:origin_allowed(undefined)).
+
+malformed_fails_closed() ->
+    %% The dropped-bracket typo: a bare binary instead of a list. The old code
+    %% fell through to allow-all, silently disabling the control. It must now
+    %% reject rather than quietly open the socket to every origin.
+    application:set_env(asobi, ws_allowed_origins, ~"https://game.studio"),
+    ?assertNot(asobi_ws_handler:origin_allowed(~"https://game.studio")),
+    ?assertNot(asobi_ws_handler:origin_allowed(~"https://evil.example")).
+
+non_list_fails_closed() ->
+    application:set_env(asobi, ws_allowed_origins, all),
+    ?assertNot(asobi_ws_handler:origin_allowed(~"https://anything.example")).
