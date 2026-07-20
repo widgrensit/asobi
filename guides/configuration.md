@@ -112,6 +112,8 @@ Shorthand (Erlang module only):
 | `skill_window` | `200` | Initial skill difference allowed (skill_based only) |
 | `skill_expand_rate` | `50` | Window expansion per 5 seconds (skill_based only) |
 | `bots` | `#{}` | Bot configuration. Read by [asobi_lua](https://github.com/widgrensit/asobi_lua), not by asobi — see [Bots](lua-bots.md) |
+| `listed` | `false` for matches, `true` for worlds | Whether instances of this mode appear in discovery (`match.list` / `world.list`). **Matches are unlisted by default** — a matchmaker-spawned match is already assigned to its players, so opt in explicitly. |
+| `quick_play` | `true` | Worlds only. Whether `world.find_or_create` may place a player into an existing world of this mode. Independent of `listed` — see [World Server](world-server.md#visibility). |
 
 ## Matchmaker
 
