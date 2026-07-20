@@ -5,7 +5,8 @@ steam_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         fun ok_ticket_returns_claims/0,
         fun publisher_banned_rejected/0,
-        fun identity_param_included_when_configured/0
+        fun identity_param_included_when_configured/0,
+        fun outbound_call_sets_tls_options/0
     ]}.
 
 setup() ->
@@ -43,6 +44,22 @@ identity_param_included_when_configured() ->
     _ = asobi_steam:validate_ticket(~"deadbeef"),
     receive
         {url, Url} -> ?assert(binary:match(Url, ~"&identity=asobi-prod") =/= nomatch)
+    after 1000 -> ?assert(false)
+    end.
+
+%% The outbound call must go through asobi_tls_client, so verify_peer TLS
+%% options reach httpc rather than the fail-open default (#171).
+outbound_call_sets_tls_options() ->
+    Self = self(),
+    meck:expect(httpc, request, fun(get, {_Url, _H}, Opts, _P) ->
+        Self ! {opts, Opts},
+        {ok, {{"HTTP/1.1", 200, "OK"}, [], auth_body(#{~"result" => ~"OK", ~"steamid" => ~"1"})}}
+    end),
+    _ = asobi_steam:validate_ticket(~"deadbeef"),
+    receive
+        {opts, Opts} ->
+            {ssl, Ssl} = lists:keyfind(ssl, 1, Opts),
+            ?assertEqual(verify_peer, proplists:get_value(verify, Ssl))
     after 1000 -> ?assert(false)
     end.
 

@@ -66,7 +66,9 @@ do_validate_ticket(ApiKey, AppId, Ticket) ->
         identity_param()
     ]),
     case
-        httpc:request(get, {binary_to_list(Url), []}, [{timeout, 10000}], [{body_format, binary}])
+        httpc:request(
+            get, {binary_to_list(Url), []}, asobi_tls_client:http_options(), [{body_format, binary}]
+        )
     of
         {ok, {{_, 200, _}, _, Body}} when is_binary(Body) ->
             parse_auth_response(Body);
@@ -134,7 +136,9 @@ fetch_player_summary(SteamId) ->
             ]),
             case
                 httpc:request(
-                    get, {binary_to_list(Url), []}, [{timeout, 10000}], [{body_format, binary}]
+                    get, {binary_to_list(Url), []}, asobi_tls_client:http_options(), [
+                        {body_format, binary}
+                    ]
                 )
             of
                 {ok, {{_, 200, _}, _, Body}} when is_binary(Body) ->
