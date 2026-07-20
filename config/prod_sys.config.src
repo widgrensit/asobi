@@ -41,6 +41,11 @@
             %% F-19: leave limiter unset so the plugin selects per-path
             %% (auth/register/iap/api). See asobi_rate_limit_plugin:select_limiter/1.
             {pre_request, asobi_rate_limit_plugin, #{}},
+            %% asobi#158: pre-auth traffic gate on the anonymous auth-create
+            %% routes. After the limiter so the cheap in-memory check sheds
+            %% floods before any external siteverify. No-op unless
+            %% `client_gate` is configured.
+            {pre_request, asobi_client_gate_plugin, #{}},
             {post_request, asobi_security_headers_plugin, #{}}
         ]}
     ]},
