@@ -356,7 +356,9 @@ Register your world mode in `sys.config`:
 | `listed` | `true` | Whether worlds of this mode appear in `world.list` / `GET /api/v1/worlds` |
 | `quick_play` | `true` | Whether `world.find_or_create` may place a player into an existing world of this mode |
 
-### Visibility
+#> Using a world as a persistent hub is covered in [Lobbies](lobbies.md).
+
+## Visibility
 
 `listed` and `quick_play` are independent axes, so a mode can be browsable
 but out of quick-play rotation, or reachable by quick-play while hidden from
