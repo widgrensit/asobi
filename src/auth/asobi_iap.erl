@@ -265,7 +265,7 @@ do_verify_google(PackageName, ProductId, PurchaseToken) ->
                 httpc:request(
                     get,
                     {binary_to_list(Url), Headers},
-                    [{timeout, 10000}],
+                    asobi_tls_client:http_options(),
                     [{body_format, binary}]
                 )
             of
@@ -379,7 +379,7 @@ exchange_jwt_for_token(Jwt) ->
         httpc:request(
             post,
             {Url, [], ContentType, Body},
-            [{timeout, 10000}],
+            asobi_tls_client:http_options(),
             [{body_format, binary}]
         )
     of
