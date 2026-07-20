@@ -270,7 +270,7 @@ One process per connected player. Manages WebSocket state, presence, and acts as
 Client ←→ WebSocket Handler ←→ Player Session Process
                                     │
                                     ├── pg groups: presence, player-specific topics
-                                    ├── Tracks: current match, party, chat channels
+                                    ├── Tracks: current match, world, chat channels
                                     └── Handles: heartbeat, disconnect cleanup
 ```
 
@@ -347,23 +347,24 @@ Game developers implement the `asobi_match` behaviour to define their game:
 
 ### Matchmaker (`asobi_matchmaker` — gen_server)
 
-Runs periodic matching ticks via Shigoto. Query-based matching with expanding windows.
+Runs periodic matching ticks. Strategy modules group tickets; the shipped
+strategies are `fill` (FCFS) and `skill_based` (expanding window).
 
-**Ticket:**
+**Ticket** (`asobi_matchmaker:add/2`):
 ```erlang
 #{
+    id => binary(),
     player_id => binary(),
-    properties => #{
-        skill => integer(),
-        region => binary(),
-        mode => binary()
-    },
-    query => binary(),          %% match query expression
-    party => [binary()],        %% party member IDs
+    mode => binary(),
+    properties => map(),        %% game-defined, read by your strategy
     submitted_at => integer(),
-    expansion_level => integer()
+    status => pending
 }
 ```
+
+There is no query expression and no party field. Ticket filtering beyond
+`mode` happens inside your strategy module against `properties`. See
+[Matchmaking](../guides/matchmaking.md).
 
 **Algorithm (each tick):**
 1. Load all active tickets from ETS

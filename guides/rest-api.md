@@ -85,6 +85,50 @@ GET /api/v1/players/:id        Get player profile
 PUT /api/v1/players/:id        Update own profile
 ```
 
+## Worlds
+
+```
+GET  /api/v1/worlds         Browse live worlds
+GET  /api/v1/worlds/:id     Get one world
+POST /api/v1/worlds         Create a world
+```
+
+`GET /api/v1/worlds` accepts `mode` (ignored above 64 bytes) and
+`has_capacity=true`. Only worlds whose mode sets `listed` (the default) are
+returned. Results are cached for 500ms.
+
+`POST /api/v1/worlds` returns **201** with the world info, **429** when the
+player is at their per-player cap (`player_world_limit_reached`), and **503**
+when the global cap is reached (`world_capacity_reached`). See
+[World capacity](configuration.md#world-capacity).
+
+`GET /api/v1/worlds/:id` returns **404** for an unknown id.
+
+None of these return the player roster - see [World Server](world-server.md).
+There is no REST join: joining binds the world to your WebSocket session, so
+it is `world.join` over WS.
+
+## Matches
+
+```
+GET /api/v1/matches         Match history (finished matches)
+GET /api/v1/matches/live    Live, joinable matches
+GET /api/v1/matches/:id     Get one match record
+```
+
+**These read different data sources, and it is the most confusing thing in
+this API.** `GET /api/v1/matches` queries the match *record* table: finished
+matches, an audit trail, nothing you can join. It accepts `mode`, `status`
+and `limit` (1-200, default 50), newest first.
+
+`GET /api/v1/matches/live` enumerates running match processes and is what a
+lobby browser wants. It accepts `mode` and `has_capacity=true`. Matches are
+**unlisted by default** - a mode opts in with `listed => true` - so an empty
+result usually means no mode has opted in yet.
+
+Neither returns the player roster. As with worlds, joining is `match.join`
+over WS.
+
 ## Social
 
 ```

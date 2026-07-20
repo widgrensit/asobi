@@ -119,12 +119,12 @@ that to be you again.
 | Lobby | Matchmaker ticket + Match in "waiting" phase | Players hit `/matchmaker/tickets`; when `match_size` is reached the match transitions to "running". |
 | Region | Deployment location | Deploy one container per region. No region abstraction baked in — you pick where to run the container. |
 | Matchmaker (2.0) | `asobi_matchmaker` | Pluggable strategies (`fill`, `skill_based`); custom via `asobi_matchmaker_strategy` behaviour. |
-| `HathoraClient.loginAnonymous` | `POST /api/v1/auth/register` with `username` + `password` | **No anonymous flag today.** You generate a random username/password in the client and persist it locally (or use OAuth). Response fields: `player_id`, `session_token`, `username`. |
+| `HathoraClient.loginAnonymous` | `POST /api/v1/auth/guest` | Device-backed anonymous auth: pass `device_id` + `device_secret`, get a real player back. Opt-in - the game declares `guest_auth` and the operator sets a pepper. Claim the account later with `POST /api/v1/auth/guest/upgrade`. See [Authentication](authentication.md). |
 | `HathoraClient.loginGoogle` | `POST /api/v1/auth/oauth` | OAuth/OIDC flow. |
 | `createLobby` / `createRoom` / queue | `POST /api/v1/matchmaker` body `{"mode":"default","properties":{}}` | Response: `{"ticket_id":"...","status":"pending"}`. |
 | Ticket poll | `GET /api/v1/matchmaker/:ticket_id` | |
 | Cancel | `DELETE /api/v1/matchmaker/:ticket_id` | |
-| `listActivePublicLobbies` | `GET /api/v1/matches` | Query params filter results. |
+| `listActivePublicLobbies` | `GET /api/v1/matches/live` | Live, joinable matches. Filter with `mode` and `has_capacity`. Matches are **unlisted by default** - a mode opts in with `listed => true`. Not to be confused with `GET /api/v1/matches`, which reads the match record table (finished matches, an audit trail). |
 | `getConnectionInfo(roomId)` | WebSocket upgrade on `GET /ws` | See [§ WebSocket handshake](#websocket-handshake) — first frame must authenticate. |
 | `ping` region API | *(none)* | If you need client-side region selection, probe each deployment endpoint yourself. |
 | Hathora SDK | asobi SDKs | [asobi-unity](https://github.com/widgrensit/asobi-unity), [asobi-unreal](https://github.com/widgrensit/asobi-unreal), [asobi-js](https://github.com/widgrensit/asobi-js), [asobi-godot](https://github.com/widgrensit/asobi-godot), [asobi-defold](https://github.com/widgrensit/asobi-defold), [asobi-dart](https://github.com/widgrensit/asobi-dart), [flame_asobi](https://github.com/widgrensit/flame_asobi). |

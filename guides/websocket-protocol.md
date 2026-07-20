@@ -98,9 +98,26 @@ to your game module untouched:
 {"type": "match.join", "payload": {"match_id": "...", "ctx": {"code": "AB12"}}}
 ```
 
-Asobi never interprets, echoes, or logs it. It reaches your game's
-`join/3` callback, which decides whether to accept. Games that implement
-only `join/2` are unaffected and a supplied `ctx` is ignored.
+Asobi never interprets, echoes, or logs it. It reaches your game's join
+callback, which decides whether to accept.
+
+In Lua, declare a third parameter:
+
+```lua
+function join(player_id, state, ctx)
+	if ctx.code ~= state.room_code then
+		return state              -- refuse: player is not added
+	end
+	state.players[player_id] = true
+	return state
+end
+```
+
+In Erlang, export `join/3` (`join(PlayerId, Ctx, GameState)`) alongside or
+instead of `join/2`.
+
+Either way a game that takes only `(player_id, state)` is unaffected and a
+supplied `ctx` is ignored.
 
 This is how you build join codes, invites, passwords and party checks:
 without it there is no channel from a client to your game before

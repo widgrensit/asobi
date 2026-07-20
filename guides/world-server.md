@@ -194,6 +194,7 @@ end
 |----------|----------|-------------|
 | `init(config)` | yes | Return initial global game state |
 | `join(player_id, state)` | yes | Handle player join, return state |
+| `join(player_id, state, ctx)` | no | Same, plus the client's join context. Declare the third parameter and it is used instead — see [Join context](websocket-protocol.md#join-context) |
 | `leave(player_id, state)` | yes | Handle player leave, return state |
 | `spawn_position(player_id, state)` | yes | Return `{x=N, y=N}` table |
 | `post_tick(tick, state)` | yes | Global tick logic. Set `_finished`/`_result` or `_vote` on state |
