@@ -12,6 +12,7 @@
     save_version_conflict/1,
     %% Generic storage
     put_storage/1,
+    put_storage_rejects_oversized_value/1,
     get_storage/1,
     list_storage/1,
     list_storage_filters_owner_perm/1,
@@ -29,6 +30,7 @@ groups() ->
         ]},
         {generic_storage, [sequence], [
             put_storage,
+            put_storage_rejects_oversized_value,
             get_storage,
             list_storage,
             list_storage_filters_owner_perm,
@@ -149,6 +151,22 @@ put_storage(Config) ->
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"version" := 1, ~"collection" := ~"settings"}, Body),
+    Config.
+
+%% M5 (#169/#170): the generic-storage path now mirrors the save-data cap.
+%% The 413 is returned before any DB query, so this exercises the cap itself.
+put_storage_rejects_oversized_value(Config) ->
+    Big = binary:copy(~"x", 300000),
+    {ok, Resp} = nova_test:put(
+        "/api/v1/storage/settings/huge",
+        #{
+            headers => auth(Config, player1),
+            json => #{~"value" => #{~"blob" => Big}}
+        },
+        Config
+    ),
+    ?assertStatus(413, Resp),
+    ?assertMatch(#{~"error" := ~"storage_value_too_large"}, nova_test:json(Resp)),
     Config.
 
 get_storage(Config) ->

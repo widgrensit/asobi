@@ -75,7 +75,23 @@ hash_password(CS) ->
             kura_changeset:put_change(CS, hashed_password, Hashed)
     end.
 
+-define(MAX_METADATA_BYTES, 16384).
+
 -spec update_changeset(map(), map()) -> #kura_changeset{}.
 update_changeset(Data, Params) ->
     CS = kura_changeset:cast(?MODULE, Data, Params, [display_name, avatar_url, metadata]),
-    kura_changeset:validate_length(CS, display_name, [{max, 64}]).
+    CS1 = kura_changeset:validate_length(CS, display_name, [{max, 64}]),
+    %% M3: `metadata` is unbounded jsonb - any authenticated player could
+    %% PUT a huge blob and persist it. Cap the encoded size. Only runs when
+    %% metadata is in the change; the global body cap is 1 MiB, this bounds
+    %% the per-row blob well under it.
+    kura_changeset:validate_change(CS1, metadata, fun metadata_within_limit/1).
+
+-spec metadata_within_limit(dynamic()) -> ok | {error, binary()}.
+metadata_within_limit(Metadata) ->
+    try iolist_size(json:encode(Metadata)) =< ?MAX_METADATA_BYTES of
+        true -> ok;
+        false -> {error, ~"must be 16 KB or less"}
+    catch
+        _:_ -> {error, ~"is not encodable"}
+    end.
