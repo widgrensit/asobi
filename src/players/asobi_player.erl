@@ -51,7 +51,13 @@ registration_changeset(Data, Params) ->
     CS2 = kura_changeset:validate_length(CS1, username, [{min, 3}, {max, 32}]),
     CS3 = kura_changeset:validate_format(CS2, username, ~"^[a-zA-Z0-9_-]+$"),
     CS4 = kura_changeset:validate_length(CS3, password, [{min, 8}, {max, 128}]),
-    maybe_hash_password(CS4).
+    %% M3 (#169): registration casts metadata too. No in-tree caller feeds it,
+    %% but registration_changeset is a library entry point (asobi_engine,
+    %% self-hosters) on the unauthenticated path, so the cap travels with the
+    %% schema rather than the controller. Placed before maybe_hash_password so
+    %% an oversized blob fails the changeset and skips the pbkdf2 cost (#157).
+    CS5 = kura_changeset:validate_change(CS4, metadata, fun metadata_within_limit/1),
+    maybe_hash_password(CS5).
 
 %% Only pay the pbkdf2 cost for a changeset that will actually be inserted -
 %% hashing an invalid one is wasted work and an unauthenticated-DoS lever (#157).

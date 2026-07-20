@@ -40,3 +40,17 @@ metadata_at_the_limit_passes_test() ->
     Ok = #{~"blob" => binary:copy(~"x", 16000)},
     CS = asobi_player:update_changeset(#{}, #{~"metadata" => Ok}),
     ?assert(CS#kura_changeset.valid).
+
+%% The cap travels with the schema: registration_changeset caps metadata too,
+%% and an oversized blob must fail before the pbkdf2 hash is computed (#157).
+registration_metadata_over_limit_is_rejected_test() ->
+    Big = #{~"blob" => binary:copy(~"x", 20000)},
+    CS = asobi_player:registration_changeset(#{}, #{
+        ~"username" => ~"validname", ~"password" => ~"longenough1", ~"metadata" => Big
+    }),
+    ?assertNot(CS#kura_changeset.valid),
+    ?assertEqual(
+        undefined,
+        kura_changeset:get_change(CS, hashed_password),
+        "an oversized-metadata registration must not pay the pbkdf2 cost"
+    ).
