@@ -113,14 +113,41 @@ jobs:
       issues: write
     steps:
       - uses: actions/github-script@v9
+        env:
+          PROPERTY_RESULT: ${{ needs.property-soak.result }}
+          SOAK_RESULT: ${{ needs.soak.result }}
         with:
           script: |
-            const title = `Nightly failure: ${new Date().toISOString().slice(0,10)}`;
-            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title,
-              body: `Nightly workflow failed.\n\nRun: ${url}\n\nThis issue is auto-opened by \`.github/workflows/nightly.yml\`.`,
-              labels: ['nightly-regression']
+            // One open issue per outage, not one per night. A recurring
+            // failure used to mint a fresh date-stamped issue every run, so
+            // a single cause (a stale _build cache, #211) accumulated five
+            // issues over five days and read as five separate regressions.
+            const { owner, repo } = context.repo;
+            const today = new Date().toISOString().slice(0, 10);
+            const url = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const failed = [
+              ['Property Tests', process.env.PROPERTY_RESULT],
+              ['Soak', process.env.SOAK_RESULT]
+            ].filter(([, r]) => r === 'failure').map(([n]) => n).join(', ') || 'unknown job';
+
+            const open = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'nightly-regression', per_page: 100
             });
+            // listForRepo returns PRs as issues; a labelled PR must not absorb the report.
+            const existing = open.data.find(i => !i.pull_request);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Still failing on ${today} (${failed}).\n\nRun: ${url}`
+              });
+              core.notice(`Commented on #${existing.number} rather than opening a duplicate.`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner, repo,
+                title: `Nightly failure: ${today}`,
+                body: `Nightly workflow failed (${failed}).\n\nRun: ${url}\n\nAuto-opened by \`.github/workflows/nightly.yml\`. While this stays open, subsequent failures are added as comments rather than new issues, so the comment count is how long the outage has run.`,
+                labels: ['nightly-regression']
+              });
+              core.notice(`Opened #${created.data.number}.`);
+            }
