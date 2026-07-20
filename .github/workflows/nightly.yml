@@ -50,10 +50,22 @@ jobs:
           path: _build
           # rebar.config is hashed too: test-profile deps (meck, proper) are not
           # written to rebar.lock, so a lock-only key never busts when they bump.
-          # The -v2- prefix retires the poisoned pre-OTP-29 caches (stale meck 0.9).
-          key: nightly-prop-v2-${{ hashFiles('rebar.config', 'rebar.lock') }}
-          restore-keys: |
-            nightly-prop-v2-
+          # The -v3- prefix retires the caches poisoned by the kura shadow below.
+          #
+          # No restore-keys, deliberately. A prefix fallback restores SOME cache
+          # even when rebar.lock changed, so _build arrives holding an older
+          # dep set. rebar3 then "Upgrading kura ..." and recompiles it, and
+          # that recompile picks up the kura bundled inside the rebar3_kura
+          # plugin instead of the dep, which declares kura_dialect with
+          # delete/2 where the dep implements delete/3:
+          #
+          #   Compiling _build/default/lib/kura/src/kura_dialect_pg.erl failed
+          #     undefined callback function delete/3 (behaviour 'kura_dialect')
+          #
+          # That failed every nightly from 2026-07-16 to 2026-07-20. A key miss
+          # costs one clean build; a stale restore costs a red nightly nobody
+          # can reproduce locally, because a local _build is already consistent.
+          key: nightly-prop-v3-${{ hashFiles('rebar.config', 'rebar.lock') }}
 
       - name: Run property tests at high numtests
         run: |
