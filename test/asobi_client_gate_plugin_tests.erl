@@ -16,7 +16,9 @@ gate_test_() ->
         fun hang_fails_closed/0,
         fun false_disables_gate/0,
         fun applies_to_oauth_and_guest/0,
-        fun folds_slash_variants/0
+        fun folds_slash_variants/0,
+        fun context_omits_password_and_extracts_token/0,
+        fun token_defaults_on_non_map_or_non_binary/0
     ]}.
 
 setup() ->
@@ -94,6 +96,28 @@ folds_slash_variants() ->
             ~"//api/v1/auth/guest"
         ]
     ].
+
+%% The central security claim: the context handed to a gate carries the
+%% challenge token but NOT the registration plaintext password.
+context_omits_password_and_extracts_token() ->
+    Req = #{
+        path => ~"/api/v1/auth/register",
+        headers => #{~"cf-turnstile-response" => ~"tok"},
+        json => #{
+            ~"username" => ~"u",
+            ~"password" => ~"secret",
+            ~"client_gate_token" => ~"tok"
+        }
+    },
+    Ctx = asobi_client_gate_plugin:context(Req),
+    ?assertEqual([headers, ip, path, token], lists:sort(maps:keys(Ctx))),
+    ?assertEqual(~"tok", maps:get(token, Ctx)),
+    ?assertNot(lists:member(~"secret", maps:values(Ctx))).
+
+token_defaults_on_non_map_or_non_binary() ->
+    ?assertEqual(~"", asobi_client_gate_plugin:token([~"array"])),
+    ?assertEqual(~"", asobi_client_gate_plugin:token(#{~"client_gate_token" => 123})),
+    ?assertEqual(~"", asobi_client_gate_plugin:token(#{})).
 
 set_gate(Fun) ->
     meck:expect(fake_gate, verify, Fun),

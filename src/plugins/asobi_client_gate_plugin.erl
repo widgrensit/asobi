@@ -6,7 +6,7 @@
 -export([pre_request/4, post_request/4, plugin_info/0]).
 
 -ifdef(TEST).
--export([decision/1]).
+-export([decision/1, context/1, token/1]).
 -endif.
 
 %% Runs immediately after the rate limiter (config/{dev,prod}_sys.config.src):
@@ -57,7 +57,7 @@ decision(Req) ->
 
 %% A gate legitimately needs the client IP, headers and a challenge token, but
 %% never the plaintext password the request map still carries here. Hand it a
-%% minimized context so a third-party gate cannot log or forward credentials.
+%% minimised context so a third-party gate cannot log or forward credentials.
 -spec context(cowboy_req:req()) -> asobi_client_gate:context().
 context(Req) ->
     Json = maps:get(json, Req, #{}),
@@ -90,6 +90,8 @@ invoke(Mod, Context) ->
         {'DOWN', MRef, process, Pid, {gate_result, Result}} ->
             Result;
         {'DOWN', MRef, process, Pid, Reason} ->
+            %% Defensive: run/2 always exits {gate_result, _}, so this fires
+            %% only on an external kill. Fail closed anyway.
             ?LOG_ERROR(#{event => client_gate_error, module => Mod, reason => Reason}),
             on_error()
     after Timeout ->
