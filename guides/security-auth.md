@@ -127,7 +127,7 @@ unrecognised value falls back to `open` and logs a warning.
 
 > **Footgun (flip before release).** The shipped `examples/` quickstarts
 > and `asobi_register_bench` register headless with username/password and
-> rely on the `open` default — do not change it in dev/CI. Choosing a
+> rely on the `open` default - do not change it in dev/CI. Choosing a
 > stricter posture is a production deployment decision, the same way Photon
 > documents flipping `AllowAnonymous` before release. asobi logs the active
 > mode at boot (`event => registration_mode`) so the posture is visible.

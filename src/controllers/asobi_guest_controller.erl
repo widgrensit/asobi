@@ -16,7 +16,7 @@
 -export([authenticate/1, upgrade/1]).
 
 -ifdef(TEST).
--export([make_verifier/1, verify/2, decode_secret/1, valid_device_id/1]).
+-export([make_verifier/1, verify/2, decode_secret/1, valid_device_id/1, create/2]).
 -endif.
 
 -include_lib("kernel/include/logger.hrl").

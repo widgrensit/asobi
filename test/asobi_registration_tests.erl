@@ -10,6 +10,7 @@ registration_test_() ->
         fun closed_denies_every_path/0,
         fun oauth_only_denies_password_only/0,
         fun register_controller_denies_before_db/0,
+        fun guest_controller_denies_before_capacity/0,
         fun log_mode_tolerates_valid_and_invalid/0
     ]}.
 
@@ -54,6 +55,15 @@ register_controller_denies_before_db() ->
     ?assertEqual(
         {json, 403, #{}, #{error => ~"registration_closed"}},
         asobi_auth_controller:register(Req)
+    ).
+
+%% closed must reject guest creation at the controller before the capacity
+%% check / DB, and it must be wired to check(guest) - not a mis-wired kind.
+guest_controller_denies_before_capacity() ->
+    application:set_env(asobi, registration, closed),
+    ?assertEqual(
+        {json, 403, #{}, #{error => ~"registration_closed"}},
+        asobi_guest_controller:create(~"device-abc", ~"secret-abc")
     ).
 
 %% The boot announcer must not crash on either a valid mode or a typo (the

@@ -59,14 +59,14 @@ today's open behaviour:
    Photon's `AllowAnonymous`, correctly modelled. Precise per-path
    semantics, enforced at the three create branches via
    `asobi_registration:check/1`:
-   - `open` — every create path mints players (password, oauth-first-time,
+   - `open` - every create path mints players (password, oauth-first-time,
      guest-first-time). Current behaviour.
-   - `oauth_only` — password registration is refused (`403`
+   - `oauth_only` - password registration is refused (`403`
      `password_registration_disabled`); delegated OAuth may still create
      players. **Guest signup is left to its own `guest_auth` toggle**
-     (ADR 0004), not governed by this mode — guest is a separate delegated
+     (ADR 0004), not governed by this mode - guest is a separate delegated
      path with its own opt-in and caps.
-   - `closed` — no new player rows via *any* public path (`403`
+   - `closed` - no new player rows via *any* public path (`403`
      `registration_closed`); existing players still authenticate (login,
      refresh, oauth-login of a known identity, guest-resume are untouched).
    An unrecognised value falls back to `open` and warns: locking real
