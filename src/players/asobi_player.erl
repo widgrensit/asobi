@@ -42,6 +42,11 @@ indexes() ->
         {[username], #{unique => true}}
     ].
 
+%% Invariant (asobi#158): any caller that mints a new player from this
+%% changeset on a public path MUST first consult asobi_registration:check/1 and
+%% honour a {deny, _} - the registration-mode gate (open|oauth_only|closed) is
+%% enforced at the create call sites, not in the schema, so a direct
+%% insert here would bypass a `closed`/`oauth_only` deployment.
 -spec registration_changeset(map(), map()) -> #kura_changeset{}.
 registration_changeset(Data, Params) ->
     CS = kura_changeset:cast(?MODULE, Data, Params, [

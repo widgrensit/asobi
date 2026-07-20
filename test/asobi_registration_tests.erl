@@ -9,7 +9,8 @@ registration_test_() ->
         fun open_allows_every_path/0,
         fun closed_denies_every_path/0,
         fun oauth_only_denies_password_only/0,
-        fun register_controller_denies_before_db/0
+        fun register_controller_denies_before_db/0,
+        fun log_mode_tolerates_valid_and_invalid/0
     ]}.
 
 setup() ->
@@ -54,3 +55,11 @@ register_controller_denies_before_db() ->
         {json, 403, #{}, #{error => ~"registration_closed"}},
         asobi_auth_controller:register(Req)
     ).
+
+%% The boot announcer must not crash on either a valid mode or a typo (the
+%% typo takes the error-level branch).
+log_mode_tolerates_valid_and_invalid() ->
+    application:set_env(asobi, registration, oauth_only),
+    ?assertEqual(ok, asobi_registration:log_mode()),
+    application:set_env(asobi, registration, banana),
+    ?assertEqual(ok, asobi_registration:log_mode()).
