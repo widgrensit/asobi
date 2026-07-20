@@ -198,6 +198,13 @@ waiting(state_timeout, waiting_timeout, State) ->
     {stop, {shutdown, timeout}, State};
 waiting(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
+%% Gathering is exactly when a game wants to tell the room someone arrived.
+%% Players are already in `players` and presence is live, so delivery works
+%% here identically to `running` - there was simply no clause, and a Lua
+%% `game.broadcast` from a join callback crashed the match on function_clause.
+waiting(cast, {broadcast_event, Event, Payload}, State) ->
+    broadcast_match_event(Event, Payload, State),
+    keep_state_and_data;
 waiting(cast, cancel, State) ->
     {stop, {shutdown, cancelled}, State}.
 
@@ -437,6 +444,13 @@ finished(state_timeout, cleanup, State) ->
     {stop, normal, State};
 finished({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(finished, State)}]};
+%% A game ending its match from `tick` and broadcasting the result in the
+%% same callback lands here. Without this clause the catch-all below
+%% swallows it silently, which reads as a client bug. Players are still in
+%% `players` for the cleanup window.
+finished(cast, {broadcast_event, Event, Payload}, State) ->
+    broadcast_match_event(Event, Payload, State),
+    keep_state_and_data;
 finished(_EventType, _Event, _State) ->
     keep_state_and_data.
 
