@@ -9,6 +9,19 @@ By default, all zones in a world are spawned at startup. For large worlds
 (thousands of zones), enable lazy loading so zones are created on demand
 when a player enters.
 
+<!-- tabs -->
+**Lua**
+```lua
+-- world.lua
+game_type         = "world"
+grid_size         = 2000       -- 2000x2000 zone grid
+zone_size         = 64         -- 64 tiles per zone
+lazy_zones        = true       -- auto-true when grid_size > 100
+zone_idle_timeout = 30000      -- reap idle zones after 30s
+max_active_zones  = 10000      -- cap concurrent zone processes
+```
+
+**Erlang**
 ```erlang
 Config = #{
     game_module => my_world,
@@ -19,6 +32,7 @@ Config = #{
     max_active_zones => 10000   %% cap concurrent zone processes
 }.
 ```
+<!-- /tabs -->
 
 With `lazy_zones => true`:
 
@@ -59,7 +73,27 @@ The `asobi_terrain` helpers below give you a compact tile format, but any
 binary your client can decode works. A complete, runnable provider lives in
 [`examples/world-terrain`](https://github.com/widgrensit/asobi/tree/main/examples/world-terrain).
 
-### Terrain Provider Behaviour
+### Selecting a Provider (Lua)
+
+A Lua world names its provider from `terrain_provider`, returning the module
+and its args:
+
+```lua
+-- world.lua
+function terrain_provider(config)
+	return {"asobi_terrain_perlin", {seed = 42}}
+end
+```
+
+Two providers ship built in: `asobi_terrain_flat` and
+`asobi_terrain_perlin`. The name is checked against an allowlist rather than
+resolved as an arbitrary module, so a script cannot name `gen_server` or any
+other loaded module. Operators extend the allowlist via env.
+
+**Writing a new provider is Erlang only** - the same split as matchmaker
+strategies. Lua selects; Erlang implements.
+
+### Terrain Provider Behaviour (Erlang)
 
 Implement `asobi_terrain_provider` to supply terrain data:
 

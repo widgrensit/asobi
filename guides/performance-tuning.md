@@ -9,20 +9,43 @@ By default, spatial queries (`query_radius`, `query_rect`) scan all
 entities in a zone via `maps:fold` -- O(n). For zones with many entities,
 enable the cell-based spatial grid for O(1) cell lookup + local scan.
 
+<!-- tabs -->
+**Lua**
+```lua
+-- world.lua
+game_type              = "world"
+spatial_grid_cell_size = 16   -- units per cell
+```
+
+**Erlang**
 ```erlang
 Config = #{
     game_module => my_world,
     spatial_grid_cell_size => 16  %% units per cell
 }.
 ```
+<!-- /tabs -->
 
 The grid is maintained automatically as entities are added, removed, or
 moved during ticks. Query through the zone API:
 
+<!-- tabs -->
+**Lua**
+```lua
+-- inside zone_tick or handle_input, where the zone is in scope
+local hits = game.spatial.query_radius(100, 200, 50)
+```
+
+`game.spatial` also offers `query_rect`, `nearest`, `in_range` and
+`distance`. The zone-based forms need a zone in scope; the entity-list
+forms (`game.spatial.query_radius(entities, x, y, radius)`) work anywhere.
+
+**Erlang**
 ```erlang
 Results = asobi_zone:query_radius(ZonePid, {100.0, 200.0}, 50.0).
 %% Returns [{EntityId, {X, Y}}, ...]
 ```
+<!-- /tabs -->
 
 When no `spatial_grid_cell_size` is configured, the zone falls back to
 the brute-force scan (existing behaviour).
@@ -69,11 +92,20 @@ through `asobi_lua_match_shared`, which exports `get_state/1`.
 
 Zones with no subscribers tick at a reduced rate to save CPU:
 
+<!-- tabs -->
+**Lua**
+```lua
+-- world.lua
+cold_tick_divisor = 10   -- cold zones tick 10x less often (default)
+```
+
+**Erlang**
 ```erlang
 Config = #{
     cold_tick_divisor => 10  %% cold zones tick 10x less often (default)
 }.
 ```
+<!-- /tabs -->
 
 | Zone State | Tick Rate | When |
 |-----------|-----------|------|
