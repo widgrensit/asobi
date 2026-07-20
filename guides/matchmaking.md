@@ -60,12 +60,25 @@ are built in:
   expanding window (configurable via `skill_window` and
   `skill_expand_rate`).
 
-The built-in strategies map to modules: the default `fill` strategy is
-`asobi_matchmaker_fill` and `skill_based` is `asobi_matchmaker_skill`.
-Strategy is configured per game mode only - there is no top-level
-`matchmaker_strategy` key.
+Select one with the `strategy` global in your mode script:
 
-## Custom Strategies
+```lua
+-- ranked.lua
+match_size = 4
+strategy   = "skill_based"   -- "fill" (default) or "skill_based"
+```
+
+The built-in strategies map to modules: `fill` is `asobi_matchmaker_fill`
+and `skill_based` is `asobi_matchmaker_skill`. Strategy is configured per
+game mode only - there is no top-level `matchmaker_strategy` key.
+
+**Writing a new strategy is Erlang only.** `strategy` takes either a
+built-in name or an Erlang module name, and there is no Lua callback for
+grouping tickets. If your matching rules do not fit `fill` or
+`skill_based`, you need an Erlang module in the release alongside your Lua
+scripts.
+
+## Custom Strategies (Erlang)
 
 Implement `asobi_matchmaker_strategy` (a single `match/2` callback):
 
@@ -85,6 +98,19 @@ match(Tickets, Config) ->
 
 Wire it up per mode:
 
+<!-- tabs -->
+**Lua**
+
+A Lua game declares its mode as script globals. Point `strategy` at your
+Erlang module by name:
+
+```lua
+-- ranked.lua
+match_size = 4
+strategy   = "my_matchmaker"
+```
+
+**Erlang**
 ```erlang
 {asobi, [
     {game_modes, #{
@@ -96,6 +122,7 @@ Wire it up per mode:
     }}
 ]}
 ```
+<!-- /tabs -->
 
 ## Configuration
 
