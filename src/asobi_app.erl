@@ -12,6 +12,7 @@ start(_StartType, _StartArgs) ->
         {error, MigErr} ->
             logger:error(#{msg => ~"migration_failed", error => MigErr})
     end,
+    asobi_registration:log_mode(),
     case asobi_sup:start_link() of
         {ok, Pid} -> {ok, Pid};
         ignore -> {error, supervisor_ignored};

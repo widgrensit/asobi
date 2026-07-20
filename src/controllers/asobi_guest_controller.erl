@@ -182,12 +182,17 @@ create(DeviceId, SecretBin) ->
     %% can't, but a single abuser can saturate it and deny guest signup to
     %% everyone. That is an availability tradeoff, so log capacity events - a
     %% sustained stream is the signal to distinguish an attack from real growth.
-    case global_create_allowed() andalso within_unlinked_cap() of
-        false ->
-            ?LOG_WARNING(#{event => guest_capacity_reached}),
-            {json, 503, #{}, #{error => ~"guest_capacity_reached"}};
-        true ->
-            insert_player_and_identity(DeviceId, SecretBin)
+    case asobi_registration:check(guest) of
+        {deny, Reason} ->
+            {json, 403, #{}, #{error => Reason}};
+        ok ->
+            case global_create_allowed() andalso within_unlinked_cap() of
+                false ->
+                    ?LOG_WARNING(#{event => guest_capacity_reached}),
+                    {json, 503, #{}, #{error => ~"guest_capacity_reached"}};
+                true ->
+                    insert_player_and_identity(DeviceId, SecretBin)
+            end
     end.
 
 -spec insert_player_and_identity(binary(), binary()) -> {json, integer(), map(), map()}.
