@@ -147,6 +147,31 @@ Each route group has its own per-IP default (window in ms): `auth` 5/1000,
 global (not per-IP) guest-create bound `guest_global` 100/1000. Override any
 group under `rate_limits`; unset groups keep their default.
 
+## WebSocket Origin allowlist
+
+By default the `/ws` upgrade accepts any `Origin` — web builds are served from
+arbitrary studio and hosting domains, so a strict default would break them.
+
+To harden a deployment against cross-site WebSocket hijacking, set an
+allowlist:
+
+```erlang
+{ws_allowed_origins, [
+    ~"https://play.yourgame.com",
+    ~"https://yourstudio.itch.io"
+]}
+```
+
+When set, a browser upgrade whose `Origin` is not listed is closed with
+`1008 origin_rejected` and emits `[asobi, ws, origin_rejected]`. Leaving it
+unset (or empty) keeps the open default.
+
+Native clients (Defold, Unity, Unreal, etc.) send no `Origin` header and are
+never affected — an absent `Origin` always passes, since a non-browser client
+cannot be a CSWSH vector. The socket also does nothing until it presents a
+valid token in the first `session.connect` frame, so this is defence in depth,
+not the primary auth gate.
+
 ## CORS
 
 CORS is handled by `nova_cors_plugin` in the Nova plugin chain — configure
