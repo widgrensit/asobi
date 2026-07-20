@@ -98,7 +98,17 @@ invalidate(_) ->
 -spec put_positive(binary(), map()) -> ok.
 put_positive(Token, Player) when is_binary(Token), is_map(Player) ->
     ExpiresAt = erlang:system_time(millisecond) + ttl_ms(),
-    insert(Token, {ok, Player}, ExpiresAt).
+    insert(Token, {ok, cacheable(Player)}, ExpiresAt).
+
+%% Cache only the fields the auth path consumes. The full player row from
+%% nova_auth_refresh carries `hashed_password` (pbkdf2); parking that in a
+%% `public` ETS table reopens the exact crash-dump/observer surface #168
+%% closes for tokens - a per-session offline-cracking target. Both consumers
+%% (asobi_ws_handler, asobi_auth_plugin) read only `id`; `is_banned/1` reads
+%% only `banned_at`.
+-spec cacheable(map()) -> map().
+cacheable(Player) ->
+    maps:with([id, banned_at], Player).
 
 -spec put_negative(binary()) -> ok.
 put_negative(Token) when is_binary(Token) ->
@@ -195,8 +205,9 @@ The token itself is never stored - only its SHA-256. A crash dump,
 usable session tokens. asobi is single-tenant so there is no untrusted Lua,
 but the dump/observer/debugger surface is real; this closes it (asobi#168).
 
-The stored `Value` holds the player map, which contains no token, so the
-row as a whole leaks nothing that resolves to a session.
+The stored `Value` holds only `id` and `banned_at` (see `cacheable/1`) -
+never the token, never `hashed_password` - so the row as a whole leaks
+nothing that resolves to a session or a credential.
 """.
 -spec key(binary()) -> binary().
 key(Token) ->
