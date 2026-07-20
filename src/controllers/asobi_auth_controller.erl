@@ -12,6 +12,18 @@
 register(
     #{json := #{~"username" := Username, ~"password" := Password} = Params} = _Req
 ) when is_binary(Username), is_binary(Password) ->
+    case asobi_registration:check(password) of
+        {deny, Reason} ->
+            {json, 403, #{}, #{error => Reason}};
+        ok ->
+            register_player(Username, Password, Params)
+    end;
+register(_Req) ->
+    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+
+-spec register_player(binary(), binary(), map()) ->
+    {json, map()} | {json, integer(), map(), map()}.
+register_player(Username, Password, Params) ->
     RegParams = #{
         username => Username,
         password => Password,
@@ -27,9 +39,7 @@ register(
             asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
         {error, #kura_changeset{} = CS} ->
             registration_error(kura_changeset:traverse_errors(CS, fun(_F, M) -> M end))
-    end;
-register(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    end.
 
 %% A duplicate username is a conflict with the current server state, so it
 %% returns 409 with a stable reason atom - the same shape as every other

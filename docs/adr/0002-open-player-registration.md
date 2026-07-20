@@ -56,7 +56,21 @@ today's open behaviour:
 
 1. **`registration => open | oauth_only | closed`** core config, default
    `open` (asobi#158). One enum, not two overlapping booleans. This is
-   Photon's `AllowAnonymous`, correctly modelled.
+   Photon's `AllowAnonymous`, correctly modelled. Precise per-path
+   semantics, enforced at the three create branches via
+   `asobi_registration:check/1`:
+   - `open` - every create path mints players (password, oauth-first-time,
+     guest-first-time). Current behaviour.
+   - `oauth_only` - password registration is refused (`403`
+     `password_registration_disabled`); delegated OAuth may still create
+     players. **Guest signup is left to its own `guest_auth` toggle**
+     (ADR 0004), not governed by this mode - guest is a separate delegated
+     path with its own opt-in and caps.
+   - `closed` - no new player rows via *any* public path (`403`
+     `registration_closed`); existing players still authenticate (login,
+     refresh, oauth-login of a known identity, guest-resume are untouched).
+   An unrecognised value falls back to `open` and warns: locking real
+   players out on a config typo is worse than the abuse a mode prevents.
 2. **Cost-aware register rate limiting** — a refinement of the existing
    seki per-path limiter (`asobi_sup.erl`, `asobi_rate_limit_plugin.erl`),
    giving `register` its own bucket and gating the 100 000-iteration

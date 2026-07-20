@@ -100,6 +100,38 @@ is secured to leak nothing useful even if the identity table is dumped:
 > valuable - purchases, competitive ranking, cross-device identity -
 > should require a claimed account, not a guest session.
 
+## Registration mode
+
+Registration is **open by default** and that is deliberate (see ADR 0002):
+one asobi deployment serves one game, the endpoint URL is the game
+identity, and a downloadable client cannot prove it is "your" client. The
+`registration` app-env setting bounds anonymous signup as a *deployment*
+decision:
+
+```erlang
+{registration, open}         %% default
+%% {registration, oauth_only}
+%% {registration, closed}
+```
+
+| Mode | Password register | OAuth first-time | Guest first-time | Existing players |
+|------|-------------------|------------------|------------------|------------------|
+| `open` (default) | ✅ | ✅ | ✅ (if `guest_auth`) | ✅ |
+| `oauth_only` | ❌ `403` | ✅ | governed by `guest_auth` | ✅ |
+| `closed` | ❌ `403` | ❌ `403` | ❌ `403` | ✅ login/refresh/resume |
+
+`oauth_only` refuses only password registration; guest signup keeps
+following its own `guest_auth` toggle. `closed` freezes every new-player
+path while leaving all existing players able to authenticate. An
+unrecognised value falls back to `open` and logs a warning.
+
+> **Footgun (flip before release).** The shipped `examples/` quickstarts
+> and `asobi_register_bench` register headless with username/password and
+> rely on the `open` default - do not change it in dev/CI. Choosing a
+> stricter posture is a production deployment decision, the same way Photon
+> documents flipping `AllowAnonymous` before release. asobi logs the active
+> mode at boot (`event => registration_mode`) so the posture is visible.
+
 ## Per-route rate limits
 
 `asobi_rate_limit_plugin` is wired as a `pre_request` plugin in

@@ -15,7 +15,10 @@ authenticate(#{json := #{~"provider" := Provider, ~"token" := Token}} = _Req) wh
                 {ok, Identity} ->
                     login_existing_player(Identity);
                 {error, not_found} ->
-                    create_player_with_identity(Provider, Claims)
+                    case asobi_registration:check(oauth) of
+                        {deny, Reason} -> {json, 403, #{}, #{error => Reason}};
+                        ok -> create_player_with_identity(Provider, Claims)
+                    end
             end;
         {error, Reason} ->
             {json, 401, #{}, #{error => Reason}}
