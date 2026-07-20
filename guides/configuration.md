@@ -147,6 +147,43 @@ Each route group has its own per-IP default (window in ms): `auth` 5/1000,
 global (not per-IP) guest-create bound `guest_global` 100/1000. Override any
 group under `rate_limits`; unset groups keep their default.
 
+## WebSocket Origin allowlist
+
+By default the `/ws` upgrade accepts any `Origin` — web builds are served from
+arbitrary studio and hosting domains, so a strict default would break them.
+
+To harden a deployment against cross-site WebSocket hijacking, set an
+allowlist:
+
+```erlang
+{ws_allowed_origins, [
+    ~"https://play.yourgame.com",
+    ~"https://yourstudio.itch.io"
+]}
+```
+
+When set, a browser upgrade whose `Origin` is not listed is closed with
+`1008 origin_rejected` and emits `[asobi, ws, origin_rejected]`. Leaving it
+unset (or empty) keeps the open default.
+
+Match is **exact** against the value the browser sends, so copy that verbatim:
+scheme + host + non-default port only — **no trailing slash, no path, all
+lowercase, punycode (`xn--...`) for internationalised domains**, and each
+entry a binary (`~"..."`), not a string. A trailing slash, an explicit `:443`,
+or an uppercase host silently matches nothing and locks out real users. A
+value that is not a list of binaries is treated as a misconfiguration and
+**fails closed** (rejects everything) with a logged error, rather than
+silently reverting to allow-all.
+
+This is independent of [CORS](#cors): CORS governs XHR/fetch, not the WebSocket
+handshake, so configuring one does not affect the other.
+
+Native clients (Defold, Unity, Unreal, etc.) send no `Origin` header and are
+never affected — an absent `Origin` always passes, since a non-browser client
+cannot be a CSWSH vector. The socket also does nothing until it presents a
+valid token in the first `session.connect` frame, so this is defence in depth,
+not the primary auth gate.
+
 ## CORS
 
 CORS is handled by `nova_cors_plugin` in the Nova plugin chain — configure

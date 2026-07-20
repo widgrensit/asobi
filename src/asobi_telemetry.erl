@@ -13,7 +13,8 @@
     ws_message_out/1,
     ws_connect_rate_limited/1,
     join_rate_limited/1,
-    ws_idle_auth_timeout/0
+    ws_idle_auth_timeout/0,
+    ws_origin_rejected/0
 ]).
 -export([anticheat_violation/3]).
 -export([economy_transaction/4, store_purchase/3]).
@@ -183,6 +184,11 @@ ws_connect_rate_limited(PeerIp) ->
 -spec ws_idle_auth_timeout() -> ok.
 ws_idle_auth_timeout() ->
     telemetry:execute([asobi, ws, idle_auth_timeout], #{count => 1}, #{}).
+
+-doc "#160: a WS upgrade was rejected by the Origin allowlist.".
+-spec ws_origin_rejected() -> ok.
+ws_origin_rejected() ->
+    telemetry:execute([asobi, ws, origin_rejected], #{count => 1}, #{}).
 
 -spec anticheat_violation(binary(), atom(), map()) -> ok.
 anticheat_violation(PlayerId, Type, Details) ->

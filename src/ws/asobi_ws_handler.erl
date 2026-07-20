@@ -2,6 +2,8 @@
 -behaviour(nova_websocket).
 
 -export([init/1, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
+%% Exported for tests (pure allowlist predicate), mirroring deployable/1.
+-export([origin_allowed/1]).
 
 -define(WS_MSG_LIMIT, 60).
 -define(WS_MSG_WINDOW_MS, 1000).
@@ -18,26 +20,75 @@
 
 -spec init(map()) -> {ok, map()}.
 init(#{req := Req} = State) ->
-    %% Capture peer IP before the upgrade so websocket_init can run the
-    %% per-IP connect-rate check without re-parsing the req.
+    %% Capture peer IP and Origin before the upgrade so websocket_init can run
+    %% the per-IP connect-rate check and the Origin allowlist without
+    %% re-parsing the req (websocket_init runs post-upgrade, no req available).
     PeerIp = asobi_peer:client_ip(Req),
-    {ok, State#{session => undefined, peer_ip => PeerIp}};
+    Origin = cowboy_req:header(~"origin", Req, undefined),
+    {ok, State#{session => undefined, peer_ip => PeerIp, origin => Origin}};
 init(State) ->
-    {ok, State#{session => undefined, peer_ip => ~"unknown"}}.
+    {ok, State#{session => undefined, peer_ip => ~"unknown", origin => undefined}}.
 
 -spec websocket_init(map()) -> {ok, map()} | {reply, {close, 1008, binary()}, map()}.
 websocket_init(#{peer_ip := PeerIp} = State) ->
+    %% Per-IP connect limiter FIRST: spending a token IS the flood defence, so
+    %% every connect must count against the budget, including one we are about
+    %% to reject on Origin. Checking Origin first would let an attacker who
+    %% sets any disallowed Origin spawn ws processes without ever touching the
+    %% limiter - each connect upgrades, emits telemetry, and closes, unbounded.
     case seki:check(asobi_ws_connect_limiter, PeerIp) of
-        {allow, _} ->
-            start_authenticated_session(State);
         {deny, _} ->
             asobi_telemetry:ws_connect_rate_limited(PeerIp),
-            {reply, {close, 1008, ~"rate_limited"}, State}
+            {reply, {close, 1008, ~"rate_limited"}, State};
+        {allow, _} ->
+            case origin_allowed(maps:get(origin, State, undefined)) of
+                false ->
+                    asobi_telemetry:ws_origin_rejected(),
+                    {reply, {close, 1008, ~"origin_rejected"}, State};
+                true ->
+                    start_authenticated_session(State)
+            end
     end;
 websocket_init(State) ->
     %% No peer_ip — init/1 ran in a path without a req map. Skip the
     %% connect-rate gate but still install the idle-auth timer.
     start_authenticated_session(State).
+
+%% CSWSH defence-in-depth (#160). Opt-in and default-open, matching ADR 0002:
+%% with no `ws_allowed_origins` configured every Origin passes (today's
+%% behaviour). When an operator sets an allowlist, only those browser Origins
+%% may open the socket. A missing Origin header is a non-browser client
+%% (Defold/Unity native etc.) - it cannot be a CSWSH vector, so it always
+%% passes regardless of the allowlist.
+-spec origin_allowed(binary() | undefined) -> boolean().
+origin_allowed(undefined) ->
+    true;
+origin_allowed(Origin) when is_binary(Origin) ->
+    case application:get_env(asobi, ws_allowed_origins) of
+        undefined ->
+            true;
+        {ok, []} ->
+            true;
+        {ok, Allowed} when is_list(Allowed) ->
+            %% Set-but-malformed (e.g. a bare binary instead of a list of
+            %% binaries) must fail CLOSED and loud, not silently allow-all -
+            %% otherwise a dropped-bracket typo nullifies the control while the
+            %% operator believes the socket is locked down.
+            case lists:all(fun is_binary/1, Allowed) of
+                true -> lists:member(Origin, Allowed);
+                false -> misconfigured_origins(Allowed)
+            end;
+        {ok, Other} ->
+            misconfigured_origins(Other)
+    end.
+
+-spec misconfigured_origins(term()) -> false.
+misconfigured_origins(Value) ->
+    logger:error(#{
+        msg => ~"ws_allowed_origins must be a list of binaries; failing closed",
+        value => Value
+    }),
+    false.
 
 start_authenticated_session(State) ->
     asobi_telemetry:ws_connected(),
