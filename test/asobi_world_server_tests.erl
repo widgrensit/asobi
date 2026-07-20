@@ -359,3 +359,17 @@ listing_info_omits_visibility_flags_test() ->
         world_id => ~"w1", listed => false, quick_play => false
     }),
     ?assertEqual([world_id], maps:keys(Listing)).
+
+%% asobi_lua binds the world server pid as `match_pid` in world and zone
+%% contexts (asobi_lua_world.erl:739,747), so `game.broadcast` from any world
+%% or zone script casts {broadcast_event, ...} at asobi_world_server. It had
+%% no clause in any state except `finished`, so the cast was a function_clause
+%% and killed the world. Unconditional, unlike the match-side variant.
+broadcast_in_running_does_not_kill_the_world_test() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    ok = asobi_world_server:join(Pid, ~"p1"),
+    gen_statem:cast(Pid, {broadcast_event, world_notice, #{msg => ~"hello"}}),
+    timer:sleep(30),
+    ?assert(is_process_alive(Pid)),
+    ?assertEqual(running, maps:get(status, asobi_world_server:get_info(Pid))),
+    stop_world(Ctx).

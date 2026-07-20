@@ -393,3 +393,53 @@ stop(Pid) ->
         false ->
             ok
     end.
+
+%% --- broadcast reaches players in every live state ---
+
+%% game.broadcast is a self-cast from the Lua callback into the match
+%% gen_statem. `waiting` had no clause and no catch-all, so a game telling
+%% the room "someone joined" while gathering crashed the match. `finished`
+%% had a catch-all, so an end-of-match broadcast was swallowed silently -
+%% which reads as a client bug rather than a server one.
+
+broadcast_in_waiting_reaches_players_test() ->
+    setup(),
+    Pid = start_match(#{min_players => 2, max_players => 4}),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    ?assertEqual(waiting, maps:get(status, asobi_match_server:get_info(Pid))),
+
+    asobi_match_server:broadcast_event(Pid, lobby_update, #{waiting_for => 1}),
+    %% A crash here would leave the match dead; a working clause leaves it
+    %% waiting and responsive.
+    ?assertEqual(waiting, maps:get(status, asobi_match_server:get_info(Pid))),
+    ?assert(is_process_alive(Pid)),
+    cleanup(ok).
+
+broadcast_in_finished_is_not_swallowed_test() ->
+    setup(),
+    %% Drive the match to `finished` the way a real game does: tick returns
+    %% {finished, Result, State}. Without a broadcast clause the catch-all in
+    %% `finished` swallows the end-of-match event with no error anywhere.
+    meck:new(asobi_test_game, [passthrough, no_link]),
+    meck:expect(asobi_test_game, tick, fun(GS) -> {finished, #{winner => ~"p1"}, GS} end),
+    Pid = start_match(#{min_players => 1, max_players => 2, tick_rate => 10}),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    wait_for_status(Pid, finished, 60),
+    ?assertEqual(finished, maps:get(status, asobi_match_server:get_info(Pid))),
+
+    asobi_match_server:broadcast_event(Pid, game_over, #{winner => ~"p1"}),
+    timer:sleep(20),
+    ?assert(is_process_alive(Pid)),
+    meck:unload(asobi_test_game),
+    cleanup(ok).
+
+wait_for_status(_Pid, _Status, 0) ->
+    error(timeout_waiting_for_status);
+wait_for_status(Pid, Status, N) ->
+    case maps:get(status, asobi_match_server:get_info(Pid), undefined) of
+        Status ->
+            ok;
+        _ ->
+            timer:sleep(20),
+            wait_for_status(Pid, Status, N - 1)
+    end.

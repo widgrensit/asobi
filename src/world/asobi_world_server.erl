@@ -227,6 +227,12 @@ loading({call, _From}, {join, _PlayerId}, _State) ->
     %% Postpone join until we transition to running. Otherwise the call
     %% would crash with function_clause and the caller would time out.
     {keep_state_and_data, [postpone]};
+%% A world script broadcasting during generate_world/init reaches the world
+%% server while it is still loading. Without this clause that is a
+%% function_clause and the world dies before it ever runs.
+loading(cast, {broadcast_event, Event, Payload}, State) ->
+    broadcast_world_event(Event, Payload, State),
+    keep_state_and_data;
 loading(cast, cancel, State) ->
     {stop, {shutdown, cancelled}, State}.
 
@@ -312,6 +318,9 @@ running(
         {error, _} ->
             keep_state_and_data
     end;
+running(cast, {broadcast_event, Event, Payload}, State) ->
+    broadcast_world_event(Event, Payload, State),
+    keep_state_and_data;
 running(cast, cancel, State) ->
     {next_state, finished, State#{result => #{status => ~"cancelled"}}};
 running(info, {vote_resolved, VoteId, Template, Result}, State) ->
@@ -410,6 +419,12 @@ finished(enter, _OldState, #{world_id := WorldId, config := Config} = State) ->
     {keep_state_and_data, [{state_timeout, 5000, cleanup}]};
 finished(state_timeout, cleanup, State) ->
     {stop, normal, State};
+%% Same reasoning as the match server: a world ending and broadcasting the
+%% result in the same callback lands here, and the catch-all below would
+%% swallow it silently.
+finished(cast, {broadcast_event, Event, Payload}, State) ->
+    broadcast_world_event(Event, Payload, State),
+    keep_state_and_data;
 finished({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(finished, State)}]};
 finished(_EventType, _Event, _State) ->
@@ -1019,6 +1034,22 @@ persist_result(#{world_id := WorldId, players := Players} = State) ->
     ),
     _ = asobi_repo:insert(CS),
     ok.
+
+-doc """
+Fan a game-authored event out to every player in the world.
+
+`notify_players/2` builds payloads for specific lifecycle events; this is
+the general path a Lua `game.broadcast` reaches. asobi_lua binds the world
+server pid as `match_pid` in world and zone contexts, so `game.broadcast`
+from a world script casts `{broadcast_event, ...}` here.
+""".
+broadcast_world_event(Event, Payload, #{players := Players}) ->
+    maps:foreach(
+        fun(PlayerId, _Meta) ->
+            asobi_presence:send(PlayerId, {world_event, Event, Payload})
+        end,
+        Players
+    ).
 
 notify_players(Event, #{players := Players, world_id := WorldId} = State) ->
     Payload =
