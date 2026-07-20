@@ -111,6 +111,22 @@ put_storage(
     WritePerm0 = maps:get(~"write_perm", Params, ~"owner"),
     ReadPerm = ensure_binary_perm(ReadPerm0),
     WritePerm = ensure_binary_perm(WritePerm0),
+    %% M5: the generic-storage path had no per-row cap, only the 1 MiB global
+    %% body cap. Mirror the save-data limit so one row cannot persist an
+    %% arbitrary blob under the global ceiling.
+    case data_within_limit(Value) of
+        false ->
+            {json, 413, #{}, #{error => ~"storage_value_too_large"}};
+        true ->
+            put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm)
+    end;
+put_storage(_Req) ->
+    {status, 400}.
+
+-spec put_storage_checked(
+    dynamic(), dynamic(), dynamic(), dynamic(), binary(), binary()
+) -> {json, map()} | {json, integer(), map(), map()} | {status, integer()}.
+put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm) ->
     case valid_perm(ReadPerm) andalso valid_perm(WritePerm) of
         false ->
             {json, 400, #{}, #{error => ~"invalid_perm"}};
