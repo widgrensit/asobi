@@ -170,6 +170,43 @@ The dev / test sys config bumps all three to 1000 because CT bursts
 register/login calls against `127.0.0.1` and the production-default
 auth cap would fail the suites.
 
+## Client gate (pre-auth)
+
+`asobi_client_gate` is a pluggable "is this traffic allowed in" seam on the
+anonymous auth-create routes (`/auth/register`, `/auth/oauth`,
+`/auth/guest`). It is distinct from `asobi_auth_plugin` ("who is the
+player"): a gate carries **no** player identity - its return type is
+deliberately narrow so an implementation cannot leak or forge identity.
+
+```erlang
+-callback verify(asobi_client_gate:context()) -> skip | {deny, Reason :: binary()}.
+```
+
+The input is a **minimized context**, not the raw request - `#{ip, headers,
+path, token}`. The request map still holds the registration plaintext
+password at this point, and a traffic gate has no need for it; handing over
+only IP / headers / path / a `client_gate_token` field keeps a verbose or
+buggy third-party gate from logging or forwarding credentials.
+
+Wire an implementation with `{client_gate, my_gate_module}` in app env;
+**unset is a no-op**, so bots, dedicated servers, CI, headless clients and
+`asobi_register_bench` all keep working by default. `asobi_client_gate_plugin`
+runs immediately after the rate limiter and before the password KDF, so a
+denial (`403 registration_gate_denied`) never pays the pbkdf2 cost
+(asobi#157), and a register flood is shed by the cheap in-memory limiter
+before it can trigger an outbound siteverify.
+
+A configured gate that **crashes, hangs, or returns garbage fails closed**
+by default (`403 client_gate_unavailable`) - a security control that
+silently fails open is bypassable by knocking over the vendor. The gate call
+is bounded by `{client_gate_timeout, Ms}` (default 5000) so a stalled
+siteverify cannot pin the request process. Trade strictness for availability
+with `{client_gate_on_error, skip}`.
+
+CAPTCHA / Turnstile / hCaptcha is the first *consumer* of this seam and
+ships **outside** core (asobi_engine or a contrib plugin): a vendor-specific
+external round-trip must not couple asobi's public request path to a SaaS.
+
 ## DDoS / DoS surface notes
 
 These are the deliberate per-call upper bounds in the runtime that
