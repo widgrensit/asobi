@@ -137,6 +137,9 @@ strategy   = "my_matchmaker"
 
 ## Playing With Friends
 
+> Gathering players before a game starts is covered in [Lobbies](lobbies.md).
+
+
 The matchmaker has no party grouping. It queues individual players, and a
 ticket cannot bring other players with it.
 
