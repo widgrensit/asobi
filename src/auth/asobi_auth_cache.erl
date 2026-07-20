@@ -57,7 +57,7 @@ resolve_token(_) ->
 -spec lookup(binary()) -> {ok, map()} | {error, term()}.
 lookup(Token) ->
     Now = erlang:system_time(millisecond),
-    case ets:lookup(?TABLE, Token) of
+    case ets:lookup(?TABLE, key(Token)) of
         [{_, {ok, Player}, ExpiresAt}] when ExpiresAt > Now ->
             asobi_telemetry:auth_cache_hit(positive),
             {ok, Player};
@@ -89,7 +89,7 @@ invalidate(Token) when is_binary(Token) ->
         undefined ->
             ok;
         _ ->
-            ets:delete(?TABLE, Token),
+            ets:delete(?TABLE, key(Token)),
             ok
     end;
 invalidate(_) ->
@@ -183,9 +183,24 @@ insert(Token, Value, ExpiresAt) ->
             %% silently skip; the real lookup will go to the DB.
             ok;
         _ ->
-            ets:insert(?TABLE, {Token, Value, ExpiresAt}),
+            ets:insert(?TABLE, {key(Token), Value, ExpiresAt}),
             ok
     end.
+
+-doc """
+Derive the ETS key from a token.
+
+The token itself is never stored - only its SHA-256. A crash dump,
+`observer`, or a hot-loaded debugger reading the table yields hashes, not
+usable session tokens. asobi is single-tenant so there is no untrusted Lua,
+but the dump/observer/debugger surface is real; this closes it (asobi#168).
+
+The stored `Value` holds the player map, which contains no token, so the
+row as a whole leaks nothing that resolves to a session.
+""".
+-spec key(binary()) -> binary().
+key(Token) ->
+    crypto:hash(sha256, Token).
 
 -spec schedule_sweep() -> reference().
 schedule_sweep() ->
