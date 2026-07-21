@@ -1,33 +1,38 @@
 # Performance Tuning
 
-Optimisation features for high-throughput world servers. These are all
-opt-in and backward compatible -- existing configurations work unchanged.
+Optimisation features for high-throughput world and match servers. All are
+opt-in and backward compatible; existing configurations work unchanged.
+
+Every feature here is game config or logic. It is identical on managed Cloud
+(`asobi deploy`, console.asobi.dev) and on a self-hosted release - the same
+script, the same globals. Only the base server URL your client SDK points at
+differs, and that is covered in [Getting Started](getting-started.md).
 
 ## Spatial Grid Index
 
-By default, spatial queries (`query_radius`, `query_rect`) scan all
-entities in a zone via `maps:fold` -- O(n). For zones with many entities,
-enable the cell-based spatial grid for O(1) cell lookup + local scan.
+By default, spatial queries scan all entities in a zone (O(n)). For zones with
+many entities, enable the cell-based spatial grid for O(1) cell lookup plus a
+local scan. Set the cell size as a global in your world script.
 
 <!-- tabs -->
 **Lua**
 ```lua
 -- world.lua
 game_type              = "world"
-spatial_grid_cell_size = 16   -- units per cell
+spatial_grid_cell_size = 16
 ```
 
 **Erlang**
 ```erlang
 Config = #{
     game_module => my_world,
-    spatial_grid_cell_size => 16  %% units per cell
+    spatial_grid_cell_size => 16
 }.
 ```
 <!-- /tabs -->
 
-The grid is maintained automatically as entities are added, removed, or
-moved during ticks. Query through the zone API:
+The grid is maintained automatically as entities are added, removed, or moved
+during ticks. Query it through the `game.spatial` namespace:
 
 <!-- tabs -->
 **Lua**
@@ -36,74 +41,86 @@ moved during ticks. Query through the zone API:
 local hits = game.spatial.query_radius(100, 200, 50)
 ```
 
-`game.spatial` also offers `query_rect`, `nearest`, `in_range` and
-`distance`. The zone-based forms need a zone in scope; the entity-list
-forms (`game.spatial.query_radius(entities, x, y, radius)`) work anywhere.
-
 **Erlang**
 ```erlang
 Results = asobi_zone:query_radius(ZonePid, {100.0, 200.0}, 50.0).
-%% Returns [{EntityId, {X, Y}}, ...]
 ```
 <!-- /tabs -->
 
-When no `spatial_grid_cell_size` is configured, the zone falls back to
-the brute-force scan (existing behaviour).
+`game.spatial` also offers `query_rect`, `nearest`, `in_range` and `distance`.
+Only `query_radius` and `query_rect` have zone-based forms and need a zone in
+scope; `nearest`, `in_range` and `distance` are entity-list forms
+(`game.spatial.query_radius(entities, x, y, radius)`) and work anywhere.
+
+When no `spatial_grid_cell_size` is configured, the zone falls back to the
+brute-force scan.
 
 ### Cell Size Guidelines
 
 | Entity Density | Recommended Cell Size |
 |---------------|----------------------|
-| Sparse (< 50/zone) | Don't enable (overhead not worth it) |
+| Sparse (< 50/zone) | Do not enable (overhead not worth it) |
 | Medium (50-200/zone) | 32-64 units |
 | Dense (200+/zone) | 8-16 units |
 
 ## Broadcast Batching
 
-Zone deltas are JSON-encoded once and the pre-encoded binary is sent to
-all subscribers. This replaces N `json:encode` calls with exactly 1.
+Zone deltas are JSON-encoded once and the pre-encoded binary is sent to all
+subscribers, replacing N `json:encode` calls with exactly 1. This is automatic;
+no configuration needed. Subscribers receive `zone_delta_raw` messages that the
+WebSocket handler forwards without re-encoding.
 
-This is automatic -- no configuration needed. Subscribers receive
-`zone_delta_raw` messages containing pre-encoded JSON, which the
-WebSocket handler forwards directly without re-encoding.
+## Match State Broadcast (Shared vs Per-Player)
 
-## Match State Broadcast (Shared vs. Per-Player)
+By default the match server calls `get_state(player_id, state)` once per player
+per tick and JSON-encodes each result. For games where every player sees the
+same world (FFA shooters, racing, party games), opt into a single shared encode:
+the server calls the state function once per tick, encodes once, and broadcasts
+the same binary to everyone. At 200 players and 10 ticks/sec this drops 2000
+encodes/sec to 10.
 
-By default the match server calls `Mod:get_state(PlayerId, GameState)`
-once per player per tick and JSON-encodes each result. For games where
-every player sees the same world (FFA shooters, racing, party games),
-implement the optional `get_state/1` callback instead:
+Opt in from your match script by declaring `state_strategy = "shared"` and
+defining a one-arg state function. Games that need per-player filtering (fog of
+war, hidden hand) keep the two-arg form and pay the per-player cost.
 
+<!-- tabs -->
+**Lua**
+```lua
+-- match.lua
+state_strategy = "shared"
+
+function get_state(state)
+    return state
+end
+```
+
+**Erlang**
 ```erlang
 -callback get_state(GameState) -> SharedState.
 ```
+<!-- /tabs -->
 
-When the match server detects `get_state/1` is exported, it calls it once
-per tick, JSON-encodes once, and broadcasts the same pre-encoded binary
-to every player. At 200 players / 10 ticks/sec this drops 2000 encodes/sec
-to 10. Games that need per-player filtering (fog of war, hidden hand)
-keep `get_state/2` and pay the per-player cost.
-
-Lua match scripts opt in by declaring `state_strategy = "shared"` and
-defining a one-arg `get_state(state)`. The asobi_lua bridge then routes
-through `asobi_lua_match_shared`, which exports `get_state/1`.
+The asobi_lua bridge routes a shared script through `asobi_lua_match_shared`,
+which exports `get_state/1`. In Erlang, export exactly one of `get_state/1` or
+`get_state/2`; the match server detects which and switches broadcast strategy.
+For multi-mode games, declare `state_strategy` in the mode's config, not in a
+shared file - see [Configuration](configuration.md).
 
 ## Adaptive Tick Rates
 
-Zones with no subscribers tick at a reduced rate to save CPU:
+Zones with no subscribers tick at a reduced rate to save CPU. Set the divisor as
+a global.
 
 <!-- tabs -->
 **Lua**
 ```lua
 -- world.lua
-cold_tick_divisor = 10   -- cold zones tick 10x less often (default)
+cold_tick_divisor = 10
 ```
 
 **Erlang**
 ```erlang
-Config = #{
-    cold_tick_divisor => 10  %% cold zones tick 10x less often (default)
-}.
+Config = #{cold_tick_divisor => 10}.
 ```
 <!-- /tabs -->
 
@@ -113,22 +130,16 @@ Config = #{
 | Cold | 1/N (every Nth tick) | Entities but no subscribers |
 | Empty | Not ticked | No entities, no subscribers |
 
-The ticker provides manual controls:
-
-```erlang
-asobi_world_ticker:promote_zone(TickerPid, ZonePid).  %% → hot
-asobi_world_ticker:demote_zone(TickerPid, ZonePid).   %% → cold
-asobi_world_ticker:remove_zone(TickerPid, ZonePid).   %% → stop ticking
-```
-
-Zone promotion/demotion is typically handled automatically by the zone
-manager based on subscriber presence.
+Promotion and demotion between hot and cold are handled automatically by the
+zone manager based on subscriber presence, so a game script never manages tick
+state directly.
 
 ## Binary Protocol
 
-For maximum throughput, clients can negotiate binary WebSocket frames
-instead of JSON. Set `binary_protocol: true` in the `session.connect`
-payload.
+For maximum throughput, a client can negotiate binary WebSocket frames instead
+of JSON. This is a client-side choice, identical on Cloud and self-hosted: set
+`binary_protocol: true` in the `session.connect` payload. JSON remains the
+default; binary is opt-in per connection.
 
 Binary frames use a Tag-Length-Value format:
 
@@ -136,24 +147,30 @@ Binary frames use a Tag-Length-Value format:
 [type:u8][length:u32be][payload:bytes]
 ```
 
-### Message Types
-
 | Tag | Type | Payload |
 |-----|------|---------|
 | 0x01 | Terrain chunk | coords (2x i32) + compressed data |
 | 0x02 | Entity deltas | tick (u64) + counted delta list |
 | 0x03 | Match state | Reserved |
 
-### Size Savings
+Terrain chunks save ~25% versus JSON+base64; entity deltas save 15-30% depending
+on field count. Frame encoding and decoding is handled by the server and SDKs -
+see the [WebSocket protocol](websocket-protocol.md) guide.
 
-Terrain chunks save ~25% vs JSON+base64 encoding. Entity deltas save
-varies based on field count but typically 15-30%.
+## Checkpoint
 
-Use `asobi_ws_binary` for encoding/decoding:
+1. Add `spatial_grid_cell_size = 16` to a busy `world.lua`, redeploy (Cloud:
+   `asobi deploy`; self-hosted: your release), and call
+   `game.spatial.query_radius(x, y, r)` from `zone_tick`. It returns the same
+   hits as before, now backed by the grid rather than a full scan.
+2. In a match where everyone shares one view, set `state_strategy = "shared"`
+   and a one-arg `get_state(state)`. With 100+ players connected, server encode
+   count per tick should drop from once-per-player to once total.
+3. Leave a zone with no subscribers. Confirm it ticks at roughly
+   `1 / cold_tick_divisor` of the hot rate, and that an empty zone stops ticking
+   entirely.
 
-```erlang
-Bin = asobi_ws_binary:encode_terrain_chunk({5, 10}, CompressedData).
-{{5, 10}, Data} = asobi_ws_binary:decode_terrain_chunk(Bin).
-```
+## Next
 
-JSON remains the default protocol. Binary is opt-in per connection.
+[Large Worlds](large-worlds.md) - lazy zone loading, terrain providers, and the
+zone lifecycle these tuning knobs sit on top of.
