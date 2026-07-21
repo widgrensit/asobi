@@ -3,6 +3,13 @@
 Asobi uses a single WebSocket connection per client at `/ws`. All messages
 are JSON with a common envelope format.
 
+> **You probably do not call this directly.** This page is the raw wire reference.
+> Every official SDK (Defold, Godot, Unity, Unreal, Dart/Flame, JavaScript, LÖVE)
+> wraps this protocol: each message you *send* is a function, each message the
+> server *pushes* is a callback you register. Reach for this page only to write a
+> client from scratch or to debug what is on the wire. For the calls in your
+> language, see the realtime section of your [SDK quickstart](https://asobi.dev/docs).
+
 ## Message Format
 
 ### Client to Server
@@ -53,6 +60,10 @@ Keep-alive ping. Send periodically to prevent timeout.
 ```
 
 ## Matches
+
+> The `match.input` (client -> server) and `match.state` (server -> all clients)
+> pair below is the core real-time loop. In an SDK these are one send function and
+> one receive callback - see the realtime section of your [SDK quickstart](https://asobi.dev/docs).
 
 ### `match.list`
 
@@ -348,11 +359,20 @@ membership without a per-frame registry lookup.
 
 | Prefix   | Used for                                  | Membership rule |
 |----------|-------------------------------------------|-----------------|
-| `dm:`    | Direct messages                           | Both participants only. |
+| `dm:`    | Direct messages                           | The two named participants only. |
 | `world:` | World-wide chat                           | Players currently joined to the world. |
-| `zone:`  | A specific zone within a world            | Players currently inside that zone. |
-| `prox:`  | Proximity chat (radius around a position) | Players within the configured radius. |
-| `room:`  | Group / lobby / custom rooms              | Group members, or open join per room policy. |
+| `zone:`  | A specific zone within a world            | Players currently joined to the world. |
+| `prox:`  | Proximity chat (radius around a position) | Players currently joined to the world. |
+| `room:`  | App-defined group chat                    | Members of the group whose id equals the channel id. Not open-join. |
+
+There is no open-join room policy and no `match:` scheme. `room:` is authorised
+as a group membership check: the runtime treats the full channel id as the group
+id, so a player must already belong to a group with that exact id. For pre-game
+lobby chat, gate on world membership with `world:<world_id>`, or use
+`game.broadcast`; see the [Lobbies](lobbies.md) guide.
+
+The worked examples below use a `world:` channel, which authorises on world
+membership you already hold after `world.join`.
 
 A single connection may join at most **32 channels** at once; a 33rd is rejected
 with `too_many_channels`. Idle channels with no members stop after 60s; rejoining
@@ -367,7 +387,7 @@ History (`GET /api/v1/chat/:channel_id/history`) requires membership and clamps
 Join a chat channel. The channel id must be namespaced.
 
 ```json
-{"type": "chat.join", "payload": {"channel_id": "room:lobby"}}
+{"type": "chat.join", "payload": {"channel_id": "world:w_ancient_ruins"}}
 ```
 
 ### `chat.send`
@@ -375,7 +395,7 @@ Join a chat channel. The channel id must be namespaced.
 Send a message to a channel.
 
 ```json
-{"type": "chat.send", "payload": {"channel_id": "room:lobby", "content": "Hello!"}}
+{"type": "chat.send", "payload": {"channel_id": "world:w_ancient_ruins", "content": "Hello!"}}
 ```
 
 ### `chat.message` (server push)
@@ -386,7 +406,7 @@ A new message in a joined channel.
 {
   "type": "chat.message",
   "payload": {
-    "channel_id": "room:lobby",
+    "channel_id": "world:w_ancient_ruins",
     "sender_id": "...",
     "content": "Hello!",
     "sent_at": "2025-01-15T10:30:00Z"
@@ -399,7 +419,7 @@ A new message in a joined channel.
 Leave a chat channel.
 
 ```json
-{"type": "chat.leave", "payload": {"channel_id": "room:lobby"}}
+{"type": "chat.leave", "payload": {"channel_id": "world:w_ancient_ruins"}}
 ```
 
 ## Voting

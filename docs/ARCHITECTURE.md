@@ -3,6 +3,13 @@
 This document describes Asobi's internal architecture, supervision trees,
 data model, and protocol design.
 
+> This is an internal design document. It is not published to HexDocs and is not
+> the API reference. For the canonical, maintained references see the
+> [Architecture guide](../guides/architecture.md) (supervision, lifecycles,
+> deployment models), the [REST API guide](../guides/rest-api.md) (every HTTP
+> endpoint and status code), and the
+> [WebSocket protocol guide](../guides/websocket-protocol.md) (the message catalogue).
+
 ## Stack
 
 | Layer | Technology |
@@ -10,7 +17,6 @@ data model, and protocol design.
 | HTTP / REST | Nova (Cowboy) |
 | WebSocket | Nova WebSocket (Cowboy) |
 | Database / ORM | Kura (PostgreSQL via pgo) |
-| Real-time UI / Admin | Arizona Core + arizona_nova |
 | Authentication | nova_auth |
 | Background Jobs | Shigoto |
 | Pub/Sub / Presence | `pg` module + Nova PubSub |
@@ -30,7 +36,7 @@ data model, and protocol design.
 │                      Nova Router                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
 │  │ REST API     │  │ WebSocket    │  │ Admin        │ │
-│  │ Controllers  │  │ Handler      │  │ (Arizona)    │ │
+│  │ Controllers  │  │ Handler      │  │ (ext. repo)  │ │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
 └─────────┼─────────────────┼─────────────────┼──────────┘
           │                 │                 │
@@ -447,34 +453,10 @@ Single WebSocket connection per client. JSON message envelope:
 
 ### Message Types
 
-**Connection:**
-- `session.connect` → authenticate WebSocket, start player session
-- `session.heartbeat` → keep-alive ping/pong
-
-**Matches:**
-- `match.join` → join a match
-- `match.leave` → leave current match
-- `match.input` → send game input to match server
-- `match.state` → server pushes state updates (delta)
-- `match.started` → server notification: match began
-- `match.finished` → server notification: match ended with results
-
-**Matchmaking:**
-- `matchmaker.add` → submit matchmaking ticket
-- `matchmaker.remove` → cancel ticket
-- `matchmaker.matched` → server notification: match found
-
-**Chat:**
-- `chat.join` → join a channel
-- `chat.leave` → leave a channel
-- `chat.send` → send message to channel
-- `chat.message` → server pushes new message
-- `chat.history` → request message history
-
-**Social:**
-- `presence.update` → update own status
-- `presence.changed` → server pushes friend status change
-- `notification.new` → server pushes notification
+The authoritative message catalogue is the
+[WebSocket protocol guide](../guides/websocket-protocol.md). The handler
+(`asobi_ws_handler`) routes each `type` to the owning service; the client sends
+input, the server decides and broadcasts state deltas.
 
 ### WebSocket Handler (`asobi_ws_handler`)
 
@@ -496,111 +478,21 @@ route_message(~"chat.send", Payload, State) ->
 
 ## REST API
 
-All REST endpoints under `/api/v1`. JSON request/response.
+The HTTP endpoint reference is the [REST API guide](../guides/rest-api.md). It is
+the single source of truth for paths, methods, and status codes; this document does
+not repeat it. All endpoints sit under `/api/v1` and exchange JSON. Routing lives in
+`asobi_router.erl`; the controllers are the `*_controller` modules under
+[Project Structure](#project-structure).
 
-### Auth (nova_auth)
-```
-POST   /api/v1/auth/register          Register with email/password
-POST   /api/v1/auth/login             Login, returns session token
-POST   /api/v1/auth/link              Link additional provider
-POST   /api/v1/auth/refresh           Refresh session token
-POST   /api/v1/auth/device            Device ID authentication
-POST   /api/v1/auth/apple             Apple Game Center auth
-POST   /api/v1/auth/google            Google Play Games auth
-```
+The client sends intent over these endpoints, the server decides, and the server
+persists and broadcasts the result.
 
-### Players
-```
-GET    /api/v1/players/:id            Get player profile
-PUT    /api/v1/players/:id            Update own profile
-GET    /api/v1/players/:id/stats      Get player stats
-```
+## Admin
 
-### Social
-```
-GET    /api/v1/friends                List friends
-POST   /api/v1/friends                Send friend request
-PUT    /api/v1/friends/:id            Accept/reject/block
-DELETE /api/v1/friends/:id            Remove friend
-
-POST   /api/v1/groups                 Create group
-GET    /api/v1/groups/:id             Get group
-PUT    /api/v1/groups/:id             Update group
-POST   /api/v1/groups/:id/join        Join group
-POST   /api/v1/groups/:id/leave       Leave group
-PUT    /api/v1/groups/:id/members/:pid Update member role
-```
-
-### Economy
-```
-GET    /api/v1/wallets                List player wallets
-GET    /api/v1/wallets/:currency/history  Transaction history
-
-GET    /api/v1/store                  List store catalog
-POST   /api/v1/store/purchase         Purchase item
-
-POST   /api/v1/iap/apple/verify       Validate Apple receipt
-POST   /api/v1/iap/google/verify      Validate Google receipt
-```
-
-### Inventory
-```
-GET    /api/v1/inventory              List player items
-POST   /api/v1/inventory/consume      Consume item
-POST   /api/v1/inventory/equip        Equip/unequip item
-```
-
-### Leaderboards
-```
-GET    /api/v1/leaderboards/:id              Top N entries
-GET    /api/v1/leaderboards/:id/around/:pid  Around player
-POST   /api/v1/leaderboards/:id              Submit score
-```
-
-### Tournaments
-```
-GET    /api/v1/tournaments            List active tournaments
-GET    /api/v1/tournaments/:id        Get tournament details
-POST   /api/v1/tournaments/:id/join   Join tournament
-```
-
-### Storage
-```
-GET    /api/v1/storage/:collection/:key        Read object
-PUT    /api/v1/storage/:collection/:key        Write object (with version for OCC)
-DELETE /api/v1/storage/:collection/:key        Delete object
-GET    /api/v1/storage/:collection             List objects in collection
-```
-
-### Cloud Saves
-```
-GET    /api/v1/saves                  List save slots
-GET    /api/v1/saves/:slot            Get save data
-PUT    /api/v1/saves/:slot            Write save (with version)
-```
-
-### Notifications
-```
-GET    /api/v1/notifications          List notifications (paginated)
-PUT    /api/v1/notifications/:id/read Mark as read
-DELETE /api/v1/notifications/:id      Delete notification
-```
-
-## Admin Dashboard (Arizona)
-
-Arizona LiveView admin console at `/admin`. Real-time updates via Arizona PubSub.
-
-### Views
-
-- **Dashboard** — online players, active matches, server stats (ETS counters)
-- **Players** — search, view profile, ban/unban, edit metadata, view transactions
-- **Matches** — live match list, spectate match state, force-end
-- **Economy** — grant/revoke currency, edit store listings, transaction audit
-- **Leaderboards** — view boards, manual entry management, trigger reset
-- **Groups** — view groups, moderate, edit
-- **Chat** — monitor channels, moderate messages
-- **Tournaments** — create/edit tournaments, view standings
-- **Config** — remote config key-value editor, feature flags
+This node ships no admin console. The dashboard is a separate project,
+[asobi_admin](https://github.com/widgrensit/asobi_admin), which reads the same
+database. There is no `/admin` route in `asobi_router.erl`, and asobi no longer
+depends on Arizona.
 
 ## Background Jobs (Shigoto)
 
@@ -834,20 +726,11 @@ asobi/
 ].
 ```
 
-## Dependencies (rebar.config)
+## Dependencies
 
-```erlang
-{deps, [
-    {nova, {git, "https://github.com/novaframework/nova.git", {branch, "main"}}},
-    {kura, {git, "https://github.com/Taure/kura.git", {branch, "main"}}},
-    {arizona_core, {git, "https://github.com/novaframework/arizona_core.git", {branch, "main"}}},
-    {arizona_nova, {git, "https://github.com/novaframework/arizona_nova.git", {branch, "main"}}},
-    {nova_auth, {git, "https://github.com/novaframework/nova_auth.git", {branch, "main"}}},
-    {shigoto, {git, "https://github.com/Taure/shigoto.git", {branch, "main"}}},
-    {nova_test, {git, "https://github.com/novaframework/nova_test.git", {branch, "main"}}},
-    {opentelemetry_kura, {git, "https://github.com/novaframework/opentelemetry_kura.git", {branch, "main"}}}
-]}.
-```
+`rebar.config` is the authoritative list. asobi builds on Nova, Kura (with
+kura_postgres), nova_auth, nova_auth_oidc, nova_resilience, seki, and Shigoto. It
+does not depend on Arizona.
 
 ## Build Phases
 
