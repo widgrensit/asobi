@@ -17,8 +17,9 @@ library with a [Luerl](https://github.com/rvirding/luerl) VM so you can
 write game logic in Lua without knowing Erlang. Ships as a Docker image at
 `ghcr.io/widgrensit/asobi_lua`. Most people start here.
 
-**asobi_arena_lua** — the flagship end-to-end Lua example. Read it to see
-a full game, not a snippet.
+**Arena Shooter** — the flagship end-to-end sample: a full multiplayer game
+(server-authoritative movement and combat, matchmaking with bots, boons,
+round voting, a leaderboard), not a snippet.
 
 ## Client SDKs
 
