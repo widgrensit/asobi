@@ -17,6 +17,12 @@
     ws_origin_rejected/0
 ]).
 -export([anticheat_violation/3]).
+-export([game_error/1, game_error/2]).
+
+%% Categories of game-code error. A fixed literal set on purpose - never derive
+%% Kind from untrusted input (atom-table exhaustion). Extend as categories arise.
+-type game_error_kind() :: lua_error.
+-export_type([game_error_kind/0]).
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).
 -export([vote_started/2, vote_cast/2, vote_resolved/3]).
@@ -197,6 +203,26 @@ anticheat_violation(PlayerId, Type, Details) ->
         #{count => 1},
         #{player_id => PlayerId, type => Type, details => Details}
     ).
+
+-doc """
+Emit `[asobi, error]` for a game-code error - the game author's logic failing,
+e.g. a Lua callback raising. `count => 1`, metadata `#{kind, details}`.
+
+`details` is passed verbatim to every attached handler (which may log or export
+it), so emitters MUST keep it bounded and free of sensitive data: no raw player
+input, secrets, PII, or file-system paths, and no unbounded values (truncate a
+message, classify the reason - never pass a raw luerl/error term, which can
+embed interpolated player input). Consumers should aggregate on `kind` only, not
+on `details` (this event can fire at high frequency).
+""".
+-spec game_error(game_error_kind(), map()) -> ok.
+game_error(Kind, Details) ->
+    telemetry:execute([asobi, error], #{count => 1}, #{kind => Kind, details => Details}).
+
+-doc "Emit `[asobi, error]` with no extra context. See `game_error/2`.".
+-spec game_error(game_error_kind()) -> ok.
+game_error(Kind) ->
+    game_error(Kind, #{}).
 
 -spec ws_message_in(binary()) -> ok.
 ws_message_in(Type) ->
