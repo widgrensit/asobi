@@ -27,6 +27,10 @@ on:
       - 'scripts/check-error-drift.sh'
       - '.github/workflows/docs-drift.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   drift:
     runs-on: ubuntu-24.04
