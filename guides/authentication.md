@@ -197,6 +197,31 @@ cryptographic RNG, store it in secure device storage, and never log or transmit
 it anywhere but this endpoint. A guest account is only as safe as that secret,
 so it is low-assurance until upgraded.
 
+### Managing the device credential
+
+You do not have to generate or store the `{device_id, device_secret}` pair by
+hand. Every SDK ships a device-credential helper that handles steps 1 and 3 for
+you: it generates the pair with a CSPRNG on first run, persists it in the
+platform's secure/save storage, and re-presents the same pair on later
+launches. Prefer the helper over rolling your own storage.
+
+```lua
+-- Create-or-resume with a managed credential: generates and persists on the
+-- first run, reuses it afterwards. No device_id/device_secret handling in your
+-- own code.
+local data, err = asobi.auth.guest_device(client)
+```
+
+The lower-level pieces are exposed too: `generate` (a fresh in-memory pair),
+`load_or_create` (load the persisted pair, or make and store one on first run),
+and `clear` (forget the stored pair). Sign-out keeps the pair on purpose, so the
+same guest resumes on the next launch; after an upgrade the server-side verifier
+is already revoked, so call `clear` to drop the now-dead local pair.
+
+Names vary by SDK: `guest_device` (the snake-case SDKs), `guestDevice` (Dart and
+JS), `GuestDevice`/`GuestDeviceAsync` (Unreal and Unity). See the SDK's README
+for the exact name and the storage location on each platform.
+
 ### Create or resume
 
 ```bash
