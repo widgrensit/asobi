@@ -12,7 +12,10 @@
     ticket_expiry/1,
     add_idempotent_same_player_mode/1,
     add_distinct_modes_new_ticket/1,
-    add_distinct_players_new_ticket/1
+    add_distinct_players_new_ticket/1,
+    add_default_mode_idempotent/1,
+    remove_then_readd_new_ticket/1,
+    selfmatch_group_rejected/1
 ]).
 
 all() ->
@@ -25,7 +28,10 @@ all() ->
         ticket_expiry,
         add_idempotent_same_player_mode,
         add_distinct_modes_new_ticket,
-        add_distinct_players_new_ticket
+        add_distinct_players_new_ticket,
+        add_default_mode_idempotent,
+        remove_then_readd_new_ticket,
+        selfmatch_group_rejected
     ].
 
 init_per_suite(Config) ->
@@ -109,4 +115,37 @@ add_distinct_players_new_ticket(Config) ->
     ?assertNotEqual(T1, T2),
     asobi_matchmaker:remove(~"player_a", T1),
     asobi_matchmaker:remove(~"player_b", T2),
+    Config.
+
+%% The guard covers the no-mode default too: two mode-less adds are idempotent.
+add_default_mode_idempotent(Config) ->
+    {ok, T1} = asobi_matchmaker:add(~"player_defmode", #{}),
+    {ok, T2} = asobi_matchmaker:add(~"player_defmode", #{}),
+    ?assertEqual(T1, T2),
+    asobi_matchmaker:remove(~"player_defmode", T1),
+    Config.
+
+%% After removing, a re-add mints a fresh working ticket (the guard un-sticks).
+remove_then_readd_new_ticket(Config) ->
+    {ok, T1} = asobi_matchmaker:add(~"player_readd", #{mode => ~"ranked"}),
+    ok = asobi_matchmaker:remove(~"player_readd", T1),
+    {ok, T2} = asobi_matchmaker:add(~"player_readd", #{mode => ~"ranked"}),
+    ?assertNotEqual(T1, T2),
+    asobi_matchmaker:remove(~"player_readd", T2),
+    Config.
+
+%% The reject seam, exercised through the real tick with a strategy that forces a
+%% self-match group. With the seam the ticket is re-queued (still present); a
+%% spawned self-match would instead consume it (get_ticket -> not_found).
+selfmatch_group_rejected(Config) ->
+    Prev = application:get_env(asobi, game_modes),
+    application:set_env(asobi, game_modes, #{~"dupmode" => #{strategy => asobi_dup_strategy}}),
+    {ok, T} = asobi_matchmaker:add(~"player_dup", #{mode => ~"dupmode"}),
+    timer:sleep(1500),
+    ?assertMatch({ok, _}, asobi_matchmaker:get_ticket(T)),
+    asobi_matchmaker:remove(~"player_dup", T),
+    case Prev of
+        {ok, V} -> application:set_env(asobi, game_modes, V);
+        undefined -> application:unset_env(asobi, game_modes)
+    end,
     Config.

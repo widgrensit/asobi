@@ -49,6 +49,11 @@ query-language extension (numeric ranges, required keys, automatic skill
 window expansion) is on the roadmap but not shipped — do that filtering
 inside your strategy module instead.
 
+The matchmaker holds **one live ticket per player per mode**: submitting again
+while already queued returns your existing ticket rather than a second one, so a
+double-tapped "find match" cannot match you with yourself. An unregistered
+`mode` is rejected with `unknown_mode`, and a full queue with `queue_full`.
+
 ## Strategies
 
 Strategy is selected per mode via the `strategy` key in `game_modes`. Two
@@ -130,10 +135,22 @@ strategy   = "my_matchmaker"
 {asobi, [
     {matchmaker, #{
         tick_interval => 1000,       %% ms between matchmaker ticks
-        max_wait_seconds => 60       %% max wait before timeout
+        max_wait_seconds => 60,      %% max wait before timeout
+        max_queue => 10000           %% max live tickets before add returns queue_full
     }}
 ]}
 ```
+
+`match_size`, `strategy`, and the rest of a mode's shape are read into
+`game_modes` **once at server boot**. Editing them in a mode script and
+hot-reloading does not change them for the matchmaker — restart the server to
+pick up a new `match_size`.
+
+**Testing solo:** the matchmaker forms a match only once `match_size` players
+have queued, so a single client against a `match_size = 2` mode waits for a
+second. Set `match_size = 1` to match instantly on your own, or run two clients.
+Do not re-submit the same client to force it — that now returns your existing
+ticket, not a second one.
 
 ## Playing With Friends
 

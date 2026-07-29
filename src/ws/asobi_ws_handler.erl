@@ -352,11 +352,30 @@ handle_message(
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    {ok, TicketId} = asobi_matchmaker:add(PlayerId, #{
-        mode => maps:get(~"mode", Payload, ~"default"),
-        properties => maps:get(~"properties", Payload, #{})
-    }),
-    Reply = encode_reply(Cid, ~"matchmaker.queued", #{ticket_id => TicketId, status => ~"pending"}),
+    Mode = maps:get(~"mode", Payload, ~"default"),
+    Reply =
+        case asobi_matchmaker:known_mode(Mode) of
+            false ->
+                encode_reply(Cid, ~"error", #{
+                    type => ~"matchmaker.add", reason => ~"unknown_mode"
+                });
+            true ->
+                case
+                    asobi_matchmaker:add(PlayerId, #{
+                        mode => Mode,
+                        properties => maps:get(~"properties", Payload, #{})
+                    })
+                of
+                    {ok, TicketId} ->
+                        encode_reply(Cid, ~"matchmaker.queued", #{
+                            ticket_id => TicketId, status => ~"pending"
+                        });
+                    {error, queue_full} ->
+                        encode_reply(Cid, ~"error", #{
+                            type => ~"matchmaker.add", reason => ~"queue_full"
+                        })
+                end
+        end,
     {reply, {text, Reply}, State};
 handle_message(
     #{~"type" := ~"matchmaker.remove", ~"payload" := #{~"ticket_id" := TicketId}} = Msg,
