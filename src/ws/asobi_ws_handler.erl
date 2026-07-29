@@ -178,6 +178,15 @@ websocket_info({asobi_message, {dm_message, Msg}}, State) when is_map(Msg) ->
 websocket_info({asobi_message, {notification, Notif}}, State) ->
     Reply = encode_reply(undefined, ~"notification.new", Notif),
     {reply, {text, Reply}, State};
+websocket_info({asobi_message, {game_message, Payload}}, State) ->
+    %% Wrapped, not sent raw: every other wire event's payload is an
+    %% object (enforced by asobi_protocol_coverage_tests), but
+    %% game.send/2 accepts any Lua value (string, number, table) as
+    %% the message, so a bare scalar payload would break that
+    %% convention and couldn't carry more fields later without a
+    %% breaking change.
+    Reply = encode_reply(undefined, ~"game.message", #{~"message" => Payload}),
+    {reply, {text, Reply}, State};
 websocket_info({session_revoked, Reason}, State) ->
     logger:notice(#{msg => ~"session_revoked", reason => Reason}),
     {stop, State#{session => undefined}};
