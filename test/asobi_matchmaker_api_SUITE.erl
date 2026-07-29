@@ -26,6 +26,15 @@ all() ->
 
 init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
+    %% The matchmaker edge now rejects unknown modes, so register the modes these
+    %% tests submit. Merge into (and later restore) any existing game_modes.
+    PrevModes = application:get_env(asobi, game_modes),
+    Existing =
+        case PrevModes of
+            {ok, M} when is_map(M) -> M;
+            _ -> #{}
+        end,
+    application:set_env(asobi, game_modes, Existing#{~"ranked" => #{}, ~"casual" => #{}}),
     U1 = asobi_test_helpers:unique_username(~"mm_api1"),
     U2 = asobi_test_helpers:unique_username(~"mm_api2"),
     {ok, R1} = nova_test:post(
@@ -43,11 +52,17 @@ init_per_suite(Config) ->
     [
         {player1_id, P1Id},
         {player1_token, P1Token},
-        {player2_token, P2Token}
+        {player2_token, P2Token},
+        {prev_game_modes, PrevModes}
         | Config0
     ].
 
 end_per_suite(Config) ->
+    case lists:keyfind(prev_game_modes, 1, Config) of
+        {prev_game_modes, {ok, V}} -> application:set_env(asobi, game_modes, V);
+        {prev_game_modes, undefined} -> application:unset_env(asobi, game_modes);
+        false -> ok
+    end,
     Config.
 
 auth(Config) ->
