@@ -40,9 +40,15 @@ curl -X POST http://localhost:8084/api/v1/matchmaker \
 ```
 **Erlang**
 ```erlang
-{ok, TicketId} = asobi_matchmaker:add(PlayerId, #{mode => <<"arena">>, properties => #{skill => 1200, region => <<"eu-west">>}}).
+{ok, TicketId, Meta} = asobi_matchmaker:add(PlayerId, #{mode => <<"arena">>, properties => #{skill => 1200, region => <<"eu-west">>}}).
 ```
 <!-- /tabs -->
+
+The reply (the `matchmaker.queued` message over WS, the JSON body over REST)
+carries `ticket_id`, `status: "pending"`, and **`players_needed`** — the mode's
+`match_size`, or `null` if the mode declares none. Show it as "waiting for N
+players" so a queued client isn't staring at silence. The `Meta` map in the
+Erlang return holds the same `players_needed`.
 
 A ticket supports `mode` and `properties`. A
 query-language extension (numeric ranges, required keys, automatic skill
@@ -53,6 +59,11 @@ The matchmaker holds **one live ticket per player per mode**: submitting again
 while already queued returns your existing ticket rather than a second one, so a
 double-tapped "find match" cannot match you with yourself. An unregistered
 `mode` is rejected with `unknown_mode`, and a full queue with `queue_full`.
+
+If a match cannot start (for example the game's Lua `init` crashes), the
+matchmaker retries a few times, then sends the queued players a
+`matchmaker_failed` event with `reason: "match_start_failed"` rather than leaving
+them queued forever. Handle `matchmaker_failed` in your client.
 
 ## Strategies
 

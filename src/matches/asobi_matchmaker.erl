@@ -10,6 +10,9 @@ spawns a match, and pushes `match.matched` to each player. A single
 -export([start_link/0, add/2, remove/2, get_ticket/1, get_ticket/2, get_queue_stats/0]).
 -export([known_mode/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-ifdef(TEST).
+-export([next_spawn_attempt/1]).
+-endif.
 
 -define(DEFAULT_TICK, 1000).
 -define(DEFAULT_MAX_QUEUE, 10000).
@@ -430,6 +433,11 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
             spawn_matches(Rest, Failed)
     end.
 
+%% Unlike spawn_match, world spawn is detached (spawn/1) to avoid blocking the
+%% matchmaker, so there is no clean handle to re-queue the group on failure.
+%% Worlds therefore fail fast: on the first spawn error/crash the players are
+%% notified match_start_failed once, with no bounded retry. Fail-fast is the safe
+%% direction (players told immediately, never left queued).
 spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
     MaxPlayers = maps:get(max_players, ModeConfig, 500),
     case resolve_game_module(Mode) of
@@ -531,15 +539,44 @@ notify_no_game_module(Mode, PlayerIds) ->
 %% rather than leaving them queued forever (asobi#232 audit). The reason is
 %% coarse and stable - never the raw crash - so no game internals leak.
 handle_spawn_failure(Group, Mode, PlayerIds, Rest, Failed) ->
-    Attempts = 1 + lists:max([maps:get(attempts, T, 0) || T <- Group]),
-    case Attempts >= ?MAX_SPAWN_ATTEMPTS of
-        true ->
+    case next_spawn_attempt(Group) of
+        give_up ->
             asobi_telemetry:matchmaker_failed(Mode, length(PlayerIds)),
             notify_matchmaker_failed(PlayerIds, ~"match_start_failed"),
             spawn_matches(Rest, Failed);
-        false ->
-            Group1 = [T#{attempts => Attempts} || T <- Group],
+        {retry, Attempt} ->
+            Group1 = [T#{attempts => Attempt} || T <- Group],
             spawn_matches(Rest, [Group1 | Failed])
+    end.
+
+%% Decide whether a failed group gets another spawn attempt (bumping its count)
+%% or is given up on. Exported for test - the off-by-one at the give-up boundary
+%% is the load-bearing bit.
+-spec next_spawn_attempt([map()]) -> {retry, pos_integer()} | give_up.
+next_spawn_attempt(Group) ->
+    Attempt = 1 + max_attempts(Group, 0),
+    case Attempt >= ?MAX_SPAWN_ATTEMPTS of
+        true -> give_up;
+        false -> {retry, Attempt}
+    end.
+
+-spec max_attempts([map()], non_neg_integer()) -> non_neg_integer().
+max_attempts([], Acc) ->
+    Acc;
+max_attempts([T | Rest], Acc) ->
+    A = ticket_attempts(T),
+    Next =
+        case A > Acc of
+            true -> A;
+            false -> Acc
+        end,
+    max_attempts(Rest, Next).
+
+-spec ticket_attempts(map()) -> non_neg_integer().
+ticket_attempts(T) ->
+    case maps:get(attempts, T, 0) of
+        N when is_integer(N), N >= 0 -> N;
+        _ -> 0
     end.
 
 -spec notify_matchmaker_failed([binary()], binary()) -> ok.

@@ -16,7 +16,8 @@
     add_default_mode_idempotent/1,
     remove_then_readd_new_ticket/1,
     selfmatch_group_rejected/1,
-    add_reply_reports_players_needed/1
+    add_reply_reports_players_needed/1,
+    spawn_retry_bounded_then_gives_up/1
 ]).
 
 all() ->
@@ -33,7 +34,8 @@ all() ->
         add_default_mode_idempotent,
         remove_then_readd_new_ticket,
         selfmatch_group_rejected,
-        add_reply_reports_players_needed
+        add_reply_reports_players_needed,
+        spawn_retry_bounded_then_gives_up
     ].
 
 init_per_suite(Config) ->
@@ -176,4 +178,19 @@ add_reply_reports_players_needed(Config) ->
             undefined -> application:unset_env(asobi, game_modes)
         end
     end,
+    Config.
+
+%% Bounded spawn retry: attempts 0->1->2 re-queue, the 3rd (?MAX_SPAWN_ATTEMPTS)
+%% gives up. The group's max attempt count drives the decision.
+spawn_retry_bounded_then_gives_up(Config) ->
+    ?assertEqual(
+        {retry, 1}, asobi_matchmaker:next_spawn_attempt([#{attempts => 0}, #{attempts => 0}])
+    ),
+    ?assertEqual({retry, 2}, asobi_matchmaker:next_spawn_attempt([#{attempts => 1}])),
+    ?assertEqual(give_up, asobi_matchmaker:next_spawn_attempt([#{attempts => 2}])),
+    ?assertEqual(
+        give_up, asobi_matchmaker:next_spawn_attempt([#{attempts => 0}, #{attempts => 2}])
+    ),
+    %% a missing/garbage attempts field defaults to 0
+    ?assertEqual({retry, 1}, asobi_matchmaker:next_spawn_attempt([#{}])),
     Config.
