@@ -141,11 +141,16 @@ selfmatch_group_rejected(Config) ->
     Prev = application:get_env(asobi, game_modes),
     application:set_env(asobi, game_modes, #{~"dupmode" => #{strategy => asobi_dup_strategy}}),
     {ok, T} = asobi_matchmaker:add(~"player_dup", #{mode => ~"dupmode"}),
-    timer:sleep(1500),
-    ?assertMatch({ok, _}, asobi_matchmaker:get_ticket(T)),
-    asobi_matchmaker:remove(~"player_dup", T),
-    case Prev of
-        {ok, V} -> application:set_env(asobi, game_modes, V);
-        undefined -> application:unset_env(asobi, game_modes)
+    %% try/after so a failed assertion still restores game_modes and removes the
+    %% ticket, rather than clobbering shared state into later suite cases.
+    try
+        timer:sleep(1500),
+        ?assertMatch({ok, _}, asobi_matchmaker:get_ticket(T))
+    after
+        asobi_matchmaker:remove(~"player_dup", T),
+        case Prev of
+            {ok, V} -> application:set_env(asobi, game_modes, V);
+            undefined -> application:unset_env(asobi, game_modes)
+        end
     end,
     Config.
