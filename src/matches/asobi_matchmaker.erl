@@ -80,22 +80,31 @@ init([]) ->
 handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
     is_binary(PlayerId), is_map(Params)
 ->
-    TicketId = generate_id(),
     Mode =
         case maps:get(mode, Params, ~"default") of
             M when is_binary(M) -> M;
             _ -> ~"default"
         end,
-    Ticket = #{
-        id => TicketId,
-        player_id => PlayerId,
-        mode => Mode,
-        properties => maps:get(properties, Params, #{}),
-        submitted_at => erlang:system_time(millisecond),
-        status => pending
-    },
-    asobi_telemetry:matchmaker_queued(PlayerId, Mode),
-    {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}};
+    %% One live ticket per (player, mode). A re-add while already queued is
+    %% idempotent: it returns the existing ticket rather than minting a second.
+    %% Without this, a double-tap of "find match" gives one player two tickets
+    %% that fill each other into a self-match (asobi#230).
+    case find_player_ticket(PlayerId, Mode, Tickets) of
+        {ok, ExistingId} ->
+            {reply, {ok, ExistingId}, State};
+        error ->
+            TicketId = generate_id(),
+            Ticket = #{
+                id => TicketId,
+                player_id => PlayerId,
+                mode => Mode,
+                properties => maps:get(properties, Params, #{}),
+                submitted_at => erlang:system_time(millisecond),
+                status => pending
+            },
+            asobi_telemetry:matchmaker_queued(PlayerId, Mode),
+            {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}}
+    end;
 handle_call({get_ticket, PlayerId, TicketId}, _From, #{tickets := Tickets} = State) when
     is_binary(PlayerId), is_binary(TicketId)
 ->
@@ -235,11 +244,67 @@ match_all_modes(ByMode) ->
             ModeConfig = mode_config(Mode),
             Strategy = resolve_strategy(ModeConfig),
             {M, U} = Strategy:match(ModeTickets, ModeConfig),
-            {M ++ AllMatched, [U | AllUnmatched]}
+            %% Defence in depth for any strategy, including user-supplied ones:
+            %% never spawn a match that lists the same player twice. A group
+            %% that repeats a player is dropped back to unmatched rather than
+            %% forming a degenerate (self-)match. The add-time guard means this
+            %% never fires for the built-in strategies.
+            {Valid, Requeue} = reject_duplicate_players(M),
+            {Valid ++ AllMatched, [U, Requeue | AllUnmatched]}
         end,
         {[], []},
         ByMode
     ).
+
+%% Partition matched groups: keep those whose players are all distinct, drop the
+%% tickets of any group that repeats a player back to the queue.
+-spec reject_duplicate_players([[map()]]) -> {[[map()]], [map()]}.
+reject_duplicate_players(Groups) ->
+    reject_duplicate_players(Groups, [], []).
+
+reject_duplicate_players([], Valid, Requeue) ->
+    {Valid, Requeue};
+reject_duplicate_players([Group | Rest], Valid, Requeue) ->
+    Ids = [maps:get(player_id, T) || T <- Group],
+    case length(lists:usort(Ids)) =:= length(Ids) of
+        true ->
+            reject_duplicate_players(Rest, [Group | Valid], Requeue);
+        false ->
+            logger:error(#{
+                msg => ~"matchmaker group repeated a player; dropped to re-queue",
+                players => Ids
+            }),
+            reject_duplicate_players(Rest, Valid, dedup_by_player(Group) ++ Requeue)
+    end.
+
+%% One ticket per player, preserving order. Only used on the reject path above.
+-spec dedup_by_player([map()]) -> [map()].
+dedup_by_player(Group) ->
+    dedup_by_player(Group, #{}, []).
+
+dedup_by_player([], _Seen, Acc) ->
+    lists:reverse(Acc);
+dedup_by_player([#{player_id := P} = T | Rest], Seen, Acc) ->
+    case Seen of
+        #{P := true} -> dedup_by_player(Rest, Seen, Acc);
+        _ -> dedup_by_player(Rest, Seen#{P => true}, [T | Acc])
+    end.
+
+%% This player's live ticket for a mode, if any - the one-ticket-per-(player,
+%% mode) idempotency guard used by add.
+-spec find_player_ticket(binary(), binary(), map()) -> {ok, binary()} | error.
+find_player_ticket(PlayerId, Mode, Tickets) ->
+    case
+        [
+            Id
+         || {Id, #{player_id := P, mode := M}} <- maps:to_list(Tickets),
+            P =:= PlayerId,
+            M =:= Mode
+        ]
+    of
+        [Id | _] -> {ok, Id};
+        [] -> error
+    end.
 
 -spec mode_config(binary()) -> map().
 mode_config(Mode) ->
