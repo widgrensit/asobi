@@ -4,7 +4,7 @@
 -export([match_started/2, match_finished/3, match_player_joined/2, match_player_left/2]).
 -export([world_started/2, world_finished/3, world_player_joined/2, world_player_left/2]).
 -export([world_phase_changed/3]).
--export([matchmaker_queued/2, matchmaker_removed/2, matchmaker_formed/3]).
+-export([matchmaker_queued/2, matchmaker_removed/2, matchmaker_formed/3, matchmaker_failed/2]).
 -export([session_connected/1, session_disconnected/2]).
 -export([
     ws_connected/0,
@@ -143,6 +143,14 @@ matchmaker_formed(Mode, PlayerCount, WaitMs) ->
         #{
             player_count => PlayerCount, wait_ms => WaitMs, count => 1
         },
+        #{mode => Mode}
+    ).
+
+-spec matchmaker_failed(binary(), non_neg_integer()) -> ok.
+matchmaker_failed(Mode, PlayerCount) ->
+    telemetry:execute(
+        [asobi, matchmaker, failed],
+        #{player_count => PlayerCount, count => 1},
         #{mode => Mode}
     ).
 

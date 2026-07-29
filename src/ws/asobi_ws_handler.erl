@@ -366,8 +366,8 @@ handle_message(
                         properties => maps:get(~"properties", Payload, #{})
                     })
                 of
-                    {ok, TicketId} ->
-                        encode_reply(Cid, ~"matchmaker.queued", #{
+                    {ok, TicketId, Meta} ->
+                        encode_reply(Cid, ~"matchmaker.queued", Meta#{
                             ticket_id => TicketId, status => ~"pending"
                         });
                     {error, queue_full} ->

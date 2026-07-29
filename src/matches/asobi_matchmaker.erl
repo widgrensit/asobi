@@ -13,15 +13,16 @@ spawns a match, and pushes `match.matched` to each player. A single
 
 -define(DEFAULT_TICK, 1000).
 -define(DEFAULT_MAX_QUEUE, 10000).
+-define(MAX_SPAWN_ATTEMPTS, 3).
 
 -spec start_link() -> gen_server:start_ret().
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
--spec add(binary(), map()) -> {ok, binary()} | {error, queue_full}.
+-spec add(binary(), map()) -> {ok, binary(), map()} | {error, queue_full}.
 add(PlayerId, Params) ->
     case gen_server:call(?MODULE, {add, PlayerId, Params}) of
-        {ok, TicketId} when is_binary(TicketId) -> {ok, TicketId};
+        {ok, TicketId, Meta} when is_binary(TicketId), is_map(Meta) -> {ok, TicketId, Meta};
         {error, queue_full} -> {error, queue_full}
     end.
 
@@ -34,6 +35,18 @@ known_mode(Mode) when is_binary(Mode) ->
     Mode =:= ~"default" orelse is_map_key(Mode, Modes);
 known_mode(_) ->
     false.
+
+%% Metadata sent back on a matchmaker.queued reply so the client can show
+%% "waiting for N players" instead of silence. players_needed is the mode's
+%% match_size (null if the mode declares none). players_waiting (a count of
+%% others queued) is deliberately not exposed by default - it is a per-mode
+%% opt-in, tracked in asobi#232's follow-up.
+-spec queue_meta(binary()) -> map().
+queue_meta(Mode) ->
+    case maps:get(match_size, mode_config(Mode), undefined) of
+        N when is_integer(N) -> #{players_needed => N};
+        _ -> #{players_needed => null}
+    end.
 
 -spec remove(binary(), binary()) -> ok | {error, not_found | not_owner}.
 remove(PlayerId, TicketId) ->
@@ -111,7 +124,7 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
     %% self-match (asobi#230). A full queue is rejected before minting.
     case find_player_ticket(PlayerId, Mode, Tickets) of
         {ok, ExistingId} ->
-            {reply, {ok, ExistingId}, State};
+            {reply, {ok, ExistingId, queue_meta(Mode)}, State};
         error when map_size(Tickets) >= MaxQueue ->
             {reply, {error, queue_full}, State};
         error ->
@@ -122,10 +135,13 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
                 mode => Mode,
                 properties => maps:get(properties, Params, #{}),
                 submitted_at => erlang:system_time(millisecond),
-                status => pending
+                status => pending,
+                attempts => 0
             },
             asobi_telemetry:matchmaker_queued(PlayerId, Mode),
-            {reply, {ok, TicketId}, State#{tickets => Tickets#{TicketId => Ticket}}}
+            {reply, {ok, TicketId, queue_meta(Mode)}, State#{
+                tickets => Tickets#{TicketId => Ticket}
+            }}
     end;
 handle_call({get_ticket, PlayerId, TicketId}, _From, #{tickets := Tickets} = State) when
     is_binary(PlayerId), is_binary(TicketId)
@@ -402,12 +418,12 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                     spawn_matches(Rest, Failed);
                 {error, Reason} ->
                     logger:error(#{
-                        msg => ~"match spawn failed, re-queuing players",
+                        msg => ~"match spawn failed",
                         mode => Mode,
                         players => PlayerIds,
                         error => Reason
                     }),
-                    spawn_matches(Rest, [Group | Failed])
+                    handle_spawn_failure(Group, Mode, PlayerIds, Rest, Failed)
             end;
         {error, _} ->
             notify_no_game_module(Mode, PlayerIds),
@@ -482,7 +498,9 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                                 mode => Mode,
                                 players => SpawnPlayerIds,
                                 error => Reason
-                            })
+                            }),
+                            asobi_telemetry:matchmaker_failed(Mode, length(SpawnPlayerIds)),
+                            notify_matchmaker_failed(SpawnPlayerIds, ~"match_start_failed")
                     end
                 catch
                     Class:Reason2:Stack ->
@@ -493,7 +511,9 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                             class => Class,
                             error => Reason2,
                             stacktrace => Stack
-                        })
+                        }),
+                        asobi_telemetry:matchmaker_failed(Mode, length(SpawnPlayerIds)),
+                        notify_matchmaker_failed(SpawnPlayerIds, ~"match_start_failed")
                 end
             end),
             spawn_matches(Rest, Failed);
@@ -504,11 +524,31 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
 
 notify_no_game_module(Mode, PlayerIds) ->
     logger:warning(#{msg => ~"no game module for mode", mode => Mode}),
+    notify_matchmaker_failed(PlayerIds, ~"no_game_module").
+
+%% A match failed to spawn (e.g. the game's Lua init crashed). Re-queue the group
+%% for a bounded number of attempts; once exhausted, tell the players it failed
+%% rather than leaving them queued forever (asobi#232 audit). The reason is
+%% coarse and stable - never the raw crash - so no game internals leak.
+handle_spawn_failure(Group, Mode, PlayerIds, Rest, Failed) ->
+    Attempts = 1 + lists:max([maps:get(attempts, T, 0) || T <- Group]),
+    case Attempts >= ?MAX_SPAWN_ATTEMPTS of
+        true ->
+            asobi_telemetry:matchmaker_failed(Mode, length(PlayerIds)),
+            notify_matchmaker_failed(PlayerIds, ~"match_start_failed"),
+            spawn_matches(Rest, Failed);
+        false ->
+            Group1 = [T#{attempts => Attempts} || T <- Group],
+            spawn_matches(Rest, [Group1 | Failed])
+    end.
+
+-spec notify_matchmaker_failed([binary()], binary()) -> ok.
+notify_matchmaker_failed(PlayerIds, Reason) ->
     lists:foreach(
         fun(PlayerId) when is_binary(PlayerId) ->
             asobi_presence:send(
                 PlayerId,
-                {match_event, matchmaker_failed, #{reason => ~"no_game_module"}}
+                {match_event, matchmaker_failed, #{reason => Reason}}
             )
         end,
         PlayerIds

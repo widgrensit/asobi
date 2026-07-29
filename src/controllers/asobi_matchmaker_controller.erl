@@ -16,8 +16,8 @@ add(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) when
                 properties => maps:get(~"properties", Params, #{})
             },
             case asobi_matchmaker:add(PlayerId, MatchParams) of
-                {ok, TicketId} ->
-                    {json, 200, #{}, #{ticket_id => TicketId, status => ~"pending"}};
+                {ok, TicketId, Meta} ->
+                    {json, 200, #{}, Meta#{ticket_id => TicketId, status => ~"pending"}};
                 {error, queue_full} ->
                     {json, 503, #{}, #{error => ~"queue_full"}}
             end
