@@ -237,7 +237,7 @@ First call (new account):
   "player_id": "...",
   "access_token": "...",
   "refresh_token": "...",
-  "username": "guest_019f615cbc4a",
+  "username": "guest_9c41e0b7a2d5f318",
   "created": true,
   "guest": true
 }

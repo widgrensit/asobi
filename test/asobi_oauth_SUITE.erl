@@ -1,6 +1,7 @@
 -module(asobi_oauth_SUITE).
 
 -include_lib("nova_test/include/nova_test.hrl").
+-include_lib("kura/include/kura.hrl").
 
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_group/2, end_per_group/2]).
 -export([
@@ -13,10 +14,13 @@
     unlink_last_auth_method/1,
     unlink_success/1,
     identity_db_roundtrip/1,
-    login_existing_identity/1
+    login_existing_identity/1,
+    create_player_retries_on_username_collision/1,
+    create_player_no_retry_on_non_unique_username_error/1
 ]).
 
-all() -> [{group, oauth_errors}, {group, link_unlink}, {group, identity_db}].
+all() ->
+    [{group, oauth_errors}, {group, link_unlink}, {group, identity_db}, {group, create_player}].
 
 groups() ->
     [
@@ -33,6 +37,10 @@ groups() ->
         ]},
         {identity_db, [sequence], [
             identity_db_roundtrip, login_existing_identity
+        ]},
+        {create_player, [], [
+            create_player_retries_on_username_collision,
+            create_player_no_retry_on_non_unique_username_error
         ]}
     ].
 
@@ -227,4 +235,68 @@ login_existing_identity(Config) ->
     ),
     {ok, [Identity]} = asobi_repo:all(Q),
     ?assertEqual(PlayerId, maps:get(player_id, Identity)),
+    Config.
+
+%% --- Username Collision Retry ---
+
+%% A generated username colliding with an existing one (previously:
+%% rand:uniform(9999) gave only ~13 bits of entropy, so two concurrent
+%% first-sign-ins for the same provider_uid collided often) must retry with
+%% a fresh one instead of surfacing a 500 on the first collision.
+create_player_retries_on_username_collision(Config) ->
+    ProviderUid = iolist_to_binary([
+        ~"collide_uid_", integer_to_binary(erlang:unique_integer([positive]))
+    ]),
+    Short = binary:part(ProviderUid, 0, min(8, byte_size(ProviderUid))),
+    CollisionRand = asobi_id:rand_suffix(4),
+    CollisionUsername = <<"discord_", Short/binary, "_", CollisionRand/binary>>,
+    ExistingCS = kura_changeset:validate_required(
+        kura_changeset:cast(asobi_player, #{}, #{username => CollisionUsername}, [username]),
+        [username]
+    ),
+    {ok, _} = asobi_repo:insert(ExistingCS),
+
+    Counter = counters:new(1, []),
+    meck:new(asobi_id, [passthrough]),
+    meck:expect(asobi_id, rand_suffix, fun
+        (4) ->
+            case counters:get(Counter, 1) of
+                0 ->
+                    counters:add(Counter, 1, 1),
+                    CollisionRand;
+                _ ->
+                    meck:passthrough([4])
+            end;
+        (N) ->
+            meck:passthrough([N])
+    end),
+    try
+        Claims = #{provider_uid => ProviderUid, provider_display_name => undefined},
+        {json, 200, _, #{username := Username, created := true}} =
+            asobi_oauth_controller:create_player_with_identity(~"discord", Claims),
+        ?assertNotEqual(CollisionUsername, Username)
+    after
+        meck:unload(asobi_id)
+    end,
+    Config.
+
+%% A `username` error that is NOT a uniqueness conflict (e.g. a future
+%% format/length validation) must 500 immediately rather than burn all 3
+%% retry attempts on a failure retrying can never fix.
+create_player_no_retry_on_non_unique_username_error(Config) ->
+    meck:new(asobi_repo, [passthrough]),
+    meck:expect(asobi_repo, insert, fun
+        (#kura_changeset{schema = asobi_player} = CS) ->
+            {error, kura_changeset:add_error(CS, username, ~"is reserved")};
+        (CS) ->
+            meck:passthrough([CS])
+    end),
+    try
+        Claims = #{provider_uid => ~"reserved_uid", provider_display_name => undefined},
+        {json, 500, _, #{error := ~"registration_failed"}} =
+            asobi_oauth_controller:create_player_with_identity(~"discord", Claims),
+        ?assertEqual(1, meck:num_calls(asobi_repo, insert, '_'))
+    after
+        meck:unload(asobi_repo)
+    end,
     Config.

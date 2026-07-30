@@ -30,6 +30,7 @@
 -define(MAX_SECRET_BYTES, 128).
 -define(MAX_SECRET_B64_BYTES, 1024).
 -define(MAX_DEVICE_ID_BYTES, 255).
+-define(MAX_USERNAME_ATTEMPTS, 3).
 
 -spec authenticate(cowboy_req:req()) -> {json, integer(), map(), map()}.
 authenticate(#{json := #{~"device_id" := DeviceId, ~"device_secret" := Secret}} = _Req) when
@@ -197,6 +198,11 @@ create(DeviceId, SecretBin) ->
 
 -spec insert_player_and_identity(binary(), binary()) -> {json, integer(), map(), map()}.
 insert_player_and_identity(DeviceId, SecretBin) ->
+    insert_player_and_identity(DeviceId, SecretBin, 1).
+
+-spec insert_player_and_identity(binary(), binary(), pos_integer()) ->
+    {json, integer(), map(), map()}.
+insert_player_and_identity(DeviceId, SecretBin, Attempt) ->
     Username = generate_username(),
     PlayerCS = kura_changeset:validate_required(
         kura_changeset:cast(asobi_player, #{}, #{username => Username}, [username]),
@@ -217,6 +223,16 @@ insert_player_and_identity(DeviceId, SecretBin) ->
                     %% orphan row.
                     _ = asobi_repo:delete(asobi_player, Player),
                     {json, 409, #{}, #{error => ~"device_already_registered"}}
+            end;
+        {error, #kura_changeset{errors = Errors}} when Attempt < ?MAX_USERNAME_ATTEMPTS ->
+            case asobi_auth_error:username_taken(Errors) of
+                true ->
+                    ?LOG_WARNING(#{
+                        event => guest_username_collision, attempt => Attempt
+                    }),
+                    insert_player_and_identity(DeviceId, SecretBin, Attempt + 1);
+                false ->
+                    {json, 500, #{}, #{error => ~"guest_create_failed"}}
             end;
         {error, _} ->
             {json, 500, #{}, #{error => ~"guest_create_failed"}}
@@ -368,5 +384,5 @@ decode_secret(_B64) ->
 
 -spec generate_username() -> binary().
 generate_username() ->
-    Suffix = binary:part(asobi_id:generate(), 0, 12),
+    Suffix = asobi_id:rand_suffix(8),
     <<"guest_", Suffix/binary>>.

@@ -17,7 +17,7 @@ ids (e.g. for tokens, invite codes, etc.) generate them via
 `crypto:strong_rand_bytes/1` rather than this function.
 """.
 
--export([generate/0]).
+-export([generate/0, rand_suffix/1]).
 
 -doc "Generate a UUIDv7 as a lowercase hyphenated binary string.".
 -spec generate() -> binary().
@@ -25,3 +25,15 @@ generate() ->
     case jhn_uuid:gen(v7) of
         UUID when is_list(UUID) -> iolist_to_binary(UUID)
     end.
+
+-doc """
+Generate a random lowercase-hex binary carrying `ByteLen` bytes of real
+entropy (2x`ByteLen` hex characters). For handles that need to be
+non-colliding across concurrent generation - e.g. a generated username
+suffix - where a `generate/0` prefix is the wrong tool: its first
+characters are pure millisecond timestamp (see the moduledoc above), so
+two calls in the same millisecond produce the identical prefix.
+""".
+-spec rand_suffix(pos_integer()) -> binary().
+rand_suffix(ByteLen) ->
+    binary:encode_hex(crypto:strong_rand_bytes(ByteLen), lowercase).

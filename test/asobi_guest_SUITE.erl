@@ -1,6 +1,7 @@
 -module(asobi_guest_SUITE).
 
 -include_lib("nova_test/include/nova_test.hrl").
+-include_lib("kura/include/kura.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
@@ -9,7 +10,9 @@
     weak_secret_rejected/1,
     upgrade_then_already_claimed/1,
     upgrade_rejected_for_non_guest/1,
-    reaper_removes_unclaimed_guest_and_children/1
+    reaper_removes_unclaimed_guest_and_children/1,
+    create_retries_on_username_collision/1,
+    create_no_retry_on_non_unique_username_error/1
 ]).
 
 all() ->
@@ -19,7 +22,9 @@ all() ->
         weak_secret_rejected,
         upgrade_then_already_claimed,
         upgrade_rejected_for_non_guest,
-        reaper_removes_unclaimed_guest_and_children
+        reaper_removes_unclaimed_guest_and_children,
+        create_retries_on_username_collision,
+        create_no_retry_on_non_unique_username_error
     ].
 
 init_per_suite(Config) ->
@@ -142,4 +147,66 @@ reaper_removes_unclaimed_guest_and_children(Config) ->
     timer:sleep(2500),
     {ok, _} = asobi_guest_reaper:sweep_now(),
     ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, Pid)),
+    Config.
+
+%% A generated username colliding with an existing one (previously: any two
+%% guests created in the same millisecond, since the old suffix was a UUIDv7
+%% prefix with zero randomness) must retry with a fresh one instead of
+%% surfacing a 500 on the first collision.
+create_retries_on_username_collision(Config) ->
+    CollisionSuffix = asobi_id:rand_suffix(8),
+    CollisionUsername = <<"guest_", CollisionSuffix/binary>>,
+    ExistingCS = kura_changeset:validate_required(
+        kura_changeset:cast(asobi_player, #{}, #{username => CollisionUsername}, [username]),
+        [username]
+    ),
+    {ok, _} = asobi_repo:insert(ExistingCS),
+
+    %% Mock the shared helper, not crypto:strong_rand_bytes/1 directly - the
+    %% latter is process-wide and shared with unrelated 8-byte callers, which
+    %% would make this test flaky against future code that also asks crypto
+    %% for 8 random bytes.
+    Counter = counters:new(1, []),
+    meck:new(asobi_id, [passthrough]),
+    meck:expect(asobi_id, rand_suffix, fun
+        (8) ->
+            case counters:get(Counter, 1) of
+                0 ->
+                    counters:add(Counter, 1, 1),
+                    CollisionSuffix;
+                _ ->
+                    meck:passthrough([8])
+            end;
+        (N) ->
+            meck:passthrough([N])
+    end),
+    try
+        {ok, R} = create(device_id(), secret(), Config),
+        ?assertStatus(200, R),
+        #{~"player_id" := Pid, ~"username" := Username} = nova_test:json(R),
+        ?assert(is_binary(Pid)),
+        ?assertNotEqual(CollisionUsername, Username)
+    after
+        meck:unload(asobi_id)
+    end,
+    Config.
+
+%% A `username` error that is NOT a uniqueness conflict (e.g. a future
+%% format/length validation) must 500 immediately rather than burn all 3
+%% retry attempts on a failure retrying can never fix.
+create_no_retry_on_non_unique_username_error(Config) ->
+    meck:new(asobi_repo, [passthrough]),
+    meck:expect(asobi_repo, insert, fun
+        (#kura_changeset{schema = asobi_player} = CS) ->
+            {error, kura_changeset:add_error(CS, username, ~"is reserved")};
+        (CS) ->
+            meck:passthrough([CS])
+    end),
+    try
+        {ok, R} = create(device_id(), secret(), Config),
+        ?assertStatus(500, R),
+        ?assertEqual(1, meck:num_calls(asobi_repo, insert, '_'))
+    after
+        meck:unload(asobi_repo)
+    end,
     Config.

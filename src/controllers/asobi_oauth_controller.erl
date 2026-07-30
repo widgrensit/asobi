@@ -1,6 +1,15 @@
 -module(asobi_oauth_controller).
 
+-include_lib("kernel/include/logger.hrl").
+-include_lib("kura/include/kura.hrl").
+
 -export([authenticate/1, link/1, unlink/1]).
+
+-ifdef(TEST).
+-export([create_player_with_identity/2]).
+-endif.
+
+-define(MAX_USERNAME_ATTEMPTS, 3).
 
 %% POST /api/v1/auth/oauth
 %% Body: {"provider": "google", "token": "<id_token>"}
@@ -145,6 +154,11 @@ login_existing_player(Identity) ->
 
 -spec create_player_with_identity(binary(), map()) -> {json, integer(), map(), map()}.
 create_player_with_identity(Provider, Claims) ->
+    create_player_with_identity(Provider, Claims, 1).
+
+-spec create_player_with_identity(binary(), map(), pos_integer()) ->
+    {json, integer(), map(), map()}.
+create_player_with_identity(Provider, Claims, Attempt) ->
     ProviderUid = maps:get(provider_uid, Claims),
     DisplayName = maps:get(provider_display_name, Claims, undefined),
     Username = generate_username(Provider, ProviderUid),
@@ -160,6 +174,16 @@ create_player_with_identity(Provider, Claims) ->
             _ = init_player_stats(PlayerId),
             _ = insert_identity(PlayerId, Provider, Claims),
             asobi_auth_tokens:issue(Player, 200, #{username => Username, created => true});
+        {error, #kura_changeset{errors = Errors}} when Attempt < ?MAX_USERNAME_ATTEMPTS ->
+            case asobi_auth_error:username_taken(Errors) of
+                true ->
+                    ?LOG_WARNING(#{
+                        event => oauth_username_collision, provider => Provider, attempt => Attempt
+                    }),
+                    create_player_with_identity(Provider, Claims, Attempt + 1);
+                false ->
+                    {json, 500, #{}, #{error => ~"registration_failed"}}
+            end;
         {error, _CS} ->
             {json, 500, #{}, #{error => ~"registration_failed"}}
     end.
@@ -208,8 +232,9 @@ has_other_auth(PlayerId, ExcludeProvider) ->
 
 -spec generate_username(binary(), binary()) -> binary().
 generate_username(Provider, ProviderUid) ->
+    %% NOT rand:uniform/1: non-crypto and only ~13 bits of entropy.
     Short = binary:part(ProviderUid, 0, min(8, byte_size(ProviderUid))),
-    Rand = integer_to_binary(rand:uniform(9999)),
+    Rand = asobi_id:rand_suffix(4),
     <<Provider/binary, "_", Short/binary, "_", Rand/binary>>.
 
 -spec maybe_value(term(), term()) -> term().
