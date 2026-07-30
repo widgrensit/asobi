@@ -9,7 +9,8 @@
     ws_unknown_type/1,
     ws_idle_auth_timeout_closes/1,
     ws_match_input_not_in_match_hint/1,
-    ws_match_input_hint_rate_limited/1
+    ws_match_input_hint_rate_limited/1,
+    ws_script_error_rendered_as_game_error/1
 ]).
 
 all() ->
@@ -19,7 +20,8 @@ all() ->
         ws_unknown_type,
         ws_idle_auth_timeout_closes,
         ws_match_input_not_in_match_hint,
-        ws_match_input_hint_rate_limited
+        ws_match_input_hint_rate_limited,
+        ws_script_error_rendered_as_game_error
     ].
 
 init_per_suite(Config) ->
@@ -104,6 +106,36 @@ ws_match_input_hint_rate_limited(Config) ->
     ok = nova_test_ws:send_json(Input, Conn),
     ?assertEqual({error, timeout}, nova_test_ws:recv(Conn, 300)),
     nova_test_ws:close(Conn),
+    Config.
+
+%% asobi_lua#98: a {script_error, Payload} presence message (sent by the
+%% Lua runtime in dev-errors mode) must reach the client as a game.error
+%% wire event carrying the payload unchanged.
+ws_script_error_rendered_as_game_error(Config) ->
+    {PlayerId, Token} = register_player(~"scripterr", Config),
+    Conn = ws_connect_authed(Token, Config),
+    asobi_presence:send(
+        PlayerId,
+        {script_error, #{
+            ~"callback" => ~"handle_input",
+            ~"script" => ~"match.lua",
+            ~"message" => ~"bad arithmetic + on nil, 1"
+        }}
+    ),
+    {ok, Reply} = recv_until(
+        fun(M) -> maps:get(~"type", M, undefined) =:= ~"game.error" end, Conn
+    ),
+    nova_test_ws:close(Conn),
+    ?assertMatch(
+        #{
+            ~"payload" := #{
+                ~"callback" := ~"handle_input",
+                ~"script" := ~"match.lua",
+                ~"message" := ~"bad arithmetic + on nil, 1"
+            }
+        },
+        Reply
+    ),
     Config.
 
 %% A WS that opens and never sends `session.connect` must be closed by

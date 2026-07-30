@@ -152,6 +152,25 @@ Send game input to the match server.
 {"type": "match.input", "payload": {"action": "move", "x": 10, "y": 5}}
 ```
 
+Input sent while not in a match or world is dropped. The first drop (at
+most one per 5 seconds per connection) is answered with an error event so
+the client can tell input is going nowhere:
+
+```json
+{"type": "error", "payload": {"type": "match.input", "reason": "not_in_match"}}
+```
+
+### `game.error` (server push)
+
+A Lua callback error, sent to the player whose input triggered it. Only
+emitted when the runtime runs with dev errors enabled
+(`ASOBI_DEV_ERRORS=true`); production runtimes keep script errors
+server-side.
+
+```json
+{"type": "game.error", "payload": {"callback": "handle_input", "script": "match.lua", "message": "bad arithmetic + on nil, 1"}}
+```
+
 ### `match.state` (server push)
 
 Server broadcasts game state updates to all players in the match.
