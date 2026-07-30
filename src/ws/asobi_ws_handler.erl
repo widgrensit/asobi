@@ -192,8 +192,15 @@ websocket_info({asobi_message, {game_message, Payload}}, State) ->
 websocket_info({asobi_message, {script_error, Payload}}, State) when is_map(Payload) ->
     %% Dev-mode Lua callback errors (asobi_lua#98). Only ever emitted when
     %% the runtime has dev errors enabled; production runtimes never send
-    %% this, so script internals stay server-side.
-    Reply = encode_reply(undefined, ~"game.error", Payload),
+    %% this, so script internals stay server-side. Encoded defensively: a
+    %% future producer sending a non-JSON-encodable map must degrade to an
+    %% error frame, not crash the connection process.
+    Reply =
+        try
+            encode_reply(undefined, ~"game.error", Payload)
+        catch
+            _:_ -> encode_reply(undefined, ~"error", #{reason => ~"internal"})
+        end,
     {reply, {text, Reply}, State};
 websocket_info({session_revoked, Reason}, State) ->
     logger:notice(#{msg => ~"session_revoked", reason => Reason}),
