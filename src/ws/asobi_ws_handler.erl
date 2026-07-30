@@ -11,6 +11,8 @@
 %% F-16: per-connection cap on simultaneously joined chat channels.
 -define(MAX_JOINED_CHANNELS_PER_CONN, 32).
 -define(MAX_CHANNEL_ID_BYTES, 256).
+%% #236: at most one `not_in_match` hint per connection per this window.
+-define(NOT_IN_MATCH_HINT_WINDOW_MS, 5000).
 
 %% Default time a freshly-connected WS has to send `session.connect`
 %% before we close it. Mobile TLS handshake on poor networks can be
@@ -263,7 +265,7 @@ handle_message(
                 undefined ->
                     case maps:get(zone_pid, SState, undefined) of
                         undefined ->
-                            {ok, State};
+                            not_in_match_hint(State);
                         ZonePid ->
                             asobi_zone:player_input(ZonePid, PlayerId, InputData),
                             {ok, State}
@@ -748,6 +750,23 @@ authenticate(#{~"token" := Token}) when is_binary(Token) ->
     end;
 authenticate(_) ->
     {error, ~"invalid_token"}.
+
+%% #236: input for a match you are not in is still dropped, but the sender
+%% gets a hint so "my input does nothing" is debuggable client-side. One
+%% hint per window per connection - a client spamming input while unjoined
+%% must not turn this into a reflected message stream.
+not_in_match_hint(State) ->
+    Now = erlang:system_time(millisecond),
+    Last = maps:get(not_in_match_hint_at, State, 0),
+    case Now - Last >= ?NOT_IN_MATCH_HINT_WINDOW_MS of
+        true ->
+            Reply = encode_reply(undefined, ~"error", #{
+                type => ~"match.input", reason => ~"not_in_match"
+            }),
+            {reply, {text, Reply}, State#{not_in_match_hint_at => Now}};
+        false ->
+            {ok, State}
+    end.
 
 check_ws_rate_limit(#{ws_msg_count := Count, ws_msg_window_start := WindowStart} = State) ->
     Now = erlang:system_time(millisecond),
