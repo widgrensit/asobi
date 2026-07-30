@@ -50,6 +50,13 @@ carries `ticket_id`, `status: "pending"`, and **`players_needed`** — the mode'
 players" so a queued client isn't staring at silence. The `Meta` map in the
 Erlang return holds the same `players_needed`.
 
+> **Testing solo?** A match only forms once `match_size` players have queued
+> (default **2** if your mode doesn't set one). One client queuing alone gets
+> `players_needed: 1` and then waits forever — that's expected, not a bug. Set
+> `match_size = 1` in your mode script to match instantly by yourself, or run
+> two clients. See [Configuration](#configuration) for where `match_size`
+> lives and why changing it needs a server restart.
+
 A ticket supports `mode` and `properties`. A
 query-language extension (numeric ranges, required keys, automatic skill
 window expansion) is on the roadmap but not shipped — do that filtering
@@ -155,13 +162,8 @@ strategy   = "my_matchmaker"
 `match_size`, `strategy`, and the rest of a mode's shape are read into
 `game_modes` **once at server boot**. Editing them in a mode script and
 hot-reloading does not change them for the matchmaker — restart the server to
-pick up a new `match_size`.
-
-**Testing solo:** the matchmaker forms a match only once `match_size` players
-have queued, so a single client against a `match_size = 2` mode waits for a
-second. Set `match_size = 1` to match instantly on your own, or run two clients.
-Do not re-submit the same client to force it — that now returns your existing
-ticket, not a second one.
+pick up a new `match_size` (see the solo-testing note above if you just want
+to test alone).
 
 ## Playing With Friends
 
