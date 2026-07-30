@@ -5,7 +5,8 @@
             {handler, default, logger_std_h, #{
                 formatter => {nova_jsonlogger, #{
                     map_depth => 3,
-                    term_depth => 50
+                    term_depth => 50,
+                    new_line => true
                 }}
             }}
         ]}
