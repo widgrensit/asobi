@@ -21,7 +21,7 @@
 
 %% Only runs when guest auth is enabled - otherwise no process, no timer on
 %% deployments that don't use guest auth.
--spec start_link() -> {ok, pid()} | ignore.
+-spec start_link() -> {ok, pid()} | ignore | {error, term()}.
 start_link() ->
     case application:get_env(asobi, guest_auth, false) of
         true -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []);
@@ -31,7 +31,9 @@ start_link() ->
 %% For tests/ops: run a sweep synchronously.
 -spec sweep_now() -> {ok, non_neg_integer()}.
 sweep_now() ->
-    gen_server:call(?MODULE, sweep, 30000).
+    case gen_server:call(?MODULE, sweep, 30000) of
+        {ok, N} when is_integer(N), N >= 0 -> {ok, N}
+    end.
 
 -spec init([]) -> {ok, map()}.
 init([]) ->
@@ -74,7 +76,15 @@ cached_unlinked_count() ->
 refresh_count(Now) ->
     case live_unlinked_count() of
         N when is_integer(N) ->
-            Ttl = application:get_env(asobi, guest_unlinked_count_ttl_ms, ?DEFAULT_COUNT_TTL_MS),
+            Ttl =
+                case
+                    application:get_env(
+                        asobi, guest_unlinked_count_ttl_ms, ?DEFAULT_COUNT_TTL_MS
+                    )
+                of
+                    T when is_integer(T) -> T;
+                    _ -> ?DEFAULT_COUNT_TTL_MS
+                end,
             true = ets:insert(?COUNT_CACHE, {count, N, Now + Ttl}),
             N;
         unknown ->
@@ -85,7 +95,7 @@ refresh_count(Now) ->
 live_unlinked_count() ->
     Q = kura_query:where(kura_query:from(asobi_player_identity), {provider, ?PROVIDER}),
     case asobi_repo:aggregate(Q, count) of
-        {ok, N} -> N;
+        {ok, N} when is_integer(N), N >= 0 -> N;
         _ -> unknown
     end.
 
@@ -111,7 +121,11 @@ handle_info(_Info, State) ->
 
 -spec schedule() -> reference().
 schedule() ->
-    Interval = application:get_env(asobi, guest_reap_interval_ms, ?DEFAULT_INTERVAL_MS),
+    Interval =
+        case application:get_env(asobi, guest_reap_interval_ms, ?DEFAULT_INTERVAL_MS) of
+            I when is_integer(I) -> I;
+            _ -> ?DEFAULT_INTERVAL_MS
+        end,
     erlang:send_after(Interval, self(), sweep).
 
 -spec run_sweep() -> non_neg_integer().
@@ -238,8 +252,12 @@ unclaimed_guest(PlayerId) ->
                 kura_query:where(kura_query:from(asobi_player_identity), {player_id, PlayerId})
             )
         of
-            {ok, Ids} -> lists:all(fun(I) -> maps:get(provider, I) =:= ?PROVIDER end, Ids);
-            _ -> false
+            {ok, Ids} ->
+                lists:all(
+                    fun(I) -> is_map(I) andalso maps:get(provider, I) =:= ?PROVIDER end, Ids
+                );
+            _ ->
+                false
         end,
     NoPassword andalso OnlyDevice.
 
