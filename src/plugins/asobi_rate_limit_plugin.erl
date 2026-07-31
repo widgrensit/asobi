@@ -85,19 +85,44 @@ select_limiter(Req) ->
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
+%% select_limiter/1 only reads `path` via cowboy_req:path/1, so a bare map is
+%% fine at runtime - this just tells eqwalizer to trust it as a
+%% cowboy_req:req() for the duration of the test (mirrors asobi_body_cap_plugin_tests).
+-spec fake_req(map()) -> dynamic().
+fake_req(M) -> M.
+
 select_limiter_test_() ->
     [
-        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1/auth/register"})),
-        ?_assertEqual(asobi_auth_limiter, select_limiter(#{path => ~"/api/v1/auth/login"})),
-        ?_assertEqual(asobi_auth_limiter, select_limiter(#{path => ~"/api/v1/auth/refresh"})),
-        ?_assertEqual(asobi_iap_limiter, select_limiter(#{path => ~"/api/v1/iap/purchase"})),
-        ?_assertEqual(asobi_api_limiter, select_limiter(#{path => ~"/api/v1/friends"})),
+        ?_assertEqual(
+            asobi_register_limiter, select_limiter(fake_req(#{path => ~"/api/v1/auth/register"}))
+        ),
+        ?_assertEqual(
+            asobi_auth_limiter, select_limiter(fake_req(#{path => ~"/api/v1/auth/login"}))
+        ),
+        ?_assertEqual(
+            asobi_auth_limiter, select_limiter(fake_req(#{path => ~"/api/v1/auth/refresh"}))
+        ),
+        ?_assertEqual(
+            asobi_iap_limiter, select_limiter(fake_req(#{path => ~"/api/v1/iap/purchase"}))
+        ),
+        ?_assertEqual(asobi_api_limiter, select_limiter(fake_req(#{path => ~"/api/v1/friends"}))),
         %% asobi#157 regression: slash-normalisation variants that the
         %% router folds onto /auth/register must not escape the register
         %% bucket onto the looser auth (5/s) or api (300/s) limiter.
-        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1/auth//register"})),
-        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1/auth/register/"})),
-        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"/api/v1//auth/register"})),
-        ?_assertEqual(asobi_register_limiter, select_limiter(#{path => ~"//api/v1/auth/register"}))
+        ?_assertEqual(
+            asobi_register_limiter,
+            select_limiter(fake_req(#{path => ~"/api/v1/auth//register"}))
+        ),
+        ?_assertEqual(
+            asobi_register_limiter,
+            select_limiter(fake_req(#{path => ~"/api/v1/auth/register/"}))
+        ),
+        ?_assertEqual(
+            asobi_register_limiter,
+            select_limiter(fake_req(#{path => ~"/api/v1//auth/register"}))
+        ),
+        ?_assertEqual(
+            asobi_register_limiter, select_limiter(fake_req(#{path => ~"//api/v1/auth/register"}))
+        )
     ].
 -endif.
