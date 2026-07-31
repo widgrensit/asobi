@@ -30,7 +30,7 @@ otp_app() -> asobi.
 all(Q) -> kura_repo_worker:all(?MODULE, Q).
 
 -spec aggregate(#kura_query{}, count | {count | sum | avg | min | max, atom()}) ->
-    {ok, number()} | {error, term()}.
+    {ok, term()} | {error, term()}.
 aggregate(Q, Agg) -> kura_repo_worker:aggregate(?MODULE, Q, Agg).
 
 -spec get(module(), term()) -> {ok, map()} | {error, term()}.
