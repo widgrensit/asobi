@@ -10,6 +10,7 @@
     spawn_with_explicit_id/1,
     entity_removed_schedules_respawn/1,
     tick_respawns_entities/1,
+    tick_reports_respawn_of_removed_template/1,
     respawn_max_limit/1,
     no_respawn_when_undefined/1,
     serialise_deserialise/1,
@@ -24,6 +25,7 @@ all() ->
         spawn_with_explicit_id,
         entity_removed_schedules_respawn,
         tick_respawns_entities,
+        tick_reports_respawn_of_removed_template,
         respawn_max_limit,
         no_respawn_when_undefined,
         serialise_deserialise,
@@ -107,13 +109,27 @@ tick_respawns_entities(_Config) ->
     Now = erlang:system_time(millisecond),
     S2 = asobi_zone_spawner:entity_removed(Id, Now, S1),
     %% Not ready yet
-    {[], S3} = asobi_zone_spawner:tick(Now + 500, S2),
+    {[], [], S3} = asobi_zone_spawner:tick(Now + 500, S2),
     %% Ready after delay
-    {Spawned, S4} = asobi_zone_spawner:tick(Now + 1001, S3),
+    {Spawned, [], S4} = asobi_zone_spawner:tick(Now + 1001, S3),
     ?assertEqual(1, length(Spawned)),
     [{_, Entity, {10.0, 20.0}}] = Spawned,
     ?assertMatch(#{type := ~"npc", health := 100}, Entity),
     ?assertEqual(0, maps:get(pending_respawns, asobi_zone_spawner:info(S4))),
+    ok.
+
+%% asobi#251: a template renamed/removed between an entity's despawn and its
+%% scheduled respawn must surface, not silently drop the respawn.
+tick_reports_respawn_of_removed_template(_Config) ->
+    S0 = asobi_zone_spawner:new(templates()),
+    {ok, {Id, _}, S1} = asobi_zone_spawner:spawn_entity(~"goblin", {10.0, 20.0}, S0),
+    Now = erlang:system_time(millisecond),
+    S2 = asobi_zone_spawner:entity_removed(Id, Now, S1),
+    %% The template disappears before the scheduled respawn fires.
+    S3 = asobi_zone_spawner:set_templates(maps:remove(~"goblin", templates()), S2),
+    {Spawned, Failed, _S4} = asobi_zone_spawner:tick(Now + 1001, S3),
+    ?assertEqual([], Spawned),
+    ?assertEqual([{~"goblin", unknown_template}], Failed),
     ok.
 
 respawn_max_limit(_Config) ->
@@ -123,7 +139,7 @@ respawn_max_limit(_Config) ->
     Now = erlang:system_time(millisecond),
     %% First removal: count=1, should schedule respawn (1 < 2)
     S2 = asobi_zone_spawner:entity_removed(Id, Now, S1),
-    {Spawned1, S3} = asobi_zone_spawner:tick(Now + 501, S2),
+    {Spawned1, [], S3} = asobi_zone_spawner:tick(Now + 501, S2),
     ?assertEqual(1, length(Spawned1)),
     %% Second removal: count=2, should NOT schedule respawn (2 >= 2)
     S4 = asobi_zone_spawner:entity_removed(Id, Now + 600, S3),

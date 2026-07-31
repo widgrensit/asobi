@@ -8,6 +8,8 @@ transient matches use `asobi_match_server` instead.
 """.
 -behaviour(gen_statem).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([
     start_link/1, join/2, join/3, join/4, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1
 ]).
@@ -308,14 +310,28 @@ running({call, From}, {use_veto, PlayerId, VoteId}, State) ->
 running(
     cast,
     {spawn_at, TemplateId, {X, Y} = Pos, Overrides},
-    #{zone_manager_pid := ZMPid, zone_size := ZS} = _State
+    #{zone_manager_pid := ZMPid, zone_size := ZS, world_id := WorldId} = _State
 ) when is_binary(TemplateId), is_number(X), is_number(Y), is_map(Overrides) ->
     Coords = pos_to_zone(Pos, ZS),
     case asobi_zone_manager:ensure_zone(ZMPid, Coords) of
         {ok, ZonePid} ->
             asobi_zone:spawn_entity(ZonePid, TemplateId, Pos, Overrides),
             keep_state_and_data;
-        {error, _} ->
+        {error, Reason} ->
+            %% asobi#251: same "spawn something, hear nothing" pattern
+            %% #247/#249 fixed elsewhere - a game.spawn call whose zone
+            %% couldn't be created (e.g. max_zones_reached) used to drop
+            %% with no signal at all.
+            ?LOG_WARNING(#{
+                event => spawn_at_zone_unavailable,
+                world_id => WorldId,
+                coords => Coords,
+                template_id => TemplateId,
+                reason => Reason
+            }),
+            asobi_telemetry:game_error(zone_unavailable, #{
+                world_id => WorldId, coords => Coords, reason => Reason
+            }),
             keep_state_and_data
     end;
 running(cast, {broadcast_event, Event, Payload}, State) ->

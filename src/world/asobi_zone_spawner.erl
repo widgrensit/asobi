@@ -148,31 +148,42 @@ schedule_respawn(EntityId, TemplateId, Now, #{templates := Templates} = State) -
 %% -------------------------------------------------------------------
 
 -spec tick(pos_integer(), state()) ->
-    {[{binary(), map(), {number(), number()}}], state()}.
+    {[{binary(), map(), {number(), number()}}], [{binary(), unknown_template}], state()}.
 tick(Now, #{respawn_queue := Queue} = State) ->
     {Ready, Remaining} = lists:partition(
         fun(#{respawn_at := At}) -> Now >= At end,
         Queue
     ),
-    process_respawns(Ready, [], State#{respawn_queue => Remaining}).
+    process_respawns(Ready, [], [], State#{respawn_queue => Remaining}).
 
+%% asobi#251: a template renamed/removed between an entity's despawn and its
+%% scheduled respawn used to fail here silently - same "spawn something, hear
+%% nothing" pattern #247/#249 fixed for the other spawn paths. This module is
+%% pure (no telemetry/logging side effects of its own), so failures are
+%% returned to the caller (asobi_zone.erl) to log via log_spawn_failed/3.
 -spec process_respawns(
     [spawn_request()],
     [{binary(), map(), {number(), number()}}],
+    [{binary(), unknown_template}],
     state()
 ) ->
-    {[{binary(), map(), {number(), number()}}], state()}.
-process_respawns([], Acc, State) ->
-    {Acc, State};
+    {[{binary(), map(), {number(), number()}}], [{binary(), unknown_template}], state()}.
+process_respawns([], Acc, FailedAcc, State) ->
+    {Acc, FailedAcc, State};
 process_respawns(
-    [#{template_id := TId, entity_id := EId, position := Pos, overrides := Ov} | Rest], Acc, State
+    [#{template_id := TId, entity_id := EId, position := Pos, overrides := Ov} | Rest],
+    Acc,
+    FailedAcc,
+    State
 ) ->
     case spawn_entity(TId, EId, Pos, Ov, State) of
         {ok, {EId2, Entity}, State1} ->
             {X, Y} = Pos,
-            process_respawns(Rest, [{EId2, Entity#{x => X, y => Y}, Pos} | Acc], State1);
-        {error, _} ->
-            process_respawns(Rest, Acc, State)
+            process_respawns(
+                Rest, [{EId2, Entity#{x => X, y => Y}, Pos} | Acc], FailedAcc, State1
+            );
+        {error, Reason} ->
+            process_respawns(Rest, Acc, [{TId, Reason} | FailedAcc], State)
     end.
 
 %% -------------------------------------------------------------------

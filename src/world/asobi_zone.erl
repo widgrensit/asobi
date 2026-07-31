@@ -488,7 +488,16 @@ do_tick(
     Entities3 = apply_timer_events(TimerEvents, Entities2),
     %% Tick spawner — process respawn queue
     Spawner = maps:get(spawner, State),
-    {Respawns, Spawner1} = asobi_zone_spawner:tick(Now, Spawner),
+    {Respawns, FailedRespawns, Spawner1} = asobi_zone_spawner:tick(Now, Spawner),
+    lists:foreach(
+        fun
+            ({TemplateId, unknown_template = Reason}) when is_binary(TemplateId) ->
+                log_spawn_failed(TemplateId, Reason, State);
+            (_) ->
+                ok
+        end,
+        FailedRespawns
+    ),
     Entities4 = apply_respawns(Respawns, Entities3),
     %% Only broadcast every Nth tick to reduce network traffic
     State1 =
