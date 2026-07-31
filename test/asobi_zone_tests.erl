@@ -46,7 +46,11 @@ zone_test_() ->
         {"spawn_entity with a known template creates the entity",
             fun spawn_entity_known_template/0},
         {"spawn_entity with an unknown template logs and emits telemetry, spawns nothing",
-            fun spawn_entity_unknown_template_observable/0}
+            fun spawn_entity_unknown_template_observable/0},
+        {"spawn_entity bounds an over-long template_id before it is observable",
+            fun spawn_entity_long_template_id_bounded/0},
+        {"spawn_entity keeps a multibyte template_id valid UTF-8 when bounding",
+            fun spawn_entity_multibyte_template_id_stays_utf8/0}
     ]}.
 
 starts_empty() ->
@@ -98,6 +102,55 @@ spawn_entity_unknown_template_observable() ->
             {ev, #{kind := unknown_spawn_template, details := D}} ->
                 ?assertEqual(~"nonexistent", maps:get(template_id, D))
         after 1000 -> ?assert(false, timeout_waiting_for_unknown_spawn_template_event)
+        end
+    after
+        telemetry:detach(Ref),
+        gen_server:stop(Pid)
+    end.
+
+spawn_entity_long_template_id_bounded() ->
+    Self = self(),
+    Ref = make_ref(),
+    {ok, _} = application:ensure_all_started(telemetry),
+    telemetry:attach(
+        Ref, [asobi, error], fun(_E, _M, Meta, _) -> Self ! {ev, Meta} end, []
+    ),
+    Long = binary:copy(~"a", 200),
+    Pid = start_zone(#{spawn_templates => #{}}),
+    try
+        asobi_zone:spawn_entity(Pid, Long, {10, 20}),
+        receive
+            {ev, #{kind := unknown_spawn_template, details := D}} ->
+                Id = maps:get(template_id, D),
+                ?assertEqual(64, byte_size(Id)),
+                ?assertEqual(binary:part(Long, 0, 64), Id)
+        after 1000 -> ?assert(false, timeout_waiting_for_bounded_template_id)
+        end
+    after
+        telemetry:detach(Ref),
+        gen_server:stop(Pid)
+    end.
+
+%% A 64-byte cut lands mid-codepoint here; the details map is exported verbatim
+%% to handlers that JSON-encode it, so it must stay valid UTF-8.
+spawn_entity_multibyte_template_id_stays_utf8() ->
+    Self = self(),
+    Ref = make_ref(),
+    {ok, _} = application:ensure_all_started(telemetry),
+    telemetry:attach(
+        Ref, [asobi, error], fun(_E, _M, Meta, _) -> Self ! {ev, Meta} end, []
+    ),
+    Split = <<(binary:copy(~"a", 63))/binary, "å"/utf8>>,
+    Pid = start_zone(#{spawn_templates => #{}}),
+    try
+        asobi_zone:spawn_entity(Pid, Split, {10, 20}),
+        receive
+            {ev, #{kind := unknown_spawn_template, details := D}} ->
+                Id = maps:get(template_id, D),
+                ?assert(byte_size(Id) =< 64),
+                ?assert(is_binary(unicode:characters_to_binary(Id))),
+                _ = json:encode(#{~"template_id" => Id})
+        after 1000 -> ?assert(false, timeout_waiting_for_utf8_safe_template_id)
         end
     after
         telemetry:detach(Ref),

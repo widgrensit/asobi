@@ -425,6 +425,11 @@ At runtime, Lua scripts spawn from a template with
 `game.zone.spawn("goblin", x, y, {overrides})`, where the optional table
 overrides fields from the template's `base_state`.
 
+If `template_id` doesn't match a key returned by `spawn_templates`, nothing
+spawns: `game.zone.spawn` has no return value to report the failure. The zone
+logs a `zone_spawn_failed` warning with the `world_id` and `coords`, and
+emits `[asobi, error]` with `kind => unknown_spawn_template`.
+
 ```lua
 function spawn_templates(config)
     return {

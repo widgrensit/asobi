@@ -750,14 +750,11 @@ has_tickable_entities(Entities) ->
 %% synchronously to the caller, so this is the only place it becomes
 %% observable - without it, a bad template_id silently spawned nothing with
 %% zero signal (asobi#246/#247).
--spec log_spawn_failed(binary(), term(), map()) -> ok.
+-spec log_spawn_failed(binary(), unknown_template, map()) -> ok.
 log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) ->
-    %% TemplateId is caller-supplied (a Lua script can pass player input
-    %% straight through to game.zone.spawn) - bound it before it reaches logs
-    %% or telemetry, per asobi_telemetry:game_error/2's own "no unbounded
-    %% values" contract (mirrors asobi_oauth_controller.erl's inline form;
-    %% asobi core has no shared truncation helper).
-    Id = binary:part(TemplateId, 0, min(64, byte_size(TemplateId))),
+    %% Caller-supplied (a Lua script can pass player input straight through
+    %% to game.zone.spawn); game_error/2 requires bounded details.
+    Id = bound_template_id(TemplateId),
     ?LOG_WARNING(#{
         event => zone_spawn_failed,
         world_id => WorldId,
@@ -769,6 +766,20 @@ log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) -
         world_id => WorldId,
         template_id => Id
     }).
+
+%% A byte-length cut alone can land mid-codepoint, and the result is exported
+%% verbatim to a JSON log formatter (nova_jsonlogger) and every telemetry
+%% handler - an invalid-UTF8 template_id must not raise there. Re-validate
+%% after truncating and take whichever prefix unicode:characters_to_binary/1
+%% says is actually well-formed (possibly empty, never invalid).
+-spec bound_template_id(binary()) -> binary().
+bound_template_id(TemplateId) ->
+    Head = binary:part(TemplateId, 0, min(64, byte_size(TemplateId))),
+    case unicode:characters_to_binary(Head) of
+        Valid when is_binary(Valid) -> Valid;
+        {incomplete, Valid, _} -> Valid;
+        {error, Valid, _} -> Valid
+    end.
 
 %% --- Spatial Grid Helpers ---
 
