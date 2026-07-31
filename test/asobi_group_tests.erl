@@ -31,3 +31,15 @@ metadata_absent_is_not_checked_test() ->
         ~"name" => ~"raid team", ~"creator_id" => asobi_id:generate()
     }),
     ?assert(CS#kura_changeset.valid).
+
+%% A small-but-unencodable value must fail for the right reason, not be
+%% misreported as oversized - shrinking it wouldn't fix the actual problem.
+metadata_not_encodable_is_rejected_test() ->
+    Bad = #{~"blob" => {tuple, ~"json:encode/1 can't serialize this"}},
+    CS = asobi_group:changeset(#{}, #{
+        ~"name" => ~"raid team", ~"creator_id" => asobi_id:generate(), ~"metadata" => Bad
+    }),
+    ?assertNot(CS#kura_changeset.valid),
+    ?assertEqual(
+        [~"is not encodable"], proplists:get_all_values(metadata, CS#kura_changeset.errors)
+    ).

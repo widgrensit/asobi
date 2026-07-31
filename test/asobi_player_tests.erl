@@ -41,6 +41,16 @@ metadata_at_the_limit_passes_test() ->
     CS = asobi_player:update_changeset(#{}, #{~"metadata" => Ok}),
     ?assert(CS#kura_changeset.valid).
 
+%% A small-but-unencodable value must fail for the right reason, not be
+%% misreported as oversized - shrinking it wouldn't fix the actual problem.
+metadata_not_encodable_is_rejected_test() ->
+    Bad = #{~"blob" => {tuple, ~"json:encode/1 can't serialize this"}},
+    CS = asobi_player:update_changeset(#{}, #{~"metadata" => Bad}),
+    ?assertNot(CS#kura_changeset.valid),
+    ?assertEqual(
+        [~"is not encodable"], proplists:get_all_values(metadata, CS#kura_changeset.errors)
+    ).
+
 %% The cap travels with the schema: registration_changeset caps metadata too,
 %% and an oversized blob must fail before the pbkdf2 hash is computed (#157).
 registration_metadata_over_limit_is_rejected_test() ->

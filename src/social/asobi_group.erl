@@ -57,7 +57,8 @@ changeset(Data, Params) ->
 
 -spec metadata_within_limit(dynamic()) -> ok | {error, binary()}.
 metadata_within_limit(Metadata) ->
-    case asobi_jsonb:within_limit(Metadata, asobi_jsonb:default_metadata_bytes()) of
-        true -> ok;
-        false -> {error, ~"must be 16 KB or less"}
+    case asobi_jsonb:check(Metadata, asobi_jsonb:default_metadata_bytes()) of
+        ok -> ok;
+        too_large -> {error, ~"must be 16 KB or less"};
+        not_encodable -> {error, ~"is not encodable"}
     end.
