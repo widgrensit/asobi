@@ -52,7 +52,10 @@ peer_ip(Req) ->
 forwarded_client(Req, Cidrs, Peer) ->
     case cowboy_req:header(~"x-forwarded-for", Req) of
         Xff when is_binary(Xff), Xff =/= <<>> ->
-            Hops = lists:reverse([trim(P) || P <- binary:split(Xff, ~",", [global])]),
+            %% lists:reverse/1's bounded polymorphic spec doesn't propagate the
+            %% element type through eqwalizer here - re-narrow with a guard.
+            Parts = [trim(P) || P <- binary:split(Xff, ~",", [global])],
+            Hops = [H || H <- lists:reverse(Parts), is_binary(H)],
             case first_untrusted(Hops, Cidrs) of
                 {ok, Ip} -> Ip;
                 none -> Peer
@@ -95,9 +98,15 @@ parse_cidr(C0) ->
 -spec ip_in_any(binary(), [cidr()]) -> boolean().
 ip_in_any(IpBin, Cidrs) ->
     case inet:parse_address(binary_to_list(IpBin)) of
-        {ok, IP} -> lists:any(fun(C) -> ip_in_cidr(IP, C) end, Cidrs);
+        {ok, IP} -> ip_in_any_(IP, Cidrs);
         _ -> false
     end.
+
+-spec ip_in_any_(inet:ip_address(), [cidr()]) -> boolean().
+ip_in_any_(_IP, []) ->
+    false;
+ip_in_any_(IP, [Cidr | Rest]) ->
+    ip_in_cidr(IP, Cidr) orelse ip_in_any_(IP, Rest).
 
 -spec ip_in_cidr(inet:ip_address(), cidr()) -> boolean().
 ip_in_cidr(IP, {Net, Bits}) when tuple_size(IP) =:= tuple_size(Net) ->
@@ -110,7 +119,13 @@ ip_in_cidr(_IP, _Cidr) ->
 -spec ip_to_int(inet:ip_address()) -> non_neg_integer().
 ip_to_int(IP) ->
     ElemBits = elem_bits(IP),
-    lists:foldl(fun(E, Acc) -> (Acc bsl ElemBits) bor E end, 0, tuple_to_list(IP)).
+    ip_to_int_(tuple_to_list(IP), ElemBits, 0).
+
+-spec ip_to_int_([term()], 8 | 16, non_neg_integer()) -> non_neg_integer().
+ip_to_int_([], _ElemBits, Acc) ->
+    Acc;
+ip_to_int_([E | Rest], ElemBits, Acc) when is_integer(E) ->
+    ip_to_int_(Rest, ElemBits, (Acc bsl ElemBits) bor E).
 
 -spec width(inet:ip_address()) -> 32 | 128.
 width(IP) -> tuple_size(IP) * elem_bits(IP).
@@ -143,4 +158,8 @@ to_int(B) ->
     end.
 
 -spec trim(binary()) -> binary().
-trim(B) -> string:trim(B).
+trim(B) ->
+    case string:trim(B) of
+        Trimmed when is_binary(Trimmed) -> Trimmed;
+        Trimmed -> iolist_to_binary(Trimmed)
+    end.
