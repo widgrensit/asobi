@@ -30,6 +30,14 @@ start_zone(Overrides) ->
     {ok, Pid} = asobi_zone:start_link(Config),
     Pid.
 
+%% sys:get_state/1 returns term() generically - narrow it to the map shape
+%% asobi_zone's gen_server state actually is.
+-spec gen_server_state(pid()) -> map().
+gen_server_state(Pid) ->
+    case sys:get_state(Pid) of
+        State when is_map(State) -> State
+    end.
+
 recovery_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"reap snapshots full state and stops the zone", fun reap_snapshots_full_state/0},
@@ -88,7 +96,7 @@ cold_start_restores() ->
     meck:expect(asobi_zone_snapshotter, load_snapshot, fun(_, _) -> {ok, Snapshot} end),
     try
         Pid = start_zone(#{persistence => true, spawn_templates => Templates}),
-        State = sys:get_state(Pid),
+        State = gen_server_state(Pid),
         ZoneState = maps:get(zone_state, State),
         %% Restored from the snapshot...
         ?assertEqual(true, maps:get(~"saved", ZoneState)),
@@ -115,7 +123,7 @@ cold_start_load_error_suppresses_persistence() ->
         Pid = start_zone(#{persistence => true}),
         %% Load failed: the zone starts (no crash) but with persistence
         %% suppressed, so it never overwrites the unreadable-but-present row.
-        ?assertEqual(false, maps:get(persistence, sys:get_state(Pid))),
+        ?assertEqual(false, maps:get(persistence, gen_server_state(Pid))),
         Ref = monitor(process, Pid),
         asobi_zone:reap(Pid),
         receive

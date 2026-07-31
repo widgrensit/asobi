@@ -29,6 +29,14 @@ start_zone(GameMod, Overrides) ->
     {ok, Pid} = asobi_zone:start_link(Config),
     Pid.
 
+%% sys:get_state/1 returns term() generically - narrow it to the map shape
+%% asobi_zone's gen_server state actually is.
+-spec gen_server_state(pid()) -> map().
+gen_server_state(Pid) ->
+    case sys:get_state(Pid) of
+        State when is_map(State) -> State
+    end.
+
 zone_lifecycle_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"init_zone_state runs via handle_continue", fun init_zone_state_runs/0},
@@ -38,7 +46,7 @@ zone_lifecycle_test_() ->
 
 init_zone_state_runs() ->
     Pid = start_zone(asobi_zone_ctx_test_game, #{}),
-    ZoneState = maps:get(zone_state, sys:get_state(Pid)),
+    ZoneState = maps:get(zone_state, gen_server_state(Pid)),
     ?assertEqual(init_zone_state, maps:get(built_by, ZoneState)),
     ?assertEqual({2, 3}, maps:get(coords, ZoneState)),
     ?assert(is_reference(maps:get(runtime, ZoneState))),
@@ -47,7 +55,7 @@ init_zone_state_runs() ->
 no_callback_unaffected() ->
     %% asobi_test_world_game exports no init_zone_state; zone_state stays as given.
     Pid = start_zone(asobi_test_world_game, #{zone_state => #{seeded => true}}),
-    ?assertEqual(#{seeded => true}, maps:get(zone_state, sys:get_state(Pid))),
+    ?assertEqual(#{seeded => true}, maps:get(zone_state, gen_server_state(Pid))),
     gen_server:stop(Pid).
 
 dump_zone_state_strips_runtime() ->
