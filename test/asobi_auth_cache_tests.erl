@@ -6,6 +6,8 @@ cache_test_() ->
         {"resolve_token returns cached positive without DB", fun positive_hit/0},
         {"resolve_token caches negative with shorter TTL", fun negative_hit/0},
         {"invalidate clears the entry", fun invalidate_clears/0},
+        {"revoke_player clears only that player's entries", fun revoke_player_scoped/0},
+        {"clear wipes every entry", fun clear_wipes_all/0},
         {"expired entries are not returned", fun expired_skipped/0},
         {"banned players are rejected", fun banned_rejected/0},
         {"active players (nil banned_at) pass", fun active_passes/0},
@@ -50,6 +52,31 @@ invalidate_clears() ->
     %% would fall back to nova_auth_refresh, but with the asobi_auth ets
     %% configuration not set up in eunit it will surface as an error.
     ?assertMatch({error, _}, asobi_auth_cache:resolve_token(Token)).
+
+%% asobi#215 security review, Medium #1: the mass-revoke primitive must not
+%% evict every player's cached session for one player's revoke.
+revoke_player_scoped() ->
+    TokenA1 = ~"tok-revoke-a1",
+    TokenA2 = ~"tok-revoke-a2",
+    TokenB = ~"tok-revoke-b",
+    asobi_auth_cache:put_positive(TokenA1, #{id => ~"player-a", banned_at => nil}),
+    asobi_auth_cache:put_positive(TokenA2, #{id => ~"player-a", banned_at => nil}),
+    asobi_auth_cache:put_positive(TokenB, #{id => ~"player-b", banned_at => nil}),
+    asobi_auth_cache:revoke_player(~"player-a"),
+    ?assertMatch({error, _}, asobi_auth_cache:resolve_token(TokenA1)),
+    ?assertMatch({error, _}, asobi_auth_cache:resolve_token(TokenA2)),
+    ?assertEqual(
+        {ok, #{id => ~"player-b", banned_at => nil}}, asobi_auth_cache:resolve_token(TokenB)
+    ).
+
+clear_wipes_all() ->
+    TokenA = ~"tok-clear-a",
+    TokenB = ~"tok-clear-b",
+    asobi_auth_cache:put_positive(TokenA, #{id => ~"player-a", banned_at => nil}),
+    asobi_auth_cache:put_positive(TokenB, #{id => ~"player-b", banned_at => nil}),
+    asobi_auth_cache:clear(),
+    ?assertMatch({error, _}, asobi_auth_cache:resolve_token(TokenA)),
+    ?assertMatch({error, _}, asobi_auth_cache:resolve_token(TokenB)).
 
 banned_rejected() ->
     Token = ~"tok-banned",

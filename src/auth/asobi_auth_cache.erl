@@ -27,16 +27,20 @@ cache. Audited as of asobi#215:
 
 - **Single-device logout** (`asobi_auth_tokens:revoke_access/1`) calls
   `invalidate/1` for the one access token being logged out. Immediate.
-- **Mass revoke** (any path that deletes more tokens than the caller
-  holds a single token for - e.g. `asobi_guest_controller`'s
-  guest-to-real upgrade, which calls `nova_auth_refresh:revoke_all/2`
-  for every token a player holds) MUST call `clear/0` right after the
-  DB-level revoke. `invalidate/1` cannot help here - the cache is keyed
-  by token hash, not player id, so there is no way to target "every
-  cached entry for this player" without a full clear. A future
-  ban/admin-suspend code path needs the same `clear/0` call; there is
-  no such path in `asobi` core today; the endpoint that does add banning
-  must not skip this.
+- **Mass revoke keyed by player** (any path that deletes more tokens
+  than the caller holds a single token for - e.g.
+  `asobi_guest_controller`'s guest-to-real upgrade, which calls
+  `nova_auth_refresh:revoke_all/2` for every token a player holds, or a
+  future ban/admin-suspend path) MUST call `revoke_player/1` right
+  after the DB-level revoke, passing the player id. The stored value
+  carries `id` (see `cacheable/1`), so a match-spec scan can target
+  every cached entry for one player without evicting every other
+  player's session; there is no need to reach for `clear/0` here.
+- `clear/0` remains available for whole-table maintenance (test
+  teardown, an operator-triggered flush) but is intentionally NOT the
+  revocation primitive - a full clear scales with total cached
+  sessions rather than the one player being revoked, and is an easy
+  denial-of-service amplifier if wired to a client-reachable action.
 - **Refresh-token rotation** (`nova_auth_refresh:refresh/2`) does NOT
   revoke the access token that was live before the rotation - by
   `nova_auth`'s design, access tokens are short-lived bearer credentials
@@ -45,24 +49,44 @@ cache. Audited as of asobi#215:
   even in principle. This is a `nova_auth` design characteristic, not an
   `asobi_auth_cache` gap.
 
+## Revoke/read race
+
+`invalidate/1` and `revoke_player/1` only delete what's in the table
+*right now*. A `miss/1` already in flight (DB read returned, `put_positive/2`
+not yet called) can still land its write after the revoke, caching the
+stale row for a fresh TTL. `epoch/0` closes this: every revoke bumps a
+counter first, and `miss/1` only caches its read if the epoch it read
+before querying the DB is still current when the DB answers - otherwise
+a revoke happened mid-read and the result is served once, uncached.
+
 ## Process model
 
 A single named gen_server owns the ETS table. Lookups are direct ETS
 reads from any process; writes go through the gen_server only for
-expiry-sweep coordination — `put/2,3` and `invalidate/1` write
-directly via `public` ETS for latency. The gen_server runs a
-periodic sweep (every TTL/2) that removes expired rows so the table
-doesn't grow unbounded under attack.
+expiry-sweep coordination — `put/2,3`, `invalidate/1` and
+`revoke_player/1` write directly via `public` ETS for latency. The
+gen_server runs a periodic sweep (every TTL/2) that removes expired
+rows so the table doesn't grow unbounded under attack.
 """.
 
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([resolve_token/1, invalidate/1, put_positive/2, put_negative/1, clear/0, info/0]).
+-export([
+    resolve_token/1,
+    invalidate/1,
+    revoke_player/1,
+    put_positive/2,
+    put_negative/1,
+    clear/0,
+    info/0
+]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(TABLE, asobi_auth_cache_tab).
+-define(EPOCH_TABLE, asobi_auth_cache_epoch_tab).
+-define(EPOCH_KEY, epoch).
 -define(DEFAULT_TTL_MS, 60_000).
 -define(DEFAULT_NEGATIVE_TTL_MS, 5_000).
 
@@ -115,11 +139,27 @@ invalidate(Token) when is_binary(Token) ->
         undefined ->
             ok;
         _ ->
+            bump_epoch(),
             ets:delete(?TABLE, key(Token)),
             ok
     end;
 invalidate(_) ->
     ok.
+
+%% Evict every cached entry for one player, without touching any other
+%% player's session. The revocation primitive for mass-revoke paths
+%% (guest-upgrade, a future ban path) - see the moduledoc's "Revocation SLA".
+-spec revoke_player(binary()) -> ok.
+revoke_player(PlayerId) when is_binary(PlayerId) ->
+    case ets:whereis(?TABLE) of
+        undefined ->
+            ok;
+        _ ->
+            bump_epoch(),
+            MS = [{{'_', {ok, #{id => '$1'}}, '_'}, [{'=:=', '$1', PlayerId}], [true]}],
+            _ = ets:select_delete(?TABLE, MS),
+            ok
+    end.
 
 -spec put_positive(binary(), map()) -> ok.
 put_positive(Token, Player) when is_binary(Token), is_map(Player) ->
@@ -147,7 +187,29 @@ clear() ->
         undefined ->
             ok;
         _ ->
+            bump_epoch(),
             ets:delete_all_objects(?TABLE),
+            ok
+    end.
+
+-spec epoch() -> non_neg_integer().
+epoch() ->
+    case ets:whereis(?EPOCH_TABLE) of
+        undefined ->
+            0;
+        _ ->
+            case ets:update_counter(?EPOCH_TABLE, ?EPOCH_KEY, 0, {?EPOCH_KEY, 0}) of
+                N when is_integer(N) -> N
+            end
+    end.
+
+-spec bump_epoch() -> ok.
+bump_epoch() ->
+    case ets:whereis(?EPOCH_TABLE) of
+        undefined ->
+            ok;
+        _ ->
+            _ = ets:update_counter(?EPOCH_TABLE, ?EPOCH_KEY, 1, {?EPOCH_KEY, 0}),
             ok
     end.
 
@@ -179,6 +241,14 @@ init([]) ->
         _ ->
             ok
     end,
+    case ets:whereis(?EPOCH_TABLE) of
+        undefined ->
+            ?EPOCH_TABLE = ets:new(?EPOCH_TABLE, [
+                named_table, public, set, {write_concurrency, true}
+            ]);
+        _ ->
+            ok
+    end,
     schedule_sweep(),
     {ok, #{}}.
 
@@ -201,14 +271,25 @@ handle_info(_Info, State) ->
 %% --- Internal ---
 
 miss(Token) ->
+    %% Capture the epoch before the DB round trip. A revoke/read race: if
+    %% invalidate/1, revoke_player/1 or clear/0 bumps the epoch while this
+    %% read is in flight, the row we're about to cache may already be stale
+    %% (deleted DB-side, hence the revoke). Serve it once, don't cache it.
+    Epoch = epoch(),
     case nova_auth_refresh:get_user_by_access_token(asobi_auth, Token) of
         {ok, Player} = OK ->
             asobi_telemetry:auth_cache_miss(positive),
-            put_positive(Token, Player),
+            case epoch() of
+                Epoch -> put_positive(Token, Player);
+                _ -> ok
+            end,
             OK;
         {error, _} = Err ->
             asobi_telemetry:auth_cache_miss(negative),
-            put_negative(Token),
+            case epoch() of
+                Epoch -> put_negative(Token);
+                _ -> ok
+            end,
             Err
     end.
 

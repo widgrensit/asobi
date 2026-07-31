@@ -104,13 +104,24 @@ upgrade_then_already_claimed(Config) ->
         Config
     ),
     ?assertStatus(200, R2),
-    %% A second upgrade on the now-claimed account is refused.
+    %% The pre-upgrade token was revoked (both DB row and auth-cache entry,
+    %% asobi#215) as part of the upgrade, so it no longer authenticates at all.
     {ok, R3} = nova_test:post(
         "/api/v1/auth/guest/upgrade",
         #{json => #{~"username" => ~"other", ~"password" => ~"secret1234"}, headers => Auth},
         Config
     ),
-    ?assertStatus(409, R3),
+    ?assertStatus(401, R3),
+    %% A second upgrade attempt with the freshly issued token is refused
+    %% because the account is now claimed.
+    #{~"access_token" := NewToken} = nova_test:json(R2),
+    NewAuth = [{~"authorization", <<"Bearer ", NewToken/binary>>}],
+    {ok, R4} = nova_test:post(
+        "/api/v1/auth/guest/upgrade",
+        #{json => #{~"username" => ~"other", ~"password" => ~"secret1234"}, headers => NewAuth},
+        Config
+    ),
+    ?assertStatus(409, R4),
     Config.
 
 %% A passwordless account that is NOT a guest (e.g. OAuth-only) must not be able
@@ -141,15 +152,26 @@ upgrade_rejected_for_non_guest(Config) ->
 %% asobi#215: do_upgrade/4 calls nova_auth_refresh:revoke_all/2, which deletes
 %% every token DB row for the player - but a token cached as a valid positive
 %% BEFORE the upgrade must not keep resolving from the ETS cache afterward.
-%% Seed a stale positive entry directly (mirrors what a real pre-upgrade
-%% request would have populated), upgrade, then confirm the cache no longer
-%% serves it - it must fall through to a genuine (now-empty) DB lookup.
+%% Cover the actual attack this exists for: a second session on the same
+%% device secret (the "stolen device secret" scenario the do_upgrade/4
+%% comment describes) cached as a stale positive must also stop resolving -
+%% not just the token the upgrade request itself carries. A test that only
+%% seeds the caller's own token would pass equally with a single-token
+%% invalidate/1 instead of the player-wide revoke_player/1 this exercises.
 upgrade_clears_stale_auth_cache_entries(Config) ->
-    {ok, R1} = create(device_id(), secret(), Config),
+    Dev = device_id(),
+    Secret = secret(),
+    {ok, R1} = create(Dev, Secret, Config),
     #{~"access_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
     Auth = [{~"authorization", <<"Bearer ", Token/binary>>}],
+    {ok, R1b} = create(Dev, Secret, Config),
+    #{~"access_token" := StolenToken} = nova_test:json(R1b),
     ok = asobi_auth_cache:put_positive(Token, #{id => PlayerId, banned_at => nil}),
+    ok = asobi_auth_cache:put_positive(StolenToken, #{id => PlayerId, banned_at => nil}),
     ?assertEqual({ok, #{id => PlayerId, banned_at => nil}}, asobi_auth_cache:resolve_token(Token)),
+    ?assertEqual(
+        {ok, #{id => PlayerId, banned_at => nil}}, asobi_auth_cache:resolve_token(StolenToken)
+    ),
     Username = asobi_test_helpers:unique_username(~"cacheclr"),
     {ok, R2} = nova_test:post(
         "/api/v1/auth/guest/upgrade",
@@ -158,6 +180,7 @@ upgrade_clears_stale_auth_cache_entries(Config) ->
     ),
     ?assertStatus(200, R2),
     ?assertEqual({error, not_found}, asobi_auth_cache:resolve_token(Token)),
+    ?assertEqual({error, not_found}, asobi_auth_cache:resolve_token(StolenToken)),
     Config.
 
 reaper_removes_unclaimed_guest_and_children(Config) ->

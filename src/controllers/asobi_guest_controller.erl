@@ -102,12 +102,16 @@ do_upgrade(Player, PlayerId, Username, Password) ->
             %% means the old (possibly attacker-held) tokens stop working -
             %% but revoke_all/2 only deletes the DB rows, and asobi_auth_cache
             %% serves a cached positive for up to auth_cache_ttl_ms after a
-            %% token's DB row is gone (asobi#215). Clear the cache too so this
-            %% mass revoke actually takes effect immediately, not up to 60s
-            %% later - a stale cache entry is exactly the case this comment's
-            %% security intent depends on not existing.
+            %% token's DB row is gone (asobi#215). Evict this player's cache
+            %% entries too so this mass revoke actually takes effect
+            %% immediately, not up to 60s later - a stale cache entry is
+            %% exactly the case this comment's security intent depends on not
+            %% existing. revoke_player/1, not clear/0: this endpoint is
+            %% reachable by any authenticated guest, and a full-table clear
+            %% would let repeated upgrades evict every other player's cached
+            %% session node-wide.
             _ = nova_auth_refresh:revoke_all(asobi_auth, PlayerId),
-            _ = asobi_auth_cache:clear(),
+            _ = asobi_auth_cache:revoke_player(PlayerId),
             asobi_auth_tokens:issue(Updated, 200, #{username => Username, upgraded => true});
         {error, #kura_changeset{} = ECS} ->
             asobi_auth_error:from_changeset_fields(
