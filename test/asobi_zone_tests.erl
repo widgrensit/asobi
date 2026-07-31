@@ -42,7 +42,11 @@ zone_test_() ->
         {"subscriber DOWN cleans up", fun subscriber_down_cleanup/0},
         {"tick touches zone_manager when subscribers present", fun tick_touches_zone_manager/0},
         {"tick hibernates when empty", fun tick_hibernates_when_empty/0},
-        {"tick does not hibernate with NPC entities", fun tick_no_hibernate_with_npcs/0}
+        {"tick does not hibernate with NPC entities", fun tick_no_hibernate_with_npcs/0},
+        {"spawn_entity with a known template creates the entity",
+            fun spawn_entity_known_template/0},
+        {"spawn_entity with an unknown template logs and emits telemetry, spawns nothing",
+            fun spawn_entity_unknown_template_observable/0}
     ]}.
 
 starts_empty() ->
@@ -60,6 +64,45 @@ add_remove_entities() ->
     timer:sleep(10),
     ?assertEqual(#{}, asobi_zone:get_entities(Pid)),
     gen_server:stop(Pid).
+
+spawn_entity_known_template() ->
+    Pid = start_zone(#{
+        spawn_templates => #{
+            ~"cube" => #{type => ~"object", base_state => #{~"solid" => true}}
+        }
+    }),
+    asobi_zone:spawn_entity(Pid, ~"cube", {10, 20}),
+    timer:sleep(10),
+    Entities = asobi_zone:get_entities(Pid),
+    ?assertEqual(1, map_size(Entities)),
+    [Entity] = maps:values(Entities),
+    ?assertEqual(~"object", maps:get(type, Entity)),
+    gen_server:stop(Pid).
+
+%% asobi#247: an unresolvable template_id must be observable (log +
+%% telemetry), not silently dropped - the game.zone.spawn caller has no
+%% synchronous way to learn a cast failed, so this is the only signal.
+spawn_entity_unknown_template_observable() ->
+    Self = self(),
+    Ref = make_ref(),
+    {ok, _} = application:ensure_all_started(telemetry),
+    telemetry:attach(
+        Ref, [asobi, error], fun(_E, _M, Meta, _) -> Self ! {ev, Meta} end, []
+    ),
+    Pid = start_zone(#{spawn_templates => #{}}),
+    try
+        asobi_zone:spawn_entity(Pid, ~"nonexistent", {10, 20}),
+        timer:sleep(10),
+        ?assertEqual(#{}, asobi_zone:get_entities(Pid)),
+        receive
+            {ev, #{kind := unknown_spawn_template, details := D}} ->
+                ?assertEqual(~"nonexistent", maps:get(template_id, D))
+        after 1000 -> ?assert(false)
+        end
+    after
+        telemetry:detach(Ref),
+        gen_server:stop(Pid)
+    end.
 
 subscribe_unsubscribe() ->
     Pid = start_zone(),

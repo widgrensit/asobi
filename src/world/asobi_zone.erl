@@ -398,7 +398,8 @@ handle_cast(
                 spawner => Spawner1,
                 spatial_grid => Grid1
             }};
-        {error, _} ->
+        {error, Reason} ->
+            log_spawn_failed(TemplateId, Reason, State),
             {noreply, State}
     end;
 handle_cast({spawn_entities, Spawns}, State) when is_list(Spawns) ->
@@ -744,6 +745,25 @@ has_tickable_entities(Entities) ->
         Entities
     ).
 
+%% asobi_zone_spawner:spawn_entity/4's only error today is unknown_template.
+%% The cast API (game.zone.spawn and world-server spawn_at) can't return this
+%% synchronously to the caller, so this is the only place it becomes
+%% observable - without it, a bad template_id silently spawned nothing with
+%% zero signal (asobi#246/#247).
+-spec log_spawn_failed(binary(), term(), map()) -> ok.
+log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) ->
+    ?LOG_WARNING(#{
+        event => zone_spawn_failed,
+        world_id => WorldId,
+        coords => Coords,
+        template_id => TemplateId,
+        reason => Reason
+    }),
+    asobi_telemetry:game_error(unknown_spawn_template, #{
+        world_id => WorldId,
+        template_id => TemplateId
+    }).
+
 %% --- Spatial Grid Helpers ---
 
 spatial_grid_insert(_EntityId, _EntityState, undefined) ->
@@ -774,7 +794,8 @@ apply_spawns(
                     spawner => Sp1,
                     spatial_grid => Gr1
                 };
-            {error, _} ->
+            {error, Reason} ->
+                log_spawn_failed(TemplateId, Reason, State),
                 State
         end,
     apply_spawns(Rest, State1);
