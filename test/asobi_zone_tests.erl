@@ -97,7 +97,7 @@ spawn_entity_unknown_template_observable() ->
         receive
             {ev, #{kind := unknown_spawn_template, details := D}} ->
                 ?assertEqual(~"nonexistent", maps:get(template_id, D))
-        after 1000 -> ?assert(false)
+        after 1000 -> ?assert(false, timeout_waiting_for_unknown_spawn_template_event)
         end
     after
         telemetry:detach(Ref),

@@ -752,16 +752,22 @@ has_tickable_entities(Entities) ->
 %% zero signal (asobi#246/#247).
 -spec log_spawn_failed(binary(), term(), map()) -> ok.
 log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) ->
+    %% TemplateId is caller-supplied (a Lua script can pass player input
+    %% straight through to game.zone.spawn) - bound it before it reaches logs
+    %% or telemetry, per asobi_telemetry:game_error/2's own "no unbounded
+    %% values" contract (mirrors asobi_oauth_controller.erl's inline form;
+    %% asobi core has no shared truncation helper).
+    Id = binary:part(TemplateId, 0, min(64, byte_size(TemplateId))),
     ?LOG_WARNING(#{
         event => zone_spawn_failed,
         world_id => WorldId,
         coords => Coords,
-        template_id => TemplateId,
+        template_id => Id,
         reason => Reason
     }),
     asobi_telemetry:game_error(unknown_spawn_template, #{
         world_id => WorldId,
-        template_id => TemplateId
+        template_id => Id
     }).
 
 %% --- Spatial Grid Helpers ---
