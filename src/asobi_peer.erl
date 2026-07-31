@@ -52,10 +52,7 @@ peer_ip(Req) ->
 forwarded_client(Req, Cidrs, Peer) ->
     case cowboy_req:header(~"x-forwarded-for", Req) of
         Xff when is_binary(Xff), Xff =/= <<>> ->
-            %% lists:reverse/1's bounded polymorphic spec doesn't propagate the
-            %% element type through eqwalizer here - re-narrow with a guard.
-            Parts = [trim(P) || P <- binary:split(Xff, ~",", [global])],
-            Hops = [H || H <- lists:reverse(Parts), is_binary(H)],
+            Hops = rev_trim(binary:split(Xff, ~",", [global]), []),
             case first_untrusted(Hops, Cidrs) of
                 {ok, Ip} -> Ip;
                 none -> Peer
@@ -161,5 +158,17 @@ to_int(B) ->
 trim(B) ->
     case string:trim(B) of
         Trimmed when is_binary(Trimmed) -> Trimmed;
-        Trimmed -> iolist_to_binary(Trimmed)
+        Trimmed ->
+            case unicode:characters_to_binary(Trimmed) of
+                Bin when is_binary(Bin) -> Bin
+            end
     end.
+
+%% Trims and reverses in one typed pass - avoids lists:reverse/1's bounded
+%% polymorphic spec, which doesn't propagate the element type through
+%% eqwalizer in this position (see forwarded_client/3).
+-spec rev_trim([binary()], [binary()]) -> [binary()].
+rev_trim([], Acc) ->
+    Acc;
+rev_trim([P | Rest], Acc) ->
+    rev_trim(Rest, [trim(P) | Acc]).

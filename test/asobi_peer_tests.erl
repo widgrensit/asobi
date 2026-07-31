@@ -7,6 +7,7 @@ peer_test_() ->
         fun untrusted_peer_ignores_xff/0,
         fun trusted_peer_uses_xff/0,
         fun strips_trusted_hops/0,
+        fun rightmost_untrusted_hop_wins/0,
         fun trusted_peer_no_xff_returns_peer/0,
         fun ipv6_trusted_proxy/0
     ]}.
@@ -46,6 +47,19 @@ strips_trusted_hops() ->
     ?assertEqual(
         ~"203.0.113.9",
         asobi_peer:client_ip(req({{10, 0, 0, 1}, 1234}, ~"203.0.113.9, 10.0.0.5"))
+    ).
+
+%% Two untrusted hops: the client controls the left-hand entries, so only the
+%% right-most non-proxy hop (the one our own proxy appended) may be trusted.
+%% An implementation that fails to reverse (or drops a hop) returns the
+%% attacker-controlled 203.0.113.9 instead.
+rightmost_untrusted_hop_wins() ->
+    application:set_env(asobi, trusted_proxies, [~"10.0.0.0/8"]),
+    ?assertEqual(
+        ~"198.51.100.7",
+        asobi_peer:client_ip(
+            req({{10, 0, 0, 1}, 1234}, ~"203.0.113.9, 198.51.100.7, 10.0.0.5")
+        )
     ).
 
 trusted_peer_no_xff_returns_peer() ->

@@ -344,7 +344,7 @@ pepper(KeyId) ->
     case application:get_env(asobi, guest_verifier_pepper, undefined) of
         Peppers when is_map(Peppers) ->
             case maps:get(KeyId, Peppers, undefined) of
-                Bin when is_binary(Bin) -> Bin;
+                Bin when is_binary(Bin), byte_size(Bin) >= 32 -> Bin;
                 _ -> undefined
             end;
         Bin when is_binary(Bin), byte_size(Bin) >= 32 -> Bin;

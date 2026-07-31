@@ -2,9 +2,11 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-%% decision/1 and context/1 only read `path`/`headers`/`json`, so a bare map
-%% is fine at runtime - this just tells eqwalizer to trust it as a
-%% cowboy_req:req() for the duration of the test (mirrors asobi_body_cap_plugin_tests).
+%% decision/1 and context/1 only read `path`/`headers`/`json` (context/1 also
+%% derives `ip` via asobi_peer:client_ip/1, safe here since trusted_proxies
+%% defaults to [] and the header lookup is try-wrapped), so a bare map is fine
+%% at runtime - this just tells eqwalizer to trust it as a cowboy_req:req()
+%% for the duration of the test (mirrors asobi_body_cap_plugin_tests).
 -spec fake_req(map()) -> dynamic().
 fake_req(M) -> M.
 
