@@ -103,6 +103,17 @@ Returning player response:
 }
 ```
 
+### Error Responses
+
+| Status | `error`                | Cause |
+|--------|------------------------|-------|
+| `400`  | `missing_required_fields` | `provider` or `token` missing |
+| `401`  | `invalid_token`        | Token failed provider validation |
+| `401`  | `unsupported_provider` | `provider` isn't one of the values below |
+| `403`  | *(registration reason)* | New-account registration is closed for this provider (`asobi_registration:check/1`) |
+| `409`  | `already_registering`  | Two first-sign-ins for the same provider identity raced; retry - the retry logs in to the account the other request created |
+| `500`  | `registration_failed`  | Account creation failed for a reason other than the race above (logged server-side) |
+
 ### Supported Providers
 
 | Provider  | `provider` value | Issuer |

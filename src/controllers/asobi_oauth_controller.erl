@@ -184,7 +184,7 @@ create_player_with_identity(Provider, Claims, Attempt) ->
                             {ok, _Identity} ->
                                 _ = init_player_stats(PlayerId),
                                 {ok, Player};
-                            {error, IErr} ->
+                            {error, _} = IErr ->
                                 throw({rollback, identity, IErr})
                         end;
                     {error, _} = PErr ->

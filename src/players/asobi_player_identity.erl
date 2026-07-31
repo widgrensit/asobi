@@ -51,4 +51,15 @@ changeset(Data, Params) ->
         provider_display_name,
         provider_metadata
     ]),
-    kura_changeset:validate_required(CS, [player_id, provider, provider_uid]).
+    CS1 = kura_changeset:validate_required(CS, [player_id, provider, provider_uid]),
+    %% Without this, a real {provider, provider_uid} race loses on the DB's
+    %% composite unique index (see indexes/0), but kura_repo_worker's
+    %% constraint_to_field/1 naming heuristic can't derive `provider_uid` from
+    %% the multi-word index name player_identities_provider_provider_uid_index
+    %% - it splits on "_" and takes the second token ("identities"), not the
+    %% field. Declaring the constraint explicitly makes the DB error land on
+    %% `provider_uid`, which asobi_auth_error:provider_uid_taken/1 depends on
+    %% (asobi#241 code review).
+    kura_changeset:unique_constraint(CS1, provider_uid, #{
+        name => ~"player_identities_provider_provider_uid_index"
+    }).

@@ -17,7 +17,8 @@
     login_existing_identity/1,
     create_player_retries_on_username_collision/1,
     create_player_no_retry_on_non_unique_username_error/1,
-    create_player_deletes_orphan_on_identity_race_loss/1
+    create_player_deletes_orphan_on_identity_race_loss/1,
+    create_player_identity_insert_real_failure_returns_500/1
 ]).
 
 all() ->
@@ -42,7 +43,8 @@ groups() ->
         {create_player, [], [
             create_player_retries_on_username_collision,
             create_player_no_retry_on_non_unique_username_error,
-            create_player_deletes_orphan_on_identity_race_loss
+            create_player_deletes_orphan_on_identity_race_loss,
+            create_player_identity_insert_real_failure_returns_500
         ]}
     ].
 
@@ -341,6 +343,35 @@ create_player_deletes_orphan_on_identity_race_loss(Config) ->
             after 1000 -> erlang:error(player_not_created)
             end,
         ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, PlayerId))
+    after
+        meck:unload(asobi_repo)
+    end,
+    Config.
+
+%% asobi#241: an identity-insert failure that is NOT the provider_uid unique
+%% race (e.g. a validation error on another field) must not be misreported as
+%% already_registering - it logs and returns 500.
+create_player_identity_insert_real_failure_returns_500(Config) ->
+    meck:new(asobi_repo, [passthrough]),
+    meck:expect(asobi_repo, insert, fun
+        (#kura_changeset{schema = asobi_player_identity} = CS) ->
+            {error, kura_changeset:add_error(CS, provider_email, ~"is invalid")};
+        (CS) ->
+            meck:passthrough([CS])
+    end),
+    try
+        ProviderUid = iolist_to_binary([
+            ~"real_failure_uid_", integer_to_binary(erlang:unique_integer([positive]))
+        ]),
+        Claims = #{
+            provider_uid => ProviderUid,
+            provider_display_name => undefined,
+            provider_email => ~"not-an-email"
+        },
+        ?assertEqual(
+            {json, 500, #{}, #{error => ~"registration_failed"}},
+            asobi_oauth_controller:create_player_with_identity(~"discord", Claims)
+        )
     after
         meck:unload(asobi_repo)
     end,
