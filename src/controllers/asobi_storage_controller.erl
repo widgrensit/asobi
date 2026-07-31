@@ -228,11 +228,7 @@ list_storage(
 
 -spec data_within_limit(dynamic()) -> boolean().
 data_within_limit(Data) ->
-    try iolist_size(json:encode(Data)) =< ?MAX_SAVE_DATA_BYTES of
-        Result -> Result
-    catch
-        _:_ -> false
-    end.
+    asobi_jsonb:within_limit(Data, ?MAX_SAVE_DATA_BYTES).
 
 -spec slots_under_cap(binary()) -> boolean().
 slots_under_cap(PlayerId) ->

@@ -6,6 +6,10 @@
 -export([table/0, fields/0, associations/0, generate_id/0]).
 -export([changeset/2]).
 
+%% asobi#216: metadata is unbounded jsonb, and create_group/update_group cast
+%% it straight from the request body - the same #169 lever, applied here.
+-define(MAX_METADATA_BYTES, 16384).
+
 -spec table() -> binary().
 table() -> ~"groups".
 
@@ -46,4 +50,12 @@ changeset(Data, Params) ->
     CS2 = kura_changeset:validate_length(CS1, name, [{min, 2}, {max, 64}]),
     %% F-17: cap description length so an attacker cannot store
     %% megabytes of text in the groups table.
-    kura_changeset:validate_length(CS2, description, [{max, 1024}]).
+    CS3 = kura_changeset:validate_length(CS2, description, [{max, 1024}]),
+    kura_changeset:validate_change(CS3, metadata, fun metadata_within_limit/1).
+
+-spec metadata_within_limit(dynamic()) -> ok | {error, binary()}.
+metadata_within_limit(Metadata) ->
+    case asobi_jsonb:within_limit(Metadata, ?MAX_METADATA_BYTES) of
+        true -> ok;
+        false -> {error, ~"must be 16 KB or less"}
+    end.

@@ -100,9 +100,7 @@ update_changeset(Data, Params) ->
 
 -spec metadata_within_limit(dynamic()) -> ok | {error, binary()}.
 metadata_within_limit(Metadata) ->
-    try iolist_size(json:encode(Metadata)) =< ?MAX_METADATA_BYTES of
+    case asobi_jsonb:within_limit(Metadata, ?MAX_METADATA_BYTES) of
         true -> ok;
         false -> {error, ~"must be 16 KB or less"}
-    catch
-        _:_ -> {error, ~"is not encodable"}
     end.
