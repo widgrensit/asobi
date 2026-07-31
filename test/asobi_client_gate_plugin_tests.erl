@@ -2,7 +2,13 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(REGISTER, #{path => ~"/api/v1/auth/register"}).
+%% decision/1 and context/1 only read `path`/`headers`/`json`, so a bare map
+%% is fine at runtime - this just tells eqwalizer to trust it as a
+%% cowboy_req:req() for the duration of the test (mirrors asobi_body_cap_plugin_tests).
+-spec fake_req(map()) -> dynamic().
+fake_req(M) -> M.
+
+-define(REGISTER, fake_req(#{path => ~"/api/v1/auth/register"})).
 
 gate_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
@@ -42,7 +48,7 @@ unset_gate_is_noop() ->
 
 non_auth_path_is_noop() ->
     set_gate(fun(_) -> {deny, ~"nope"} end),
-    ?assertEqual(pass, asobi_client_gate_plugin:decision(#{path => ~"/api/v1/friends"})).
+    ?assertEqual(pass, asobi_client_gate_plugin:decision(fake_req(#{path => ~"/api/v1/friends"}))).
 
 deny_propagates() ->
     set_gate(fun(_) -> {deny, ~"captcha_failed"} end),
@@ -80,15 +86,19 @@ false_disables_gate() ->
 
 applies_to_oauth_and_guest() ->
     set_gate(fun(_) -> {deny, ~"x"} end),
-    ?assertEqual({deny, ~"x"}, asobi_client_gate_plugin:decision(#{path => ~"/api/v1/auth/oauth"})),
-    ?assertEqual({deny, ~"x"}, asobi_client_gate_plugin:decision(#{path => ~"/api/v1/auth/guest"})).
+    ?assertEqual(
+        {deny, ~"x"}, asobi_client_gate_plugin:decision(fake_req(#{path => ~"/api/v1/auth/oauth"}))
+    ),
+    ?assertEqual(
+        {deny, ~"x"}, asobi_client_gate_plugin:decision(fake_req(#{path => ~"/api/v1/auth/guest"}))
+    ).
 
 %% Slash-fold variants the router collapses onto a gated path must still gate,
 %% mirroring the asobi#157 regression cases on select_limiter/1.
 folds_slash_variants() ->
     set_gate(fun(_) -> {deny, ~"x"} end),
     [
-        ?assertEqual({deny, ~"x"}, asobi_client_gate_plugin:decision(#{path => P}))
+        ?assertEqual({deny, ~"x"}, asobi_client_gate_plugin:decision(fake_req(#{path => P})))
      || P <- [
             ~"/api/v1/auth//register",
             ~"/api/v1/auth/register/",
@@ -100,7 +110,7 @@ folds_slash_variants() ->
 %% The central security claim: the context handed to a gate carries the
 %% challenge token but NOT the registration plaintext password.
 context_omits_password_and_extracts_token() ->
-    Req = #{
+    Req = fake_req(#{
         path => ~"/api/v1/auth/register",
         headers => #{~"cf-turnstile-response" => ~"tok"},
         json => #{
@@ -108,7 +118,7 @@ context_omits_password_and_extracts_token() ->
             ~"password" => ~"secret",
             ~"client_gate_token" => ~"tok"
         }
-    },
+    }),
     Ctx = asobi_client_gate_plugin:context(Req),
     ?assertEqual([headers, ip, path, token], lists:sort(maps:keys(Ctx))),
     ?assertEqual(~"tok", maps:get(token, Ctx)),
