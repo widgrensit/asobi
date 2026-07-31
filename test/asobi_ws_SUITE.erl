@@ -10,7 +10,8 @@
     ws_idle_auth_timeout_closes/1,
     ws_match_input_not_in_match_hint/1,
     ws_match_input_hint_rate_limited/1,
-    ws_script_error_rendered_as_game_error/1
+    ws_script_error_rendered_as_game_error/1,
+    ws_matchmaker_add_omitted_mode_rejected/1
 ]).
 
 all() ->
@@ -21,7 +22,8 @@ all() ->
         ws_idle_auth_timeout_closes,
         ws_match_input_not_in_match_hint,
         ws_match_input_hint_rate_limited,
-        ws_script_error_rendered_as_game_error
+        ws_script_error_rendered_as_game_error,
+        ws_matchmaker_add_omitted_mode_rejected
     ].
 
 init_per_suite(Config) ->
@@ -133,6 +135,33 @@ ws_script_error_rendered_as_game_error(Config) ->
                 ~"script" := ~"match.lua",
                 ~"message" := ~"bad arithmetic + on nil, 1"
             }
+        },
+        Reply
+    ),
+    Config.
+
+%% asobi#243: matchmaker.add with no `mode' defaults to "default"; the WS edge
+%% gates on the same known_mode/1 as REST, so an unmapped "default" must be
+%% rejected here too (dev_sys.config.src ships an empty game_modes).
+ws_matchmaker_add_omitted_mode_rejected(Config) ->
+    {_, Token} = register_player(~"mmnomode", Config),
+    Conn = ws_connect_authed(Token, Config),
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"matchmaker.add",
+            ~"cid" => ~"mm1",
+            ~"payload" => #{~"properties" => #{~"skill" => 1200}}
+        },
+        Conn
+    ),
+    {ok, Reply} = recv_until(
+        fun(M) -> maps:get(~"type", M, undefined) =:= ~"error" end, Conn
+    ),
+    nova_test_ws:close(Conn),
+    ?assertMatch(
+        #{
+            ~"cid" := ~"mm1",
+            ~"payload" := #{~"type" := ~"matchmaker.add", ~"reason" := ~"unknown_mode"}
         },
         Reply
     ),

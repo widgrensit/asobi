@@ -61,9 +61,12 @@ Erlang return holds the same `players_needed`.
 > value** — `{mode = "arena"}` in Lua, `mode: "arena"` in JSON/TS, a typed
 > `mode` parameter elsewhere. A malformed options shape (e.g. Lua's
 > `{"arena"}`, which sets index `1`, not a `mode` field) silently falls back
-> to the mode's default instead of erroring, so you queue for the wrong mode
-> with no feedback — and if `default` isn't in your `config.lua`, that ticket
-> can never spawn a match. The Lua SDKs (asobi-defold, asobi-love2d) now
+> to `"default"` instead of erroring. A multi-mode game gets `400 unknown_mode`
+> for it - `default` is just another key, and a `config.lua` manifest never
+> maps it. A **single-mode** game does not: its loader registers `default`
+> automatically, so the malformed call silently queues for the only mode
+> there is, with no error at all - the SDK-level guards below are your only
+> protection in that case. The Lua SDKs (asobi-defold, asobi-love2d) now
 > raise a loud error on this exact mistake; the typed SDKs (Dart, Unity,
 > Unreal, Godot) prevent it at compile/parse time via a required `mode`
 > parameter. asobi-js's WS transport is intentionally schema-less (see its

@@ -5,6 +5,7 @@
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     add_ticket/1,
+    add_ticket_omitted_mode_rejected/1,
     get_ticket/1,
     get_ticket_not_found/1,
     cancel_ticket/1,
@@ -16,6 +17,7 @@
 all() ->
     [
         add_ticket,
+        add_ticket_omitted_mode_rejected,
         get_ticket,
         get_ticket_not_found,
         cancel_ticket,
@@ -34,7 +36,13 @@ init_per_suite(Config) ->
             {ok, M} when is_map(M) -> M;
             _ -> #{}
         end,
-    application:set_env(asobi, game_modes, Existing#{~"ranked" => #{}, ~"casual" => #{}}),
+    %% add_ticket_omitted_mode_rejected depends on "default" being absent -
+    %% remove it explicitly rather than relying on Existing not having it.
+    application:set_env(
+        asobi,
+        game_modes,
+        (maps:remove(~"default", Existing))#{~"ranked" => #{}, ~"casual" => #{}}
+    ),
     U1 = asobi_test_helpers:unique_username(~"mm_api1"),
     U2 = asobi_test_helpers:unique_username(~"mm_api2"),
     {ok, R1} = nova_test:post(
@@ -94,6 +102,24 @@ add_ticket(Config) ->
         #{headers => auth(Config)},
         Config
     ),
+    Config.
+
+%% asobi#243 incident: a request with no `mode' field defaults to "default"
+%% (asobi_matchmaker_controller:add/1), which used to be unconditionally
+%% accepted by known_mode/1 even though this suite's game_modes never maps
+%% "default" - the ticket queued, then failed later with no_game_module
+%% instead of an immediate, actionable 400 here.
+add_ticket_omitted_mode_rejected(Config) ->
+    {ok, Resp} = nova_test:post(
+        "/api/v1/matchmaker",
+        #{
+            headers => auth(Config),
+            json => #{~"properties" => #{~"skill" => 1200}}
+        },
+        Config
+    ),
+    ?assertStatus(400, Resp),
+    ?assertMatch(#{~"error" := ~"unknown_mode"}, nova_test:json(Resp)),
     Config.
 
 get_ticket(Config) ->
