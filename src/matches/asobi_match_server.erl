@@ -19,7 +19,16 @@ the place to put callback hardening.
 -behaviour(gen_statem).
 
 -export([
-    start_link/1, join/2, join/3, leave/2, handle_input/3, get_info/1, pause/1, resume/1, cancel/1
+    start_link/1,
+    join/2,
+    join/3,
+    leave/2,
+    handle_input/3,
+    get_info/1,
+    get_info/2,
+    pause/1,
+    resume/1,
+    cancel/1
 ]).
 -export([reconnect/2]).
 -export([listing_info/1]).
@@ -69,6 +78,17 @@ handle_input(Pid, PlayerId, Input) ->
 -spec get_info(pid()) -> map().
 get_info(Pid) ->
     case gen_statem:call(Pid, get_info) of
+        Info when is_map(Info) -> Info;
+        _ -> #{}
+    end.
+
+%% asobi#194: mirrors asobi_world_server:get_info/2 - the discovery-listing
+%% consumers (asobi_discovery:enumerate/3, via list_matches/1) never read
+%% `players`, only player_count. Skips computing maps:keys(Players) at all
+%% rather than fanning it out to every live match just to discard it.
+-spec get_info(pid(), listing) -> map().
+get_info(Pid, listing) ->
+    case gen_statem:call(Pid, {get_info, listing}) of
         Info when is_map(Info) -> Info;
         _ -> #{}
     end.
@@ -194,6 +214,8 @@ waiting({call, From}, {join, PlayerId, Ctx}, State) ->
     handle_join(From, PlayerId, Ctx, State);
 waiting({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(waiting, State)}]};
+waiting({call, From}, {get_info, listing}, State) ->
+    {keep_state_and_data, [{reply, From, match_info(waiting, State, false)}]};
 waiting(state_timeout, waiting_timeout, State) ->
     {stop, {shutdown, timeout}, State};
 waiting(cast, {leave, PlayerId}, State) ->
@@ -291,6 +313,8 @@ running({call, From}, resume, _State) ->
     {keep_state_and_data, [{reply, From, {error, not_paused}}]};
 running({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(running, State)}]};
+running({call, From}, {get_info, listing}, State) ->
+    {keep_state_and_data, [{reply, From, match_info(running, State, false)}]};
 running({call, From}, {join, PlayerId, Ctx}, State) ->
     handle_join(From, PlayerId, Ctx, State);
 running(
@@ -405,6 +429,8 @@ paused(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 paused({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(paused, State)}]};
+paused({call, From}, {get_info, listing}, State) ->
+    {keep_state_and_data, [{reply, From, match_info(paused, State, false)}]};
 paused(cast, {broadcast_event, Event, Payload}, State) ->
     broadcast_match_event(Event, Payload, State),
     keep_state_and_data;
@@ -444,6 +470,8 @@ finished(state_timeout, cleanup, State) ->
     {stop, normal, State};
 finished({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, match_info(finished, State)}]};
+finished({call, From}, {get_info, listing}, State) ->
+    {keep_state_and_data, [{reply, From, match_info(finished, State, false)}]};
 %% A game ending its match from `tick` and broadcasting the result in the
 %% same callback lands here. Without this clause the catch-all below
 %% swallows it silently, which reads as a client bug. Players are still in
@@ -623,16 +651,27 @@ persist_result(#{match_id := MatchId, players := Players} = State) ->
     _ = asobi_repo:insert(CS),
     ok.
 
-match_info(Status, #{match_id := MatchId, players := Players} = State) ->
-    Base = #{
+match_info(Status, State) ->
+    match_info(Status, State, true).
+
+%% IncludeRoster = false skips maps:keys(Players) entirely rather than
+%% computing then discarding it - see get_info/2's moduledoc note (#194).
+%% Every other field is a cheap scalar already required by
+%% asobi_match_lobby:matches_filters/2 and listing_info/1.
+match_info(Status, #{match_id := MatchId, players := Players} = State, IncludeRoster) ->
+    Base0 = #{
         match_id => MatchId,
         status => Status,
         player_count => map_size(Players),
-        players => maps:keys(Players),
         mode => maps:get(mode, State, undefined),
         max_players => maps:get(max_players, State, ?DEFAULT_MAX_PLAYERS),
         listed => maps:get(listed, State, false)
     },
+    Base =
+        case IncludeRoster of
+            true -> Base0#{players => maps:keys(Players)};
+            false -> Base0
+        end,
     case maps:get(phase_state, State, undefined) of
         undefined -> Base;
         PS -> Base#{phase => asobi_phase:info(PS)}

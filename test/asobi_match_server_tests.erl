@@ -41,6 +41,8 @@ match_server_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"starts in waiting state", fun starts_waiting/0},
         {"get_info returns match metadata", fun get_info_waiting/0},
+        {"get_info(Pid, listing) omits the roster but keeps filter/listing fields",
+            fun get_info_listing/0},
         {"join adds player", fun join_adds_player/0},
         {"join rejects when full", fun join_rejects_full/0},
         {"duplicate join is idempotent", fun duplicate_join/0},
@@ -78,6 +80,22 @@ get_info_waiting() ->
     Pid = start_match(),
     Info = asobi_match_server:get_info(Pid),
     ?assertMatch(#{match_id := _, status := waiting, player_count := 0, players := []}, Info),
+    stop(Pid).
+
+%% asobi#194: mirrors asobi_world_server_tests:get_info_listing/0.
+get_info_listing() ->
+    Pid = start_match(),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    Full = asobi_match_server:get_info(Pid),
+    Listing = asobi_match_server:get_info(Pid, listing),
+    ?assertNot(maps:is_key(players, Listing)),
+    [
+        ?assertEqual(maps:get(K, Full), maps:get(K, Listing))
+     || K <- [match_id, status, player_count, max_players, mode, listed]
+    ],
+    ?assertEqual(
+        asobi_match_server:listing_info(Full), asobi_match_server:listing_info(Listing)
+    ),
     stop(Pid).
 
 join_adds_player() ->

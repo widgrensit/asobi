@@ -9,7 +9,16 @@ transient matches use `asobi_match_server` instead.
 -behaviour(gen_statem).
 
 -export([
-    start_link/1, join/2, join/3, join/4, leave/2, move_player/3, post_tick/2, get_info/1, cancel/1
+    start_link/1,
+    join/2,
+    join/3,
+    join/4,
+    leave/2,
+    move_player/3,
+    post_tick/2,
+    get_info/1,
+    get_info/2,
+    cancel/1
 ]).
 -export([listing_info/1]).
 -export_type([listing/0]).
@@ -77,6 +86,18 @@ post_tick(Pid, TickN) ->
 -spec get_info(pid()) -> map().
 get_info(Pid) ->
     case gen_statem:call(Pid, get_info) of
+        M when is_map(M) -> M
+    end.
+
+%% asobi#194: the discovery-listing consumers (asobi_discovery:enumerate/3,
+%% via list_worlds/1) never read `players` - matches_filters/2 only reads
+%% player_count, and listing_info/1 doesn't project it either. Fanning that
+%% out to every running world just to throw it away is copying up to 500
+%% player-id binaries per world, across a process boundary, per world, on
+%% every uncached enumeration. This variant skips computing it at all.
+-spec get_info(pid(), listing) -> map().
+get_info(Pid, listing) ->
+    case gen_statem:call(Pid, {get_info, listing}) of
         M when is_map(M) -> M
     end.
 
@@ -223,6 +244,8 @@ loading(state_timeout, zones_ready, State) ->
     {next_state, running, State#{started_at => erlang:system_time(millisecond)}};
 loading({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(loading, State)}]};
+loading({call, From}, {get_info, listing}, State) ->
+    {keep_state_and_data, [{reply, From, world_info(loading, State, false)}]};
 loading({call, _From}, {join, _PlayerId}, _State) ->
     %% Postpone join until we transition to running. Otherwise the call
     %% would crash with function_clause and the caller would time out.
@@ -299,6 +322,8 @@ running({timeout, empty_grace}, _Content, #{players := Players} = State) ->
     end;
 running({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(running, State)}]};
+running({call, From}, {get_info, listing}, State) ->
+    {keep_state_and_data, [{reply, From, world_info(running, State, false)}]};
 running({call, From}, {start_vote, VoteConfig}, State) ->
     handle_start_vote(From, VoteConfig, State);
 running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
@@ -427,6 +452,8 @@ finished(cast, {broadcast_event, Event, Payload}, State) ->
     keep_state_and_data;
 finished({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(finished, State)}]};
+finished({call, From}, {get_info, listing}, State) ->
+    {keep_state_and_data, [{reply, From, world_info(finished, State, false)}]};
 finished(_EventType, _Event, _State) ->
     keep_state_and_data.
 
@@ -1069,19 +1096,30 @@ notify_players(Event, #{players := Players, world_id := WorldId} = State) ->
         Players
     ).
 
-world_info(Status, #{world_id := WorldId, players := Players} = State) ->
-    Base = #{
+world_info(Status, State) ->
+    world_info(Status, State, true).
+
+%% IncludeRoster = false skips `maps:keys(Players)` entirely rather than
+%% computing then discarding it - see get_info/2's moduledoc note (#194).
+%% Every other field is a cheap scalar already required by
+%% asobi_world_lobby:matches_filters/2 and listing_info/1.
+world_info(Status, #{world_id := WorldId, players := Players} = State, IncludeRoster) ->
+    Base0 = #{
         world_id => WorldId,
         status => Status,
         player_count => map_size(Players),
         max_players => maps:get(max_players, State, 500),
-        players => maps:keys(Players),
         mode => maps:get(mode, State, undefined),
         grid_size => maps:get(grid_size, State),
         started_at => maps:get(started_at, State, undefined),
         listed => maps:get(listed, State, true),
         quick_play => maps:get(quick_play, State, true)
     },
+    Base =
+        case IncludeRoster of
+            true -> Base0#{players => maps:keys(Players)};
+            false -> Base0
+        end,
     case maps:get(phase_state, State, undefined) of
         undefined -> Base;
         PS -> Base#{phase => asobi_phase:info(PS)}

@@ -65,6 +65,8 @@ world_server_test_() ->
         {"leave removes player", fun leave_player/0},
         {timeout, 15, {"leave last player finishes world", fun leave_last_finishes/0}},
         {"get_info returns world metadata", fun get_info/0},
+        {"get_info(Pid, listing) omits the roster but keeps filter/listing fields",
+            fun get_info_listing/0},
         {timeout, 15, {"cancel finishes world", fun cancel_world/0}},
         {"whereis finds world by id", fun whereis_world/0},
         {"join records player in ETS, leave clears it", fun ets_tracks_player_world/0},
@@ -144,6 +146,28 @@ get_info() ->
     ?assert(maps:is_key(status, Info)),
     ?assert(maps:is_key(player_count, Info)),
     ?assert(maps:is_key(grid_size, Info)),
+    ?assert(maps:is_key(players, Info)),
+    stop_world(Ctx).
+
+%% asobi#194: the listing variant must not carry the roster at all - not
+%% just omit it from the eventual listing_info/1 projection, since the
+%% whole point is to never copy it across the process boundary - but must
+%% keep every field asobi_world_lobby:matches_filters/2 and listing_info/1
+%% read (player_count, max_players, mode, status, listed, quick_play).
+get_info_listing() ->
+    Ctx = start_world(),
+    Pid = maps:get(world_pid, Ctx),
+    ok = asobi_world_server:join(Pid, ~"p1"),
+    Full = asobi_world_server:get_info(Pid),
+    Listing = asobi_world_server:get_info(Pid, listing),
+    ?assertNot(maps:is_key(players, Listing)),
+    [
+        ?assertEqual(maps:get(K, Full), maps:get(K, Listing))
+     || K <- [world_id, status, player_count, max_players, mode, grid_size, listed, quick_play]
+    ],
+    ?assertEqual(
+        asobi_world_server:listing_info(Full), asobi_world_server:listing_info(Listing)
+    ),
     stop_world(Ctx).
 
 cancel_world() ->

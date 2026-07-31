@@ -3,9 +3,10 @@
 Shared enumeration for the discovery surfaces.
 
 Worlds and matches both register as `{ServerMod, Id}` in the `nova_scope`
-pg scope and both expose `get_info/1` plus `listing_info/1`, so browsing
-either is the same walk: enumerate the live processes, apply the caller's
-filter to the full info, and return the listing projection.
+pg scope and both expose `get_info/2` (the `listing` variant, asobi#194)
+plus `listing_info/1`, so browsing either is the same walk: enumerate the
+live processes, apply the caller's filter to the listing info, and return
+the listing projection.
 
 Enumeration is a pull, not a push. Worlds churn on *attributes* — the set
 of worlds is near-static while occupancy changes constantly — so a delta
@@ -23,9 +24,17 @@ refreshes per second regardless of load. See `asobi_world_lobby`.
 List live `ServerMod` processes whose info satisfies `FilterFun`, each as
 its `ServerMod:listing_info/1` projection.
 
-`ServerMod` is both the pg group tag and the module supplying `get_info/1`
+`ServerMod` is both the pg group tag and the module supplying `get_info/2`
 and `listing_info/1`. A process that dies mid-enumeration, or whose
-`get_info/1` fails, is skipped rather than failing the whole listing.
+`get_info/2` fails, is skipped rather than failing the whole listing.
+
+asobi#194: uses `get_info(Pid, listing)`, not `get_info/1` - the roster
+(`players`) is not read by any consumer here (`FilterFun` only reads
+scalar fields like `player_count`; `listing_info/1` never projects
+`players` into its output either), so fanning it out to every process just
+to discard it was copying up to `max_players` binaries per process, per
+call, for nothing. At up to 1000 worlds of up to 500 players that is up to
+500k discarded binaries per enumeration.
 """.
 -spec enumerate(module(), map(), fun((map(), map()) -> boolean())) -> [map()].
 enumerate(ServerMod, Filters, FilterFun) ->
@@ -37,7 +46,7 @@ enumerate(ServerMod, Filters, FilterFun) ->
     ],
     lists:filtermap(
         fun(Pid) ->
-            try ServerMod:get_info(Pid) of
+            try ServerMod:get_info(Pid, listing) of
                 Info when is_map(Info) ->
                     case FilterFun(Info, Filters) of
                         true -> {true, ServerMod:listing_info(Info)};
