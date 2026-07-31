@@ -19,6 +19,32 @@ a much shorter TTL (`asobi.auth_cache_negative_ttl_ms`, default
 5_000ms) so a fresh-token race doesn't keep returning errors after
 the token actually exists.
 
+## Revocation SLA (asobi#215)
+
+A revoked token's cache entry can outlive its DB row by up to
+`auth_cache_ttl_ms` unless the revoking code path also touches this
+cache. Audited as of asobi#215:
+
+- **Single-device logout** (`asobi_auth_tokens:revoke_access/1`) calls
+  `invalidate/1` for the one access token being logged out. Immediate.
+- **Mass revoke** (any path that deletes more tokens than the caller
+  holds a single token for - e.g. `asobi_guest_controller`'s
+  guest-to-real upgrade, which calls `nova_auth_refresh:revoke_all/2`
+  for every token a player holds) MUST call `clear/0` right after the
+  DB-level revoke. `invalidate/1` cannot help here - the cache is keyed
+  by token hash, not player id, so there is no way to target "every
+  cached entry for this player" without a full clear. A future
+  ban/admin-suspend code path needs the same `clear/0` call; there is
+  no such path in `asobi` core today; the endpoint that does add banning
+  must not skip this.
+- **Refresh-token rotation** (`nova_auth_refresh:refresh/2`) does NOT
+  revoke the access token that was live before the rotation - by
+  `nova_auth`'s design, access tokens are short-lived bearer credentials
+  (60 min default, `asobi_auth:config/0`) that aren't tied to their
+  refresh token's rotation state, so there is nothing to invalidate here
+  even in principle. This is a `nova_auth` design characteristic, not an
+  `asobi_auth_cache` gap.
+
 ## Process model
 
 A single named gen_server owns the ETS table. Lookups are direct ETS

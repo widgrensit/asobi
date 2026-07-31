@@ -10,6 +10,7 @@
     weak_secret_rejected/1,
     upgrade_then_already_claimed/1,
     upgrade_rejected_for_non_guest/1,
+    upgrade_clears_stale_auth_cache_entries/1,
     reaper_removes_unclaimed_guest_and_children/1,
     create_retries_on_username_collision/1,
     create_no_retry_on_non_unique_username_error/1
@@ -22,6 +23,7 @@ all() ->
         weak_secret_rejected,
         upgrade_then_already_claimed,
         upgrade_rejected_for_non_guest,
+        upgrade_clears_stale_auth_cache_entries,
         reaper_removes_unclaimed_guest_and_children,
         create_retries_on_username_collision,
         create_no_retry_on_non_unique_username_error
@@ -134,6 +136,28 @@ upgrade_rejected_for_non_guest(Config) ->
         Config
     ),
     ?assertStatus(409, R),
+    Config.
+
+%% asobi#215: do_upgrade/4 calls nova_auth_refresh:revoke_all/2, which deletes
+%% every token DB row for the player - but a token cached as a valid positive
+%% BEFORE the upgrade must not keep resolving from the ETS cache afterward.
+%% Seed a stale positive entry directly (mirrors what a real pre-upgrade
+%% request would have populated), upgrade, then confirm the cache no longer
+%% serves it - it must fall through to a genuine (now-empty) DB lookup.
+upgrade_clears_stale_auth_cache_entries(Config) ->
+    {ok, R1} = create(device_id(), secret(), Config),
+    #{~"access_token" := Token, ~"player_id" := PlayerId} = nova_test:json(R1),
+    Auth = [{~"authorization", <<"Bearer ", Token/binary>>}],
+    ok = asobi_auth_cache:put_positive(Token, #{id => PlayerId, banned_at => nil}),
+    ?assertEqual({ok, #{id => PlayerId, banned_at => nil}}, asobi_auth_cache:resolve_token(Token)),
+    Username = asobi_test_helpers:unique_username(~"cacheclr"),
+    {ok, R2} = nova_test:post(
+        "/api/v1/auth/guest/upgrade",
+        #{json => #{~"username" => Username, ~"password" => ~"secret1234"}, headers => Auth},
+        Config
+    ),
+    ?assertStatus(200, R2),
+    ?assertEqual({error, not_found}, asobi_auth_cache:resolve_token(Token)),
     Config.
 
 reaper_removes_unclaimed_guest_and_children(Config) ->

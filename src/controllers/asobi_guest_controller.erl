@@ -99,8 +99,15 @@ do_upgrade(Player, PlayerId, Username, Password) ->
             %% stolen device secret has already minted an access+refresh pair,
             %% and upgrade is exactly the "my device was compromised" moment.
             %% Killing the whole family first, then issuing a fresh pair below,
-            %% means the old (possibly attacker-held) tokens stop working.
+            %% means the old (possibly attacker-held) tokens stop working -
+            %% but revoke_all/2 only deletes the DB rows, and asobi_auth_cache
+            %% serves a cached positive for up to auth_cache_ttl_ms after a
+            %% token's DB row is gone (asobi#215). Clear the cache too so this
+            %% mass revoke actually takes effect immediately, not up to 60s
+            %% later - a stale cache entry is exactly the case this comment's
+            %% security intent depends on not existing.
             _ = nova_auth_refresh:revoke_all(asobi_auth, PlayerId),
+            _ = asobi_auth_cache:clear(),
             asobi_auth_tokens:issue(Updated, 200, #{username => Username, upgraded => true});
         {error, #kura_changeset{} = ECS} ->
             asobi_auth_error:from_changeset_fields(
