@@ -168,24 +168,59 @@ create_player_with_identity(Provider, Claims, Attempt) ->
     },
     CS = kura_changeset:cast(asobi_player, #{}, PlayerParams, [username, display_name]),
     CS1 = kura_changeset:validate_required(CS, [username]),
-    case asobi_repo:insert(CS1) of
-        {ok, Player} ->
-            PlayerId = maps:get(id, Player),
-            case insert_identity(PlayerId, Provider, Claims) of
-                {ok, _Identity} ->
-                    _ = init_player_stats(PlayerId),
-                    asobi_auth_tokens:issue(Player, 200, #{username => Username, created => true});
-                {error, _} ->
-                    %% Lost the unique {provider, provider_uid} race to a
-                    %% concurrent first-sign-in for the same identity. Delete
-                    %% the just-created player so it can't become an orphan
-                    %% with no identity row - the next login retries cleanly
-                    %% instead of ending up unfindable. Mirrors
-                    %% asobi_guest_controller:insert_player_and_identity/3.
-                    _ = asobi_repo:delete(asobi_player, Player),
-                    {json, 409, #{}, #{error => ~"already_registering"}}
+    %% Player insert and identity insert happen in one transaction: on
+    %% identity-insert failure (concurrent first-sign-in for the same
+    %% {provider, provider_uid} won the race), the DB itself rolls the player
+    %% row back instead of a separate compensating delete that could fail
+    %% silently and leave exactly the orphan this is closing (found in
+    %% security review of the delete-based version).
+    Result =
+        try
+            asobi_repo:transaction(fun() ->
+                case asobi_repo:insert(CS1) of
+                    {ok, Player} ->
+                        PlayerId = maps:get(id, Player),
+                        case insert_identity(PlayerId, Provider, Claims) of
+                            {ok, _Identity} ->
+                                _ = init_player_stats(PlayerId),
+                                {ok, Player};
+                            {error, IErr} ->
+                                throw({rollback, identity, IErr})
+                        end;
+                    {error, _} = PErr ->
+                        throw({rollback, player, PErr})
+                end
+            end)
+        catch
+            throw:{rollback, identity, CaughtIErr} -> {error, identity, CaughtIErr};
+            throw:{rollback, player, CaughtPErr} -> {error, player, CaughtPErr}
+        end,
+    case Result of
+        {ok, Player} when is_map(Player) ->
+            asobi_auth_tokens:issue(Player, 200, #{username => Username, created => true});
+        {error, identity, {error, #kura_changeset{errors = IErrors}}} ->
+            case asobi_auth_error:provider_uid_taken(IErrors) of
+                true ->
+                    {json, 409, #{}, #{error => ~"already_registering"}};
+                false ->
+                    %% A real failure (e.g. a provider claim over a column
+                    %% limit), not the identity race - do not log Claims,
+                    %% which can carry provider_email.
+                    ?LOG_ERROR(#{
+                        event => oauth_identity_insert_failed,
+                        provider => Provider,
+                        errors => IErrors
+                    }),
+                    {json, 500, #{}, #{error => ~"registration_failed"}}
             end;
-        {error, #kura_changeset{errors = Errors}} when Attempt < ?MAX_USERNAME_ATTEMPTS ->
+        {error, identity, IErr} ->
+            ?LOG_ERROR(#{
+                event => oauth_identity_insert_failed, provider => Provider, reason => IErr
+            }),
+            {json, 500, #{}, #{error => ~"registration_failed"}};
+        {error, player, {error, #kura_changeset{errors = Errors}}} when
+            Attempt < ?MAX_USERNAME_ATTEMPTS
+        ->
             case asobi_auth_error:username_taken(Errors) of
                 true ->
                     ?LOG_WARNING(#{
@@ -195,7 +230,7 @@ create_player_with_identity(Provider, Claims, Attempt) ->
                 false ->
                     {json, 500, #{}, #{error => ~"registration_failed"}}
             end;
-        {error, _CS} ->
+        {error, player, _} ->
             {json, 500, #{}, #{error => ~"registration_failed"}}
     end.
 

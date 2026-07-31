@@ -308,32 +308,37 @@ create_player_no_retry_on_non_unique_username_error(Config) ->
 %% (unique {provider, provider_uid} index). The loser must NOT be issued
 %% tokens for a player with no identity row - that player becomes an orphan
 %% no later login can ever match against. Simulate the loss by forcing the
-%% identity insert to fail; assert 409 and that the just-created player was
-%% deleted rather than left behind.
+%% identity insert to fail inside the transaction; assert 409 and that the
+%% DB rolled the just-created player back rather than leaving it behind.
+%% The created id is captured independently of anything the code under test
+%% returns, so this can't pass by tautology (asobi#241 security review, M3).
 create_player_deletes_orphan_on_identity_race_loss(Config) ->
     Self = self(),
     meck:new(asobi_repo, [passthrough]),
     meck:expect(asobi_repo, insert, fun
         (#kura_changeset{schema = asobi_player_identity} = CS) ->
             {error, kura_changeset:add_error(CS, provider_uid, ~"has already been taken")};
+        (#kura_changeset{schema = asobi_player} = CS) ->
+            {ok, Player} = meck:passthrough([CS]),
+            true = is_map(Player),
+            Self ! {created, maps:get(id, Player)},
+            {ok, Player};
         (CS) ->
             meck:passthrough([CS])
-    end),
-    meck:expect(asobi_repo, delete, fun(Schema, Record) ->
-        Self ! {deleted, Schema, maps:get(id, Record, undefined)},
-        meck:passthrough([Schema, Record])
     end),
     try
         ProviderUid = iolist_to_binary([
             ~"race_uid_", integer_to_binary(erlang:unique_integer([positive]))
         ]),
         Claims = #{provider_uid => ProviderUid, provider_display_name => undefined},
-        {json, 409, _, #{error := ~"already_registering"}} =
-            asobi_oauth_controller:create_player_with_identity(~"discord", Claims),
+        ?assertEqual(
+            {json, 409, #{}, #{error => ~"already_registering"}},
+            asobi_oauth_controller:create_player_with_identity(~"discord", Claims)
+        ),
         PlayerId =
             receive
-                {deleted, asobi_player, Id} -> Id
-            after 1000 -> erlang:error(player_not_deleted)
+                {created, Id} -> Id
+            after 1000 -> erlang:error(player_not_created)
             end,
         ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, PlayerId))
     after

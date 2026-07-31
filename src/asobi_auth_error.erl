@@ -7,7 +7,7 @@
 %% per-field detail for form UIs. (asobi_auth_controller:register/1 should adopt
 %% this once its 409 branch lands - see the register-409 change.)
 
--export([from_changeset_fields/1, username_taken/1]).
+-export([from_changeset_fields/1, username_taken/1, provider_uid_taken/1]).
 
 %% kura's default message for a unique-index violation.
 -define(UNIQUE_MSG, ~"has already been taken").
@@ -29,6 +29,16 @@ from_changeset_fields(Fields) ->
 -spec username_taken([{atom(), binary()}]) -> boolean().
 username_taken(Errors) ->
     lists:keyfind(username, 1, Errors) =:= {username, ?UNIQUE_MSG}.
+
+%% Same distinction for the OAuth/guest identity race: was this insert
+%% failure specifically the unique {provider, provider_uid} conflict (a
+%% concurrent first-sign-in won), or something else (a provider claim over a
+%% column limit, a transient DB error)? Only the former should read as a
+%% retryable "already registering" - anything else is a real failure that
+%% looks identical to the client unless this is checked.
+-spec provider_uid_taken([{atom(), binary()}]) -> boolean().
+provider_uid_taken(Errors) ->
+    lists:keyfind(provider_uid, 1, Errors) =:= {provider_uid, ?UNIQUE_MSG}.
 
 -spec validation_failed(map()) -> {json, 422, map(), map()}.
 validation_failed(Fields) ->
