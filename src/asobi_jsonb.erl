@@ -9,7 +9,7 @@ the one place that idiom lives, shared by every schema and controller that
 needs it rather than a per-call-site copy.
 """.
 
--export([within_limit/2]).
+-export([within_limit/2, default_metadata_bytes/0]).
 
 -spec within_limit(dynamic(), non_neg_integer()) -> boolean().
 within_limit(Value, MaxBytes) ->
@@ -18,3 +18,10 @@ within_limit(Value, MaxBytes) ->
     catch
         _:_ -> false
     end.
+
+%% The shared ceiling for a "metadata annotation" field (as opposed to a
+%% bulk-data field like cloud-save/storage values, which set their own,
+%% larger limit) - one place so every schema that adopts this idiom agrees
+%% by default rather than each declaring its own copy of the same number.
+-spec default_metadata_bytes() -> non_neg_integer().
+default_metadata_bytes() -> 16384.

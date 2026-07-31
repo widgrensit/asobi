@@ -9,6 +9,10 @@
     get_history/3
 ]).
 
+-ifdef(TEST).
+-export([grant_inner/4, debit_inner/4]).
+-endif.
+
 -spec get_or_create_wallet(binary(), binary()) -> {ok, map()} | {error, term()}.
 get_or_create_wallet(PlayerId, Currency) ->
     Q = kura_query:where(
@@ -150,31 +154,61 @@ acquire_wallet_lock(PlayerId, Currency) ->
     #{rows := [_ | _]} = kura_db:query(asobi_repo, SQL, [PlayerId, Currency]),
     ok.
 
+%% asobi#216 security review (M1 on #255): grant/4 and debit/4 have no
+%% in-repo caller that threads client data into Opts.metadata today, but
+%% they are exported library entry points into a money-adjacent audit
+%% table the same way asobi_player:registration_changeset/2 is (#169 M3) -
+%% the cap travels with the write path, not with today's callers staying
+%% disciplined. Checked before any wallet write, so a rejected blob is a
+%% clean {error, _} return with nothing to roll back.
+-spec metadata_within_limit(dynamic()) -> boolean().
+metadata_within_limit(Metadata) ->
+    asobi_jsonb:within_limit(Metadata, asobi_jsonb:default_metadata_bytes()).
+
 -spec grant_inner(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
 grant_inner(PlayerId, Currency, Amount, Opts) ->
-    {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
-    NewBalance = maps:get(balance, Wallet) + Amount,
-    WalletCS = kura_changeset:cast(asobi_wallet, Wallet, #{balance => NewBalance}, [balance]),
-    {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
-    TxCS = kura_changeset:cast(
-        asobi_transaction,
-        #{},
-        #{
-            wallet_id => maps:get(id, Wallet),
-            amount => Amount,
-            balance_after => NewBalance,
-            reason => maps:get(reason, Opts, ~"admin_grant"),
-            reference_type => maps:get(reference_type, Opts, undefined),
-            reference_id => maps:get(reference_id, Opts, undefined),
-            metadata => maps:get(metadata, Opts, #{})
-        },
-        [wallet_id, amount, balance_after, reason, reference_type, reference_id, metadata]
-    ),
-    {ok, _Tx} = asobi_repo:insert(TxCS),
-    {ok, UpdatedWallet}.
+    Metadata = maps:get(metadata, Opts, #{}),
+    case metadata_within_limit(Metadata) of
+        false ->
+            {error, metadata_too_large};
+        true ->
+            {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
+            NewBalance = maps:get(balance, Wallet) + Amount,
+            WalletCS = kura_changeset:cast(
+                asobi_wallet, Wallet, #{balance => NewBalance}, [balance]
+            ),
+            {ok, UpdatedWallet} = asobi_repo:update(WalletCS),
+            TxCS = kura_changeset:cast(
+                asobi_transaction,
+                #{},
+                #{
+                    wallet_id => maps:get(id, Wallet),
+                    amount => Amount,
+                    balance_after => NewBalance,
+                    reason => maps:get(reason, Opts, ~"admin_grant"),
+                    reference_type => maps:get(reference_type, Opts, undefined),
+                    reference_id => maps:get(reference_id, Opts, undefined),
+                    metadata => Metadata
+                },
+                [wallet_id, amount, balance_after, reason, reference_type, reference_id, metadata]
+            ),
+            {ok, _Tx} = asobi_repo:insert(TxCS),
+            {ok, UpdatedWallet}
+    end.
 
 -spec debit_inner(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
 debit_inner(PlayerId, Currency, Amount, Opts) ->
+    Metadata = maps:get(metadata, Opts, #{}),
+    case metadata_within_limit(Metadata) of
+        false ->
+            {error, metadata_too_large};
+        true ->
+            debit_inner_checked(PlayerId, Currency, Amount, Opts, Metadata)
+    end.
+
+-spec debit_inner_checked(binary(), binary(), pos_integer(), map(), dynamic()) ->
+    {ok, map()} | {error, term()}.
+debit_inner_checked(PlayerId, Currency, Amount, Opts, Metadata) ->
     {ok, Wallet} = get_or_create_wallet(PlayerId, Currency),
     Balance = maps:get(balance, Wallet),
     case Balance >= Amount of
@@ -196,7 +230,7 @@ debit_inner(PlayerId, Currency, Amount, Opts) ->
                     reason => maps:get(reason, Opts, ~"purchase"),
                     reference_type => maps:get(reference_type, Opts, undefined),
                     reference_id => maps:get(reference_id, Opts, undefined),
-                    metadata => maps:get(metadata, Opts, #{})
+                    metadata => Metadata
                 },
                 [
                     wallet_id,

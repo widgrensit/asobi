@@ -6,10 +6,6 @@
 -export([table/0, fields/0, associations/0, generate_id/0]).
 -export([changeset/2]).
 
-%% asobi#216: metadata is unbounded jsonb, and create_group/update_group cast
-%% it straight from the request body - the same #169 lever, applied here.
--define(MAX_METADATA_BYTES, 16384).
-
 -spec table() -> binary().
 table() -> ~"groups".
 
@@ -51,11 +47,17 @@ changeset(Data, Params) ->
     %% F-17: cap description length so an attacker cannot store
     %% megabytes of text in the groups table.
     CS3 = kura_changeset:validate_length(CS2, description, [{max, 1024}]),
+    %% asobi#216: metadata is unbounded jsonb. changeset/2 is a public library
+    %% entry point (asobi_engine, self-hosters, future controllers) that casts
+    %% it - today's create_group/update_group controllers happen to strip
+    %% metadata via an explicit allowlist before calling here, but the cap
+    %% belongs on the schema, not on that filtering staying in place
+    %% (mirrors asobi_player:registration_changeset/2, #169 M3).
     kura_changeset:validate_change(CS3, metadata, fun metadata_within_limit/1).
 
 -spec metadata_within_limit(dynamic()) -> ok | {error, binary()}.
 metadata_within_limit(Metadata) ->
-    case asobi_jsonb:within_limit(Metadata, ?MAX_METADATA_BYTES) of
+    case asobi_jsonb:within_limit(Metadata, asobi_jsonb:default_metadata_bytes()) of
         true -> ok;
         false -> {error, ~"must be 16 KB or less"}
     end.
