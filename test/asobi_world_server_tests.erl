@@ -514,3 +514,14 @@ broadcast_in_running_does_not_kill_the_world_test() ->
     ?assert(is_process_alive(Pid)),
     ?assertEqual(running, maps:get(status, asobi_world_server:get_info(Pid))),
     stop_world(Ctx).
+
+%% pos_to_zone/2 only clamps the low end; a position past the world's far
+%% edge fed an out-of-grid coordinate to interest_zones/3 and
+%% asobi_world_chat:proximity_zones/3, both of which crashed on it
+%% (widgrensit/asobi#248). pos_to_zone/3 is what closes that.
+pos_to_zone_clamps_both_ends_test() ->
+    ?assertEqual({0, 0}, asobi_world_server:pos_to_zone({-500.0, -1.0}, 100, 3)),
+    ?assertEqual({1, 1}, asobi_world_server:pos_to_zone({150.0, 150.0}, 100, 3)),
+    ?assertEqual({2, 2}, asobi_world_server:pos_to_zone({299.0, 299.0}, 100, 3)),
+    ?assertEqual({2, 2}, asobi_world_server:pos_to_zone({1.0e9, 1.0e9}, 100, 3)),
+    ?assertEqual({0, 0}, asobi_world_server:pos_to_zone({999.0, 999.0}, 100, 1)).

@@ -17,6 +17,7 @@ transient matches use `asobi_match_server` instead.
     join/4,
     leave/2,
     move_player/3,
+    move_player/4,
     post_tick/2,
     get_info/1,
     get_info/2,
@@ -28,6 +29,7 @@ transient matches use `asobi_match_server` instead.
 -export([reconnect/2]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
 -export([whereis/1]).
+-export([pos_to_zone/3]).
 -export([callback_mode/0, init/1, terminate/3]).
 -export([loading/3, running/3, finished/3]).
 
@@ -79,7 +81,18 @@ leave(Pid, PlayerId) ->
 
 -spec move_player(pid(), binary(), {number(), number()}) -> ok.
 move_player(Pid, PlayerId, NewPos) ->
-    gen_statem:cast(Pid, {move_player, PlayerId, NewPos}).
+    gen_statem:cast(Pid, {move_player, PlayerId, NewPos, undefined}).
+
+-doc """
+As `move_player/3`, but for a caller that already holds the entity's full
+state (asobi_zone's resolve_zone_crossings/1). `Entity` is written into the
+target zone as-is instead of being reconstructed as `#{x, y, type}` only, so
+fields a game script keeps beyond position - health, inventory, whatever -
+survive the zone boundary. See widgrensit/asobi#248.
+""".
+-spec move_player(pid(), binary(), {number(), number()}, map()) -> ok.
+move_player(Pid, PlayerId, NewPos, Entity) when is_map(Entity) ->
+    gen_statem:cast(Pid, {move_player, PlayerId, NewPos, Entity}).
 
 -spec post_tick(pid(), non_neg_integer()) -> ok.
 post_tick(Pid, TickN) ->
@@ -247,6 +260,12 @@ loading({call, _From}, {join, _PlayerId}, _State) ->
     %% Postpone join until we transition to running. Otherwise the call
     %% would crash with function_clause and the caller would time out.
     {keep_state_and_data, [postpone]};
+%% A zone's post-tick crossing check (asobi_zone:resolve_zone_crossings/1)
+%% can fire on a pre-warmed zone recovered from a snapshot before the world
+%% has finished loading. Without this, that cast is a function_clause and
+%% kills the world instead of just running once we reach running.
+loading(cast, {move_player, _PlayerId, _NewPos, _Entity}, _State) ->
+    {keep_state_and_data, [postpone]};
 %% A world script broadcasting during generate_world/init reaches the world
 %% server while it is still loading. Without this clause that is a
 %% function_clause and the world dies before it ever runs.
@@ -276,8 +295,8 @@ running({call, From}, {join, PlayerId, Ctx}, State) ->
     handle_join(From, PlayerId, Ctx, State);
 running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
-running(cast, {move_player, PlayerId, NewPos}, State) ->
-    handle_move(PlayerId, NewPos, State);
+running(cast, {move_player, PlayerId, NewPos, Entity}, State) ->
+    handle_move(PlayerId, NewPos, Entity, State);
 running(
     cast,
     {post_tick, TickN},
@@ -330,9 +349,14 @@ running({call, From}, {use_veto, PlayerId, VoteId}, State) ->
 running(
     cast,
     {spawn_at, TemplateId, {X, Y} = Pos, Overrides},
-    #{zone_manager_pid := ZMPid, zone_size := ZS, world_id := WorldId} = _State
+    #{
+        zone_manager_pid := ZMPid,
+        zone_size := ZS,
+        grid_size := GridSize,
+        world_id := WorldId
+    } = _State
 ) when is_binary(TemplateId), is_number(X), is_number(Y), is_map(Overrides) ->
-    Coords = pos_to_zone(Pos, ZS),
+    Coords = pos_to_zone(Pos, ZS, GridSize),
     case asobi_zone_manager:ensure_zone(ZMPid, Coords) of
         {ok, ZonePid} ->
             asobi_zone:spawn_entity(ZonePid, TemplateId, Pos, Overrides),
@@ -485,6 +509,8 @@ configure_zone_manager(
         ticker_pid := TickerPid,
         world_id := WorldId,
         game_module := GameMod,
+        zone_size := ZoneSize,
+        grid_size := GridSize,
         config := Config
     } = State
 ) ->
@@ -501,7 +527,11 @@ configure_zone_manager(
         persistence => Persistence,
         snapshot_interval => maps:get(snapshot_interval, Config, 600),
         zone_manager_pid => ZoneManagerPid,
-        terrain_store_pid => TerrainStorePid
+        terrain_store_pid => TerrainStorePid,
+        %% So a zone can decide crossings with the same clamped math - see
+        %% resolve_zone_crossings/1 in asobi_zone.
+        zone_size => ZoneSize,
+        grid_size => GridSize
     },
     asobi_zone_manager:set_zone_config(ZoneManagerPid, BaseZoneConfig),
     State#{terrain_store_pid => TerrainStorePid}.
@@ -683,7 +713,9 @@ handle_join(
                                 veto_tokens => VetoTokens#{PlayerId => VetoCount}
                             },
                             asobi_telemetry:world_player_joined(WorldId, PlayerId),
-                            ZoneCoords = pos_to_zone(SpawnPos, maps:get(zone_size, State3)),
+                            ZoneCoords = pos_to_zone(
+                                SpawnPos, maps:get(zone_size, State3), maps:get(grid_size, State3)
+                            ),
                             asobi_world_chat:player_joined(
                                 PlayerId, ZoneCoords, maps:get(chat_state, State3)
                             ),
@@ -739,11 +771,19 @@ handle_leave(
 %% {ok, ZonePid} = ... match here used to crash the whole world gen_statem -
 %% every player in it - on what should be a per-player placement failure.
 %% Callers get a tagged result and decide their own safe fallback.
+%%
+%% Called at join, where there is no prior entity to preserve.
 -spec place_player(binary(), {number(), number()}, map()) ->
+    {ok, map(), pid()} | {error, term(), map()}.
+place_player(PlayerId, {X, Y} = Pos, State) ->
+    place_player(PlayerId, Pos, #{x => X, y => Y, type => ~"player"}, State).
+
+-spec place_player(binary(), {number(), number()}, map(), map()) ->
     {ok, map(), pid()} | {error, term(), map()}.
 place_player(
     PlayerId,
     {X, Y} = _Pos,
+    Entity,
     #{
         zone_manager_pid := ZMPid,
         view_radius := ViewRadius,
@@ -751,13 +791,13 @@ place_player(
         grid_size := GridSize
     } = State
 ) ->
-    ZoneCoords = pos_to_zone({X, Y}, ZoneSize),
+    ZoneCoords = pos_to_zone({X, Y}, ZoneSize, GridSize),
     case asobi_zone_manager:ensure_zone(ZMPid, ZoneCoords) of
         {error, Reason} ->
             {error, Reason, State};
         {ok, ZonePid} ->
             PlayerPid = find_player_pid(PlayerId),
-            asobi_zone:add_entity(ZonePid, PlayerId, #{x => X, y => Y, type => ~"player"}),
+            asobi_zone:add_entity(ZonePid, PlayerId, Entity),
             asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
             InterestZones = interest_zones(ZoneCoords, ViewRadius, GridSize),
             subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
@@ -794,14 +834,43 @@ remove_player_from_zones(
                 not_loaded -> ok
             end,
             unsubscribe_interest_zones(InterestZones, ZMPid, PlayerId),
-            %% Release primary zone if no other players need it
-            asobi_zone_manager:release_zone(ZMPid, ZoneCoords),
+            %% release_zone unconditionally backdates the zone past its idle
+            %% timeout (asobi_zone_manager.erl) - it does not itself check for
+            %% other occupants despite what its name suggests. Do that check
+            %% here instead, from player_zones already in hand: releasing a
+            %% zone another player is still standing in risks the reaper
+            %% killing it inside the backdate-to-reap-sweep race window,
+            %% dropping every subscriber with nothing to re-subscribe them.
+            %% See widgrensit/asobi#248.
+            case zone_still_occupied(ZoneCoords, PlayerId, PlayerZones) of
+                true -> ok;
+                false -> asobi_zone_manager:release_zone(ZMPid, ZoneCoords)
+            end,
             State#{player_zones => maps:remove(PlayerId, PlayerZones)}
     end.
+
+%% "Occupied" covers both a player standing in the zone (its `zone`) and one
+%% merely watching it from a neighbouring cell (in its `interest` ring) -
+%% releasing a zone the latter is still subscribed to risks the same reaper
+%% race, just for a subscriber the zone never itself notices leaving.
+-spec zone_still_occupied({integer(), integer()}, binary(), map()) -> boolean().
+zone_still_occupied(ZoneCoords, LeavingPlayerId, PlayerZones) ->
+    lists:any(
+        fun
+            (#{zone := Zone}) when Zone =:= ZoneCoords ->
+                true;
+            (#{interest := Interest}) when is_list(Interest) ->
+                lists:member(ZoneCoords, Interest);
+            (_) ->
+                false
+        end,
+        maps:values(maps:remove(LeavingPlayerId, PlayerZones))
+    ).
 
 handle_move(
     PlayerId,
     {X, Y} = NewPos,
+    MaybeEntity,
     #{
         world_id := WorldId,
         players := Players,
@@ -816,15 +885,22 @@ handle_move(
     case maps:get(PlayerId, PlayerZones, undefined) of
         undefined ->
             keep_state_and_data;
-        #{zone := OldZoneCoords} ->
-            NewZoneCoords = pos_to_zone(NewPos, ZoneSize),
+        #{zone := OldZoneCoords, interest := OldInterest} ->
+            NewZoneCoords = pos_to_zone(NewPos, ZoneSize, GridSize),
+            %% move_player/3 (existing test/external callers) passes no
+            %% entity; move_player/4 (asobi_zone:resolve_zone_crossings/1)
+            %% passes the entity's current full state so fields beyond x/y/type
+            %% survive the crossing. See widgrensit/asobi#248.
+            Entity =
+                case MaybeEntity of
+                    undefined -> #{x => X, y => Y, type => ~"player"};
+                    Map when is_map(Map) -> Map
+                end,
             case OldZoneCoords =:= NewZoneCoords of
                 true ->
                     case asobi_zone_manager:get_zone(ZMPid, OldZoneCoords) of
                         {ok, ZonePid} ->
-                            asobi_zone:add_entity(ZonePid, PlayerId, #{
-                                x => X, y => Y, type => ~"player"
-                            });
+                            asobi_zone:add_entity(ZonePid, PlayerId, Entity);
                         not_loaded ->
                             ok
                     end,
@@ -853,60 +929,63 @@ handle_move(
                                 world_id => WorldId, coords => NewZoneCoords, reason => Reason
                             }),
                             keep_state_and_data;
-                        {ok, _} ->
-                            State1 = remove_player_from_zones(PlayerId, State),
-                            %% place_player/4's own ensure_zone call for these same
-                            %% coords now hits the fast (already-created) path - the
-                            %% precheck above and this call target the same coords in
-                            %% the same synchronous callback, with no yield point for
-                            %% the zone to be reaped in between. {error, _, _} here is
-                            %% not reachable under current asobi_zone_manager
-                            %% invariants; handled defensively (not a bare match)
-                            %% rather than trusting that to hold forever.
-                            case place_player(PlayerId, NewPos, State1) of
-                                {error, Reason, _} ->
-                                    %% remove_player_from_zones/2's casts to the OLD
-                                    %% zone already fired and can't be recalled, so
-                                    %% this player's player_zones bookkeeping is left
-                                    %% stale rather than crashing the whole world over
-                                    %% a should-be-unreachable edge case.
-                                    ?LOG_ERROR(#{
-                                        event => move_zone_unavailable_after_removal,
-                                        world_id => WorldId,
-                                        player_id => PlayerId,
-                                        coords => NewZoneCoords,
-                                        reason => Reason
-                                    }),
-                                    asobi_telemetry:game_error(zone_unavailable, #{
-                                        world_id => WorldId,
-                                        coords => NewZoneCoords,
-                                        reason => Reason
-                                    }),
-                                    {keep_state, State1};
-                                {ok, State2, ZonePid} ->
-                                    asobi_world_chat:player_zone_changed(
-                                        PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
-                                    ),
-                                    Players1 = maps:update_with(
-                                        PlayerId,
-                                        fun(Meta) -> Meta#{position => NewPos} end,
-                                        maps:get(players, State2)
-                                    ),
-                                    PlayerPid = find_player_pid(PlayerId),
-                                    PlayerPid ! {asobi_message, {world_zone_changed, ZonePid}},
-                                    NewInterest = interest_zones(
-                                        NewZoneCoords, ViewRadius, GridSize
-                                    ),
-                                    PZ = maps:get(player_zones, State2),
-                                    {keep_state, State2#{
-                                        players => Players1,
-                                        player_zones => PZ#{
-                                            PlayerId => #{
-                                                zone => NewZoneCoords, interest => NewInterest
-                                            }
-                                        }
-                                    }}
-                            end
+                        {ok, NewZonePid} ->
+                            %% A single-step crossing keeps most of the ring in
+                            %% common (radius 1 keeps 6 of 9 zones on an
+                            %% orthogonal move) - touching only the zones that
+                            %% actually entered or left avoids an unsubscribe/
+                            %% resubscribe (and the full zone snapshot resend
+                            %% subscribing triggers) for every zone that didn't
+                            %% change. See widgrensit/asobi#248.
+                            NewInterest = interest_zones(NewZoneCoords, ViewRadius, GridSize),
+                            ToUnsubscribe = OldInterest -- NewInterest,
+                            ToSubscribe = NewInterest -- OldInterest,
+
+                            case asobi_zone_manager:get_zone(ZMPid, OldZoneCoords) of
+                                {ok, OldZonePid} -> asobi_zone:remove_entity(OldZonePid, PlayerId);
+                                not_loaded -> ok
+                            end,
+                            PlayerPid = find_player_pid(PlayerId),
+                            asobi_zone:add_entity(NewZonePid, PlayerId, Entity),
+                            asobi_presence:send(PlayerId, {world_joined, self(), NewZonePid}),
+
+                            unsubscribe_interest_zones(ToUnsubscribe, ZMPid, PlayerId),
+                            subscribe_interest_zones(ToSubscribe, ZMPid, PlayerId, PlayerPid),
+                            %% Same race place_player/4's join path guards against: a
+                            %% world.input cast can reach the new zone before add_entity
+                            %% lands, since add_entity and the WS handler's cast are
+                            %% different senders (no FIFO guarantee between them).
+                            _ = asobi_zone:get_subscriber_count(NewZonePid),
+
+                            asobi_world_chat:player_zone_changed(
+                                PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
+                            ),
+
+                            PlayerZones1 = maps:remove(PlayerId, PlayerZones),
+                            %% The old zone is often still in the player's own
+                            %% new ring (see ToUnsubscribe above) -
+                            %% zone_still_occupied/3 only knows about other
+                            %% players, so check that first.
+                            case
+                                lists:member(OldZoneCoords, NewInterest) orelse
+                                    zone_still_occupied(OldZoneCoords, PlayerId, PlayerZones1)
+                            of
+                                true -> ok;
+                                false -> asobi_zone_manager:release_zone(ZMPid, OldZoneCoords)
+                            end,
+
+                            PlayerPid ! {asobi_message, {world_zone_changed, NewZonePid}},
+                            Players1 = maps:update_with(
+                                PlayerId,
+                                fun(Meta) -> Meta#{position => NewPos} end,
+                                Players
+                            ),
+                            {keep_state, State#{
+                                players => Players1,
+                                player_zones => PlayerZones1#{
+                                    PlayerId => #{zone => NewZoneCoords, interest => NewInterest}
+                                }
+                            }}
                     end
             end
     end.
@@ -921,6 +1000,8 @@ leave_chat(PlayerId, #{player_zones := PlayerZones, chat_state := ChatState}) ->
 
 %% --- Internal: Spatial ---
 
+%% Only clamps the low end - not safe for a position past the world's far
+%% edge. pos_to_zone/3 below is what every other module should call.
 -spec pos_to_zone({number(), number()}, non_neg_integer()) ->
     {non_neg_integer(), non_neg_integer()}.
 pos_to_zone({X, Y}, ZoneSize) when is_number(X), is_number(Y), ZoneSize > 0 ->
@@ -938,22 +1019,36 @@ pos_to_zone({X, Y}, ZoneSize) when is_number(X), is_number(Y), ZoneSize > 0 ->
         end,
     {ZX, ZY}.
 
+-doc """
+As `pos_to_zone/2`, additionally clamped to `0 .. GridSize - 1` on both axes.
+Use this wherever a player's current zone is derived from position. See
+widgrensit/asobi#248.
+""".
+-spec pos_to_zone({number(), number()}, non_neg_integer(), pos_integer()) ->
+    {non_neg_integer(), non_neg_integer()}.
+pos_to_zone(Pos, ZoneSize, GridSize) when is_integer(GridSize), GridSize > 0 ->
+    {ZX, ZY} = pos_to_zone(Pos, ZoneSize),
+    {min(ZX, GridSize - 1), min(ZY, GridSize - 1)}.
+
 -spec interest_zones({integer(), integer()}, non_neg_integer(), non_neg_integer()) ->
     [{integer(), integer()}].
 interest_zones({ZX, ZY}, Radius, GridSize) ->
-    XLo = clamp_lo(ZX - Radius),
-    XHi = min(GridSize - 1, ZX + Radius),
-    YLo = clamp_lo(ZY - Radius),
-    YHi = min(GridSize - 1, ZY + Radius),
     [
         {X, Y}
-     || X <- lists:seq(XLo, XHi),
-        Y <- lists:seq(YLo, YHi)
+     || X <- safe_seq(clamp_lo(ZX - Radius), min(GridSize - 1, ZX + Radius)),
+        Y <- safe_seq(clamp_lo(ZY - Radius), min(GridSize - 1, ZY + Radius))
     ].
 
 -spec clamp_lo(integer()) -> non_neg_integer().
 clamp_lo(N) when N < 0 -> 0;
 clamp_lo(N) -> N.
+
+%% lists:seq/2 requires Hi >= Lo - 1; a coordinate outside the grid (only
+%% possible if a caller skips pos_to_zone/3's clamp) would otherwise crash
+%% this function_clause deep instead of degrading to an empty ring.
+-spec safe_seq(integer(), integer()) -> [integer()].
+safe_seq(Lo, Hi) when Hi < Lo -> [];
+safe_seq(Lo, Hi) -> lists:seq(Lo, Hi).
 
 find_player_pid(PlayerId) ->
     case pg:get_members(?PG_SCOPE, {player, PlayerId}) of

@@ -19,6 +19,9 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -include_lib("kernel/include/logger.hrl").
 
 -define(PG_SCOPE, nova_scope).
+%% Must match asobi_world_server's own defaults of the same name.
+-define(DEFAULT_ZONE_SIZE, 200).
+-define(DEFAULT_GRID_SIZE, 10).
 
 %% --- Public API ---
 
@@ -124,6 +127,8 @@ init(Config) ->
     ZoneState = maps:get(zone_state, Config, #{}),
     ZoneManagerPid = maps:get(zone_manager_pid, Config, undefined),
     TerrainStorePid = maps:get(terrain_store_pid, Config, undefined),
+    ZoneSize = maps:get(zone_size, Config, ?DEFAULT_ZONE_SIZE),
+    GridSize = maps:get(grid_size, Config, ?DEFAULT_GRID_SIZE),
     pg:join(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     %% Recover entity state from ETS backup if available (zone crash recovery)
     RecoveredEntities = recover_zone_state(WorldId, Coords),
@@ -156,6 +161,8 @@ init(Config) ->
             spawn_templates => Templates,
             zone_manager_pid => ZoneManagerPid,
             terrain_store_pid => TerrainStorePid,
+            zone_size => ZoneSize,
+            grid_size => GridSize,
             entities => RecoveredEntities,
             prev_entities => #{},
             broadcast_entities => #{},
@@ -320,7 +327,7 @@ handle_cast(reap, State) ->
     {stop, normal, State};
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
-    State2 = transfer_out_of_bounds_npcs(State1),
+    State2 = resolve_zone_crossings(State1),
     #{subscribers := Subs, entities := Ents, zone_manager_pid := ZMPid, coords := Coords} = State2,
     case map_size(Subs) of
         0 ->
@@ -636,32 +643,24 @@ encode_delta({added, Id, FullState}) ->
 encode_delta({removed, Id}) ->
     #{~"op" => ~"r", ~"id" => Id}.
 
-%% --- NPC Zone Crossing ---
+%% --- Zone Crossing ---
 
-transfer_out_of_bounds_npcs(
+%% Called after every tick, once entity positions for this tick are final.
+%% NPCs are transferred directly (asobi_zone owns them outright). Players
+%% can't be: only asobi_world_server can move a session's subscriptions and
+%% zone_pid, so those are handed off via move_player/4 instead. See
+%% widgrensit/asobi#248.
+resolve_zone_crossings(
     #{
         entities := Entities,
-        zone_state := ZS,
         world_id := WorldId,
-        coords := {ZX, ZY}
+        coords := Coords,
+        zone_size := ZoneSize,
+        grid_size := GridSize,
+        world_server_pid := WorldServerPid
     } = State
 ) ->
-    Zs = maps:get(zone_size, ZS, 1200) * 1.0,
-    {ToRemove, ToTransfer} = maps:fold(
-        fun
-            (Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans}) ->
-                NewZX = trunc(X / Zs),
-                NewZY = trunc(Y / Zs),
-                case {NewZX, NewZY} =/= {ZX, ZY} of
-                    true -> {[Id | Rem], [{Id, {NewZX, NewZY}, Entity} | Trans]};
-                    false -> {Rem, Trans}
-                end;
-            (_, _, Acc) ->
-                Acc
-        end,
-        {[], []},
-        Entities
-    ),
+    {ToRemove, ToTransfer, ToRehome} = find_zone_crossings(Entities, Coords, ZoneSize, GridSize),
     %% Transfer each NPC to the target zone
     lists:foreach(
         fun({Id, TargetCoords, Entity}) ->
@@ -675,11 +674,73 @@ transfer_out_of_bounds_npcs(
         end,
         ToTransfer
     ),
-    %% Remove transferred NPCs from this zone
+    %% Hand each player off to move_player/4 rather than writing them into the
+    %% target zone directly - handle_move/4 (via remove_player_from_zones/2)
+    %% is what actually removes them from this zone, re-subscribes their
+    %% interest ring and re-points their session's zone_pid. move_player/4 is
+    %% a cast: it always returns ok whether or not the world server has a
+    %% player_zones entry for this id, so that can't be used to decide
+    %% whether to delete the entity here. Deleting it unconditionally instead
+    %% destroyed any non-NPC entity a game script keeps as type "player"
+    %% (bots, decoys, ...) that the world server has never joined - it now
+    %% simply stays here, exactly as it did before this fix, until something
+    %% actually claims it. See widgrensit/asobi#248.
+    case WorldServerPid of
+        undefined ->
+            ok;
+        _ ->
+            lists:foreach(
+                fun
+                    ({Id, {X, Y} = Pos, Entity}) when
+                        is_binary(Id), is_number(X), is_number(Y), is_map(Entity)
+                    ->
+                        asobi_world_server:move_player(WorldServerPid, Id, Pos, Entity);
+                    (_) ->
+                        ok
+                end,
+                ToRehome
+            )
+    end,
+    %% Remove transferred NPCs from this zone. Rehomed players are removed by
+    %% asobi_world_server:remove_player_from_zones/2 once move_player/4's cast
+    %% is processed, not here.
     Entities1 = maps:without(ToRemove, Entities),
     Grid = maps:get(spatial_grid, State, undefined),
     Grid1 = remove_from_grid(ToRemove, Grid),
     State#{entities => Entities1, spatial_grid => Grid1}.
+
+%% Explicit -spec so eqwalizer treats ToRehome's element type as ground truth
+%% at the move_player/4 call site above, rather than inferring term() through
+%% the fold's multi-branch accumulator.
+-spec find_zone_crossings(map(), {integer(), integer()}, pos_integer(), pos_integer()) ->
+    {[binary()], [{binary(), {integer(), integer()}, map()}], [
+        {binary(), {number(), number()}, map()}
+    ]}.
+find_zone_crossings(Entities, Coords, ZoneSize, GridSize) ->
+    maps:fold(
+        fun
+            (Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
+                is_binary(Id), is_number(X), is_number(Y)
+            ->
+                case asobi_world_server:pos_to_zone({X, Y}, ZoneSize, GridSize) of
+                    Coords ->
+                        {Rem, Trans, Rehome};
+                    NewCoords ->
+                        {[Id | Rem], [{Id, NewCoords, Entity} | Trans], Rehome}
+                end;
+            (Id, #{type := ~"player", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
+                is_binary(Id), is_number(X), is_number(Y)
+            ->
+                case asobi_world_server:pos_to_zone({X, Y}, ZoneSize, GridSize) of
+                    Coords -> {Rem, Trans, Rehome};
+                    _NewCoords -> {Rem, Trans, [{Id, {X, Y}, Entity} | Rehome]}
+                end;
+            (_, _, Acc) ->
+                Acc
+        end,
+        {[], [], []},
+        Entities
+    ).
 
 %% --- Snapshot Helpers ---
 
