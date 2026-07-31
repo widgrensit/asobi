@@ -8,9 +8,10 @@ verifies_peer_test() ->
 
 uses_system_trust_store_test() ->
     Ssl = asobi_tls_client:ssl_options(),
-    CaCerts = proplists:get_value(cacerts, Ssl),
-    ?assert(is_list(CaCerts)),
-    ?assert(length(CaCerts) > 0).
+    case proplists:get_value(cacerts, Ssl) of
+        CaCerts when is_list(CaCerts) -> ?assert(length(CaCerts) > 0);
+        _ -> ?assert(false)
+    end.
 
 checks_hostname_test() ->
     Ssl = asobi_tls_client:ssl_options(),

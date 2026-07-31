@@ -1,6 +1,12 @@
 -module(asobi_iap_controller_tests).
 -include_lib("eunit/include/eunit.hrl").
 
+%% verify_apple/1 and verify_google/1 only read json/auth_data, so a bare map
+%% is fine at runtime - this just tells eqwalizer to trust it as a
+%% cowboy_req:req() for the duration of the test (mirrors asobi_body_cap_plugin_tests).
+-spec fake_req(map()) -> dynamic().
+fake_req(M) -> M.
+
 iap_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         fun first_purchase_recorded/0,
@@ -45,7 +51,7 @@ cross_account_replay_rejected() ->
     ).
 
 unauthenticated_rejected() ->
-    Req = #{json => #{~"signed_transaction" => ~"jws"}},
+    Req = fake_req(#{json => #{~"signed_transaction" => ~"jws"}}),
     ?assertMatch({json, 400, _, _}, asobi_iap_controller:verify_apple(Req)).
 
 verify_failure_surfaced() ->
@@ -61,10 +67,10 @@ google_uses_order_id() ->
     end),
     no_existing(),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
-    Req = #{
+    Req = fake_req(#{
         json => #{~"product_id" => ~"coins", ~"purchase_token" => ~"tok"},
         auth_data => #{player_id => ~"p1"}
-    },
+    }),
     {json, 200, _, Body} = asobi_iap_controller:verify_google(Req),
     ?assertEqual(false, maps:get(duplicate, Body)).
 

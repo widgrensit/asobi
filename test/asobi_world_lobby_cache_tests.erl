@@ -67,7 +67,7 @@ distinct_modes_do_not_grow_table() ->
     A = #{world_id => ~"a", mode => ~"barrow"},
     ets:insert(?TAB, {?KEY(false), [A], Now + ?TTL_MS}),
     lists:foreach(
-        fun(N) ->
+        fun(N) when is_integer(N) ->
             Mode = integer_to_binary(N),
             _ = asobi_world_lobby:list_worlds_cached(#{mode => Mode})
         end,

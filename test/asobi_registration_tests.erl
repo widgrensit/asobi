@@ -2,6 +2,12 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+%% register/1 only reads `json`, so a bare map is fine at runtime - this just
+%% tells eqwalizer to trust it as a cowboy_req:req() for the duration of the
+%% test (mirrors asobi_body_cap_plugin_tests).
+-spec fake_req(map()) -> dynamic().
+fake_req(M) -> M.
+
 registration_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         fun defaults_to_open/0,
@@ -51,7 +57,7 @@ oauth_only_denies_password_only() ->
 %% before any account/DB work - the check is the first thing register/1 does.
 register_controller_denies_before_db() ->
     application:set_env(asobi, registration, closed),
-    Req = #{json => #{~"username" => ~"validname", ~"password" => ~"longenough1"}},
+    Req = fake_req(#{json => #{~"username" => ~"validname", ~"password" => ~"longenough1"}}),
     ?assertEqual(
         {json, 403, #{}, #{error => ~"registration_closed"}},
         asobi_auth_controller:register(Req)

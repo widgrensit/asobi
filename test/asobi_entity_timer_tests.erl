@@ -208,6 +208,6 @@ deserialise_malformed_entry_is_skipped_test() ->
     ?assertEqual(~"good", maps:get(timer_id, Timer)).
 
 round_trip(State) ->
-    asobi_entity_timer:deserialise(
-        json:decode(iolist_to_binary(json:encode(asobi_entity_timer:serialise(State))))
-    ).
+    case json:decode(iolist_to_binary(json:encode(asobi_entity_timer:serialise(State)))) of
+        Decoded when is_map(Decoded) -> asobi_entity_timer:deserialise(Decoded)
+    end.
