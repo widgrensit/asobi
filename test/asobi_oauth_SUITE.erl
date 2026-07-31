@@ -16,7 +16,8 @@
     identity_db_roundtrip/1,
     login_existing_identity/1,
     create_player_retries_on_username_collision/1,
-    create_player_no_retry_on_non_unique_username_error/1
+    create_player_no_retry_on_non_unique_username_error/1,
+    create_player_deletes_orphan_on_identity_race_loss/1
 ]).
 
 all() ->
@@ -40,7 +41,8 @@ groups() ->
         ]},
         {create_player, [], [
             create_player_retries_on_username_collision,
-            create_player_no_retry_on_non_unique_username_error
+            create_player_no_retry_on_non_unique_username_error,
+            create_player_deletes_orphan_on_identity_race_loss
         ]}
     ].
 
@@ -296,6 +298,44 @@ create_player_no_retry_on_non_unique_username_error(Config) ->
         {json, 500, _, #{error := ~"registration_failed"}} =
             asobi_oauth_controller:create_player_with_identity(~"discord", Claims),
         ?assertEqual(1, meck:num_calls(asobi_repo, insert, '_'))
+    after
+        meck:unload(asobi_repo)
+    end,
+    Config.
+
+%% asobi#241: two concurrent first-sign-ins for the same provider_uid can
+%% both insert a `players` row, but only one wins the identity insert
+%% (unique {provider, provider_uid} index). The loser must NOT be issued
+%% tokens for a player with no identity row - that player becomes an orphan
+%% no later login can ever match against. Simulate the loss by forcing the
+%% identity insert to fail; assert 409 and that the just-created player was
+%% deleted rather than left behind.
+create_player_deletes_orphan_on_identity_race_loss(Config) ->
+    Self = self(),
+    meck:new(asobi_repo, [passthrough]),
+    meck:expect(asobi_repo, insert, fun
+        (#kura_changeset{schema = asobi_player_identity} = CS) ->
+            {error, kura_changeset:add_error(CS, provider_uid, ~"has already been taken")};
+        (CS) ->
+            meck:passthrough([CS])
+    end),
+    meck:expect(asobi_repo, delete, fun(Schema, Record) ->
+        Self ! {deleted, Schema, maps:get(id, Record, undefined)},
+        meck:passthrough([Schema, Record])
+    end),
+    try
+        ProviderUid = iolist_to_binary([
+            ~"race_uid_", integer_to_binary(erlang:unique_integer([positive]))
+        ]),
+        Claims = #{provider_uid => ProviderUid, provider_display_name => undefined},
+        {json, 409, _, #{error := ~"already_registering"}} =
+            asobi_oauth_controller:create_player_with_identity(~"discord", Claims),
+        PlayerId =
+            receive
+                {deleted, asobi_player, Id} -> Id
+            after 1000 -> erlang:error(player_not_deleted)
+            end,
+        ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, PlayerId))
     after
         meck:unload(asobi_repo)
     end,

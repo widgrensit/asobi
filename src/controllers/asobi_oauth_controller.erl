@@ -171,9 +171,20 @@ create_player_with_identity(Provider, Claims, Attempt) ->
     case asobi_repo:insert(CS1) of
         {ok, Player} ->
             PlayerId = maps:get(id, Player),
-            _ = init_player_stats(PlayerId),
-            _ = insert_identity(PlayerId, Provider, Claims),
-            asobi_auth_tokens:issue(Player, 200, #{username => Username, created => true});
+            case insert_identity(PlayerId, Provider, Claims) of
+                {ok, _Identity} ->
+                    _ = init_player_stats(PlayerId),
+                    asobi_auth_tokens:issue(Player, 200, #{username => Username, created => true});
+                {error, _} ->
+                    %% Lost the unique {provider, provider_uid} race to a
+                    %% concurrent first-sign-in for the same identity. Delete
+                    %% the just-created player so it can't become an orphan
+                    %% with no identity row - the next login retries cleanly
+                    %% instead of ending up unfindable. Mirrors
+                    %% asobi_guest_controller:insert_player_and_identity/3.
+                    _ = asobi_repo:delete(asobi_player, Player),
+                    {json, 409, #{}, #{error => ~"already_registering"}}
+            end;
         {error, #kura_changeset{errors = Errors}} when Attempt < ?MAX_USERNAME_ATTEMPTS ->
             case asobi_auth_error:username_taken(Errors) of
                 true ->
