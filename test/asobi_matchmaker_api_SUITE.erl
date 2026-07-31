@@ -38,10 +38,16 @@ init_per_suite(Config) ->
         end,
     %% add_ticket_omitted_mode_rejected depends on "default" being absent -
     %% remove it explicitly rather than relying on Existing not having it.
+    %% known_mode/1 now requires a resolvable module (not just a game_modes
+    %% key), so these need a `module` entry - the tests never let a match
+    %% actually spawn, so any atom clears the known_mode gate.
     application:set_env(
         asobi,
         game_modes,
-        (maps:remove(~"default", Existing))#{~"ranked" => #{}, ~"casual" => #{}}
+        (maps:remove(~"default", Existing))#{
+            ~"ranked" => #{module => asobi_matchmaker_api_suite_test_mod},
+            ~"casual" => #{module => asobi_matchmaker_api_suite_test_mod}
+        }
     ),
     U1 = asobi_test_helpers:unique_username(~"mm_api1"),
     U2 = asobi_test_helpers:unique_username(~"mm_api2"),
