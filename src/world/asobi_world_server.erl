@@ -89,12 +89,7 @@ get_info(Pid) ->
         M when is_map(M) -> M
     end.
 
-%% asobi#194: the discovery-listing consumers (asobi_discovery:enumerate/3,
-%% via list_worlds/1) never read `players` - matches_filters/2 only reads
-%% player_count, and listing_info/1 doesn't project it either. Fanning that
-%% out to every running world just to throw it away is copying up to 500
-%% player-id binaries per world, across a process boundary, per world, on
-%% every uncached enumeration. This variant skips computing it at all.
+%% asobi#194: skips the roster; see asobi_discovery:enumerate/3's doc.
 -spec get_info(pid(), listing) -> map().
 get_info(Pid, listing) ->
     case gen_statem:call(Pid, {get_info, listing}) of
@@ -1099,10 +1094,6 @@ notify_players(Event, #{players := Players, world_id := WorldId} = State) ->
 world_info(Status, State) ->
     world_info(Status, State, true).
 
-%% IncludeRoster = false skips `maps:keys(Players)` entirely rather than
-%% computing then discarding it - see get_info/2's moduledoc note (#194).
-%% Every other field is a cheap scalar already required by
-%% asobi_world_lobby:matches_filters/2 and listing_info/1.
 world_info(Status, #{world_id := WorldId, players := Players} = State, IncludeRoster) ->
     Base0 = #{
         world_id => WorldId,

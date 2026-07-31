@@ -82,10 +82,7 @@ get_info(Pid) ->
         _ -> #{}
     end.
 
-%% asobi#194: mirrors asobi_world_server:get_info/2 - the discovery-listing
-%% consumers (asobi_discovery:enumerate/3, via list_matches/1) never read
-%% `players`, only player_count. Skips computing maps:keys(Players) at all
-%% rather than fanning it out to every live match just to discard it.
+%% asobi#194: mirrors asobi_world_server:get_info/2; see asobi_discovery's doc.
 -spec get_info(pid(), listing) -> map().
 get_info(Pid, listing) ->
     case gen_statem:call(Pid, {get_info, listing}) of
@@ -654,10 +651,6 @@ persist_result(#{match_id := MatchId, players := Players} = State) ->
 match_info(Status, State) ->
     match_info(Status, State, true).
 
-%% IncludeRoster = false skips maps:keys(Players) entirely rather than
-%% computing then discarding it - see get_info/2's moduledoc note (#194).
-%% Every other field is a cheap scalar already required by
-%% asobi_match_lobby:matches_filters/2 and listing_info/1.
 match_info(Status, #{match_id := MatchId, players := Players} = State, IncludeRoster) ->
     Base0 = #{
         match_id => MatchId,
