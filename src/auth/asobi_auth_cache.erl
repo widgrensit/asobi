@@ -36,6 +36,10 @@ cache. Audited as of asobi#215:
   carries `id` (see `cacheable/1`), so a match-spec scan can target
   every cached entry for one player without evicting every other
   player's session; there is no need to reach for `clear/0` here.
+  "Targeted" is about blast radius, not cost: there is no secondary
+  index on `id`, so `revoke_player/1` is still an O(total cache size)
+  scan, same shape as `clear/0`'s `delete_all_objects/1`, not
+  O(that player's token count).
 - `clear/0` remains available for whole-table maintenance (test
   teardown, an operator-triggered flush) but is intentionally NOT the
   revocation primitive - a full clear scales with total cached
@@ -198,6 +202,11 @@ epoch() ->
         undefined ->
             0;
         _ ->
+            %% No fallback clause: with a 4-arity call and a plain integer
+            %% Incr (0), update_counter/4 always returns a single integer,
+            %% never the list form its type covers for a list-of-UpdateOp
+            %% call. Only here for eqwalizer narrowing (see to_count/1) -
+            %% not defensive against a real alternate return.
             case ets:update_counter(?EPOCH_TABLE, ?EPOCH_KEY, 0, {?EPOCH_KEY, 0}) of
                 N when is_integer(N) -> N
             end
@@ -244,7 +253,11 @@ init([]) ->
     case ets:whereis(?EPOCH_TABLE) of
         undefined ->
             ?EPOCH_TABLE = ets:new(?EPOCH_TABLE, [
-                named_table, public, set, {write_concurrency, true}
+                named_table,
+                public,
+                set,
+                {write_concurrency, true},
+                {decentralized_counters, true}
             ]);
         _ ->
             ok

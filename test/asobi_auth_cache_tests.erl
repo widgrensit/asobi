@@ -8,6 +8,10 @@ cache_test_() ->
         {"invalidate clears the entry", fun invalidate_clears/0},
         {"revoke_player clears only that player's entries", fun revoke_player_scoped/0},
         {"clear wipes every entry", fun clear_wipes_all/0},
+        {"a positive resolve racing a revoke is served but not cached",
+            fun epoch_race_positive_not_cached/0},
+        {"a negative resolve racing a revoke is served but not cached",
+            fun epoch_race_negative_not_cached/0},
         {"expired entries are not returned", fun expired_skipped/0},
         {"banned players are rejected", fun banned_rejected/0},
         {"active players (nil banned_at) pass", fun active_passes/0},
@@ -77,6 +81,42 @@ clear_wipes_all() ->
     asobi_auth_cache:clear(),
     ?assertMatch({error, _}, asobi_auth_cache:resolve_token(TokenA)),
     ?assertMatch({error, _}, asobi_auth_cache:resolve_token(TokenB)).
+
+%% asobi#215 security review, Medium #2: a resolve_token racing a revoke must
+%% not re-cache a stale positive with a fresh TTL, even though this one
+%% in-flight call still correctly returns the pre-revoke result. Simulate the
+%% race by having the mocked DB call itself trigger the revoke before
+%% returning - the epoch it bumps is the one miss/1 already captured.
+epoch_race_positive_not_cached() ->
+    Token = ~"tok-race-positive",
+    Player = #{id => ~"player-race-positive", banned_at => nil},
+    meck:new(nova_auth_refresh, [passthrough, non_strict]),
+    meck:expect(nova_auth_refresh, get_user_by_access_token, fun(_AuthMod, _Tok) ->
+        asobi_auth_cache:revoke_player(~"player-race-positive"),
+        {ok, Player}
+    end),
+    try
+        ?assertEqual({ok, Player}, asobi_auth_cache:resolve_token(Token)),
+        ?assertEqual([], ets:lookup(asobi_auth_cache_tab, crypto:hash(sha256, Token)))
+    after
+        meck:unload(nova_auth_refresh)
+    end.
+
+epoch_race_negative_not_cached() ->
+    Token = ~"tok-race-negative",
+    meck:new(nova_auth_refresh, [passthrough, non_strict]),
+    meck:expect(nova_auth_refresh, get_user_by_access_token, fun(_AuthMod, _Tok) ->
+        %% Any revoke bumps the epoch - invalidate/1 is as good a trigger as
+        %% revoke_player/1 for this race, and exercises a second call site.
+        asobi_auth_cache:invalidate(~"unrelated-token"),
+        {error, not_found}
+    end),
+    try
+        ?assertEqual({error, not_found}, asobi_auth_cache:resolve_token(Token)),
+        ?assertEqual([], ets:lookup(asobi_auth_cache_tab, crypto:hash(sha256, Token)))
+    after
+        meck:unload(nova_auth_refresh)
+    end.
 
 banned_rejected() ->
     Token = ~"tok-banned",
