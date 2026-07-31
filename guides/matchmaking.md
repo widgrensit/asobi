@@ -57,6 +57,19 @@ Erlang return holds the same `players_needed`.
 > two clients. See [Configuration](#configuration) for where `match_size`
 > lives and why changing it needs a server restart.
 
+> **Always pass `mode` as a named/keyed field, never a bare positional
+> value** — `{mode = "arena"}` in Lua, `mode: "arena"` in JSON/TS, a typed
+> `mode` parameter elsewhere. A malformed options shape (e.g. Lua's
+> `{"arena"}`, which sets index `1`, not a `mode` field) silently falls back
+> to the mode's default instead of erroring, so you queue for the wrong mode
+> with no feedback — and if `default` isn't in your `config.lua`, that ticket
+> can never spawn a match. The Lua SDKs (asobi-defold, asobi-love2d) now
+> raise a loud error on this exact mistake; the typed SDKs (Dart, Unity,
+> Unreal, Godot) prevent it at compile/parse time via a required `mode`
+> parameter. asobi-js's WS transport is intentionally schema-less (see its
+> README), so a hand-rolled WS payload there is not protected by any SDK —
+> double-check the key name if you're sending `matchmaker.add` by hand.
+
 A ticket supports `mode` and `properties`. A
 query-language extension (numeric ranges, required keys, automatic skill
 window expansion) is on the roadmap but not shipped — do that filtering
