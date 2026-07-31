@@ -2,6 +2,12 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+%% authenticate/1 only pattern-matches the `json` key here, so a bare map is
+%% fine at runtime - this just tells eqwalizer to trust it as a
+%% cowboy_req:req() for the duration of the test (mirrors asobi_body_cap_plugin_tests).
+-spec fake_req(map()) -> dynamic().
+fake_req(M) -> M.
+
 setup() ->
     application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
     ok.
@@ -61,12 +67,12 @@ decode_secret_upper_bound_test() ->
 
 authenticate_disabled_returns_403_test() ->
     application:unset_env(asobi, guest_auth),
-    Req = #{
+    Req = fake_req(#{
         json => #{
             ~"device_id" => ~"dev-abc",
             ~"device_secret" => base64:encode(crypto:strong_rand_bytes(32))
         }
-    },
+    }),
     ?assertMatch(
         {json, 403, _, #{error := ~"guest_auth_disabled", message := _}},
         asobi_guest_controller:authenticate(Req)

@@ -263,7 +263,12 @@ issue_for_player(PlayerId) ->
 make_verifier(SecretBin) ->
     Salt = crypto:strong_rand_bytes(16),
     KeyId = current_key_id(),
-    Mac = crypto:mac(hmac, sha256, pepper(KeyId), <<Salt/binary, SecretBin/binary>>),
+    Pepper =
+        case pepper(KeyId) of
+            Key when is_binary(Key) -> Key;
+            undefined -> error(guest_verifier_pepper_missing)
+        end,
+    Mac = crypto:mac(hmac, sha256, Pepper, <<Salt/binary, SecretBin/binary>>),
     #{
         ~"salt" => base64:encode(Salt),
         ~"key_id" => KeyId,
@@ -329,14 +334,22 @@ guest_enabled() ->
 
 -spec current_key_id() -> binary().
 current_key_id() ->
-    application:get_env(asobi, guest_verifier_key_id, ~"v1").
+    case application:get_env(asobi, guest_verifier_key_id, ~"v1") of
+        KeyId when is_binary(KeyId) -> KeyId;
+        _ -> ~"v1"
+    end.
 
 -spec pepper(binary()) -> binary() | undefined.
 pepper(KeyId) ->
     case application:get_env(asobi, guest_verifier_pepper, undefined) of
-        Peppers when is_map(Peppers) -> maps:get(KeyId, Peppers, undefined);
+        Peppers when is_map(Peppers) ->
+            case maps:get(KeyId, Peppers, undefined) of
+                Bin when is_binary(Bin) -> Bin;
+                _ -> undefined
+            end;
         Bin when is_binary(Bin), byte_size(Bin) >= 32 -> Bin;
-        _ -> undefined
+        _ ->
+            undefined
     end.
 
 -spec global_create_allowed() -> boolean().
