@@ -53,7 +53,12 @@ allow(Key) ->
     %% starts seki) in a real boot; lightweight eunit setups (e.g.
     %% asobi_zone_tests) don't - `{limiter_not_found, _}` covers seki running
     %% with no matching limiter, `badarg` covers seki's own registry table
-    %% not existing at all (its application/supervisor never started).
+    %% not existing at all (its application/supervisor never started). Both
+    %% catches are scoped to the whole seki:check/2 call, not narrowed to
+    %% exactly those two failure points inside it - a badarg raised for any
+    %% other reason in seki's call chain also fails open here. Acceptable
+    %% for a fail-open, non-security path; not narrowable further without a
+    %% seki API change.
     try seki:check(asobi_script_log_limiter, Key) of
         {allow, _} ->
             {true, take_dropped(Key)};

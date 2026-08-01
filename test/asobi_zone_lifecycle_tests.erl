@@ -41,7 +41,10 @@ zone_lifecycle_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"init_zone_state runs via handle_continue", fun init_zone_state_runs/0},
         {"game module without the callback is unaffected", fun no_callback_unaffected/0},
-        {"dump_zone_state strips the runtime before snapshot", fun dump_zone_state_strips_runtime/0}
+        {"dump_zone_state strips the runtime before snapshot",
+            fun dump_zone_state_strips_runtime/0},
+        {"terminating a zone clears its pending script-log drop count",
+            fun terminate_clears_script_log_drop_row/0}
     ]}.
 
 init_zone_state_runs() ->
@@ -83,3 +86,27 @@ dump_zone_state_strips_runtime() ->
     after
         meck:unload(asobi_zone_snapshotter)
     end.
+
+%% asobi#252 code review: asobi_script_log_limiter:forget/1 is called from
+%% all three terminate/2 clauses, but nothing proved it - deleting the call
+%% left the full suite green. Seed a drop-count row directly (bypassing
+%% seki/rate-limiting entirely) and drive the normal-termination path to
+%% confirm the row is actually gone afterward, not just that forget/1 works
+%% in isolation (already covered by asobi_script_log_limiter_tests). Only
+%% the `normal` reason is exercised here: start_zone/2 links the zone to
+%% this test process (via start_link/1, never unlinked in this file), and
+%% the other two terminate/2 clauses ({shutdown, _} and any other reason)
+%% both propagate as a fatal EXIT signal to a non-trapping linked process -
+%% stopping via either would kill the test process itself, not just the
+%% zone. All three clauses call forget/1 identically (same call, same
+%% position, before pg:leave), so this single case already protects the
+%% wiring a refactor could plausibly break.
+terminate_clears_script_log_drop_row() ->
+    ok = asobi_script_log_limiter:init_table(),
+    WorldId = ~"lc_normal",
+    Coords = {9, 1},
+    Key = {WorldId, Coords},
+    true = ets:insert(asobi_script_log_limiter_drops, {Key, 3}),
+    Pid = start_zone(asobi_test_world_game, #{world_id => WorldId, coords => Coords}),
+    gen_server:stop(Pid),
+    ?assertEqual([], ets:lookup(asobi_script_log_limiter_drops, Key)).
