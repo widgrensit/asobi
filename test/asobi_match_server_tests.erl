@@ -451,6 +451,21 @@ broadcast_in_finished_is_not_swallowed_test() ->
     meck:unload(asobi_test_game),
     cleanup(ok).
 
+empty_phases_does_not_finish_test() ->
+    %% Inject phases/1 that returns []. Before the fix, the match would
+    %% transition to `finished` on the first tick because asobi_phase:init([])
+    %% returns a state with status=complete. Mirrors
+    %% asobi_world_server_tests:empty_phases_does_not_finish/0.
+    setup(),
+    meck:new(asobi_test_game, [passthrough, non_strict, no_link]),
+    meck:expect(asobi_test_game, phases, fun(_GameConfig) -> [] end),
+    Pid = start_match(#{min_players => 1, max_players => 2, tick_rate => 10}),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    timer:sleep(100),
+    ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    meck:unload(asobi_test_game),
+    cleanup(ok).
+
 wait_for_status(_Pid, _Status, 0) ->
     error(timeout_waiting_for_status);
 wait_for_status(Pid, Status, N) ->

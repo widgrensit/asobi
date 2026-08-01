@@ -170,8 +170,10 @@ init(Config) ->
             {PhaseInitEvents, PhaseState} =
                 case erlang:function_exported(GameMod, phases, 1) of
                     true ->
-                        Phases = GameMod:phases(GameConfig),
-                        asobi_phase:init(Phases);
+                        case GameMod:phases(GameConfig) of
+                            [] -> {[], undefined};
+                            Phases -> asobi_phase:init(Phases)
+                        end;
                     false ->
                         {[], undefined}
                 end,
