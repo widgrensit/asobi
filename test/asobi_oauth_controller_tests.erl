@@ -96,6 +96,11 @@ dependency_unmatched_return_is_caught() ->
 %% actually validates a real token.
 
 real_validation_setup() ->
+    %% nova_auth_oidc:config/1 caches asobi_oidc_config:config/0's result in
+    %% persistent_term on first call - invalidate before setting env so this
+    %% group's oidc_providers value is guaranteed to be the one actually
+    %% read, regardless of what ran (and cached) before it.
+    nova_auth_oidc:invalidate_cache(asobi_oidc_config),
     application:set_env(asobi, oidc_providers, #{
         google => #{
             issuer => ~"https://accounts.google.com",
