@@ -62,6 +62,10 @@ world_server_test_() ->
         {"spawns correct number of zones", fun spawns_zones/0},
         {"join adds player to world", fun join_player/0},
         {"join rejects when full", fun join_rejects_full/0},
+        {"join returns error, not crash, when the zone is unavailable",
+            fun join_zone_unavailable_returns_error/0},
+        {"a zone-crossing move survives the destination zone being unavailable",
+            fun move_zone_unavailable_is_a_noop/0},
         {"leave removes player", fun leave_player/0},
         {timeout, 15, {"leave last player finishes world", fun leave_last_finishes/0}},
         {"get_info returns world metadata", fun get_info/0},
@@ -111,6 +115,52 @@ join_rejects_full() ->
     Pid = maps:get(world_pid, Ctx),
     ?assertEqual(ok, asobi_world_server:join(Pid, <<"p1">>)),
     ?assertEqual({error, world_full}, asobi_world_server:join(Pid, <<"p2">>)),
+    stop_world(Ctx).
+
+%% asobi#258: a bare {ok, ZonePid} = ensure_zone(...) used to crash the whole
+%% world gen_statem - every player in it - on e.g. max_zones_reached. join/2
+%% must reject cleanly instead.
+join_zone_unavailable_returns_error() ->
+    Ctx = start_world(),
+    Pid = maps:get(world_pid, Ctx),
+    meck:new(asobi_zone_manager, [passthrough]),
+    meck:expect(asobi_zone_manager, ensure_zone, fun(_Ref, _Coords) ->
+        {error, max_zones_reached}
+    end),
+    try
+        ?assertEqual({error, zone_unavailable}, asobi_world_server:join(Pid, ~"p1")),
+        ?assert(is_process_alive(Pid)),
+        ?assertEqual(0, maps:get(player_count, asobi_world_server:get_info(Pid)))
+    after
+        meck:unload(asobi_zone_manager)
+    end,
+    stop_world(Ctx).
+
+%% asobi#258: same crash, reached via a zone-crossing move instead of a join.
+%% The fix checks the destination zone before removing the player from their
+%% current one, so a failed crossing is a pure no-op rather than a crash (and
+%% rather than a crash-free version that still strands the player zoneless).
+move_zone_unavailable_is_a_noop() ->
+    Ctx = start_world(),
+    Pid = maps:get(world_pid, Ctx),
+    %% asobi_test_world_game:spawn_position/2 always returns {100.0, 100.0},
+    %% which is zone {1,1} at zone_size=100 (see ?BASE_CONFIG).
+    ok = asobi_world_server:join(Pid, ~"p1"),
+    timer:sleep(20),
+    meck:new(asobi_zone_manager, [passthrough]),
+    meck:expect(asobi_zone_manager, ensure_zone, fun
+        (_Ref, {0, 0}) -> {error, max_zones_reached};
+        (Ref, Coords) -> meck:passthrough([Ref, Coords])
+    end),
+    try
+        %% {0.0, 0.0} is zone {0,0} - a real zone-crossing, mocked to fail.
+        asobi_world_server:move_player(Pid, ~"p1", {0.0, 0.0}),
+        timer:sleep(20),
+        ?assert(is_process_alive(Pid)),
+        ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid)))
+    after
+        meck:unload(asobi_zone_manager)
+    end,
     stop_world(Ctx).
 
 leave_player() ->
