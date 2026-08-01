@@ -227,19 +227,23 @@ Optional multi-node clustering via Erlang distribution.
 ```erlang
 {oidc_providers, #{
     google => #{
+        issuer => ~"https://accounts.google.com",
         client_id => ~"...",
-        client_secret => ~"...",
-        discovery_url => ~"https://accounts.google.com/.well-known/openid-configuration"
+        client_secret => ~"..."
     },
-    discord => #{
+    apple => #{
+        issuer => ~"https://appleid.apple.com",
         client_id => ~"...",
-        client_secret => ~"...",
-        authorize_url => ~"https://discord.com/api/oauth2/authorize",
-        token_url => ~"https://discord.com/api/oauth2/token",
-        userinfo_url => ~"https://discord.com/api/users/@me"
+        client_secret => ~"..."
     }
 }}
 ```
+
+Every provider needs `issuer`, `client_id`, and `client_secret` - asobi discovers
+the rest (authorize/token/JWKS endpoints) from the issuer's
+`.well-known/openid-configuration` document. A provider entry missing
+`issuer` fails asobi's boot - see [Authentication](authentication.md) for
+the full supported-provider table and per-provider setup notes.
 
 `base_url` is the public origin asobi uses to build OAuth/OIDC redirect URIs
 (defaults to `~"http://localhost:8082"`). Set it to your deployed URL so the

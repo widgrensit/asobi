@@ -6,7 +6,7 @@
 -export([authenticate/1, link/1, unlink/1]).
 
 -ifdef(TEST).
--export([create_player_with_identity/2]).
+-export([create_player_with_identity/2, validate_oidc_token/2]).
 -endif.
 
 -define(MAX_USERNAME_ATTEMPTS, 3).
@@ -101,12 +101,39 @@ validate_provider_token(Provider, Token) ->
 
 -spec validate_oidc_token(atom(), binary()) -> {ok, map()} | {error, term()}.
 validate_oidc_token(ProviderAtom, Token) ->
-    case
-        erlang:apply(nova_auth_oidc_jwt, validate_token, [asobi_oidc_config, ProviderAtom, Token])
-    of
-        {ok, Result} when is_map(Result) -> {ok, Result};
-        {error, _} = Err -> Err;
-        _ -> {error, unexpected_result}
+    %% This route is unauthenticated (POST /api/v1/auth/oauth, security
+    %% => false), so a dependency crash on a malformed or malicious token
+    %% must never reach cowboy uncaught - that would be an unbounded
+    %% 500/log-write generator with no rate limit on this route. Only
+    %% class/reason are logged, never the stacktrace: its arg list can
+    %% include the raw token, which - unlike an opaque session token -
+    %% embeds the signing input an attacker (or a curious operator
+    %% reading logs) could use to reconstruct a still-valid credential.
+    %% The case lives INSIDE the try's protected body, not in a `try ... of`
+    %% clause list: a value that matches none of the `of` clauses raises
+    %% try_clause OUTSIDE the scope the accompanying catch covers (verified -
+    %% it is not caught by the same try/catch), which would silently
+    %% reopen exactly the crash-to-cowboy gap this fix exists to close.
+    %% Inside the body, nova_auth_oidc_jwt:validate_token/3 returning
+    %% anything outside its own declared {ok, actor()} | {error, term()}
+    %% contract raises case_clause, which the catch below does cover -
+    %% no explicit catch-all needed (dialyzer proves the dependency's
+    %% current behavior never produces one; a future contract-breaking
+    %% change would still be a safe catch, not a crash).
+    try
+        case nova_auth_oidc_jwt:validate_token(asobi_oidc_config, ProviderAtom, Token) of
+            {ok, Result} when is_map(Result) -> {ok, Result};
+            {error, _} = Err -> Err
+        end
+    catch
+        Class:Reason ->
+            ?LOG_ERROR(#{
+                msg => ~"oidc token validation crashed",
+                provider => ProviderAtom,
+                class => Class,
+                reason => Reason
+            }),
+            {error, validation_failed}
     end.
 
 -spec normalize_claims(binary(), map()) -> map().
