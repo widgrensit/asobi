@@ -35,6 +35,9 @@ zone_test_() ->
         {"starts empty", fun starts_empty/0},
         {"add and remove entities", fun add_remove_entities/0},
         {"subscribe and unsubscribe", fun subscribe_unsubscribe/0},
+        {"resubscribing the same pid is idempotent", fun resubscribe_same_pid_is_idempotent/0},
+        {"resubscribing a new pid replaces and demonitors the old one",
+            fun resubscribe_new_pid_replaces_and_demonitors_old/0},
         {"tick processes inputs and broadcasts deltas", fun tick_broadcasts/0},
         {"tick with no changes sends no deltas", fun tick_no_changes/0},
         {"tick acks to ticker", fun tick_acks/0},
@@ -175,6 +178,75 @@ subscribe_unsubscribe() ->
     asobi_zone:unsubscribe(Pid, <<"p1">>),
     timer:sleep(10),
     ?assertEqual(0, asobi_zone:get_subscriber_count(Pid)),
+    gen_server:stop(Pid).
+
+%% asobi#275: callers now (re-)subscribe a crossing/backfilled player to a
+%% zone unconditionally, even when they may already be subscribed - a
+%% same-pid re-subscribe must be a true no-op, not a second monitor/2 (which
+%% would leak the first MonRef, since only the latest one is ever kept in
+%% subscribers) or a wasted second snapshot send.
+resubscribe_same_pid_is_idempotent() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    #{subscribers := #{~"p1" := {_, Ref0}}} = sys:get_state(Pid),
+    {monitored_by, Before} = process_info(self(), monitored_by),
+    flush_messages(),
+
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    #{subscribers := #{~"p1" := {SamePid, Ref1}}} = sys:get_state(Pid),
+    ?assertEqual(self(), SamePid),
+    %% The original monitor ref is retained - a fresh monitor/2 call would
+    %% have replaced it with a new one and left the old one dangling.
+    ?assertEqual(Ref0, Ref1),
+    {monitored_by, After} = process_info(self(), monitored_by),
+    ?assertEqual(length(Before), length(After)),
+    ?assertEqual(1, asobi_zone:get_subscriber_count(Pid)),
+    ?assertEqual(
+        timeout,
+        receive
+            {asobi_message, {zone_delta, 0, _}} -> resent
+        after 100 -> timeout
+        end
+    ),
+    gen_server:stop(Pid).
+
+%% A reconnect legitimately re-subscribes the same PlayerId under a new
+%% session pid - that must replace the old subscription (fresh monitor, fresh
+%% snapshot) and demonitor the stale one so its later DOWN can't evict the
+%% live subscription (asobi_zone's DOWN handler filters by pid, not by ref).
+resubscribe_new_pid_replaces_and_demonitors_old() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    Old = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    asobi_zone:subscribe(Pid, {~"p1", Old}),
+    timer:sleep(10),
+    #{subscribers := #{~"p1" := {Old, OldRef}}} = sys:get_state(Pid),
+
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    #{subscribers := #{~"p1" := {NewPid, NewRef}}} = sys:get_state(Pid),
+    ?assertEqual(self(), NewPid),
+    ?assertNotEqual(OldRef, NewRef),
+    ?assertMatch(
+        [_ | _],
+        receive
+            {asobi_message, {zone_delta, 0, Snapshot}} -> Snapshot
+        after 200 -> []
+        end
+    ),
+
+    exit(Old, kill),
+    timer:sleep(50),
+    ?assertEqual(1, asobi_zone:get_subscriber_count(Pid)),
     gen_server:stop(Pid).
 
 tick_broadcasts() ->

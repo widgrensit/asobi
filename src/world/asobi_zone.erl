@@ -360,31 +360,26 @@ handle_cast({remove_entity, EntityId}, #{entities := Entities, spatial_grid := G
     {noreply, State#{entities => maps:remove(EntityId, Entities), spatial_grid => Grid1}};
 handle_cast(
     {subscribe, PlayerId, PlayerPid},
-    #{subscribers := Subs, entities := Entities, coords := Coords} = State
+    #{subscribers := Subs} = State
+) when is_binary(PlayerId), is_pid(PlayerPid), is_map_key(PlayerId, Subs) ->
+    %% Re-affirming a subscription that already holds for this pid is a no-op:
+    %% callers now subscribe a crossing player to their destination zone
+    %% unconditionally (widgrensit/asobi#275), so this is the common case on
+    %% every crossing, not just a rare double-call. Re-monitoring here would
+    %% leak the old MonRef (never demonitored) and resending the snapshot is
+    %% wasted - the next tick already delivers deltas to a live subscriber.
+    case maps:get(PlayerId, Subs) of
+        {PlayerPid, _MonRef} ->
+            {noreply, State};
+        {_OldPid, OldMonRef} ->
+            demonitor(OldMonRef, [flush]),
+            subscribe_new(PlayerId, PlayerPid, State)
+    end;
+handle_cast(
+    {subscribe, PlayerId, PlayerPid},
+    State
 ) when is_binary(PlayerId), is_pid(PlayerPid) ->
-    MonRef = monitor(process, PlayerPid),
-    %% Send immediate snapshot so new subscribers see all current entities
-    _ =
-        case map_size(Entities) of
-            0 ->
-                ok;
-            _ ->
-                Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
-                PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
-        end,
-    _ =
-        case maps:get(terrain_store_pid, State, undefined) of
-            undefined ->
-                ok;
-            StorePid ->
-                case asobi_terrain_store:get_chunk(StorePid, Coords) of
-                    {ok, Data} ->
-                        PlayerPid ! {asobi_message, {terrain_chunk, Coords, Data}};
-                    _ ->
-                        ok
-                end
-        end,
-    {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}};
+    subscribe_new(PlayerId, PlayerPid, State);
 handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
     case maps:get(PlayerId, Subs, undefined) of
         undefined ->
@@ -467,6 +462,36 @@ terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities
     ok.
 
 %% --- Internal ---
+
+-spec subscribe_new(binary(), pid(), map()) -> {noreply, map()}.
+subscribe_new(
+    PlayerId,
+    PlayerPid,
+    #{subscribers := Subs, entities := Entities, coords := Coords} = State
+) ->
+    MonRef = monitor(process, PlayerPid),
+    %% Send immediate snapshot so new subscribers see all current entities
+    _ =
+        case map_size(Entities) of
+            0 ->
+                ok;
+            _ ->
+                Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
+                PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
+        end,
+    _ =
+        case maps:get(terrain_store_pid, State, undefined) of
+            undefined ->
+                ok;
+            StorePid ->
+                case asobi_terrain_store:get_chunk(StorePid, Coords) of
+                    {ok, Data} ->
+                        PlayerPid ! {asobi_message, {terrain_chunk, Coords, Data}};
+                    _ ->
+                        ok
+                end
+        end,
+    {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}}.
 
 do_tick(
     TickN,

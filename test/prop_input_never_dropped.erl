@@ -185,7 +185,7 @@ zone_at(#{world_pid := WorldPid}, Coords) ->
         {_StateName, StateData} when is_map(StateData) ->
             case maps:get(zone_manager_pid, StateData) of
                 ZMPid when is_pid(ZMPid) ->
-                    {ok, ZP} = asobi_zone_manager:ensure_zone(ZMPid, Coords),
+                    {ok, ZP, _Status} = asobi_zone_manager:ensure_zone(ZMPid, Coords),
                     ZP
             end
     end.

@@ -63,7 +63,7 @@ terrain_chunk_on_subscribe() ->
     unlink(InstancePid),
     timer:sleep(100),
     ZMPid = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
-    {ok, ZonePid} = asobi_zone_manager:ensure_zone(ZMPid, {0, 0}),
+    {ok, ZonePid, _Status} = asobi_zone_manager:ensure_zone(ZMPid, {0, 0}),
     asobi_zone:subscribe(ZonePid, {~"test_player", self()}),
     Received = collect_messages(500),
     HasTerrain = lists:any(
@@ -82,7 +82,7 @@ terrain_data_correct() ->
     unlink(InstancePid),
     timer:sleep(100),
     ZMPid = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
-    {ok, ZonePid} = asobi_zone_manager:ensure_zone(ZMPid, {1, 2}),
+    {ok, ZonePid, _Status} = asobi_zone_manager:ensure_zone(ZMPid, {1, 2}),
     asobi_zone:subscribe(ZonePid, {~"test_player2", self()}),
     Received = collect_messages(500),
     [{asobi_message, {terrain_chunk, {1, 2}, ChunkData}}] =

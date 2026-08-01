@@ -29,15 +29,25 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 start_link(Opts) ->
     gen_server:start_link(?MODULE, Opts, []).
 
--doc "Return existing zone or start a new one. ETS fast path first.".
--spec ensure_zone(pid() | atom(), {integer(), integer()}) -> {ok, pid()} | {error, term()}.
+-doc """
+Return existing zone or start a new one. ETS fast path first.
+
+The third element of a successful result tells the caller whether this call
+is what brought the zone into existence (`created`) or whether it was already
+running (`existing`) - callers that need to backfill subscribers whose
+interest ring already covered these coords (widgrensit/asobi#275) only need
+to act on `created`.
+""".
+-spec ensure_zone(pid() | atom(), {integer(), integer()}) ->
+    {ok, pid(), created | existing} | {error, term()}.
 ensure_zone(Ref, Coords) ->
     case ets_lookup(Ref, Coords) of
         {ok, Pid} ->
-            {ok, Pid};
+            {ok, Pid, existing};
         not_loaded ->
             case gen_server:call(Ref, {ensure_zone, Coords}) of
-                {ok, P} when is_pid(P) -> {ok, P};
+                {ok, P, created} when is_pid(P) -> {ok, P, created};
+                {ok, P, existing} when is_pid(P) -> {ok, P, existing};
                 {error, _} = Err -> Err
             end
     end.
@@ -142,11 +152,11 @@ init(Opts) ->
 handle_call({ensure_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
     case ets:lookup(Tab, Coords) of
         [{Coords, Pid}] ->
-            {reply, {ok, Pid}, touch(Coords, State)};
+            {reply, {ok, Pid, existing}, touch(Coords, State)};
         [] ->
             case start_zone(Coords, State) of
                 {ok, Pid, State1} ->
-                    {reply, {ok, Pid}, State1};
+                    {reply, {ok, Pid, created}, State1};
                 {error, Reason} ->
                     {reply, {error, Reason}, State}
             end

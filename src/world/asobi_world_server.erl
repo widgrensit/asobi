@@ -361,13 +361,21 @@ running(
         zone_manager_pid := ZMPid,
         zone_size := ZS,
         grid_size := GridSize,
-        world_id := WorldId
+        world_id := WorldId,
+        player_zones := PlayerZones
     } = _State
 ) when is_binary(TemplateId), is_number(X), is_number(Y), is_map(Overrides) ->
     Coords = pos_to_zone(Pos, ZS, GridSize),
     case asobi_zone_manager:ensure_zone(ZMPid, Coords) of
-        {ok, ZonePid} ->
+        {ok, ZonePid, ZoneStatus} ->
             asobi_zone:spawn_entity(ZonePid, TemplateId, Pos, Overrides),
+            %% asobi#275: a script-driven spawn can lazily create a zone just
+            %% as a player crossing can - same backfill is needed, just with
+            %% no acting player of its own to exclude.
+            case ZoneStatus of
+                created -> backfill_zone_subscribers(Coords, ZonePid, undefined, PlayerZones);
+                existing -> ok
+            end,
             keep_state_and_data;
         {error, Reason} ->
             %% asobi#251: same "spawn something, hear nothing" pattern
@@ -637,7 +645,7 @@ restore_entities([{CX, CY} = Coords | Rest], Entities, ZoneManagerPid, WorldId) 
                     asobi_telemetry:game_error(zone_unavailable, #{
                         world_id => WorldId, coords => Coords, reason => Reason
                     });
-                {ok, ZonePid} ->
+                {ok, ZonePid, _Status} ->
                     maps:foreach(
                         fun(EId, EState) -> asobi_zone:add_entity(ZonePid, EId, EState) end,
                         RecoveredEnts
@@ -805,12 +813,17 @@ place_player(
     case asobi_zone_manager:ensure_zone(ZMPid, ZoneCoords) of
         {error, Reason} ->
             {error, Reason, State};
-        {ok, ZonePid} ->
+        {ok, ZonePid, ZoneStatus} ->
             PlayerPid = find_player_pid(PlayerId),
             asobi_zone:add_entity(ZonePid, PlayerId, Entity),
             asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
             InterestZones = interest_zones(ZoneCoords, ViewRadius, GridSize),
             subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
+            PlayerZones = maps:get(player_zones, State),
+            case ZoneStatus of
+                created -> backfill_zone_subscribers(ZoneCoords, ZonePid, PlayerId, PlayerZones);
+                existing -> ok
+            end,
             %% Drain the casts above (add_entity + subscribe) by issuing a sync call to
             %% the zone. Without this, a world.input cast from the WS handler can race
             %% past the add_entity cast (different sender = no FIFO) and the zone's
@@ -819,7 +832,6 @@ place_player(
             %% silently drops the input. The sync call forces the zone to process its
             %% mailbox up to here before we reply {ok, ZonePid} to the WS handler.
             _ = asobi_zone:get_subscriber_count(ZonePid),
-            PlayerZones = maps:get(player_zones, State),
             State1 = State#{
                 player_zones => PlayerZones#{
                     PlayerId => #{zone => ZoneCoords, interest => InterestZones}
@@ -827,6 +839,40 @@ place_player(
             },
             {ok, State1, ZonePid}
     end.
+
+%% asobi#275: a zone coming into existence has to pick up every already-known
+%% player whose interest ring already covers it - the ring-diff subscribe path
+%% only fires for zones newly entering a player's ring, never for one that was
+%% already there but unloaded at the time. ExcludePlayerId is whichever player
+%% caused this creation - they are subscribed separately by the caller (with
+%% the full context of their own crossing/join), so skip them here.
+%%
+%% Deliberately does not reuse find_player_pid/1 - its self()-fallback exists
+%% for "the player currently acting" (always a live caller), but a
+%% player_zones entry outlives disconnection (kept around for reconnect, see
+%% the {reconnect_state := RS} clause above), so a player here can legitimately
+%% have no live session. Falling back to self() would subscribe the world
+%% server's own pid as that player's "session" - a silent wrong subscriber
+%% that stalls out the zone_delta stream until they actually reconnect.
+-spec backfill_zone_subscribers({integer(), integer()}, pid(), binary() | undefined, map()) -> ok.
+backfill_zone_subscribers(ZoneCoords, ZonePid, ExcludePlayerId, PlayerZones) ->
+    maps:foreach(
+        fun
+            (PlayerId, _) when PlayerId =:= ExcludePlayerId ->
+                ok;
+            (PlayerId, #{interest := Interest}) ->
+                case lists:member(ZoneCoords, Interest) of
+                    true ->
+                        case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
+                            [PlayerPid | _] -> asobi_zone:subscribe(ZonePid, {PlayerId, PlayerPid});
+                            [] -> ok
+                        end;
+                    false ->
+                        ok
+                end
+        end,
+        PlayerZones
+    ).
 
 remove_player_from_zones(
     PlayerId,
@@ -939,7 +985,7 @@ handle_move(
                                 world_id => WorldId, coords => NewZoneCoords, reason => Reason
                             }),
                             keep_state_and_data;
-                        {ok, NewZonePid} ->
+                        {ok, NewZonePid, ZoneStatus} ->
                             %% A single-step crossing keeps most of the ring in
                             %% common (radius 1 keeps 6 of 9 zones on an
                             %% orthogonal move) - touching only the zones that
@@ -949,7 +995,17 @@ handle_move(
                             %% change. See widgrensit/asobi#248.
                             NewInterest = interest_zones(NewZoneCoords, ViewRadius, GridSize),
                             ToUnsubscribe = OldInterest -- NewInterest,
-                            ToSubscribe = NewInterest -- OldInterest,
+                            %% NewZoneCoords is itself always part of NewInterest
+                            %% (the ring includes its own centre), so a one-step
+                            %% crossing where it was already a ring neighbour
+                            %% never appears in this diff. asobi#275: subscribe
+                            %% is idempotent for an already-subscribed pid, so
+                            %% NewZoneCoords is dropped here and subscribed
+                            %% unconditionally below instead of relying on the
+                            %% diff to have subscribed it correctly the first
+                            %% time it entered the ring (it may not have - see
+                            %% backfill_zone_subscribers/4).
+                            ToSubscribe = (NewInterest -- OldInterest) -- [NewZoneCoords],
 
                             case asobi_zone_manager:get_zone(ZMPid, OldZoneCoords) of
                                 {ok, OldZonePid} -> asobi_zone:remove_entity(OldZonePid, PlayerId);
@@ -960,7 +1016,22 @@ handle_move(
                             asobi_presence:send(PlayerId, {world_joined, self(), NewZonePid}),
 
                             unsubscribe_interest_zones(ToUnsubscribe, ZMPid, PlayerId),
+                            asobi_zone:subscribe(NewZonePid, {PlayerId, PlayerPid}),
                             subscribe_interest_zones(ToSubscribe, ZMPid, PlayerId, PlayerPid),
+                            %% asobi#275: this crossing is what brought the zone
+                            %% into existence - any other already-connected
+                            %% player whose interest ring already covers it (a
+                            %% stationary neighbour, most commonly) tried to
+                            %% subscribe while it was not_loaded and was
+                            %% silently skipped, with nothing to retry it since.
+                            case ZoneStatus of
+                                created ->
+                                    backfill_zone_subscribers(
+                                        NewZoneCoords, NewZonePid, PlayerId, PlayerZones
+                                    );
+                                existing ->
+                                    ok
+                            end,
                             %% Same race place_player/4's join path guards against: a
                             %% world.input cast can reach the new zone before add_entity
                             %% lands, since add_entity and the WS handler's cast are

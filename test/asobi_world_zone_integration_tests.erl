@@ -70,6 +70,10 @@ world_zone_integration_test_() ->
             fun script_owned_player_entity_survives_crossing/0},
         {"a crossing only touches the interest-ring zones that actually changed",
             fun world_input_crossing_touches_only_ring_delta/0},
+        {"a crossing into a lazily-created zone backfills a stationary neighbour",
+            fun crossing_into_a_lazily_created_zone_backfills_stationary_neighbours/0},
+        {"a script-driven spawn into a lazily-created zone backfills neighbours",
+            fun script_spawn_into_a_lazily_created_zone_backfills_neighbours/0},
         {"a position within the boundary margin does not rehome the player",
             fun world_input_within_margin_does_not_rehome/0},
         {"a rate-limited crossing leaves the entity in place instead of destroying it",
@@ -129,7 +133,7 @@ shared_zone_process() ->
     timer:sleep(20),
     %% Both spawn at {100.0, 100.0} => zone {1,1}
     {ok, ZonePid1} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
-    {ok, ZonePid2} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
+    {ok, ZonePid2, existing} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
     ?assertEqual(ZonePid1, ZonePid2),
     ?assert(is_process_alive(ZonePid1)),
     stop_world(Ctx).
@@ -369,7 +373,7 @@ rehome_denied_by_global_limit() ->
 %% attempted a hand-off nothing claimed - it must stay exactly where it was.
 script_owned_player_entity_survives_crossing() ->
     Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{lazy_zones => true}),
-    {ok, ZonePid1} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
+    {ok, ZonePid1, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
     asobi_zone:add_entity(ZonePid1, ~"bot1", #{
         x => 100.0, y => 100.0, type => ~"player", hp => 7
     }),
@@ -422,7 +426,10 @@ world_input_crossing_touches_only_ring_delta() ->
     %% Reaching the same end state doesn't prove the ring diff ran instead of
     %% a full unsubscribe-everything/resubscribe-everything pass - both reach
     %% identical final counts. Count the actual subscribe/unsubscribe calls:
-    %% only 3 zones left the ring and 3 entered it, not all 9.
+    %% only 3 zones left the ring and 3 entered it (not all 9), plus one more
+    %% unconditional subscribe to the destination zone itself (asobi#275: the
+    %% crossing player is always (re-)subscribed to the zone they land in,
+    %% even though it stayed in the ring and so is never in the ring diff).
     Self = self(),
     meck:new(asobi_zone, [passthrough]),
     try
@@ -445,14 +452,17 @@ world_input_crossing_touches_only_ring_delta() ->
         SubscribeCalls = count_messages(subscribed),
         UnsubscribeCalls = count_messages(unsubscribed),
 
-        ?assertEqual(3, SubscribeCalls),
+        ?assertEqual(4, SubscribeCalls),
         ?assertEqual(3, UnsubscribeCalls),
         %% {1,1} is in both rings - never unsubscribed, so it's never re-touched.
         ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
         %% {0,0} left the ring (x=0 column no longer in range) - unsubscribed.
         ?assertEqual(0, asobi_zone:get_subscriber_count(Z00)),
         %% {3,0} entered the ring (x=3 column, new only) - freshly subscribed.
-        ?assertEqual(1, asobi_zone:get_subscriber_count(Z30))
+        ?assertEqual(1, asobi_zone:get_subscriber_count(Z30)),
+        %% {2,1} is the destination zone itself - subscribed unconditionally.
+        {ok, Z21} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
+        ?assertEqual(1, asobi_zone:get_subscriber_count(Z21))
     after
         meck:unload(asobi_zone),
         stop_world(Ctx)
@@ -462,6 +472,132 @@ count_messages(Tag) ->
     receive
         Tag -> 1 + count_messages(Tag)
     after 0 -> 0
+    end.
+
+%% A live, pg-registered session for a player, so find_player_pid/1 and
+%% backfill_zone_subscribers/4 (both pg-based) resolve to a real process
+%% instead of silently falling through to not_loaded/self()-fallback
+%% behaviour. Forwards every asobi_message to Owner so a test can assert on
+%% actual delivery, not just zone subscriber-map bookkeeping.
+fake_session(PlayerId, Owner) ->
+    Pid = spawn(fun Loop() ->
+        receive
+            stop ->
+                ok;
+            Msg ->
+                Owner ! {PlayerId, Msg},
+                Loop()
+        end
+    end),
+    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
+    Pid.
+
+%% Blocks until PlayerId's forwarded messages include a zone_delta mentioning
+%% EntityId, or the timeout elapses.
+received_entity(PlayerId, EntityId) ->
+    receive
+        {PlayerId, {asobi_message, {zone_delta, _Tick, Ops}}} ->
+            HasEntity = lists:any(
+                fun
+                    (#{~"id" := Id}) -> Id =:= EntityId;
+                    (_) -> false
+                end,
+                Ops
+            ),
+            case HasEntity of
+                true -> true;
+                false -> received_entity(PlayerId, EntityId)
+            end
+    after 500 -> false
+    end.
+
+%% Regression for widgrensit/asobi#275: a zone that a crossing brings into
+%% existence for the first time must pick up every already-connected player
+%% whose interest ring already covered it, not just the crossing player.
+%% Before the fix, a stationary neighbour's earlier subscribe attempt (made
+%% back when the zone was still not_loaded) was silently skipped, and the
+%% ring-diff on the crossing player's own move never re-touched a zone that
+%% stayed in their ring - so nothing ever subscribed the neighbour to it.
+%%
+%% Player ids are namespaced (bf275_*) and each has a real pg-registered
+%% session killed at the end - a stale {player, <<"p1">>} registration
+%% leaking from an unrelated suite must not be able to satisfy this test the
+%% way a bare ~"p1"/~"p2" id previously could.
+crossing_into_a_lazily_created_zone_backfills_stationary_neighbours() ->
+    Ctx =
+        #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{
+            lazy_zones => true, grid_size => 5
+        }),
+    Ada = ~"bf275_ada",
+    Bob = ~"bf275_bob",
+    AdaPid = fake_session(Ada, self()),
+    BobPid = fake_session(Bob, self()),
+    try
+        %% Ada joins and stays put. Spawns at {100.0,100.0} => zone {1,1};
+        %% with view_radius=1 that ring already covers {2,1} - but {2,1} is
+        %% not_loaded at join, so the ring-subscribe attempt to it silently
+        %% no-ops (subscribe_interest_zones/4 uses get_zone, never
+        %% ensure_zone).
+        ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),
+        timer:sleep(20),
+        ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {2, 1})),
+
+        %% Bob joins (also spawns in {1,1}) and then crosses one zone east
+        %% into {2,1} - the same crossing that lazily creates the zone for
+        %% the first time.
+        ?assertEqual(ok, asobi_world_server:join(Pid, Bob)),
+        timer:sleep(20),
+        {ok, Z11} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+        %% x=225 clears zone {1,1}'s margin (edge at 200 + 15% of 100),
+        %% landing in zone {2,1}.
+        asobi_zone:player_input(Z11, Bob, #{
+            ~"action" => ~"move", ~"x" => 225.0, ~"y" => 100.0
+        }),
+        timer:sleep(150),
+
+        {ok, Z21} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
+        %% The right pids, not just the right keys.
+        ?assertMatch(
+            #{subscribers := #{Ada := {AdaPid, _}, Bob := {BobPid, _}}}, sys:get_state(Z21)
+        ),
+        %% And the thing #275 actually reports: the stationary neighbour
+        %% receives the crossing player's entity.
+        ?assert(received_entity(Ada, Bob))
+    after
+        exit(AdaPid, kill),
+        exit(BobPid, kill),
+        stop_world(Ctx)
+    end.
+
+%% Regression for widgrensit/asobi#275, spawn_at variant: a script-driven
+%% game.spawn call can lazily create a zone just as a player crossing can -
+%% same backfill applies, just with no acting player of its own to exclude
+%% (ExcludePlayerId = undefined at that call site). The template_id is
+%% deliberately unresolvable - spawn_at's backfill runs off ensure_zone's
+%% created/existing status, not off whether the spawn itself succeeds, so
+%% this doesn't need a real template registered in the test game module.
+script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
+    Ctx =
+        #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{
+            lazy_zones => true, grid_size => 5
+        }),
+    Ada = ~"bf275_spawn_ada",
+    AdaPid = fake_session(Ada, self()),
+    try
+        ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),
+        timer:sleep(20),
+        ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {2, 1})),
+
+        %% {225.0, 100.0} is zone {2,1} - already in Ada's interest ring
+        %% (view_radius=1 from {1,1}), but not yet loaded.
+        ok = asobi_world_server:spawn_at(Pid, ~"unresolvable_template", {225.0, 100.0}),
+        timer:sleep(150),
+
+        {ok, Z21} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
+        ?assertMatch(#{subscribers := #{Ada := {AdaPid, _}}}, sys:get_state(Z21))
+    after
+        exit(AdaPid, kill),
+        stop_world(Ctx)
     end.
 
 %% Small grid (grid_size=3) without explicit lazy_zones works like before

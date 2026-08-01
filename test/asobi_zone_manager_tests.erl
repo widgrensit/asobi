@@ -64,15 +64,15 @@ starts_ok() ->
 
 ensure_zone_creates() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, ZonePid} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
     ?assert(is_pid(ZonePid)),
     ?assert(is_process_alive(ZonePid)),
     stop_manager(Ctx).
 
 ensure_zone_existing() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, Pid1} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
-    {ok, Pid2} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
+    {ok, Pid1, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
+    {ok, Pid2, existing} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
     ?assertEqual(Pid1, Pid2),
     stop_manager(Ctx).
 
@@ -83,14 +83,14 @@ get_zone_not_loaded() ->
 
 get_zone_loaded() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, ZonePid} = asobi_zone_manager:ensure_zone(Mgr, {0, 1}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 1}),
     ?assertEqual({ok, ZonePid}, asobi_zone_manager:get_zone(Mgr, {0, 1})),
     stop_manager(Ctx).
 
 get_active_zones() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, P1} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
-    {ok, P2} = asobi_zone_manager:ensure_zone(Mgr, {1, 0}),
+    {ok, P1, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, P2, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 0}),
     Active = asobi_zone_manager:get_active_zones(Mgr),
     ?assertEqual(2, length(Active)),
     ?assert(lists:member(P1, Active)),
@@ -99,7 +99,7 @@ get_active_zones() ->
 
 zone_terminated_cleanup() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, ZonePid} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
     exit(ZonePid, kill),
     timer:sleep(50),
     ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {0, 0})),
@@ -107,20 +107,20 @@ zone_terminated_cleanup() ->
 
 down_monitor_cleanup() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, ZonePid} = asobi_zone_manager:ensure_zone(Mgr, {2, 1}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {2, 1}),
     exit(ZonePid, kill),
     timer:sleep(50),
     ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {2, 1})),
     %% Can recreate after cleanup
-    {ok, NewPid} = asobi_zone_manager:ensure_zone(Mgr, {2, 1}),
+    {ok, NewPid, created} = asobi_zone_manager:ensure_zone(Mgr, {2, 1}),
     ?assert(is_pid(NewPid)),
     ?assertNotEqual(ZonePid, NewPid),
     stop_manager(Ctx).
 
 max_zones_enforced() ->
     Ctx = #{mgr := Mgr} = start_manager(#{max_active_zones => 2}),
-    {ok, _} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
-    {ok, _} = asobi_zone_manager:ensure_zone(Mgr, {1, 0}),
+    {ok, _, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, _, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 0}),
     ?assertEqual({error, max_zones_reached}, asobi_zone_manager:ensure_zone(Mgr, {2, 0})),
     stop_manager(Ctx).
 
@@ -137,7 +137,7 @@ pre_warm_all() ->
 
 touch_zone_resets() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, _} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, _, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
     ok = asobi_zone_manager:touch_zone(Mgr, {0, 0}),
     timer:sleep(10),
     ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, {0, 0})),
@@ -145,7 +145,7 @@ touch_zone_resets() ->
 
 release_zone_marks_stale() ->
     Ctx = #{mgr := Mgr} = start_manager(),
-    {ok, _} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, _, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
     ok = asobi_zone_manager:release_zone(Mgr, {0, 0}),
     timer:sleep(10),
     ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, {0, 0})),
@@ -162,8 +162,8 @@ initial_zone_states_threaded() ->
         {1, 1} => #{marker => one_one, lua_state => fake_lua_one}
     },
     ok = asobi_zone_manager:set_initial_zone_states(Mgr, States),
-    {ok, P00} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
-    {ok, P11} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
+    {ok, P00, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, P11, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 1}),
     #{zone_state := ZS00} = sys:get_state(P00),
     #{zone_state := ZS11} = sys:get_state(P11),
     ?assertMatch(#{marker := zero_zero, lua_state := fake_lua_zero}, ZS00),
@@ -174,7 +174,7 @@ initial_zone_states_default() ->
     Ctx = #{mgr := Mgr} = start_manager(),
     %% No set_initial_zone_states call — zone should still start with the
     %% default empty zone_state, not crash.
-    {ok, P} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    {ok, P, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
     #{zone_state := ZS} = sys:get_state(P),
     ?assertEqual(#{}, ZS),
     stop_manager(Ctx).
