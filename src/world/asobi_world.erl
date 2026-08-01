@@ -96,6 +96,13 @@ Called every tick if exported, so implementations MUST be cheap in the
 common case - return `unchanged` immediately unless something already
 indicates a real change happened this tick (e.g. a hot-reload just ran).
 Do not unconditionally rebuild/re-read a template source here.
+
+`{changed, NewTemplates}` REPLACES the zone's entire template set, the same
+as `spawn_templates/1`'s result does at creation - it is not a delta. An
+implementation built from a partial reload that reconstructs only the
+templates it knows changed will silently drop every other template; make
+sure `NewTemplates` includes every template that should still be spawnable,
+not only the ones that changed.
 """.
 -callback spawn_templates_hint(ZoneState :: term()) ->
     unchanged | {changed, #{binary() => asobi_zone_spawner:spawn_template()}}.

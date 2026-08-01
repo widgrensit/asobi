@@ -444,6 +444,11 @@ owns the cost of deciding whether anything actually changed (e.g. only doing
 real work right after its own hot-reload check fires), not this callback
 being a place to unconditionally re-derive templates every tick.
 
+`NewTemplates` **replaces** the zone's whole template set, the same as
+`spawn_templates/1`'s result does at creation - it is not a delta. Include
+every template that should still be spawnable, not only the ones that
+changed, or the rest silently stop being spawnable.
+
 ```erlang
 spawn_templates_hint(ZoneState) ->
     case just_reloaded(ZoneState) of
