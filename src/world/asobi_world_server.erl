@@ -558,13 +558,14 @@ restore_entities([{CX, CY} = Coords | Rest], Entities, ZoneManagerPid, WorldId) 
         0 ->
             ok;
         _ ->
-            %% asobi#258: a bare {ok, ZonePid} = ... here used to crash world
-            %% boot entirely on e.g. max_zones_reached. Skip this zone's
-            %% recovery and log rather than failing every other zone's
-            %% entities along with it.
+            %% asobi#258: see place_player/4 for why this isn't a bare match.
             case asobi_zone_manager:ensure_zone(ZoneManagerPid, Coords) of
                 {error, Reason} ->
-                    ?LOG_WARNING(#{
+                    %% ERROR, not WARNING: unlike the routine capacity
+                    %% rejections on the runtime join/move paths, this drops
+                    %% previously-persisted entity state for the zone - real
+                    %% data loss, not just backpressure (asobi#258 review).
+                    ?LOG_ERROR(#{
                         event => restore_entities_zone_unavailable,
                         world_id => WorldId,
                         coords => Coords,
@@ -625,11 +626,10 @@ handle_join(
                     State1 = State#{game_state => GS1},
                     case place_player(PlayerId, SpawnPos, State1) of
                         {error, Reason, _State1} ->
-                            %% asobi#258: placement failed (e.g. max_zones_reached) -
-                            %% reject the join cleanly. keep_state_and_data discards
-                            %% GS1, so the game module's join is rolled back along
-                            %% with it rather than leaving it out of sync with a
-                            %% client that was told the join failed.
+                            %% keep_state_and_data discards GS1, rolling the game
+                            %% module's join back along with the rejected placement
+                            %% rather than leaving it out of sync with a client that
+                            %% was told the join failed (asobi#258).
                             ?LOG_WARNING(#{
                                 event => join_zone_unavailable,
                                 world_id => WorldId,
@@ -813,15 +813,11 @@ handle_move(
                     ),
                     {keep_state, State#{players => Players1}};
                 false ->
-                    %% asobi#258: check the destination zone is available BEFORE
-                    %% removing the player from their current one - a bare
-                    %% {ok, ZonePid} = ensure_zone(...) here used to crash the
-                    %% whole world gen_statem on e.g. max_zones_reached, and
-                    %% only after the player had already been pulled out of
-                    %% their old zone (so a crash-free version of the same bug
-                    %% would still have stranded them zoneless). Pre-checking
-                    %% keeps a failed crossing a pure no-op: the player stays
-                    %% exactly where they were.
+                    %% asobi#258: check the destination zone BEFORE removing the
+                    %% player from their current one - a crash-free version of
+                    %% this same ordering would still have stranded them
+                    %% zoneless on failure. Pre-checking keeps a failed crossing
+                    %% a pure no-op instead.
                     case asobi_zone_manager:ensure_zone(ZMPid, NewZoneCoords) of
                         {error, Reason} ->
                             ?LOG_WARNING(#{
@@ -838,26 +834,57 @@ handle_move(
                         {ok, _} ->
                             State1 = remove_player_from_zones(PlayerId, State),
                             %% place_player/4's own ensure_zone call for these same
-                            %% coords now hits the fast (already-created) path.
-                            {ok, State2, ZonePid} = place_player(PlayerId, NewPos, State1),
-                            asobi_world_chat:player_zone_changed(
-                                PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
-                            ),
-                            Players1 = maps:update_with(
-                                PlayerId,
-                                fun(Meta) -> Meta#{position => NewPos} end,
-                                maps:get(players, State2)
-                            ),
-                            PlayerPid = find_player_pid(PlayerId),
-                            PlayerPid ! {asobi_message, {world_zone_changed, ZonePid}},
-                            NewInterest = interest_zones(NewZoneCoords, ViewRadius, GridSize),
-                            PZ = maps:get(player_zones, State2),
-                            {keep_state, State2#{
-                                players => Players1,
-                                player_zones => PZ#{
-                                    PlayerId => #{zone => NewZoneCoords, interest => NewInterest}
-                                }
-                            }}
+                            %% coords now hits the fast (already-created) path - the
+                            %% precheck above and this call target the same coords in
+                            %% the same synchronous callback, with no yield point for
+                            %% the zone to be reaped in between. {error, _, _} here is
+                            %% not reachable under current asobi_zone_manager
+                            %% invariants; handled defensively (not a bare match)
+                            %% rather than trusting that to hold forever.
+                            case place_player(PlayerId, NewPos, State1) of
+                                {error, Reason, _} ->
+                                    %% remove_player_from_zones/2's casts to the OLD
+                                    %% zone already fired and can't be recalled, so
+                                    %% this player's player_zones bookkeeping is left
+                                    %% stale rather than crashing the whole world over
+                                    %% a should-be-unreachable edge case.
+                                    ?LOG_ERROR(#{
+                                        event => move_zone_unavailable_after_removal,
+                                        world_id => WorldId,
+                                        player_id => PlayerId,
+                                        coords => NewZoneCoords,
+                                        reason => Reason
+                                    }),
+                                    asobi_telemetry:game_error(zone_unavailable, #{
+                                        world_id => WorldId,
+                                        coords => NewZoneCoords,
+                                        reason => Reason
+                                    }),
+                                    {keep_state, State1};
+                                {ok, State2, ZonePid} ->
+                                    asobi_world_chat:player_zone_changed(
+                                        PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
+                                    ),
+                                    Players1 = maps:update_with(
+                                        PlayerId,
+                                        fun(Meta) -> Meta#{position => NewPos} end,
+                                        maps:get(players, State2)
+                                    ),
+                                    PlayerPid = find_player_pid(PlayerId),
+                                    PlayerPid ! {asobi_message, {world_zone_changed, ZonePid}},
+                                    NewInterest = interest_zones(
+                                        NewZoneCoords, ViewRadius, GridSize
+                                    ),
+                                    PZ = maps:get(player_zones, State2),
+                                    {keep_state, State2#{
+                                        players => Players1,
+                                        player_zones => PZ#{
+                                            PlayerId => #{
+                                                zone => NewZoneCoords, interest => NewInterest
+                                            }
+                                        }
+                                    }}
+                            end
                     end
             end
     end.

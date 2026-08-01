@@ -66,6 +66,10 @@ world_server_test_() ->
             fun join_zone_unavailable_returns_error/0},
         {"a zone-crossing move survives the destination zone being unavailable",
             fun move_zone_unavailable_is_a_noop/0},
+        {"a zone-crossing move survives ensure_zone failing after the player was removed",
+            fun move_zone_unavailable_after_removal_is_defensive/0},
+        {"world boot survives a zone being unavailable during snapshot recovery",
+            fun restore_entities_skips_unavailable_zone/0},
         {"leave removes player", fun leave_player/0},
         {timeout, 15, {"leave last player finishes world", fun leave_last_finishes/0}},
         {"get_info returns world metadata", fun get_info/0},
@@ -162,6 +166,69 @@ move_zone_unavailable_is_a_noop() ->
         meck:unload(asobi_zone_manager)
     end,
     stop_world(Ctx).
+
+%% asobi#258 code review (architecture-guardian pass on #260): the
+%% zone-crossing branch's precheck and place_player/4's own internal
+%% ensure_zone call target the same coords - a failure at the SECOND call,
+%% after the player was already removed from their old zone, was left as a
+%% bare match. Not reachable under current asobi_zone_manager timing
+%% invariants (no yield point between the two calls for the zone to be
+%% reaped), but defended anyway rather than trusted to hold forever. Force
+%% it here by making ensure_zone succeed once then fail for the same coords.
+move_zone_unavailable_after_removal_is_defensive() ->
+    Ctx = start_world(),
+    Pid = maps:get(world_pid, Ctx),
+    ok = asobi_world_server:join(Pid, ~"p1"),
+    timer:sleep(20),
+    Counter = counters:new(1, []),
+    meck:new(asobi_zone_manager, [passthrough]),
+    meck:expect(asobi_zone_manager, ensure_zone, fun
+        (Ref, {0, 0} = Coords) ->
+            case counters:get(Counter, 1) of
+                0 ->
+                    counters:add(Counter, 1, 1),
+                    meck:passthrough([Ref, Coords]);
+                _ ->
+                    {error, max_zones_reached}
+            end;
+        (Ref, Coords) ->
+            meck:passthrough([Ref, Coords])
+    end),
+    try
+        asobi_world_server:move_player(Pid, ~"p1", {0.0, 0.0}),
+        timer:sleep(20),
+        ?assert(is_process_alive(Pid))
+    after
+        meck:unload(asobi_zone_manager)
+    end,
+    stop_world(Ctx).
+
+%% asobi#258: restore_entities/4 (world-boot snapshot recovery) must skip a
+%% zone that fails ensure_zone rather than crashing the whole world's boot.
+restore_entities_skips_unavailable_zone() ->
+    Snapshot = #{
+        {0, 0} => #{
+            zone_state => #{}, entities => #{~"e1" => #{x => 0.0, y => 0.0}}, spawner_state => #{}
+        }
+    },
+    meck:new(asobi_zone_snapshotter, [passthrough]),
+    meck:expect(asobi_zone_snapshotter, load_snapshots, fun(_WorldId) -> {ok, Snapshot} end),
+    meck:new(asobi_zone_manager, [passthrough]),
+    meck:expect(asobi_zone_manager, ensure_zone, fun
+        (_Ref, {0, 0}) -> {error, max_zones_reached};
+        (Ref, Coords) -> meck:passthrough([Ref, Coords])
+    end),
+    try
+        Ctx = start_world(#{persistence => true}),
+        Pid = maps:get(world_pid, Ctx),
+        ?assert(is_process_alive(Pid)),
+        Info = asobi_world_server:get_info(Pid),
+        ?assertEqual(running, maps:get(status, Info)),
+        stop_world(Ctx)
+    after
+        meck:unload(asobi_zone_manager),
+        meck:unload(asobi_zone_snapshotter)
+    end.
 
 leave_player() ->
     Ctx = start_world(),
