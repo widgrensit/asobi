@@ -46,7 +46,9 @@ integration_test_() ->
         {"player leave cleans up channels", fun leave_cleans_up/0},
         {"zone change swaps zone chat", fun zone_change_swaps_chat/0},
         {"proximity chat subscribes to nearby zones", fun proximity_chat/0},
-        {"no chat config means no channels", fun no_chat_config/0}
+        {"no chat config means no channels", fun no_chat_config/0},
+        {"a player with no live session never joins as the calling process",
+            fun no_live_session_does_not_join_as_caller/0}
     ]}.
 
 setup() ->
@@ -137,3 +139,23 @@ no_chat_config() ->
     ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, WorldChannel}))),
     ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ZoneChannel}))),
     unregister_player().
+
+%% Regression for widgrensit/asobi#277: find_player_pid/1 in this module used
+%% to fall back to self() (the caller's own pid - asobi_world_server in
+%% production) when a player had no live pg registration. Deliberately not
+%% calling register_player/0 here - a player with no session must not join,
+%% leave, or move any channel using the calling process's own pid.
+no_live_session_does_not_join_as_caller() ->
+    ChatState = asobi_world_chat:init(~"wc7", #{
+        chat => #{world => true, zone => true, proximity => 1, grid_size => 5}
+    }),
+    ok = asobi_world_chat:player_joined(~"ghost", {2, 2}, ChatState),
+    WorldChannel = asobi_world_chat:channel_id(~"wc7", world, undefined),
+    ZoneChannel = asobi_world_chat:channel_id(~"wc7", zone, {2, 2}),
+    ProxChannel = asobi_world_chat:channel_id(~"wc7", proximity, {2, 2}),
+    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, WorldChannel}))),
+    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ZoneChannel}))),
+    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ProxChannel}))),
+    %% zone_changed and left must also degrade cleanly, not crash.
+    ok = asobi_world_chat:player_zone_changed(~"ghost", {2, 2}, {3, 3}, 5, ChatState),
+    ok = asobi_world_chat:player_left(~"ghost", {3, 3}, ChatState).

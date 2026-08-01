@@ -91,7 +91,13 @@ world_server_test_() ->
         {timeout, 15,
             {"player_ttl_ms>0: DOWN starts grace, fires reconnect events",
                 fun player_ttl_grace_starts_grace/0}},
-        {"join/3 sets zone_pid in player_session synchronously", fun join_three_sets_zone_pid/0}
+        {"join/3 sets zone_pid in player_session synchronously", fun join_three_sets_zone_pid/0},
+        {"join with no live session does not crash",
+            fun join_with_no_live_session_does_not_crash/0},
+        {"reconnect with no live session returns an error, not a crash",
+            fun reconnect_with_no_live_session_returns_error/0},
+        {"a failed reconnect leaves the disconnected grace entry intact",
+            fun failed_reconnect_leaves_grace_intact/0}
     ]}.
 
 starts_running() ->
@@ -440,6 +446,68 @@ join_three_sets_zone_pid() ->
     ?assert(is_pid(maps:get(zone_pid, State1))),
     ?assertEqual(Pid, maps:get(world_pid, State1)),
     asobi_player_session:stop(SessionPid),
+    stop_world(Ctx).
+
+%% Regression for widgrensit/asobi#277: find_player_pid/1 used to fall back
+%% to self() when a player had no live pg registration, which would have
+%% recorded the world server's own pid as that player's session and
+%% subscribed it to the player's zone - not a crash, but silently wrong.
+%% join/2 (test-only, no session registered) is exactly that case.
+join_with_no_live_session_does_not_crash() ->
+    Ctx = #{world_pid := Pid, instance_pid := InstancePid} = start_world(),
+    PlayerId = ~"no_session",
+    ?assertEqual(ok, asobi_world_server:join(Pid, PlayerId)),
+    ?assert(is_process_alive(Pid)),
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    %% The actual defect: under the old self() fallback, this player's
+    %% session_pid/monitor_ref would be the world server itself, and the
+    %% world server would show up as a subscriber of the player's own zone.
+    {_StateName, #{
+        players := #{PlayerId := #{session_pid := SessionPid, monitor_ref := MonRef}}
+    }} = sys:get_state(Pid),
+    ?assertEqual(undefined, SessionPid),
+    ?assertEqual(undefined, MonRef),
+    ZMPid = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
+    %% asobi_test_world_game:spawn_position/2 always returns {100.0, 100.0},
+    %% zone {1,1} at zone_size=100 (?BASE_CONFIG).
+    {ok, ZonePid} = asobi_zone_manager:get_zone(ZMPid, {1, 1}),
+    ?assertEqual(0, asobi_zone:get_subscriber_count(ZonePid)),
+    stop_world(Ctx).
+
+%% Regression for widgrensit/asobi#277: a reconnect attempt with no live
+%% pg-registered session for the player must fail cleanly (the caller
+%% invoking reconnect/2 IS supposed to be that live session) rather than
+%% crash on monitor(process, undefined) or silently monitor the world
+%% server's own pid.
+reconnect_with_no_live_session_returns_error() ->
+    Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => 5_000}),
+    PlayerId = ~"reconnect_no_session",
+    SessionPid = fake_session(PlayerId),
+    ?assertEqual(ok, asobi_world_server:join(Pid, PlayerId)),
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    exit(SessionPid, kill),
+    timer:sleep(100),
+    %% No new session registered before reconnecting.
+    ?assertEqual({error, no_live_session}, asobi_world_server:reconnect(Pid, PlayerId)),
+    ?assert(is_process_alive(Pid)),
+    stop_world(Ctx).
+
+%% Regression for widgrensit/asobi#277: the no-live-session check runs before
+%% asobi_reconnect:reconnect/2, so a rejected reconnect must not consume the
+%% player's disconnected/grace entry - a real session arriving afterwards
+%% still gets to reconnect normally.
+failed_reconnect_leaves_grace_intact() ->
+    Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => 5_000}),
+    PlayerId = ~"retry_after_no_session",
+    S1 = fake_session(PlayerId),
+    ?assertEqual(ok, asobi_world_server:join(Pid, PlayerId)),
+    exit(S1, kill),
+    timer:sleep(100),
+    ?assertEqual({error, no_live_session}, asobi_world_server:reconnect(Pid, PlayerId)),
+    {_StateName, #{reconnect_state := #{disconnected := #{PlayerId := _}}}} = sys:get_state(Pid),
+    _S2 = fake_session(PlayerId),
+    ?assertEqual(ok, asobi_world_server:reconnect(Pid, PlayerId)),
+    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
     stop_world(Ctx).
 
 %% --- listing_info/1 (pure projection, no world needed) ---

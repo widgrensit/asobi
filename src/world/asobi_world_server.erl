@@ -440,7 +440,8 @@ running({call, From}, {reconnect, PlayerId}, State) when is_binary(PlayerId) ->
     #{
         reconnect_state := RS,
         player_zones := PZ,
-        zone_manager_pid := ZMPid
+        zone_manager_pid := ZMPid,
+        world_id := WorldId
     } = State,
     case {RS, maps:get(PlayerId, PZ, undefined)} of
         {undefined, _} ->
@@ -450,28 +451,45 @@ running({call, From}, {reconnect, PlayerId}, State) when is_binary(PlayerId) ->
         {_, #{zone := {ZX, ZY}, interest := InterestZones}} when
             is_integer(ZX), is_integer(ZY), is_list(InterestZones)
         ->
-            ZoneCoords = {ZX, ZY},
-            {_Events, RS1} = asobi_reconnect:reconnect(PlayerId, RS),
-            PlayerPid = find_player_pid(PlayerId),
-            MonRef = erlang:monitor(process, PlayerPid),
-            %% Re-subscribe to all interest zones
-            subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
-            %% Notify session of world/zone
-            ZonePid =
-                case asobi_zone_manager:get_zone(ZMPid, ZoneCoords) of
-                    {ok, ZP} -> ZP;
-                    not_loaded -> undefined
-                end,
-            asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
-            %% Update player entry with new session
-            Players = maps:get(players, State),
-            PlayerMeta = maps:get(PlayerId, Players, #{}),
-            Players1 = Players#{
-                PlayerId => PlayerMeta#{
-                    session_pid => PlayerPid, monitor_ref => MonRef
-                }
-            },
-            {keep_state, State#{reconnect_state => RS1, players => Players1}, [{reply, From, ok}]}
+            %% asobi#277: checked before touching reconnect_state at all, so
+            %% a missing session leaves this a pure no-op (keep_state_and_data
+            %% below discards whatever asobi_reconnect:reconnect/2 would have
+            %% computed) rather than a monitor(process, undefined) crash -
+            %% the caller invoking reconnect/2 IS the reconnecting session, so
+            %% it not being pg-registered yet means the reconnect is broken.
+            case find_player_pid(PlayerId) of
+                undefined ->
+                    ?LOG_WARNING(#{
+                        event => reconnect_no_live_session,
+                        world_id => WorldId,
+                        player_id => PlayerId
+                    }),
+                    {keep_state_and_data, [{reply, From, {error, no_live_session}}]};
+                PlayerPid ->
+                    ZoneCoords = {ZX, ZY},
+                    {_Events, RS1} = asobi_reconnect:reconnect(PlayerId, RS),
+                    MonRef = erlang:monitor(process, PlayerPid),
+                    %% Re-subscribe to all interest zones
+                    subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
+                    %% Notify session of world/zone
+                    ZonePid =
+                        case asobi_zone_manager:get_zone(ZMPid, ZoneCoords) of
+                            {ok, ZP} -> ZP;
+                            not_loaded -> undefined
+                        end,
+                    asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
+                    %% Update player entry with new session
+                    Players = maps:get(players, State),
+                    PlayerMeta = maps:get(PlayerId, Players, #{}),
+                    Players1 = Players#{
+                        PlayerId => PlayerMeta#{
+                            session_pid => PlayerPid, monitor_ref => MonRef
+                        }
+                    },
+                    {keep_state, State#{reconnect_state => RS1, players => Players1}, [
+                        {reply, From, ok}
+                    ]}
+            end
     end.
 
 %% --- finished state ---
@@ -711,9 +729,25 @@ handle_join(
                             }),
                             {keep_state_and_data, [{reply, From, {error, zone_unavailable}}]};
                         {ok, State2, ZonePid} ->
-                            %% Monitor player session for reconnection handling
+                            %% Monitor player session for reconnection handling.
+                            %% asobi#277: place_player/4 already degrades
+                            %% gracefully if this player has no live session
+                            %% (its subscribe becomes a no-op); do the same
+                            %% here rather than crashing on
+                            %% monitor(process, undefined).
                             PlayerPid = find_player_pid(PlayerId),
-                            MonRef = erlang:monitor(process, PlayerPid),
+                            MonRef =
+                                case PlayerPid of
+                                    undefined ->
+                                        ?LOG_WARNING(#{
+                                            event => join_no_live_session,
+                                            world_id => WorldId,
+                                            player_id => PlayerId
+                                        }),
+                                        undefined;
+                                    _ ->
+                                        erlang:monitor(process, PlayerPid)
+                                end,
                             Players1 = Players#{
                                 PlayerId => #{
                                     joined_at => erlang:system_time(millisecond),
@@ -847,13 +881,13 @@ place_player(
 %% caused this creation - they are subscribed separately by the caller (with
 %% the full context of their own crossing/join), so skip them here.
 %%
-%% Deliberately does not reuse find_player_pid/1 - its self()-fallback exists
-%% for "the player currently acting" (always a live caller), but a
-%% player_zones entry outlives disconnection (kept around for reconnect, see
-%% the {reconnect_state := RS} clause above), so a player here can legitimately
-%% have no live session. Falling back to self() would subscribe the world
-%% server's own pid as that player's "session" - a silent wrong subscriber
-%% that stalls out the zone_delta stream until they actually reconnect.
+%% Resolves other players' pids via find_player_pid/1 - safe since asobi#277
+%% made it return undefined instead of falling back to self() for a player
+%% with no live pg registration. A player_zones entry outlives disconnection
+%% (kept around for reconnect, see the {reconnect_state := RS} clause above),
+%% so a player here can legitimately have no live session; undefined lets
+%% this skip them instead of subscribing the world server's own pid as their
+%% "session".
 -spec backfill_zone_subscribers({integer(), integer()}, pid(), binary() | undefined, map()) -> ok.
 backfill_zone_subscribers(ZoneCoords, ZonePid, ExcludePlayerId, PlayerZones) ->
     maps:foreach(
@@ -863,9 +897,9 @@ backfill_zone_subscribers(ZoneCoords, ZonePid, ExcludePlayerId, PlayerZones) ->
             (PlayerId, #{interest := Interest}) ->
                 case lists:member(ZoneCoords, Interest) of
                     true ->
-                        case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
-                            [PlayerPid | _] -> asobi_zone:subscribe(ZonePid, {PlayerId, PlayerPid});
-                            [] -> ok
+                        case find_player_pid(PlayerId) of
+                            undefined -> ok;
+                            PlayerPid -> asobi_zone:subscribe(ZonePid, {PlayerId, PlayerPid})
                         end;
                     false ->
                         ok
@@ -1016,7 +1050,13 @@ handle_move(
                             asobi_presence:send(PlayerId, {world_joined, self(), NewZonePid}),
 
                             unsubscribe_interest_zones(ToUnsubscribe, ZMPid, PlayerId),
-                            asobi_zone:subscribe(NewZonePid, {PlayerId, PlayerPid}),
+                            %% asobi#277: PlayerPid is undefined if this
+                            %% crossing player somehow has no live session -
+                            %% nothing to subscribe or notify in that case.
+                            case PlayerPid of
+                                undefined -> ok;
+                                _ -> asobi_zone:subscribe(NewZonePid, {PlayerId, PlayerPid})
+                            end,
                             subscribe_interest_zones(ToSubscribe, ZMPid, PlayerId, PlayerPid),
                             %% asobi#275: this crossing is what brought the zone
                             %% into existence - any other already-connected
@@ -1055,7 +1095,14 @@ handle_move(
                                 false -> asobi_zone_manager:release_zone(ZMPid, OldZoneCoords)
                             end,
 
-                            PlayerPid ! {asobi_message, {world_zone_changed, NewZonePid}},
+                            _ =
+                                case PlayerPid of
+                                    undefined ->
+                                        ok;
+                                    _ ->
+                                        PlayerPid !
+                                            {asobi_message, {world_zone_changed, NewZonePid}}
+                                end,
                             Players1 = maps:update_with(
                                 PlayerId,
                                 fun(Meta) -> Meta#{position => NewPos} end,
@@ -1116,10 +1163,19 @@ pos_to_zone(Pos, ZoneSize, GridSize) when is_integer(GridSize), GridSize > 0 ->
 interest_zones(Coords, Radius, GridSize) ->
     asobi_zone_grid:ring(Coords, Radius, GridSize).
 
+%% asobi#277: used to fall back to self() when a player had no live pg
+%% registration - meant for "the player currently acting" call sites, where
+%% the caller's own session is always registered before it ever reaches
+%% here. But a player_zones entry outlives disconnection (kept around for
+%% reconnect), so that invariant isn't structural - a future caller reaching
+%% this with a disconnected player would have silently subscribed/monitored
+%% the world server itself as that player's "session". undefined makes the
+%% no-live-session case something every caller has to handle explicitly.
+-spec find_player_pid(binary()) -> pid() | undefined.
 find_player_pid(PlayerId) ->
     case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
         [Pid | _] -> Pid;
-        [] -> self()
+        [] -> undefined
     end.
 
 -spec remember_player_world(binary(), pid()) -> ok.
@@ -1142,7 +1198,10 @@ forget_player_world(PlayerId) ->
             ok
     end.
 
--spec subscribe_interest_zones([term()], pid() | atom(), binary(), pid()) -> ok.
+-spec subscribe_interest_zones([term()], pid() | atom(), binary(), pid() | undefined) -> ok.
+subscribe_interest_zones(_Zones, _ZMPid, _PlayerId, undefined) ->
+    %% asobi#277: no live session to subscribe - nothing to do.
+    ok;
 subscribe_interest_zones([], _ZMPid, _PlayerId, _PlayerPid) ->
     ok;
 subscribe_interest_zones([{CX, CY} | Rest], ZMPid, PlayerId, PlayerPid) when

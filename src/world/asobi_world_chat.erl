@@ -33,29 +33,43 @@ init(WorldId, Config) ->
 
 -spec player_joined(binary(), {integer(), integer()}, map()) -> ok.
 player_joined(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatConfig}) ->
-    PlayerPid = find_player_pid(PlayerId),
-    case maps:get(world, ChatConfig, false) of
-        true ->
-            ChannelId = channel_id(WorldId, world, undefined),
-            asobi_chat_channel:join(ChannelId, PlayerPid);
-        false ->
+    case find_player_pid(PlayerId) of
+        undefined ->
+            %% asobi#277: no live session for this player - nothing to join
+            %% to a chat channel. Falling back to self() here (as this used
+            %% to) would have joined the world server's own pid instead.
+            ok;
+        PlayerPid ->
+            case maps:get(world, ChatConfig, false) of
+                true ->
+                    ChannelId = channel_id(WorldId, world, undefined),
+                    asobi_chat_channel:join(ChannelId, PlayerPid);
+                false ->
+                    ok
+            end,
+            join_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
-    end,
-    join_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
-    ok.
+    end.
 
 -spec player_left(binary(), {integer(), integer()}, map()) -> ok.
 player_left(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatConfig}) ->
-    PlayerPid = find_player_pid(PlayerId),
-    case maps:get(world, ChatConfig, false) of
-        true ->
-            ChannelId = channel_id(WorldId, world, undefined),
-            asobi_chat_channel:leave(ChannelId, PlayerPid);
-        false ->
+    case find_player_pid(PlayerId) of
+        undefined ->
+            %% asobi#277: routine on a real disconnect - the session is
+            %% already gone from pg by the time leave runs. Nothing to
+            %% remove from a chat channel.
+            ok;
+        PlayerPid ->
+            case maps:get(world, ChatConfig, false) of
+                true ->
+                    ChannelId = channel_id(WorldId, world, undefined),
+                    asobi_chat_channel:leave(ChannelId, PlayerPid);
+                false ->
+                    ok
+            end,
+            leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
-    end,
-    leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
-    ok.
+    end.
 
 -spec player_zone_changed(
     binary(), {integer(), integer()}, {integer(), integer()}, non_neg_integer(), map()
@@ -65,38 +79,48 @@ player_zone_changed(
         world_id := WorldId, chat_config := ChatConfig
     }
 ) ->
-    PlayerPid = find_player_pid(PlayerId),
-    case maps:get(zone, ChatConfig, false) of
-        true ->
-            OldChannelId = channel_id(WorldId, zone, OldZoneCoords),
-            NewChannelId = channel_id(WorldId, zone, NewZoneCoords),
-            asobi_chat_channel:leave(OldChannelId, PlayerPid),
-            asobi_chat_channel:join(NewChannelId, PlayerPid);
-        false ->
-            ok
-    end,
-    case maps:get(proximity, ChatConfig, false) of
-        false ->
+    case find_player_pid(PlayerId) of
+        undefined ->
+            %% asobi#277: no live session - nothing to move between chat
+            %% channels.
             ok;
-        Radius when is_integer(Radius) ->
-            OldProx = proximity_zones(OldZoneCoords, Radius, GridSize),
-            NewProx = proximity_zones(NewZoneCoords, Radius, GridSize),
-            LeaveProx = OldProx -- NewProx,
-            JoinProx = NewProx -- OldProx,
-            lists:foreach(
-                fun(Coords) ->
-                    asobi_chat_channel:leave(channel_id(WorldId, proximity, Coords), PlayerPid)
-                end,
-                LeaveProx
-            ),
-            lists:foreach(
-                fun(Coords) ->
-                    asobi_chat_channel:join(channel_id(WorldId, proximity, Coords), PlayerPid)
-                end,
-                JoinProx
-            )
-    end,
-    ok.
+        PlayerPid ->
+            case maps:get(zone, ChatConfig, false) of
+                true ->
+                    OldChannelId = channel_id(WorldId, zone, OldZoneCoords),
+                    NewChannelId = channel_id(WorldId, zone, NewZoneCoords),
+                    asobi_chat_channel:leave(OldChannelId, PlayerPid),
+                    asobi_chat_channel:join(NewChannelId, PlayerPid);
+                false ->
+                    ok
+            end,
+            case maps:get(proximity, ChatConfig, false) of
+                false ->
+                    ok;
+                Radius when is_integer(Radius) ->
+                    OldProx = proximity_zones(OldZoneCoords, Radius, GridSize),
+                    NewProx = proximity_zones(NewZoneCoords, Radius, GridSize),
+                    LeaveProx = OldProx -- NewProx,
+                    JoinProx = NewProx -- OldProx,
+                    lists:foreach(
+                        fun(Coords) ->
+                            asobi_chat_channel:leave(
+                                channel_id(WorldId, proximity, Coords), PlayerPid
+                            )
+                        end,
+                        LeaveProx
+                    ),
+                    lists:foreach(
+                        fun(Coords) ->
+                            asobi_chat_channel:join(
+                                channel_id(WorldId, proximity, Coords), PlayerPid
+                            )
+                        end,
+                        JoinProx
+                    )
+            end,
+            ok
+    end.
 
 %% --- Channel ID generation ---
 
@@ -159,10 +183,15 @@ leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig) ->
 proximity_zones(Coords, Radius, GridSize) ->
     asobi_zone_grid:ring(Coords, Radius, GridSize).
 
+%% asobi#277: used to fall back to self() (the caller's own pid, which is
+%% asobi_world_server since that's who calls player_joined/left/zone_changed)
+%% when a player had no live pg registration. All three call sites now check
+%% for undefined instead.
+-spec find_player_pid(binary()) -> pid() | undefined.
 find_player_pid(PlayerId) ->
     case pg:get_members(nova_scope, {player, PlayerId}) of
         [Pid | _] -> Pid;
-        [] -> self()
+        [] -> undefined
     end.
 
 ignore_result(_) -> ok.
