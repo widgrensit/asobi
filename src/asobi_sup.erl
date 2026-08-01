@@ -3,6 +3,9 @@
 
 -export([start_link/0]).
 -export([init/1]).
+-ifdef(TEST).
+-export([ensure_oidc_providers/0]).
+-endif.
 
 -spec start_link() -> supervisor:startlink_ret().
 start_link() ->
@@ -17,6 +20,7 @@ init([]) ->
     },
     Children = [
         rate_limit_spec(),
+        oidc_providers_spec(),
         auth_cache_spec(),
         cluster_spec(),
         player_session_sup(),
@@ -109,6 +113,31 @@ presence_spec() ->
         id => asobi_presence,
         start => {asobi_presence, start_link, []}
     }.
+
+oidc_providers_spec() ->
+    #{
+        id => asobi_oidc_providers,
+        start => {erlang, apply, [fun ensure_oidc_providers/0, []]},
+        restart => temporary
+    }.
+
+%% asobi#220: nova_auth_oidc_sup (the provider-configuration-worker
+%% supervisor) never starts any workers on its own - ensure_providers/1 is
+%% what does that, and nothing called it before this. asobi_oauth_controller
+%% has always called nova_auth_oidc_jwt:validate_token/3 to check an OIDC
+%% ID token, but that needs a running provider worker to fetch the JWKS,
+%% and none was ever started - OIDC social login has never actually worked.
+%% Only run this when at least one OIDC provider is configured, so a
+%% deployment that doesn't use OIDC never attempts discovery-fetch network
+%% I/O at boot.
+ensure_oidc_providers() ->
+    case application:get_env(asobi, oidc_providers, #{}) of
+        Providers when is_map(Providers), map_size(Providers) > 0 ->
+            ok = nova_auth_oidc:ensure_providers(asobi_oidc_config);
+        _ ->
+            ok
+    end,
+    ignore.
 
 rate_limit_spec() ->
     #{

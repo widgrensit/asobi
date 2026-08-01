@@ -22,6 +22,14 @@ config() ->
             ~"sub" => provider_uid,
             ~"email" => provider_email,
             ~"name" => provider_display_name
+        },
+        %% asobi#220: pins the discovery/JWKS fetch to the same explicit,
+        %% version-independent TLS verification already used for Steam/IAP
+        %% (asobi_tls_client, #171). A trust anchor, not just a TLS option -
+        %% see nova_auth_oidc's moduledoc - so this MUST stay a static call,
+        %% never built from oidc_providers or any other operator/env config.
+        provider_configuration_opts => #{
+            request_opts => #{ssl => asobi_tls_client:ssl_options()}
         }
     }.
 
