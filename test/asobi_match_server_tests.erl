@@ -463,6 +463,7 @@ empty_phases_does_not_finish_test() ->
     ok = asobi_match_server:join(Pid, ~"p1"),
     timer:sleep(100),
     ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    gen_statem:stop(Pid),
     meck:unload(asobi_test_game),
     cleanup(ok).
 
