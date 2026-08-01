@@ -430,6 +430,28 @@ spawns: `game.zone.spawn` has no return value to report the failure. The zone
 logs a `zone_spawn_failed` warning with the `world_id` and `coords`, and
 emits `[asobi, error]` with `kind => unknown_spawn_template`.
 
+### Updating templates in an already-running zone
+
+`spawn_templates/1` is only ever called once, at zone creation - a template
+added later (e.g. via a script hot-reload) never reaches a zone that's
+already running; it stays invisible to that zone until the zone is recreated.
+
+The optional `spawn_templates_hint/1` Erlang callback closes this: it runs
+every tick, and returning `{changed, NewTemplates}` pushes an updated
+template set into the live zone immediately. Return `unchanged` in the
+common case - this runs on the hot path, so a game module implementing it
+owns the cost of deciding whether anything actually changed (e.g. only doing
+real work right after its own hot-reload check fires), not this callback
+being a place to unconditionally re-derive templates every tick.
+
+```erlang
+spawn_templates_hint(ZoneState) ->
+    case just_reloaded(ZoneState) of
+        false -> unchanged;
+        true -> {changed, current_templates(ZoneState)}
+    end.
+```
+
 ```lua
 function spawn_templates(config)
     return {

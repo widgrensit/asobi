@@ -50,7 +50,9 @@ zone_test_() ->
         {"spawn_entity bounds an over-long template_id before it is observable",
             fun spawn_entity_long_template_id_bounded/0},
         {"spawn_entity keeps a multibyte template_id valid UTF-8 when bounding",
-            fun spawn_entity_multibyte_template_id_stays_utf8/0}
+            fun spawn_entity_multibyte_template_id_stays_utf8/0},
+        {"spawn_templates_hint updates a live zone's spawnable templates",
+            fun spawn_templates_hint_updates_live_zone/0}
     ]}.
 
 starts_empty() ->
@@ -306,6 +308,42 @@ tick_no_hibernate_with_npcs() ->
     {current_function, CF} = erlang:process_info(Pid, current_function),
     ?assertNotEqual({erlang, hibernate, 3}, CF),
     gen_server:stop(Pid).
+
+%% asobi#253: spawn_templates/1 is only ever called once, at zone creation -
+%% a template added by a later script hot-reload never reached an
+%% already-running zone. spawn_templates_hint/1 is the fix: an optional,
+%% per-tick, cheap "did templates change" callback. asobi_test_world_game
+%% doesn't export it normally (verified: it's absent from
+%% -export([init/1, join/2, ...])), so injecting it via meck's non_strict
+%% mode - the same technique already used for phases/1 in
+%% asobi_world_server_tests.erl - both proves the callback is genuinely
+%% optional (erlang:function_exported/3 must see it appear) and lets this
+%% test control exactly when a "change" is reported.
+spawn_templates_hint_updates_live_zone() ->
+    Pid = start_zone(#{spawn_templates => #{}}),
+    meck:new(?GAME, [passthrough, non_strict]),
+    meck:expect(?GAME, spawn_templates_hint, fun(_ZoneState) ->
+        {changed, #{~"goblin" => #{type => ~"npc", base_state => #{}}}}
+    end),
+    try
+        %% Before the hint has run: the template is genuinely unknown.
+        asobi_zone:spawn_entity(Pid, ~"goblin", {5, 5}),
+        timer:sleep(10),
+        ?assertEqual(#{}, asobi_zone:get_entities(Pid)),
+        %% A tick applies the hint's {changed, _} result to the live spawner.
+        asobi_zone:tick(Pid, 1),
+        timer:sleep(10),
+        %% The same template_id that failed above now spawns.
+        asobi_zone:spawn_entity(Pid, ~"goblin", {5, 5}),
+        timer:sleep(10),
+        Entities = asobi_zone:get_entities(Pid),
+        ?assertEqual(1, map_size(Entities)),
+        [Entity] = maps:values(Entities),
+        ?assertEqual(~"npc", maps:get(type, Entity))
+    after
+        meck:unload(?GAME),
+        gen_server:stop(Pid)
+    end.
 
 start_mock_zone_manager() ->
     spawn(fun() -> mock_zm_loop([]) end).

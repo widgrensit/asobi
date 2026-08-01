@@ -486,9 +486,14 @@ do_tick(
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),
-    %% Tick spawner — process respawn queue
-    Spawner = maps:get(spawner, State),
-    {Respawns, FailedRespawns, Spawner1} = asobi_zone_spawner:tick(Now, Spawner),
+    %% Tick spawner — process respawn queue. asobi#253: pick up a live
+    %% template update (e.g. a script hot-reload) before ticking, so a
+    %% just-renamed/added template doesn't have to wait for the next respawn
+    %% window to become spawnable.
+    Spawner0 = maybe_apply_spawn_templates_hint(
+        GameMod, ZoneState1, maps:get(spawner, State), WorldId, Coords
+    ),
+    {Respawns, FailedRespawns, Spawner1} = asobi_zone_spawner:tick(Now, Spawner0),
     lists:foreach(
         fun
             ({TemplateId, unknown_template = Reason}) when is_binary(TemplateId) ->
@@ -669,9 +674,7 @@ transfer_out_of_bounds_npcs(
     Entities1 = maps:without(ToRemove, Entities),
     Grid = maps:get(spatial_grid, State, undefined),
     Grid1 = remove_from_grid(ToRemove, Grid),
-    State#{entities => Entities1, spatial_grid => Grid1};
-transfer_out_of_bounds_npcs(State) ->
-    State.
+    State#{entities => Entities1, spatial_grid => Grid1}.
 
 %% --- Snapshot Helpers ---
 
@@ -753,6 +756,34 @@ has_tickable_entities(Entities) ->
         false,
         Entities
     ).
+
+%% asobi#253: spawn_templates/1 is only ever called once, at zone creation -
+%% a long-running zone never learns about a template added/renamed by a
+%% later script hot-reload, so it surfaces as unknown_spawn_template
+%% indefinitely rather than just until the next reload. spawn_templates_hint/1
+%% is optional and runs every tick, so it must be cheap when nothing
+%% changed - the callback owns that cost, not this call site.
+-spec maybe_apply_spawn_templates_hint(
+    module(), term(), asobi_zone_spawner:state(), binary(), {integer(), integer()}
+) -> asobi_zone_spawner:state().
+maybe_apply_spawn_templates_hint(GameMod, ZoneState, Spawner, WorldId, Coords) ->
+    case erlang:function_exported(GameMod, spawn_templates_hint, 1) of
+        false ->
+            Spawner;
+        true ->
+            case GameMod:spawn_templates_hint(ZoneState) of
+                {changed, NewTemplates} when is_map(NewTemplates) ->
+                    ?LOG_NOTICE(#{
+                        event => zone_spawn_templates_updated,
+                        world_id => WorldId,
+                        coords => Coords,
+                        template_count => map_size(NewTemplates)
+                    }),
+                    asobi_zone_spawner:set_templates(NewTemplates, Spawner);
+                _ ->
+                    Spawner
+            end
+    end.
 
 %% asobi_zone_spawner:spawn_entity/4's only error today is unknown_template.
 %% The cast API (game.zone.spawn and world-server spawn_at) can't return this

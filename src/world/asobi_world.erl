@@ -84,6 +84,22 @@ behind the join.
 -callback spawn_templates(Config :: map()) ->
     #{binary() => asobi_zone_spawner:spawn_template()}.
 
+-doc """
+Optional (asobi#253): a per-tick, cheap hint that spawn templates may have
+changed since zone creation - e.g. a script hot-reload adding/renaming a
+template. `spawn_templates/1` is only ever called once, at zone creation;
+without this, a long-running zone never learns about a template added
+later and every spawn attempt against it surfaces as `unknown_spawn_template`
+indefinitely, not just until the next reload.
+
+Called every tick if exported, so implementations MUST be cheap in the
+common case - return `unchanged` immediately unless something already
+indicates a real change happened this tick (e.g. a hot-reload just ran).
+Do not unconditionally rebuild/re-read a template source here.
+""".
+-callback spawn_templates_hint(ZoneState :: term()) ->
+    unchanged | {changed, #{binary() => asobi_zone_spawner:spawn_template()}}.
+
 -doc "Optional: the terrain provider module + args, or `none`.".
 -callback terrain_provider(Config :: map()) ->
     {Module :: module(), ProviderArgs :: map()} | none.
@@ -120,6 +136,7 @@ plain terms. The inverse of `init_zone_state`'s restore path.
     on_phase_ended/2,
     on_world_recovered/2,
     spawn_templates/1,
+    spawn_templates_hint/1,
     terrain_provider/1,
     on_zone_loaded/2,
     on_zone_unloaded/2,
