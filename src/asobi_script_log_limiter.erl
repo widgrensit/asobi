@@ -18,7 +18,7 @@ more like this were suppressed" instead of the gap just looking like the
 failure stopped.
 """.
 
--export([allow/1, init_table/0]).
+-export([allow/1, forget/1, init_table/0]).
 
 -define(DROP_TABLE, asobi_script_log_limiter_drops).
 
@@ -63,6 +63,22 @@ allow(Key) ->
     catch
         error:{limiter_not_found, _} -> {true, take_dropped(Key)};
         error:badarg -> {true, take_dropped(Key)}
+    end.
+
+-doc """
+Drop any pending drop-count row for `Key`. Callers whose Key's lifetime is
+bounded (e.g. a zone process, keyed on `{WorldId, Coords}`) should call this
+when that lifetime ends, so a Key that suppressed a log line right before
+terminating doesn't leave a permanent stale row behind.
+""".
+-spec forget(term()) -> ok.
+forget(Key) ->
+    case ets:whereis(?DROP_TABLE) of
+        undefined ->
+            ok;
+        _ ->
+            _ = ets:delete(?DROP_TABLE, Key),
+            ok
     end.
 
 -spec take_dropped(term()) -> non_neg_integer().

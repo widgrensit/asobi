@@ -24,7 +24,9 @@ script_log_limiter_test_() ->
         {"buckets are per key", fun per_key_buckets/0},
         {"a denied call is counted and reported on the next allow",
             fun reports_dropped_count_on_next_allow/0},
-        {"an allowed call with nothing suppressed reports zero", fun reports_zero_when_clean/0}
+        {"an allowed call with nothing suppressed reports zero", fun reports_zero_when_clean/0},
+        {"forget drops a pending count so a later allow reports zero, not stale",
+            fun forget_clears_pending_drop_count/0}
     ]}.
 
 denies_past_limit() ->
@@ -59,6 +61,22 @@ reports_dropped_count_on_next_allow() ->
 reports_zero_when_clean() ->
     Key = unique_key(),
     ?assertEqual({true, 0}, asobi_script_log_limiter:allow(Key)).
+
+%% asobi#252 review (used from asobi_zone:terminate/2): a Key with a bounded
+%% lifetime (a zone's {WorldId, Coords}) must not leave a stale drop-count
+%% row behind forever once that lifetime ends.
+forget_clears_pending_drop_count() ->
+    Key = unique_key(),
+    [asobi_script_log_limiter:allow(Key) || _ <- lists:seq(1, 3)],
+    %% Suppressed once - a pending count is now sitting in the drop table.
+    ?assertEqual(false, asobi_script_log_limiter:allow(Key)),
+    ok = asobi_script_log_limiter:forget(Key),
+    catch seki:reset(?LIMITER, Key),
+    ?assertEqual(
+        {true, 0},
+        asobi_script_log_limiter:allow(Key),
+        "forget/1 must clear the pending count, not just let the next allow report it"
+    ).
 
 unique_key() ->
     {test, erlang:unique_integer([positive])}.

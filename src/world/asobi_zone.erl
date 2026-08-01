@@ -432,12 +432,16 @@ terminate(normal, #{world_id := WorldId, coords := Coords} = State) ->
     maybe_final_snapshot(State),
     clear_zone_backup(WorldId, Coords),
     notify_zone_manager_terminated(State),
+    %% asobi#252 review: a zone that ever suppressed a log line leaves a
+    %% permanent drop-count row otherwise - this Key's lifetime ends here.
+    asobi_script_log_limiter:forget({WorldId, Coords}),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate({shutdown, _}, #{world_id := WorldId, coords := Coords} = State) ->
     maybe_final_snapshot(State),
     clear_zone_backup(WorldId, Coords),
     notify_zone_manager_terminated(State),
+    asobi_script_log_limiter:forget({WorldId, Coords}),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities} = State) ->
@@ -445,6 +449,7 @@ terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities
     maybe_final_snapshot(State),
     backup_zone_state(WorldId, Coords, Entities),
     notify_zone_manager_terminated(State),
+    asobi_script_log_limiter:forget({WorldId, Coords}),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok.
 
