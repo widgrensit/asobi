@@ -151,7 +151,14 @@ register_limiters() ->
         %% Global (not per-IP) bound on guest-create throughput. Guest rows are
         %% minted unauthenticated and cheaply, so a per-IP limit alone lets a
         %% botnet spam rows; this caps the total rate. Keyed on a constant.
-        guest_global => #{algorithm => sliding_window, limit => 100, window => 1000}
+        guest_global => #{algorithm => sliding_window, limit => 100, window => 1000},
+        %% asobi#252: bounds LOG LINES (not the telemetry counter, which stays
+        %% unconditional - see asobi_script_log_limiter's moduledoc) from a
+        %% script that fails on every tick. Keyed per call site's own choice
+        %% of "same recurring failure" (typically per zone or per callback),
+        %% so one broken zone/script doesn't starve another's visibility.
+        %% Generous: this is about volume, not adversarial abuse.
+        script_log => #{algorithm => sliding_window, limit => 3, window => 10_000}
     },
     Configured =
         case application:get_env(asobi, rate_limits, #{}) of
@@ -171,6 +178,7 @@ register_limiters() ->
         end,
         Defaults
     ),
+    asobi_script_log_limiter:init_table(),
     ignore.
 
 limiter_name(auth) -> asobi_auth_limiter;
@@ -179,7 +187,8 @@ limiter_name(iap) -> asobi_iap_limiter;
 limiter_name(api) -> asobi_api_limiter;
 limiter_name(ws_connect) -> asobi_ws_connect_limiter;
 limiter_name(join) -> asobi_join_limiter;
-limiter_name(guest_global) -> asobi_guest_global_limiter.
+limiter_name(guest_global) -> asobi_guest_global_limiter;
+limiter_name(script_log) -> asobi_script_log_limiter.
 
 cluster_spec() ->
     #{

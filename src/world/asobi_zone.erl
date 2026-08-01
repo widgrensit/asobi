@@ -764,13 +764,22 @@ log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) -
     %% Caller-supplied (a Lua script can pass player input straight through
     %% to game.zone.spawn); game_error/2 requires bounded details.
     Id = bound_template_id(TemplateId),
-    ?LOG_WARNING(#{
-        event => zone_spawn_failed,
-        world_id => WorldId,
-        coords => Coords,
-        template_id => Id,
-        reason => Reason
-    }),
+    %% asobi#252: a tick-loop script with a typo'd template_id logs once per
+    %% tick forever. The telemetry counter stays unconditional so dashboards
+    %% see the true rate; only the log line itself is rate-limited per zone.
+    case asobi_script_log_limiter:allow({WorldId, Coords}) of
+        {true, DroppedSinceLastLog} ->
+            ?LOG_WARNING(#{
+                event => zone_spawn_failed,
+                world_id => WorldId,
+                coords => Coords,
+                template_id => Id,
+                reason => Reason,
+                suppressed_since_last => DroppedSinceLastLog
+            });
+        false ->
+            ok
+    end,
     asobi_telemetry:game_error(unknown_spawn_template, #{
         world_id => WorldId,
         template_id => Id
