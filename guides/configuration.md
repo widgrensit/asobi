@@ -360,6 +360,28 @@ implement `join/3` in your game module and reject unauthorised joins - see
 A player at the per-player cap gets `429`; once the global cap is reached
 further creates get `503`.
 
+## Zone crossing rate
+
+For `world`-mode games, re-homing a player across a zone boundary is bounded
+per player, not per IP:
+
+```erlang
+{rate_limits, #{
+    rehome => #{algorithm => sliding_window, limit => 5, window => 1000}
+}}
+```
+
+Each crossing updates part of the player's interest ring and resends a full
+zone snapshot to any newly-subscribed zone, so an unbounded rate lets one
+client force that work every tick by parking on (or jittering across) a zone
+boundary. The default (5/sec) bounds the worst case on top of the crossing's
+own hysteresis margin (see [World Server](world-server.md)); it caps sustained
+crossing speed at `limit * zone_size` units/sec, so a fast-moving game (a
+vehicle, flight sim, or racer) on a small `zone_size` may need to raise this.
+Denied crossings are not dropped input - the player's position still updates
+within their current zone, they just don't re-home that tick. Exceeding the
+limit emits `[asobi, rehome, rate_limited]`.
+
 ## Terrain provider allowlist
 
 For Lua large-world games, only allowlisted terrain generators can be named

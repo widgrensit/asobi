@@ -39,6 +39,12 @@ transient matches use `asobi_match_server` instead.
 -define(DEFAULT_TICK_RATE, 50).
 -define(DEFAULT_MAX_PLAYERS, 500).
 -define(DEFAULT_VIEW_RADIUS, 1).
+%% Fraction of zone_size a position must clear past a zone's own rectangle
+%% before asobi_zone treats it as a real crossing rather than jitter -
+%% widgrensit/asobi#248. A fixed fraction, not absolute units, since it
+%% should scale with whatever zone_size a world picks; games wanting a
+%% tighter or looser boundary can override rehome_margin per world.
+-define(DEFAULT_REHOME_MARGIN, 0.15).
 
 %% --- Public API ---
 
@@ -171,6 +177,7 @@ init(Config) ->
     TickRate = maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE),
     MaxPlayers = maps:get(max_players, Config, ?DEFAULT_MAX_PLAYERS),
     ViewRadius = maps:get(view_radius, Config, ?DEFAULT_VIEW_RADIUS),
+    RehomeMargin = maps:get(rehome_margin, Config, ?DEFAULT_REHOME_MARGIN),
     VetoTokensPerPlayer = maps:get(veto_tokens_per_player, Config, 0),
     FrustrationBonus = maps:get(frustration_bonus, Config, 0.5),
     Persistent = maps:get(persistent, Config, false),
@@ -203,6 +210,7 @@ init(Config) ->
         tick_rate => TickRate,
         max_players => MaxPlayers,
         view_radius => ViewRadius,
+        rehome_margin => RehomeMargin,
         players => #{},
         player_zones => #{},
         instance_sup => InstanceSup,
@@ -511,6 +519,7 @@ configure_zone_manager(
         game_module := GameMod,
         zone_size := ZoneSize,
         grid_size := GridSize,
+        rehome_margin := RehomeMargin,
         config := Config
     } = State
 ) ->
@@ -531,7 +540,8 @@ configure_zone_manager(
         %% So a zone can decide crossings with the same clamped math - see
         %% resolve_zone_crossings/1 in asobi_zone.
         zone_size => ZoneSize,
-        grid_size => GridSize
+        grid_size => GridSize,
+        rehome_margin => RehomeMargin
     },
     asobi_zone_manager:set_zone_config(ZoneManagerPid, BaseZoneConfig),
     State#{terrain_store_pid => TerrainStorePid}.

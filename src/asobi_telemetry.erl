@@ -13,6 +13,7 @@
     ws_message_out/1,
     ws_connect_rate_limited/1,
     join_rate_limited/1,
+    rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
     ws_origin_rejected/0
 ]).
@@ -193,6 +194,20 @@ join_rate_limited(PlayerId) ->
 ws_connect_rate_limited(PeerIp) ->
     telemetry:execute(
         [asobi, ws, connect_rate_limited], #{count => 1}, #{peer_ip => PeerIp}
+    ).
+
+-doc """
+asobi#248: a player hit the per-identity or global zone-crossing rate cap.
+Fires per denied crossing - the denied entity is clamped back inside its
+current zone (private, see asobi_zone's clamp_to_zone/3), but under
+sustained input the crossing is still re-detected (and re-denied) every
+tick, so a client thrashing a boundary can drive this at up to the world
+tick rate. Aggregate this; do not use `player_id` as a metric label.
+""".
+-spec rehome_rate_limited(binary()) -> ok.
+rehome_rate_limited(PlayerId) ->
+    telemetry:execute(
+        [asobi, rehome, rate_limited], #{count => 1}, #{player_id => PlayerId}
     ).
 
 -spec ws_idle_auth_timeout() -> ok.

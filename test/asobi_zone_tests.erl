@@ -372,6 +372,32 @@ spawn_templates_hint_malformed_return_is_observable() ->
         gen_server:stop(Pid)
     end.
 
+%% Regression for widgrensit/asobi#248 (security review): the crossing check
+%% needs a margin, not a hard edge, or a player camped on a boundary re-homes
+%% every tick - full interest-ring diff and zone snapshot resend each time.
+past_zone_margin_test() ->
+    ZoneSize = 100,
+    Coords = {1, 1},
+    Fraction = 0.15,
+    %% Just inside the zone: never past the margin.
+    ?assertNot(asobi_zone:past_zone_margin({150.0, 150.0}, Coords, ZoneSize, Fraction)),
+    %% Just past the edge (100..200), but within the 15-unit margin.
+    ?assertNot(asobi_zone:past_zone_margin({205.0, 150.0}, Coords, ZoneSize, Fraction)),
+    ?assertNot(asobi_zone:past_zone_margin({95.0, 150.0}, Coords, ZoneSize, Fraction)),
+    %% Exactly at the margin boundary (200 + 100*0.15 = 215 / 100 - 15 = 85):
+    %% the low side's `<` excludes 85, the high side's `>=` includes 215.
+    ?assertNot(asobi_zone:past_zone_margin({85.0, 150.0}, Coords, ZoneSize, Fraction)),
+    ?assert(asobi_zone:past_zone_margin({215.0, 150.0}, Coords, ZoneSize, Fraction)),
+    %% Clearly past the margin on every side.
+    ?assert(asobi_zone:past_zone_margin({220.0, 150.0}, Coords, ZoneSize, Fraction)),
+    ?assert(asobi_zone:past_zone_margin({80.0, 150.0}, Coords, ZoneSize, Fraction)),
+    ?assert(asobi_zone:past_zone_margin({150.0, 220.0}, Coords, ZoneSize, Fraction)),
+    ?assert(asobi_zone:past_zone_margin({150.0, 80.0}, Coords, ZoneSize, Fraction)),
+    %% A different fraction actually changes the threshold, proving the
+    %% argument is live and not shadowed by a leftover constant.
+    ?assertNot(asobi_zone:past_zone_margin({210.0, 150.0}, Coords, ZoneSize, 0.5)),
+    ?assert(asobi_zone:past_zone_margin({210.0, 150.0}, Coords, ZoneSize, 0.05)).
+
 start_mock_zone_manager() ->
     spawn(fun() -> mock_zm_loop([]) end).
 

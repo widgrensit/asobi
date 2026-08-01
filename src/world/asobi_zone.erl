@@ -15,6 +15,9 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -export([start_entity_timer/2, cancel_entity_timer/3]).
 -export([query_radius/3, query_rect/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
+-ifdef(TEST).
+-export([past_zone_margin/4]).
+-endif.
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -22,6 +25,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 %% Must match asobi_world_server's own defaults of the same name.
 -define(DEFAULT_ZONE_SIZE, 200).
 -define(DEFAULT_GRID_SIZE, 10).
+-define(DEFAULT_REHOME_MARGIN, 0.15).
 
 %% --- Public API ---
 
@@ -129,6 +133,7 @@ init(Config) ->
     TerrainStorePid = maps:get(terrain_store_pid, Config, undefined),
     ZoneSize = maps:get(zone_size, Config, ?DEFAULT_ZONE_SIZE),
     GridSize = maps:get(grid_size, Config, ?DEFAULT_GRID_SIZE),
+    RehomeMargin = maps:get(rehome_margin, Config, ?DEFAULT_REHOME_MARGIN),
     pg:join(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     %% Recover entity state from ETS backup if available (zone crash recovery)
     RecoveredEntities = recover_zone_state(WorldId, Coords),
@@ -163,6 +168,7 @@ init(Config) ->
             terrain_store_pid => TerrainStorePid,
             zone_size => ZoneSize,
             grid_size => GridSize,
+            rehome_margin => RehomeMargin,
             entities => RecoveredEntities,
             prev_entities => #{},
             broadcast_entities => #{},
@@ -657,10 +663,13 @@ resolve_zone_crossings(
         coords := Coords,
         zone_size := ZoneSize,
         grid_size := GridSize,
+        rehome_margin := RehomeMargin,
         world_server_pid := WorldServerPid
     } = State
 ) ->
-    {ToRemove, ToTransfer, ToRehome} = find_zone_crossings(Entities, Coords, ZoneSize, GridSize),
+    {ToRemove, ToTransfer, ToRehome} = find_zone_crossings(
+        Entities, Coords, ZoneSize, GridSize, RehomeMargin
+    ),
     %% Transfer each NPC to the target zone
     lists:foreach(
         fun({Id, TargetCoords, Entity}) ->
@@ -685,38 +694,101 @@ resolve_zone_crossings(
     %% (bots, decoys, ...) that the world server has never joined - it now
     %% simply stays here, exactly as it did before this fix, until something
     %% actually claims it. See widgrensit/asobi#248.
-    case WorldServerPid of
-        undefined ->
-            ok;
-        _ ->
-            lists:foreach(
-                fun
-                    ({Id, {X, Y} = Pos, Entity}) when
-                        is_binary(Id), is_number(X), is_number(Y), is_map(Entity)
-                    ->
-                        asobi_world_server:move_player(WorldServerPid, Id, Pos, Entity);
-                    (_) ->
-                        ok
-                end,
-                ToRehome
-            )
-    end,
-    %% Remove transferred NPCs from this zone. Rehomed players are removed by
-    %% asobi_world_server:remove_player_from_zones/2 once move_player/4's cast
-    %% is processed, not here.
-    Entities1 = maps:without(ToRemove, Entities),
+    %%
+    %% A rate-limited crossing is denied here (WorldServerPid never learns
+    %% about it), but denying the hand-off alone would leave the entity's raw
+    %% x/y outside this zone's own rectangle while this zone keeps owning it -
+    %% security review measured that divergence running over a second at a
+    %% time under sustained denial, with the entity invisible to
+    %% query_radius/3 and query_rect/3 callers at its true position and this
+    %% zone re-detecting the same crossing (and re-denying it) every tick.
+    %% Clamping the denied entity back inside Coords closes the divergence:
+    %% once input stops, the position is self-consistent with Coords again.
+    %% Under sustained input the crossing is still re-detected (and
+    %% re-denied) every tick - clamping does not stop that - but each denied
+    %% tick now costs no hand-off, no ring diff and no terrain-store call,
+    %% only this cheap re-clamp.
+    DeniedEntities =
+        case WorldServerPid of
+            undefined ->
+                #{};
+            _ ->
+                Results = [
+                    rehome_or_clamp(WorldServerPid, Id, Pos, Entity, Coords, ZoneSize)
+                 || {Id, {X, Y} = Pos, Entity} <- ToRehome,
+                    is_binary(Id),
+                    is_number(X),
+                    is_number(Y),
+                    is_map(Entity)
+                ],
+                maps:from_list([R || R <- Results, R =/= moved])
+        end,
+    %% Remove transferred NPCs and rehomed players from this zone; a denied
+    %% player is kept, clamped back inside these bounds.
+    Entities1 = maps:merge(maps:without(ToRemove, Entities), DeniedEntities),
     Grid = maps:get(spatial_grid, State, undefined),
     Grid1 = remove_from_grid(ToRemove, Grid),
-    State#{entities => Entities1, spatial_grid => Grid1}.
+    %% query_radius/3 and query_rect/3 read positions from this grid, not
+    %% Entities1, when spatial_grid_cell_size is configured - without
+    %% re-indexing here, a denied entity's clamp is invisible to both and
+    %% they keep answering with its out-of-zone position: exactly the
+    %% divergence clamping exists to close. See widgrensit/asobi#248.
+    Grid2 = reindex_clamped(maps:to_list(DeniedEntities), Grid1),
+    State#{entities => Entities1, spatial_grid => Grid2}.
+
+-spec reindex_clamped([{binary(), map()}], asobi_spatial_grid:grid() | undefined) ->
+    asobi_spatial_grid:grid() | undefined.
+reindex_clamped(_DeniedList, undefined) ->
+    undefined;
+reindex_clamped([], Grid) ->
+    Grid;
+reindex_clamped([{Id, #{x := X, y := Y}} | Rest], Grid) ->
+    reindex_clamped(Rest, asobi_spatial_grid:update(Id, {X, Y}, Grid));
+reindex_clamped([_ | Rest], Grid) ->
+    reindex_clamped(Rest, Grid).
+
+%% Attempts the hand-off; returns `moved` (caller does nothing further) or
+%% `{Id, ClampedEntity}` for a denied crossing (caller keeps the entity here).
+-spec rehome_or_clamp(
+    pid(), binary(), {number(), number()}, map(), {integer(), integer()}, pos_integer()
+) ->
+    moved | {binary(), map()}.
+rehome_or_clamp(WorldServerPid, Id, Pos, Entity, Coords, ZoneSize) ->
+    %% Backstop under the crossing hysteresis: a client that still manages to
+    %% force repeated re-homes (a modified client skipping the margin, or
+    %% plain jitter at the wrong instant) gets denied rather than paying for
+    %% a fresh interest-ring diff and zone snapshot resend every tick.
+    case asobi_rehome_limiter:allow(Id) of
+        true ->
+            asobi_world_server:move_player(WorldServerPid, Id, Pos, Entity),
+            moved;
+        false ->
+            asobi_telemetry:rehome_rate_limited(Id),
+            {Id, clamp_to_zone(Entity, Coords, ZoneSize)}
+    end.
+
+%% Pulls a denied entity's x/y back inside the zone rectangle Coords owns, so
+%% the position this zone broadcasts never disagrees with the zone that owns
+%% it. Epsilon keeps the clamped point strictly inside (at the exact upper
+%% edge, pos_to_zone/3 would compute the next zone over again).
+-spec clamp_to_zone(map(), {integer(), integer()}, pos_integer()) -> map().
+clamp_to_zone(#{x := X, y := Y} = Entity, {ZX, ZY}, ZoneSize) ->
+    Eps = 1.0e-6,
+    XLo = ZX * ZoneSize * 1.0,
+    YLo = ZY * ZoneSize * 1.0,
+    Entity#{
+        x => min(max(X, XLo), XLo + ZoneSize - Eps),
+        y => min(max(Y, YLo), YLo + ZoneSize - Eps)
+    }.
 
 %% Explicit -spec so eqwalizer treats ToRehome's element type as ground truth
 %% at the move_player/4 call site above, rather than inferring term() through
 %% the fold's multi-branch accumulator.
--spec find_zone_crossings(map(), {integer(), integer()}, pos_integer(), pos_integer()) ->
+-spec find_zone_crossings(map(), {integer(), integer()}, pos_integer(), pos_integer(), number()) ->
     {[binary()], [{binary(), {integer(), integer()}, map()}], [
         {binary(), {number(), number()}, map()}
     ]}.
-find_zone_crossings(Entities, Coords, ZoneSize, GridSize) ->
+find_zone_crossings(Entities, Coords, ZoneSize, GridSize, RehomeMargin) ->
     maps:fold(
         fun
             (Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
@@ -731,9 +803,21 @@ find_zone_crossings(Entities, Coords, ZoneSize, GridSize) ->
             (Id, #{type := ~"player", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
                 is_binary(Id), is_number(X), is_number(Y)
             ->
+                %% Hysteresis: pos_to_zone/3 disagreeing with Coords alone is
+                %% a hard edge with zero margin, so a player camped on (or
+                %% jittering across) a boundary would re-home every tick -
+                %% full interest-ring diff, zone snapshot resend, session
+                %% zone_pid flip, each time. Require the position to be
+                %% ZoneSize * RehomeMargin past this zone's own bounds before
+                %% treating it as a real crossing. See widgrensit/asobi#248.
                 case asobi_world_server:pos_to_zone({X, Y}, ZoneSize, GridSize) of
-                    Coords -> {Rem, Trans, Rehome};
-                    _NewCoords -> {Rem, Trans, [{Id, {X, Y}, Entity} | Rehome]}
+                    Coords ->
+                        {Rem, Trans, Rehome};
+                    _NewCoords ->
+                        case past_zone_margin({X, Y}, Coords, ZoneSize, RehomeMargin) of
+                            true -> {Rem, Trans, [{Id, {X, Y}, Entity} | Rehome]};
+                            false -> {Rem, Trans, Rehome}
+                        end
                 end;
             (_, _, Acc) ->
                 Acc
@@ -741,6 +825,15 @@ find_zone_crossings(Entities, Coords, ZoneSize, GridSize) ->
         {[], [], []},
         Entities
     ).
+
+-spec past_zone_margin({number(), number()}, {integer(), integer()}, pos_integer(), number()) ->
+    boolean().
+past_zone_margin({X, Y}, {ZX, ZY}, ZoneSize, RehomeMargin) ->
+    Margin = ZoneSize * RehomeMargin,
+    XLo = ZX * ZoneSize,
+    YLo = ZY * ZoneSize,
+    X < XLo - Margin orelse X >= XLo + ZoneSize + Margin orelse
+        Y < YLo - Margin orelse Y >= YLo + ZoneSize + Margin.
 
 %% --- Snapshot Helpers ---
 

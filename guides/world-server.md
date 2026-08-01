@@ -349,6 +349,7 @@ Register your world mode in `sys.config`:
 | `zone_size` | 200 | Units per zone side (world size = grid_size * zone_size) |
 | `tick_rate` | 50 | Milliseconds between ticks (50 = 20 Hz) |
 | `view_radius` | 1 | Zones visible in each direction from player's zone |
+| `rehome_margin` | 0.15 | Fraction of `zone_size` a player must clear past their zone's edge before re-homing to the neighbouring zone (see below) |
 | `max_players` | 500 | Maximum concurrent players per world |
 | `zone_idle_timeout` | 30000 | Milliseconds an empty zone lingers before it is released |
 | `empty_grace_ms` | 0 | Milliseconds a world with no players lingers before it finishes (0 = finish immediately) |
@@ -357,6 +358,16 @@ Register your world mode in `sys.config`:
 | `quick_play` | `true` | Whether `world.find_or_create` may place a player into an existing world of this mode |
 
 #> Using a world as a persistent hub is covered in [Lobbies](lobbies.md).
+
+A player must clear their zone's edge by `rehome_margin` (a fraction of
+`zone_size`) before re-homing to the neighbouring zone, so a player parked on
+or jittering across a boundary doesn't re-home every tick. This means a
+player's tracked zone can lag their true position by up to that margin near a
+boundary - if your game reads a zone's own coordinates to bound something
+(a spatial query via `game.zone.query_radius`/`query_rect`, a terrain lookup),
+account for that slack rather than assuming every entity in a zone's entity
+map is strictly within its rectangle. See [Configuration](configuration.md)
+for the matching `rehome` rate limit on how often a player may re-home at all.
 
 ## Visibility
 

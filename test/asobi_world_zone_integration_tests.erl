@@ -16,6 +16,14 @@ setup() ->
         undefined -> pg:start_link(nova_scope);
         _ -> ok
     end,
+    application:ensure_all_started(seki),
+    %% Deliberately not registering asobi_rehome_limiter here: every crossing
+    %% test below exercises asobi_rehome_limiter:allow/1 with the limiter
+    %% unregistered (this harness never starts asobi_sup), which is exactly
+    %% the fail-open path that matters - a bare seki:check/2 here used to
+    %% crash the zone, and via asobi_zone_sup/asobi_world_instance's
+    %% supervision, the whole world. rehome_denied_by_rate_limit_survives/0
+    %% registers its own tight limiter locally to exercise the deny path.
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     meck:expect(asobi_repo, insert, fun(_CS, _Opts) -> {ok, #{}} end),
@@ -59,7 +67,15 @@ world_zone_integration_test_() ->
         {"world.input past the world's far edge does not crash the world server",
             fun world_input_past_far_edge_survives/0},
         {"a script-owned player-typed entity the world server never joined survives crossing",
-            fun script_owned_player_entity_survives_crossing/0}
+            fun script_owned_player_entity_survives_crossing/0},
+        {"a crossing only touches the interest-ring zones that actually changed",
+            fun world_input_crossing_touches_only_ring_delta/0},
+        {"a position within the boundary margin does not rehome the player",
+            fun world_input_within_margin_does_not_rehome/0},
+        {"a rate-limited crossing leaves the entity in place instead of destroying it",
+            fun rehome_denied_by_rate_limit_survives/0},
+        {"the global rehome limit denies a crossing even with per-player budget to spare",
+            fun rehome_denied_by_global_limit/0}
     ]}.
 
 %% Default (lazy_zones=false, grid_size=3) pre-spawns all 9 zones
@@ -193,6 +209,159 @@ world_input_past_far_edge_survives() ->
     ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, {2, 1})),
     stop_world(Ctx).
 
+%% Regression for widgrensit/asobi#248 (security review): without a margin,
+%% pos_to_zone/3 disagreeing with the zone's own Coords by even a fraction of
+%% a unit is treated as a crossing - a player parked on (or jittering across)
+%% a boundary re-homes every tick. asobi_zone's past_zone_margin/4 requires
+%% clearing the zone's own rectangle by rehome_margin (default 15% of
+%% zone_size) first; this proves
+%% that suppression end to end, not just the margin math in isolation
+%% (past_zone_margin_test/0 in asobi_zone_tests.erl covers that).
+world_input_within_margin_does_not_rehome() ->
+    Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{lazy_zones => true}),
+    ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
+    timer:sleep(20),
+    %% Spawns at {100.0, 100.0} => zone {1,1}, bounds x/y in [100, 200).
+    {ok, ZonePid1} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+
+    %% x=205 is past the raw edge (200) but within the 15-unit margin
+    %% (200 + 100*0.15 = 215) - pos_to_zone/3 alone would call this zone {2,1}.
+    asobi_zone:player_input(ZonePid1, ~"p1", #{
+        ~"action" => ~"move", ~"x" => 205.0, ~"y" => 100.0
+    }),
+    timer:sleep(150),
+
+    ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {2, 1})),
+    ?assert(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid1))),
+    stop_world(Ctx).
+
+%% Regression for widgrensit/asobi#248 (security review): move_player/4 is a
+%% cast, so a rate-limited crossing must be decided BEFORE that cast - once
+%% resolve_zone_crossings/1 fires it, there is no undoing the hand-off. This
+%% exercises asobi_rehome_limiter denying a crossing outright and asserts the
+%% entity survives exactly where it was, the same guarantee
+%% script_owned_player_entity_survives_crossing/0 proves for an unclaimed
+%% hand-off - a rate-limited one must not destroy the entity either.
+%%
+%% It also asserts the denied entity's position was clamped back inside its
+%% owning zone: denying the hand-off without correcting x/y left the entity's
+%% true position outside the zone that still claims to own it - invisible to
+%% query_radius/3 and query_rect/3 at its real location, and re-detected (and
+%% re-denied) as a fresh crossing on every subsequent tick.
+rehome_denied_by_rate_limit_survives() ->
+    %% Not registered in setup/0 (see its comment) - one allowed crossing,
+    %% then every other crossing in the 60s window is denied.
+    %% seki:new_limiter/2 returns {error, already_registered} rather than
+    %% raising if the name is already registered (e.g. by another test in
+    %% this run with different options) - catch alone does not guard against
+    %% that, since it is a return value, not an exception. Delete first so
+    %% this test's own limit actually takes effect regardless of what ran
+    %% before it.
+    catch seki:delete_limiter(asobi_rehome_limiter),
+    ok = seki:new_limiter(asobi_rehome_limiter, #{
+        algorithm => sliding_window, limit => 1, window => 60000
+    }),
+    Self = self(),
+    Ref = make_ref(),
+    {ok, _} = application:ensure_all_started(telemetry),
+    telemetry:attach(
+        Ref, [asobi, rehome, rate_limited], fun(_E, _M, Meta, _) -> Self ! {denied, Meta} end, []
+    ),
+    Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{lazy_zones => true}),
+    try
+        ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
+        timer:sleep(20),
+        %% Spawns at {100.0, 100.0} => zone {1,1}.
+        {ok, ZonePid1} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+
+        %% First crossing: clears the margin, consumes the one allowed token.
+        asobi_zone:player_input(ZonePid1, ~"p1", #{
+            ~"action" => ~"move", ~"x" => 220.0, ~"y" => 100.0
+        }),
+        timer:sleep(150),
+        ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, {2, 1})),
+        {ok, ZonePid2} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
+        ?assert(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid2))),
+
+        %% Second crossing: also clears its zone's margin, but the limiter is
+        %% now exhausted - must be denied, not applied.
+        asobi_zone:player_input(ZonePid2, ~"p1", #{
+            ~"action" => ~"move", ~"x" => 220.0, ~"y" => 220.0
+        }),
+        timer:sleep(150),
+
+        ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {2, 2})),
+        Entities = asobi_zone:get_entities(ZonePid2),
+        ?assert(maps:is_key(~"p1", Entities)),
+        %% Zone {2,1} spans x in [200,300), y in [100,200): the attempted
+        %% y=220 is clamped back just inside the top edge, x=220 is untouched
+        %% (already inside the zone on that axis).
+        #{x := DeniedX, y := DeniedY} = maps:get(~"p1", Entities),
+        ?assertEqual(220.0, DeniedX),
+        ?assert(DeniedY < 200.0),
+        ?assert(DeniedY > 199.0),
+        receive
+            {denied, #{player_id := ~"p1"}} -> ok
+        after 1000 -> ?assert(false, timeout_waiting_for_rehome_rate_limited_event)
+        end
+    after
+        telemetry:detach(Ref),
+        catch seki:reset(asobi_rehome_limiter, ~"p1"),
+        stop_world(Ctx)
+    end.
+
+%% Regression for widgrensit/asobi#248 (security review): per-player limiting
+%% alone doesn't bound the aggregate - every crossing's resubscribe makes a
+%% blocking asobi_terrain_store call into the one store a whole world shares,
+%% so N attackers each within their own per-player budget scale that load
+%% linearly with attacker count. asobi_rehome_global_limiter is the ceiling.
+%% Registered generously per-player and tightly globally, so only the global
+%% limiter can be what denies this crossing.
+rehome_denied_by_global_limit() ->
+    %% Delete before create: see rehome_denied_by_rate_limit_survives/0's
+    %% comment on why catch alone does not guarantee this test's own limits
+    %% take effect over whatever another test in this run already registered.
+    catch seki:delete_limiter(asobi_rehome_limiter),
+    ok = seki:new_limiter(asobi_rehome_limiter, #{
+        algorithm => sliding_window, limit => 1000, window => 60000
+    }),
+    catch seki:delete_limiter(asobi_rehome_global_limiter),
+    ok = seki:new_limiter(asobi_rehome_global_limiter, #{
+        algorithm => sliding_window, limit => 1, window => 60000
+    }),
+    %% Pre-spend the one global token so the very first crossing below is
+    %% denied by it, not by coincidentally being the window's first check.
+    seki:check(asobi_rehome_global_limiter, ~"global"),
+    Self = self(),
+    Ref = make_ref(),
+    {ok, _} = application:ensure_all_started(telemetry),
+    telemetry:attach(
+        Ref, [asobi, rehome, rate_limited], fun(_E, _M, Meta, _) -> Self ! {denied, Meta} end, []
+    ),
+    Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{lazy_zones => true}),
+    try
+        ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
+        timer:sleep(20),
+        {ok, ZonePid1} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+        asobi_zone:player_input(ZonePid1, ~"p1", #{
+            ~"action" => ~"move", ~"x" => 220.0, ~"y" => 100.0
+        }),
+        timer:sleep(150),
+        %% The player's own budget (1000) is untouched - only the global cap
+        %% can have denied this, so the hand-off must not have happened.
+        ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {2, 1})),
+        ?assert(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid1))),
+        receive
+            {denied, #{player_id := ~"p1"}} -> ok
+        after 1000 -> ?assert(false, timeout_waiting_for_global_rehome_denial)
+        end
+    after
+        telemetry:detach(Ref),
+        catch seki:reset(asobi_rehome_limiter, ~"p1"),
+        catch seki:reset(asobi_rehome_global_limiter, ~"global"),
+        stop_world(Ctx)
+    end.
+
 %% Regression for widgrensit/asobi#248 (security review): a game script can
 %% type a non-session entity "player" (a bot, a decoy) without it ever
 %% joining, so the world server holds no player_zones entry for it.
@@ -223,6 +392,77 @@ script_owned_player_entity_survives_crossing() ->
             end,
     ?assert(Survived),
     stop_world(Ctx).
+
+%% Regression for widgrensit/asobi#248 (security review): a crossing used to
+%% unsubscribe the whole old ring and resubscribe the whole new ring, even
+%% though most zones are common to both - each resubscribe resends a full
+%% zone snapshot. On a grid_size=5, view_radius=1 world, moving from zone
+%% {1,1} to {2,1} keeps {1,0}..{2,2} in the ring the whole time: only the
+%% x=0 column should be dropped and only the x=3 column newly picked up.
+%%
+%% Retroactive coverage: the ring diff itself shipped in #259, not in the
+%% commit this test was added by. It lives here because that is where it
+%% was originally (mis-)attributed.
+world_input_crossing_touches_only_ring_delta() ->
+    %% subscribe_interest_zones/4 only subscribes zones that already exist
+    %% (it uses get_zone, not ensure_zone, so it never spins up an empty zone
+    %% just because it's in view) - lazy_zones=false pre-spawns the whole
+    %% grid so every ring zone is subscribable at join time.
+    Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{grid_size => 5}),
+    ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
+    timer:sleep(20),
+    %% Spawns at {100.0, 100.0} => zone {1,1}.
+    {ok, Z11} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+    ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
+    {ok, Z00} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
+    ?assertEqual(1, asobi_zone:get_subscriber_count(Z00)),
+    {ok, Z30} = asobi_zone_manager:get_zone(Mgr, {3, 0}),
+    ?assertEqual(0, asobi_zone:get_subscriber_count(Z30)),
+
+    %% Reaching the same end state doesn't prove the ring diff ran instead of
+    %% a full unsubscribe-everything/resubscribe-everything pass - both reach
+    %% identical final counts. Count the actual subscribe/unsubscribe calls:
+    %% only 3 zones left the ring and 3 entered it, not all 9.
+    Self = self(),
+    meck:new(asobi_zone, [passthrough]),
+    try
+        meck:expect(asobi_zone, subscribe, fun(ZPid, Sub) ->
+            Self ! subscribed,
+            meck:passthrough([ZPid, Sub])
+        end),
+        meck:expect(asobi_zone, unsubscribe, fun(ZPid, PId) ->
+            Self ! unsubscribed,
+            meck:passthrough([ZPid, PId])
+        end),
+
+        %% x=225 clears zone {1,1}'s margin (edge at 200 + 15% of 100), landing
+        %% in zone {2,1}.
+        asobi_zone:player_input(Z11, ~"p1", #{
+            ~"action" => ~"move", ~"x" => 225.0, ~"y" => 100.0
+        }),
+        timer:sleep(150),
+
+        SubscribeCalls = count_messages(subscribed),
+        UnsubscribeCalls = count_messages(unsubscribed),
+
+        ?assertEqual(3, SubscribeCalls),
+        ?assertEqual(3, UnsubscribeCalls),
+        %% {1,1} is in both rings - never unsubscribed, so it's never re-touched.
+        ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
+        %% {0,0} left the ring (x=0 column no longer in range) - unsubscribed.
+        ?assertEqual(0, asobi_zone:get_subscriber_count(Z00)),
+        %% {3,0} entered the ring (x=3 column, new only) - freshly subscribed.
+        ?assertEqual(1, asobi_zone:get_subscriber_count(Z30))
+    after
+        meck:unload(asobi_zone),
+        stop_world(Ctx)
+    end.
+
+count_messages(Tag) ->
+    receive
+        Tag -> 1 + count_messages(Tag)
+    after 0 -> 0
+    end.
 
 %% Small grid (grid_size=3) without explicit lazy_zones works like before
 small_grid_backward_compat() ->

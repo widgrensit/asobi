@@ -158,7 +158,26 @@ register_limiters() ->
         %% of "same recurring failure" (typically per zone or per callback),
         %% so one broken zone/script doesn't starve another's visibility.
         %% Generous: this is about volume, not adversarial abuse.
-        script_log => #{algorithm => sliding_window, limit => 3, window => 10_000}
+        script_log => #{algorithm => sliding_window, limit => 3, window => 10_000},
+        %% Backstop on world zone-crossing re-homes (asobi#248). Each crossing
+        %% resubscribes part of a player's interest ring, and each new
+        %% subscription makes a blocking asobi_terrain_store call and resends
+        %% a full zone snapshot. asobi_zone's past_zone_margin/4 hysteresis
+        %% only filters jitter (oscillating within the margin); an attacker
+        %% moving with amplitude past it crosses every tick regardless, so
+        %% this limiter is the actual adversarial control, not a backstop
+        %% under it. Keyed on player_id: the cost is per-session. 5/sec is
+        %% generous for real movement (crossing more than a few zones a
+        %% second sustained isn't a realistic player speed) but denies a
+        %% client thrashing a boundary from forcing this every tick.
+        rehome => #{algorithm => sliding_window, limit => 5, window => 1000},
+        %% Per-player alone doesn't bound the aggregate: every subscribe a
+        %% crossing triggers calls into the single asobi_terrain_store shared
+        %% by the whole world, so N concurrent attackers each keeping their
+        %% own 5/sec budget scales that blocking load linearly with attacker
+        %% count. Same reasoning as guest_global. Size from your real
+        %% concurrent-player target; this default is a placeholder.
+        rehome_global => #{algorithm => sliding_window, limit => 200, window => 1000}
     },
     Configured =
         case application:get_env(asobi, rate_limits, #{}) of
@@ -188,7 +207,9 @@ limiter_name(api) -> asobi_api_limiter;
 limiter_name(ws_connect) -> asobi_ws_connect_limiter;
 limiter_name(join) -> asobi_join_limiter;
 limiter_name(guest_global) -> asobi_guest_global_limiter;
-limiter_name(script_log) -> asobi_script_log_limiter.
+limiter_name(script_log) -> asobi_script_log_limiter;
+limiter_name(rehome) -> asobi_rehome_limiter;
+limiter_name(rehome_global) -> asobi_rehome_global_limiter.
 
 cluster_spec() ->
     #{
