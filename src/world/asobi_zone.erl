@@ -16,7 +16,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -export([query_radius/3, query_rect/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
 -ifdef(TEST).
--export([past_zone_margin/4]).
+-export([past_zone_margin/4, classify_crossing/5]).
 -endif.
 
 -include_lib("kernel/include/logger.hrl").
@@ -672,13 +672,14 @@ resolve_zone_crossings(
     ),
     %% Transfer each NPC to the target zone
     lists:foreach(
-        fun({Id, TargetCoords, Entity}) ->
+        fun({Id, {TX, TY} = TargetCoords, Entity}) when
+            is_binary(Id), is_integer(TX), is_integer(TY)
+        ->
             case pg:get_members(?PG_SCOPE, {asobi_zone, WorldId, TargetCoords}) of
                 [TargetPid | _] ->
                     gen_server:cast(TargetPid, {add_entity, Id, Entity});
                 [] ->
-                    %% Target zone doesn't exist, NPC disappears
-                    ok
+                    log_npc_transfer_unavailable(WorldId, Id, TargetCoords)
             end
         end,
         ToTransfer
@@ -794,30 +795,20 @@ find_zone_crossings(Entities, Coords, ZoneSize, GridSize, RehomeMargin) ->
             (Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
                 is_binary(Id), is_number(X), is_number(Y)
             ->
-                case asobi_world_server:pos_to_zone({X, Y}, ZoneSize, GridSize) of
-                    Coords ->
+                case classify_crossing({X, Y}, Coords, ZoneSize, GridSize, RehomeMargin) of
+                    same ->
                         {Rem, Trans, Rehome};
-                    NewCoords ->
+                    {crossed, NewCoords} ->
                         {[Id | Rem], [{Id, NewCoords, Entity} | Trans], Rehome}
                 end;
             (Id, #{type := ~"player", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
                 is_binary(Id), is_number(X), is_number(Y)
             ->
-                %% Hysteresis: pos_to_zone/3 disagreeing with Coords alone is
-                %% a hard edge with zero margin, so a player camped on (or
-                %% jittering across) a boundary would re-home every tick -
-                %% full interest-ring diff, zone snapshot resend, session
-                %% zone_pid flip, each time. Require the position to be
-                %% ZoneSize * RehomeMargin past this zone's own bounds before
-                %% treating it as a real crossing. See widgrensit/asobi#248.
-                case asobi_world_server:pos_to_zone({X, Y}, ZoneSize, GridSize) of
-                    Coords ->
+                case classify_crossing({X, Y}, Coords, ZoneSize, GridSize, RehomeMargin) of
+                    same ->
                         {Rem, Trans, Rehome};
-                    _NewCoords ->
-                        case past_zone_margin({X, Y}, Coords, ZoneSize, RehomeMargin) of
-                            true -> {Rem, Trans, [{Id, {X, Y}, Entity} | Rehome]};
-                            false -> {Rem, Trans, Rehome}
-                        end
+                    {crossed, _NewCoords} ->
+                        {Rem, Trans, [{Id, {X, Y}, Entity} | Rehome]}
                 end;
             (_, _, Acc) ->
                 Acc
@@ -825,6 +816,27 @@ find_zone_crossings(Entities, Coords, ZoneSize, GridSize, RehomeMargin) ->
         {[], [], []},
         Entities
     ).
+
+%% Hysteresis: pos_to_zone/3 disagreeing with Coords alone is a hard edge
+%% with zero margin, so an entity jittering across a boundary crosses every
+%% tick it does - for a player a full ring diff, snapshot resend and
+%% zone_pid flip. Require ZoneSize * RehomeMargin of clearance first, for
+%% both entity types. This is a jitter filter, not a rate limit - see
+%% asobi_rehome_limiter for that. widgrensit/asobi#248.
+-spec classify_crossing(
+    {number(), number()}, {integer(), integer()}, pos_integer(), pos_integer(), number()
+) ->
+    same | {crossed, {integer(), integer()}}.
+classify_crossing({X, Y}, Coords, ZoneSize, GridSize, RehomeMargin) ->
+    case asobi_world_server:pos_to_zone({X, Y}, ZoneSize, GridSize) of
+        Coords ->
+            same;
+        NewCoords ->
+            case past_zone_margin({X, Y}, Coords, ZoneSize, RehomeMargin) of
+                true -> {crossed, NewCoords};
+                false -> same
+            end
+    end.
 
 -spec past_zone_margin({number(), number()}, {integer(), integer()}, pos_integer(), number()) ->
     boolean().
@@ -987,6 +999,31 @@ log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) -
     asobi_telemetry:game_error(unknown_spawn_template, #{
         world_id => WorldId,
         template_id => Id
+    }).
+
+%% An NPC crossing into an unloaded target zone is dropped (widgrensit/
+%% asobi#251 gave the analogous spawn failure a signal; this closes the same
+%% gap here - the drop itself, not just its silence, is tracked separately
+%% as widgrensit/asobi#271). This runs from the per-tick crossing check, so
+%% a spawner parked near an unloaded neighbour would otherwise log once per
+%% tick forever (asobi#252) - only the log line is rate-limited, the
+%% telemetry counter stays unconditional.
+-spec log_npc_transfer_unavailable(binary(), binary(), {integer(), integer()}) -> ok.
+log_npc_transfer_unavailable(WorldId, Id, TargetCoords) ->
+    case asobi_script_log_limiter:allow({WorldId, TargetCoords}) of
+        {true, DroppedSinceLastLog} ->
+            ?LOG_WARNING(#{
+                event => npc_transfer_zone_unavailable,
+                world_id => WorldId,
+                entity_id => Id,
+                coords => TargetCoords,
+                suppressed_since_last => DroppedSinceLastLog
+            });
+        false ->
+            ok
+    end,
+    asobi_telemetry:game_error(zone_unavailable, #{
+        world_id => WorldId, coords => TargetCoords, entity_id => Id
     }).
 
 %% A byte-length cut alone can land mid-codepoint, and the result is exported

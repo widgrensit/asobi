@@ -1042,23 +1042,8 @@ pos_to_zone(Pos, ZoneSize, GridSize) when is_integer(GridSize), GridSize > 0 ->
 
 -spec interest_zones({integer(), integer()}, non_neg_integer(), non_neg_integer()) ->
     [{integer(), integer()}].
-interest_zones({ZX, ZY}, Radius, GridSize) ->
-    [
-        {X, Y}
-     || X <- safe_seq(clamp_lo(ZX - Radius), min(GridSize - 1, ZX + Radius)),
-        Y <- safe_seq(clamp_lo(ZY - Radius), min(GridSize - 1, ZY + Radius))
-    ].
-
--spec clamp_lo(integer()) -> non_neg_integer().
-clamp_lo(N) when N < 0 -> 0;
-clamp_lo(N) -> N.
-
-%% lists:seq/2 requires Hi >= Lo - 1; a coordinate outside the grid (only
-%% possible if a caller skips pos_to_zone/3's clamp) would otherwise crash
-%% this function_clause deep instead of degrading to an empty ring.
--spec safe_seq(integer(), integer()) -> [integer()].
-safe_seq(Lo, Hi) when Hi < Lo -> [];
-safe_seq(Lo, Hi) -> lists:seq(Lo, Hi).
+interest_zones(Coords, Radius, GridSize) ->
+    asobi_zone_grid:ring(Coords, Radius, GridSize).
 
 find_player_pid(PlayerId) ->
     case pg:get_members(?PG_SCOPE, {player, PlayerId}) of

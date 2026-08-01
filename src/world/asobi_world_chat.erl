@@ -154,25 +154,10 @@ leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig) ->
     end,
     ignore_result(PlayerId).
 
-proximity_zones({ZX, ZY}, Radius, GridSize) when is_integer(ZX), is_integer(ZY) ->
-    [
-        {X, Y}
-     || X <- safe_seq(clamp_lo(ZX - Radius), min(GridSize - 1, ZX + Radius)),
-        Y <- safe_seq(clamp_lo(ZY - Radius), min(GridSize - 1, ZY + Radius))
-    ].
-
--spec clamp_lo(integer()) -> non_neg_integer().
-clamp_lo(N) when N < 0 -> 0;
-clamp_lo(N) -> N.
-
-%% ZoneCoords here comes from asobi_world_server:pos_to_zone/3, which clamps
-%% to the grid - but this module can't rely on every future caller doing the
-%% same, and lists:seq/2 requires Hi >= Lo - 1. Degrade to an empty ring
-%% rather than crashing the caller (this ran the whole world down before
-%% pos_to_zone/3 existed - widgrensit/asobi#248).
--spec safe_seq(integer(), integer()) -> [integer()].
-safe_seq(Lo, Hi) when Hi < Lo -> [];
-safe_seq(Lo, Hi) -> lists:seq(Lo, Hi).
+%% Callers feed a pos_to_zone/3 result; ring/3 owns the malformed-centre
+%% degrade (widgrensit/asobi#248).
+proximity_zones(Coords, Radius, GridSize) ->
+    asobi_zone_grid:ring(Coords, Radius, GridSize).
 
 find_player_pid(PlayerId) ->
     case pg:get_members(nova_scope, {player, PlayerId}) of

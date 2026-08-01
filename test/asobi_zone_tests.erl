@@ -54,7 +54,13 @@ zone_test_() ->
         {"spawn_templates_hint updates a live zone's spawnable templates",
             fun spawn_templates_hint_updates_live_zone/0},
         {"spawn_templates_hint returning garbage logs a warning and survives",
-            fun spawn_templates_hint_malformed_return_is_observable/0}
+            fun spawn_templates_hint_malformed_return_is_observable/0},
+        {"an NPC within the boundary margin does not transfer zones",
+            fun npc_within_margin_does_not_transfer/0},
+        {"an NPC past the boundary margin transfers to the neighbouring zone",
+            fun npc_past_margin_transfers/0},
+        {"an NPC transfer to an unloaded target zone is observable, not silent",
+            fun npc_transfer_unavailable_zone_is_observable/0}
     ]}.
 
 starts_empty() ->
@@ -397,6 +403,93 @@ past_zone_margin_test() ->
     %% argument is live and not shadowed by a leftover constant.
     ?assertNot(asobi_zone:past_zone_margin({210.0, 150.0}, Coords, ZoneSize, 0.5)),
     ?assert(asobi_zone:past_zone_margin({210.0, 150.0}, Coords, ZoneSize, 0.05)).
+
+%% zone_size=200, grid_size=10, rehome_margin=0.15 => 30-unit margin.
+classify_crossing_boundary_test() ->
+    C = {0, 0},
+    ?assertEqual(same, asobi_zone:classify_crossing({199.0, 0.0}, C, 200, 10, 0.15)),
+    ?assertEqual(same, asobi_zone:classify_crossing({229.9, 0.0}, C, 200, 10, 0.15)),
+    ?assertEqual({crossed, {1, 0}}, asobi_zone:classify_crossing({230.0, 0.0}, C, 200, 10, 0.15)),
+    %% One axis clear, the other still inside its margin: still a crossing,
+    %% and the target is the zone that actually contains the point.
+    ?assertEqual(
+        {crossed, {1, 1}}, asobi_zone:classify_crossing({245.0, 215.0}, C, 200, 10, 0.15)
+    ),
+    %% Out-of-world clamps back onto Coords before the margin is consulted.
+    ?assertEqual(same, asobi_zone:classify_crossing({-9000.0, 0.0}, C, 200, 10, 0.15)).
+
+%% zone_size=200, rehome_margin=0.15 => zone {0,0} covers x in [0, 200),
+%% margin is 30 units. Passed explicitly so a change to either default
+%% doesn't silently retune what these tests exercise.
+-define(NPC_MARGIN_ZONE_SIZE, 200).
+-define(NPC_MARGIN_REHOME_MARGIN, 0.15).
+
+npc_within_margin_does_not_transfer() ->
+    Pid = start_zone(#{
+        world_id => ~"npc_margin_within",
+        zone_size => ?NPC_MARGIN_ZONE_SIZE,
+        rehome_margin => ?NPC_MARGIN_REHOME_MARGIN
+    }),
+    %% x=215 is past the raw edge (200) but within the 30-unit margin (230).
+    asobi_zone:add_entity(Pid, ~"npc1", #{type => ~"npc", x => 215.0, y => 0.0}),
+    timer:sleep(10),
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
+    ?assert(maps:is_key(~"npc1", asobi_zone:get_entities(Pid))),
+    gen_server:stop(Pid).
+
+npc_past_margin_transfers() ->
+    WorldId = ~"npc_margin_past",
+    Config = #{
+        world_id => WorldId,
+        zone_size => ?NPC_MARGIN_ZONE_SIZE,
+        rehome_margin => ?NPC_MARGIN_REHOME_MARGIN
+    },
+    Pid = start_zone(Config#{coords => {0, 0}}),
+    TargetPid = start_zone(Config#{coords => {1, 0}}),
+    %% x=245 clears the 30-unit margin past the raw edge (200 + 30 = 230).
+    asobi_zone:add_entity(Pid, ~"npc1", #{type => ~"npc", x => 245.0, y => 0.0}),
+    timer:sleep(10),
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
+    ?assertNot(maps:is_key(~"npc1", asobi_zone:get_entities(Pid))),
+    ?assert(maps:is_key(~"npc1", asobi_zone:get_entities(TargetPid))),
+    gen_server:stop(Pid),
+    gen_server:stop(TargetPid).
+
+%% An NPC crossing into a zone that isn't loaded is dropped (asobi_zone_sup
+%% doesn't eagerly spawn every grid cell) - that loss must be observable the
+%% same way #251 made spawn_at_zone_unavailable observable, not silent.
+npc_transfer_unavailable_zone_is_observable() ->
+    Self = self(),
+    Ref = make_ref(),
+    {ok, _} = application:ensure_all_started(telemetry),
+    telemetry:attach(
+        Ref, [asobi, error], fun(_E, _M, Meta, _) -> Self ! {ev, Meta} end, []
+    ),
+    Pid = start_zone(#{
+        world_id => ~"npc_transfer_no_target",
+        coords => {0, 0},
+        zone_size => ?NPC_MARGIN_ZONE_SIZE,
+        rehome_margin => ?NPC_MARGIN_REHOME_MARGIN
+    }),
+    try
+        %% x=245 clears the margin; no zone is loaded at {1,0} in this world.
+        asobi_zone:add_entity(Pid, ~"npc1", #{type => ~"npc", x => 245.0, y => 0.0}),
+        timer:sleep(10),
+        asobi_zone:tick(Pid, 1),
+        timer:sleep(20),
+        ?assertNot(maps:is_key(~"npc1", asobi_zone:get_entities(Pid))),
+        receive
+            {ev, #{kind := zone_unavailable, details := D}} ->
+                ?assertEqual({1, 0}, maps:get(coords, D)),
+                ?assertEqual(~"npc1", maps:get(entity_id, D))
+        after 1000 -> ?assert(false, timeout_waiting_for_zone_unavailable_event)
+        end
+    after
+        telemetry:detach(Ref),
+        gen_server:stop(Pid)
+    end.
 
 start_mock_zone_manager() ->
     spawn(fun() -> mock_zm_loop([]) end).
