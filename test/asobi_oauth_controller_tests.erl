@@ -81,3 +81,82 @@ dependency_unmatched_return_is_caught() ->
         {error, validation_failed},
         asobi_oauth_controller:validate_oidc_token(google, ~"sometoken")
     ).
+
+%% ---- real end-to-end integration (asobi#220) ----
+%%
+%% Everything above mocks nova_auth_oidc_jwt itself, which is correct for
+%% pinning validate_oidc_token/2's own crash-safety contract - but it
+%% can't prove OIDC login actually WORKS, only that this module survives
+%% the dependency misbehaving. This group drives the REAL
+%% nova_auth_oidc_jwt:validate_token/3 -> oidcc_jwt_util:verify_signature/3
+%% chain with a genuinely-signed token, mocking only the one real network
+%% boundary (the discovery worker's get_jwks/1) - proving the full chain
+%% asobi_oauth_controller -> nova_auth_oidc_jwt -> oidcc_jwt_util that
+%% was broken end to end before novaframework/nova_auth_oidc#9/#10 now
+%% actually validates a real token.
+
+real_validation_setup() ->
+    application:set_env(asobi, oidc_providers, #{
+        google => #{
+            issuer => ~"https://accounts.google.com",
+            client_id => ~"test-client-id",
+            client_secret => ~"test-client-secret"
+        }
+    }),
+    meck:new(oidcc_provider_configuration_worker, [passthrough]),
+    ok.
+
+real_validation_cleanup(_) ->
+    meck:unload(oidcc_provider_configuration_worker),
+    application:unset_env(asobi, oidc_providers),
+    nova_auth_oidc:invalidate_cache(asobi_oidc_config).
+
+real_validation_test_() ->
+    {foreach, fun real_validation_setup/0, fun real_validation_cleanup/1, [
+        {"a genuinely RS256-signed, correctly-claimed token validates end to end",
+            fun genuine_token_validates/0},
+        {"a genuinely signed but expired token is rejected by real claims validation",
+            fun genuine_expired_token_rejected/0}
+    ]}.
+
+genuine_token_validates() ->
+    Priv = jose_jwk:generate_key({rsa, 2048}),
+    mock_jwks(Priv),
+    Token = sign_id_token(Priv, id_token_claims()),
+    %% asobi_oidc_config's claims_mapping maps ~"sub" -> provider_uid (not
+    %% id), merged onto build_actor/3's #{provider => Provider} base -
+    %% this is the exact shape nova_auth_claims:map/3 produces, verified
+    %% by reading it rather than guessed.
+    ?assertEqual(
+        {ok, #{provider => google, provider_uid => ~"user-42"}},
+        asobi_oauth_controller:validate_oidc_token(google, Token)
+    ).
+
+genuine_expired_token_rejected() ->
+    Priv = jose_jwk:generate_key({rsa, 2048}),
+    mock_jwks(Priv),
+    Past = erlang:system_time(second) - 3600,
+    Token = sign_id_token(Priv, (id_token_claims())#{~"exp" => Past}),
+    ?assertEqual(
+        {error, token_expired},
+        asobi_oauth_controller:validate_oidc_token(google, Token)
+    ).
+
+mock_jwks(PrivKey) ->
+    PubMap = element(2, jose_jwk:to_map(jose_jwk:to_public(PrivKey))),
+    Jwks = jose_jwk:from_map(#{~"keys" => [PubMap]}),
+    meck:expect(oidcc_provider_configuration_worker, get_jwks, fun(_) -> Jwks end).
+
+sign_id_token(PrivKey, Claims) ->
+    Jwt = jose_jwt:from(Claims),
+    {_, Signed} = jose_jwt:sign(PrivKey, #{~"alg" => ~"RS256"}, Jwt),
+    {_, Compact} = jose_jws:compact(Signed),
+    Compact.
+
+id_token_claims() ->
+    #{
+        ~"iss" => ~"https://accounts.google.com",
+        ~"aud" => ~"test-client-id",
+        ~"sub" => ~"user-42",
+        ~"exp" => erlang:system_time(second) + 3600
+    }.
