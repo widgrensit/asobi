@@ -52,7 +52,9 @@ zone_test_() ->
         {"spawn_entity keeps a multibyte template_id valid UTF-8 when bounding",
             fun spawn_entity_multibyte_template_id_stays_utf8/0},
         {"spawn_templates_hint updates a live zone's spawnable templates",
-            fun spawn_templates_hint_updates_live_zone/0}
+            fun spawn_templates_hint_updates_live_zone/0},
+        {"spawn_templates_hint returning garbage logs a warning and survives",
+            fun spawn_templates_hint_malformed_return_is_observable/0}
     ]}.
 
 starts_empty() ->
@@ -340,6 +342,31 @@ spawn_templates_hint_updates_live_zone() ->
         ?assertEqual(1, map_size(Entities)),
         [Entity] = maps:values(Entities),
         ?assertEqual(~"npc", maps:get(type, Entity))
+    after
+        meck:unload(?GAME),
+        gen_server:stop(Pid)
+    end.
+
+%% asobi#253 code review: a callback return that's neither `unchanged` nor a
+%% well-formed `{changed, Map}` is a bug in the game module, not a normal
+%% "nothing changed" outcome. It must be observable (logged) and must not
+%% touch the spawner's existing templates - not silently swallowed like the
+%% expected `unchanged` case.
+spawn_templates_hint_malformed_return_is_observable() ->
+    Pid = start_zone(#{
+        spawn_templates => #{~"cube" => #{type => ~"object", base_state => #{}}}
+    }),
+    meck:new(?GAME, [passthrough, non_strict]),
+    meck:expect(?GAME, spawn_templates_hint, fun(_ZoneState) -> not_a_valid_hint_return end),
+    try
+        asobi_zone:tick(Pid, 1),
+        timer:sleep(10),
+        ?assert(is_process_alive(Pid)),
+        %% The existing template survives untouched - the malformed return
+        %% must not have reached asobi_zone_spawner:set_templates/2.
+        asobi_zone:spawn_entity(Pid, ~"cube", {1, 1}),
+        timer:sleep(10),
+        ?assertEqual(1, map_size(asobi_zone:get_entities(Pid)))
     after
         meck:unload(?GAME),
         gen_server:stop(Pid)

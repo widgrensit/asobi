@@ -780,7 +780,21 @@ maybe_apply_spawn_templates_hint(GameMod, ZoneState, Spawner, WorldId, Coords) -
                         template_count => map_size(NewTemplates)
                     }),
                     asobi_zone_spawner:set_templates(NewTemplates, Spawner);
-                _ ->
+                unchanged ->
+                    Spawner;
+                Other ->
+                    %% A malformed callback return (anything but `unchanged` or
+                    %% a well-formed `{changed, Map}`) is a bug in the game
+                    %% module's implementation, not a normal "nothing changed"
+                    %% outcome - surface it rather than silently no-op like the
+                    %% expected `unchanged` case does.
+                    ?LOG_WARNING(#{
+                        event => zone_spawn_templates_hint_malformed,
+                        world_id => WorldId,
+                        coords => Coords,
+                        game_module => GameMod,
+                        returned => bound_debug_term(Other)
+                    }),
                     Spawner
             end
     end.
@@ -815,6 +829,20 @@ log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) -
 -spec bound_template_id(binary()) -> binary().
 bound_template_id(TemplateId) ->
     Head = binary:part(TemplateId, 0, min(64, byte_size(TemplateId))),
+    case unicode:characters_to_binary(Head) of
+        Valid when is_binary(Valid) -> Valid;
+        {incomplete, Valid, _} -> Valid;
+        {error, Valid, _} -> Valid
+    end.
+
+%% A malformed spawn_templates_hint/1 return can be an arbitrary Erlang term
+%% (the callback is game-module code, not asobi's own); ~p-format it before
+%% logging so nova_jsonlogger's JSON encoder always sees a plain, bounded
+%% binary rather than a raw pid/reference/fun it cannot encode.
+-spec bound_debug_term(term()) -> binary().
+bound_debug_term(Term) ->
+    Formatted = iolist_to_binary(io_lib:format("~0p", [Term])),
+    Head = binary:part(Formatted, 0, min(200, byte_size(Formatted))),
     case unicode:characters_to_binary(Head) of
         Valid when is_binary(Valid) -> Valid;
         {incomplete, Valid, _} -> Valid;
