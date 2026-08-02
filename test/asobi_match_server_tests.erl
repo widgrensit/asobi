@@ -64,7 +64,15 @@ match_server_test_() ->
         {"disconnect with reconnect policy starts grace", fun disconnect_starts_grace/0},
         {"disconnect without policy is immediate leave", fun disconnect_no_policy_leaves/0},
         {"reconnect within grace keeps player", fun reconnect_within_grace_keeps/0},
-        {"reconnect with no policy returns error", fun reconnect_no_policy_errors/0}
+        {"reconnect with no policy returns error", fun reconnect_no_policy_errors/0},
+        {"session down while waiting removes player", fun waiting_down_removes_player/0},
+        {"session down while paused with no policy is immediate leave",
+            fun paused_down_no_policy_leaves/0},
+        {"session down while paused with reconnect policy starts grace",
+            fun paused_down_starts_grace/0},
+        {"reconnect while paused succeeds instead of hanging",
+            fun reconnect_while_paused_succeeds/0},
+        {"reconnect while waiting does not crash", fun reconnect_while_waiting_does_not_crash/0}
     ]}.
 
 %% --- Tests ---
@@ -382,6 +390,144 @@ reconnect_no_policy_errors() ->
     ok = asobi_match_server:join(Pid, ~"p1"),
     timer:sleep(50),
     ?assertMatch({error, no_reconnect_policy}, asobi_match_server:reconnect(Pid, ~"p1")),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#285: waiting/3 had no clause for a
+%% session dying while the match was still gathering players, so a DOWN
+%% message crashed the match server with function_clause and took every
+%% player already in the lobby down with it. Unique player ids - other
+%% tests in this suite leave dangling fake_session processes registered
+%% under {player, ~"p1"} in the shared nova_scope pg group.
+waiting_down_removes_player() ->
+    Pid = start_match(#{min_players => 3, max_players => 4}),
+    SessionPid1 = fake_session(~"p285_waiting_1"),
+    ok = asobi_match_server:join(Pid, ~"p285_waiting_1"),
+    ok = asobi_match_server:join(Pid, ~"p285_waiting_2"),
+    timer:sleep(50),
+    Info0 = asobi_match_server:get_info(Pid),
+    ?assertEqual(waiting, maps:get(status, Info0)),
+    ?assertEqual(2, maps:get(player_count, Info0)),
+
+    exit(SessionPid1, kill),
+    timer:sleep(100),
+    ?assert(is_process_alive(Pid)),
+    Info1 = asobi_match_server:get_info(Pid),
+    ?assertEqual(waiting, maps:get(status, Info1)),
+    ?assertEqual(1, maps:get(player_count, Info1)),
+    ?assertEqual([~"p285_waiting_2"], maps:get(players, Info1)),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#285: paused/3 had no clause for a
+%% session DOWN, so it fell through to the catch-all and was silently
+%% swallowed. Without a reconnect policy this must behave like running's
+%% no-policy branch: an immediate leave.
+paused_down_no_policy_leaves() ->
+    Pid = start_match(#{min_players => 1, max_players => 2}),
+    unlink(Pid),
+    Ref = monitor(process, Pid),
+    SessionPid = fake_session(~"p285_paused_nopolicy"),
+    ok = asobi_match_server:join(Pid, ~"p285_paused_nopolicy"),
+    timer:sleep(50),
+    ok = asobi_match_server:pause(Pid),
+    ?assertMatch(#{status := paused}, asobi_match_server:get_info(Pid)),
+
+    exit(SessionPid, kill),
+    %% Single-player match shuts down on last leave, same as running.
+    receive
+        {'DOWN', Ref, process, Pid, {shutdown, empty}} -> ok
+    after 2000 ->
+        ?assert(false)
+    end.
+
+%% Regression for widgrensit/asobi#285: with a reconnect policy active, a
+%% session DOWN while paused must start reconnect grace exactly like
+%% running's with-policy branch - not be swallowed by the catch-all.
+%%
+%% paused/3, unlike running/3, still ends in a catch-all, so "player still
+%% counted right after the kill" is not proof grace actually started - the
+%% catch-all silently dropping the DOWN produces the identical observation.
+%% tick_reconnect/2 only runs from running's tick handler, so grace can't
+%% progress while paused; resume/1 and let the (short) grace period expire
+%% instead - that only happens if asobi_reconnect:disconnect/3 genuinely
+%% populated grace state, which only the fixed with-policy clause does.
+paused_down_starts_grace() ->
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 100,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    SessionPid = fake_session(~"p285_paused_policy"),
+    ok = asobi_match_server:join(Pid, ~"p285_paused_policy"),
+    timer:sleep(50),
+    ok = asobi_match_server:pause(Pid),
+    ?assertMatch(#{status := paused}, asobi_match_server:get_info(Pid)),
+
+    exit(SessionPid, kill),
+    timer:sleep(50),
+    %% Grace active - player still counted, match server alive.
+    ?assert(is_process_alive(Pid)),
+    Info = asobi_match_server:get_info(Pid),
+    ?assertEqual(paused, maps:get(status, Info)),
+    ?assertEqual(1, maps:get(player_count, Info)),
+
+    ok = asobi_match_server:resume(Pid),
+    timer:sleep(500),
+    ?assertEqual(0, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#285: paused/3 had no {call, reconnect}
+%% clause, so calling reconnect/2 while paused fell through to the
+%% catch-all, which never replies - gen_statem:call/2 defaults to timeout
+%% infinity, so the caller would hang forever. Calls gen_statem:call/3
+%% directly with a bounded timeout so a regression fails fast here instead
+%% of hanging the whole test run.
+reconnect_while_paused_succeeds() ->
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 30_000,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    PlayerId = ~"p285_reconnect_paused",
+    SessionPid1 = fake_session(PlayerId),
+    ok = asobi_match_server:join(Pid, PlayerId),
+    timer:sleep(50),
+    ok = asobi_match_server:pause(Pid),
+    exit(SessionPid1, kill),
+    timer:sleep(100),
+    %% Grace active (see paused_down_starts_grace/0) - a real session
+    %% arriving now must be able to reconnect before resume/1 is called.
+    _SessionPid2 = fake_session(PlayerId),
+    ?assertEqual(ok, gen_statem:call(Pid, {reconnect, PlayerId}, 2000)),
+    ?assertMatch(#{status := paused}, asobi_match_server:get_info(Pid)),
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#285: waiting/3 had no {call, reconnect}
+%% clause and no catch-all, so calling reconnect/2 while still gathering
+%% players crashed the match server with function_clause. Bounded timeout
+%% for the same reason as reconnect_while_paused_succeeds/0.
+reconnect_while_waiting_does_not_crash() ->
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    PlayerId = ~"p285_reconnect_waiting",
+    ok = asobi_match_server:join(Pid, PlayerId),
+    ?assertEqual(
+        {error, no_reconnect_policy}, gen_statem:call(Pid, {reconnect, PlayerId}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
     stop(Pid).
 
 %% --- Helpers ---
