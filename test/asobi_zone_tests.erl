@@ -63,7 +63,10 @@ zone_test_() ->
         {"an NPC past the boundary margin transfers to the neighbouring zone",
             fun npc_past_margin_transfers/0},
         {"an NPC transfer to an unloaded target zone is observable, not silent",
-            fun npc_transfer_unavailable_zone_is_observable/0}
+            fun npc_transfer_unavailable_zone_is_observable/0},
+        {"reap stops a zone with no entities", fun reap_stops_empty_zone/0},
+        {"reap declines and re-touches a zone that still has entities",
+            fun reap_declines_when_occupied/0}
     ]}.
 
 starts_empty() ->
@@ -562,6 +565,47 @@ npc_transfer_unavailable_zone_is_observable() ->
         telemetry:detach(Ref),
         gen_server:stop(Pid)
     end.
+
+reap_stops_empty_zone() ->
+    Pid = start_zone(),
+    Ref = monitor(process, Pid),
+    asobi_zone:reap(Pid),
+    receive
+        {'DOWN', Ref, process, Pid, normal} -> ok
+    after 1000 -> ?assert(false, timeout_waiting_for_reap_stop)
+    end.
+
+%% asobi#283, found via the nightly prop_input_never_dropped flake (#282):
+%% asobi_zone_manager:release_zone/2 backdates a zone's zone_last_active the
+%% moment it empties out, so it becomes reap-eligible on the next sweep. But
+%% nothing un-stales that timestamp on re-occupation for a zone with no live
+%% subscribers - this zone's own tick only touches the manager on the
+%% map_size(Subs) > 0 branch, and neither does asobi_zone_manager:ensure_zone
+%% for an existing zone. A zone could empty, get re-occupied (players joined
+%% with no live session, exactly as prop_input_never_dropped's harness does),
+%% and still get torn down by a sweep the manager scheduled while it was
+%% briefly empty. The zone is the one source of truth for its own occupancy
+%% at the moment it actually receives the cast, so it must decline instead
+%% of trusting the manager's bookkeeping - and re-touch so the manager's
+%% timestamp catches up instead of retrying every sweep.
+reap_declines_when_occupied() ->
+    ZMPid = start_mock_zone_manager(),
+    Pid = start_zone(#{zone_manager_pid => ZMPid}),
+    asobi_zone:add_entity(Pid, <<"p1">>, #{type => ~"player", x => 0, y => 0}),
+    timer:sleep(10),
+    asobi_zone:reap(Pid),
+    timer:sleep(20),
+    ?assert(is_process_alive(Pid)),
+    ZMPid ! {get_touches, self()},
+    receive
+        {touches, Touches} ->
+            ?assert(length(Touches) > 0),
+            ?assertEqual({0, 0}, hd(Touches))
+    after 1000 ->
+        ?assert(false, timeout_waiting_for_touch)
+    end,
+    gen_server:stop(Pid),
+    ZMPid ! stop.
 
 start_mock_zone_manager() ->
     spawn(fun() -> mock_zm_loop([]) end).

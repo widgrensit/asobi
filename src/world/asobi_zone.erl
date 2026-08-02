@@ -327,10 +327,24 @@ handle_call(_Request, _From, State) ->
 
 -spec handle_cast(term(), map()) ->
     {noreply, map()} | {noreply, map(), hibernate} | {stop, normal, map()}.
-handle_cast(reap, State) ->
+handle_cast(reap, #{entities := Entities} = State) when map_size(Entities) =:= 0 ->
     %% Graceful stop so terminate/2 writes a final snapshot. Transient restart
     %% means a normal stop is not respawned.
     {stop, normal, State};
+handle_cast(reap, #{zone_manager_pid := ZMPid, coords := Coords} = State) ->
+    %% asobi#283: the manager decides to reap from its own zone_last_active
+    %% bookkeeping, which can lag real occupancy - release_zone backdates it
+    %% the moment a zone empties, and nothing re-touches it for an occupied
+    %% zone with no live subscribers (this zone's own tick only touches on
+    %% the map_size(Subs) > 0 branch). Trusting the cast here would tear down
+    %% an occupied zone out from under its entities. This zone is the one
+    %% source of truth for its own occupancy at the moment it actually
+    %% receives the cast, so decline and re-touch instead of stopping.
+    case ZMPid of
+        undefined -> ok;
+        _ -> asobi_zone_manager:touch_zone(ZMPid, Coords)
+    end,
+    {noreply, State};
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
     State2 = resolve_zone_crossings(State1),

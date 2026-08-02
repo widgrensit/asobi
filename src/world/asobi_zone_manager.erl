@@ -37,23 +37,12 @@ is what brought the zone into existence (`created`) or whether it was already
 running (`existing`) - callers that need to backfill subscribers whose
 interest ring already covered these coords (widgrensit/asobi#275) only need
 to act on `created`.
-
-An ETS-fast-path hit touches the zone (asobi#283): `release_zone/2`
-backdates `zone_last_active` as soon as a zone empties out, and nothing else
-un-stales it once that happened, since a zone with no subscribers is never
-`touch_zone`d by its own tick either (asobi_zone only touches on tick when
-`map_size(Subs) > 0`). Without this, a zone that empties and is then
-re-occupied before the next reap sweep keeps its stale timestamp and can be
-reaped out from under its new occupants - an ensure_zone call is itself
-evidence of active use, so it must count as a touch even on the path that
-never talks to the gen_server for the lookup itself.
 """.
 -spec ensure_zone(pid() | atom(), {integer(), integer()}) ->
     {ok, pid(), created | existing} | {error, term()}.
 ensure_zone(Ref, Coords) ->
     case ets_lookup(Ref, Coords) of
         {ok, Pid} ->
-            touch_zone(Ref, Coords),
             {ok, Pid, existing};
         not_loaded ->
             case gen_server:call(Ref, {ensure_zone, Coords}) of
