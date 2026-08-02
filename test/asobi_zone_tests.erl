@@ -35,6 +35,10 @@ zone_test_() ->
         {"starts empty", fun starts_empty/0},
         {"add and remove entities", fun add_remove_entities/0},
         {"subscribe and unsubscribe", fun subscribe_unsubscribe/0},
+        {"unsubscribe sends a removal for every entity the zone holds",
+            fun unsubscribe_sends_removals_for_entities/0},
+        {"unsubscribe of an unknown player sends nothing",
+            fun unsubscribe_unknown_player_is_noop/0},
         {"resubscribing the same pid is idempotent", fun resubscribe_same_pid_is_idempotent/0},
         {"resubscribing a new pid replaces and demonitors the old one",
             fun resubscribe_new_pid_replaces_and_demonitors_old/0},
@@ -181,6 +185,50 @@ subscribe_unsubscribe() ->
     asobi_zone:unsubscribe(Pid, <<"p1">>),
     timer:sleep(10),
     ?assertEqual(0, asobi_zone:get_subscriber_count(Pid)),
+    gen_server:stop(Pid).
+
+%% widgrensit/asobi#293: leaving a zone's interest ring must mirror joining
+%% it - subscribe_new/3 sends an `a` for every entity, so unsubscribe must
+%% send an `r` for every entity still held, or the departing client's copy
+%% of this zone freezes at its last known state forever (the zone never
+%% sends it another update once the subscription is gone).
+unsubscribe_sends_removals_for_entities() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    asobi_zone:add_entity(Pid, ~"e2", #{x => 2, y => 2, type => ~"npc"}),
+    timer:sleep(10),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+
+    asobi_zone:unsubscribe(Pid, ~"p1"),
+    Removals =
+        receive
+            {asobi_message, {zone_delta, 0, Deltas}} -> Deltas
+        after 200 -> []
+        end,
+    ?assertEqual(
+        lists:sort([~"e1", ~"e2"]),
+        lists:sort([Id || #{~"op" := ~"r", ~"id" := Id} <- Removals])
+    ),
+    timer:sleep(10),
+    ?assertEqual(0, asobi_zone:get_subscriber_count(Pid)),
+    gen_server:stop(Pid).
+
+%% Unsubscribing a player who was never subscribed (or already removed) must
+%% stay a pure no-op - no message to a pid that never subscribed.
+unsubscribe_unknown_player_is_noop() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    asobi_zone:unsubscribe(Pid, ~"nobody"),
+    ?assertEqual(
+        timeout,
+        receive
+            {asobi_message, {zone_delta, 0, _}} -> resent
+        after 100 -> timeout
+        end
+    ),
     gen_server:stop(Pid).
 
 %% asobi#275: callers now (re-)subscribe a crossing/backfilled player to a

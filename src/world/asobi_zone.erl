@@ -394,12 +394,15 @@ handle_cast(
     State
 ) when is_binary(PlayerId), is_pid(PlayerPid) ->
     subscribe_new(PlayerId, PlayerPid, State);
-handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
+handle_cast(
+    {unsubscribe, PlayerId}, #{subscribers := Subs, entities := Entities} = State
+) ->
     case maps:get(PlayerId, Subs, undefined) of
         undefined ->
             {noreply, State};
-        {_Pid, MonRef} ->
+        {Pid, MonRef} ->
             demonitor(MonRef, [flush]),
+            send_leave_removals(Pid, Entities),
             {noreply, State#{subscribers => maps:remove(PlayerId, Subs)}}
     end;
 handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) when is_map(Config) ->
@@ -506,6 +509,15 @@ subscribe_new(
                 end
         end,
     {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}}.
+
+%% Mirror of subscribe_new/3's snapshot, in reverse. See widgrensit/asobi#293.
+-spec send_leave_removals(pid(), map()) -> ok.
+send_leave_removals(_Pid, Entities) when map_size(Entities) =:= 0 ->
+    ok;
+send_leave_removals(Pid, Entities) ->
+    Removals = encode_deltas([{removed, Id} || Id <- maps:keys(Entities)]),
+    Pid ! {asobi_message, {zone_delta, 0, Removals}},
+    ok.
 
 do_tick(
     TickN,

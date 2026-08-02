@@ -79,7 +79,9 @@ world_zone_integration_test_() ->
         {"a rate-limited crossing leaves the entity in place instead of destroying it",
             fun rehome_denied_by_rate_limit_survives/0},
         {"the global rehome limit denies a crossing even with per-player budget to spare",
-            fun rehome_denied_by_global_limit/0}
+            fun rehome_denied_by_global_limit/0},
+        {"a crossing that drops a zone from the ring removes its stationary occupants",
+            fun crossing_out_of_ring_removes_stationary_neighbour/0}
     ]}.
 
 %% Default (lazy_zones=false, grid_size=3) pre-spawns all 9 zones
@@ -597,6 +599,69 @@ script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
         ?assertMatch(#{subscribers := #{Ada := {AdaPid, _}}}, sys:get_state(Z21))
     after
         exit(AdaPid, kill),
+        stop_world(Ctx)
+    end.
+
+%% Blocks until PlayerId's forwarded messages include a zone_delta removal
+%% (op "r") for EntityId, or the timeout elapses.
+received_removal(PlayerId, EntityId) ->
+    receive
+        {PlayerId, {asobi_message, {zone_delta, _Tick, Ops}}} ->
+            HasRemoval = lists:any(
+                fun
+                    (#{~"op" := ~"r", ~"id" := Id}) -> Id =:= EntityId;
+                    (_) -> false
+                end,
+                Ops
+            ),
+            case HasRemoval of
+                true -> true;
+                false -> received_removal(PlayerId, EntityId)
+            end
+    after 500 -> false
+    end.
+
+%% Regression for widgrensit/asobi#293: leaving a zone's interest ring must
+%% mirror joining it - subscribe_new/3 already sends a full "add" snapshot to
+%% a fresh subscriber, but unsubscribing previously sent nothing, so a
+%% stationary occupant of a zone a player has ridden out of the ring stayed
+%% frozen on that departing player's client forever. Ada spawns and stays put
+%% in zone {1,1}; Bob spawns alongside her (so he holds her entity via the
+%% shared zone's snapshot) then crosses far enough east that {1,1} falls
+%% entirely outside his new interest ring - not just a one-zone crossing,
+%% which #248/#275 already covered via the entity's own removal, but the
+%% ring-only drop of a zone whose *other* occupants never moved at all.
+crossing_out_of_ring_removes_stationary_neighbour() ->
+    Ctx =
+        #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{
+            lazy_zones => true, grid_size => 6
+        }),
+    Ada = ~"leave_ring_ada",
+    Bob = ~"leave_ring_bob",
+    AdaPid = fake_session(Ada, self()),
+    BobPid = fake_session(Bob, self()),
+    try
+        %% Both spawn at {100.0, 100.0} => zone {1,1}.
+        ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),
+        ?assertEqual(ok, asobi_world_server:join(Pid, Bob)),
+        timer:sleep(20),
+        {ok, Z11} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+        ?assert(received_entity(Bob, Ada)),
+
+        %% Bob crosses three zones east - view_radius=1 keeps {0,0}..{2,2}
+        %% around his old zone {1,1}, but his new ring around {4,1} is
+        %% {3,0}..{5,2}, nowhere near it, so {1,1} must be dropped entirely.
+        asobi_zone:player_input(Z11, Bob, #{
+            ~"action" => ~"move", ~"x" => 430.0, ~"y" => 100.0
+        }),
+        timer:sleep(150),
+
+        %% Ada never moved, so she's still subscribed - only Bob left.
+        ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
+        ?assert(received_removal(Bob, Ada))
+    after
+        exit(AdaPid, kill),
+        exit(BobPid, kill),
         stop_world(Ctx)
     end.
 
