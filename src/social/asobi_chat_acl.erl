@@ -3,7 +3,9 @@
 Authorisation policy for chat channels.
 
 Channel ID schemes:
-  dm:<A>:<B>                 - A and B are the only allowed readers
+  dm:<A>:<B>                 - A and B are the only allowed readers, and B
+                                (the participant that isn't the caller) must
+                                resolve to a real player id (see #305 below)
   world:<WorldId>            - must currently be joined to the world
   zone:<WorldId>:<X>,<Y>     - must currently be joined to the world
   prox:<WorldId>:<X>,<Y>     - must currently be joined to the world
@@ -22,6 +24,25 @@ stripped, different case, padded/garbage-prefixed hex) that a lossy uuid
 decode downstream would otherwise all resolve to the same group - each alias
 would otherwise be a distinct, unmoderated channel process.
 
+#306: for a group with `open=true`, membership (checked here) is easy to
+get - anyone can join without an invite - but membership is still what
+gates reading. Once joined, a member sees the group's full retained
+history, including messages sent before they joined; this is intentional
+(see `guides/websocket-protocol.md`), not a gap to close here.
+
+#305: `dm:<A>:<B>` had the same unbounded-minting shape as the pre-fix
+`room:` scheme — `classify/1` authorised `dm:<self>:<anything>` for any
+value of `<anything>`, and `chat.send`/`send_message/3` start a channel
+process on demand with no prior `chat.join`, so `MAX_JOINED_CHANNELS_PER_CONN`
+never bounded it. The other participant must now resolve to a real,
+currently-known player id (checked against the `players` table via
+`asobi_repo:get/2`, the same lookup `asobi_social_controller` already uses
+to verify a friend id is real). This bounds minting to O(known players)
+instead of unbounded arbitrary strings. Checking "is a real player" rather
+than "is currently online" is deliberate: the other participant is very
+often offline (that's when you send someone a DM), so an online-only check
+would break ordinary DMing, not just close the abuse case.
+
 Shared by `asobi_chat_controller` (HTTP history) and `asobi_ws_handler`
 (WebSocket `chat.join` / `chat.send`). Keeping a single source of truth
 prevents the WS path from drifting and silently allowing DM eavesdropping.
@@ -39,11 +60,29 @@ authorized(ChannelId, PlayerId) when is_binary(ChannelId), is_binary(PlayerId) -
         deny ->
             false;
         {dm, A, B} ->
-            PlayerId =:= A orelse PlayerId =:= B;
+            dm_authorized(PlayerId, A, B);
         {world, WorldId} ->
             player_in_world(PlayerId, WorldId);
         {group, GroupId} ->
             is_group_member(PlayerId, GroupId)
+    end.
+
+%% #305: PlayerId must be one of the two named participants, and the OTHER
+%% participant must resolve to a real, currently-known player - otherwise
+%% PlayerId could mint `dm:<self>:<anything>` for any value of `<anything>`.
+-spec dm_authorized(binary(), binary(), binary()) -> boolean().
+dm_authorized(PlayerId, PlayerId, Other) ->
+    is_known_player(Other);
+dm_authorized(PlayerId, Other, PlayerId) ->
+    is_known_player(Other);
+dm_authorized(_PlayerId, _A, _B) ->
+    false.
+
+-spec is_known_player(binary()) -> boolean().
+is_known_player(PlayerId) ->
+    case asobi_repo:get(asobi_player, PlayerId) of
+        {ok, _} -> true;
+        {error, _} -> false
     end.
 
 -doc """
