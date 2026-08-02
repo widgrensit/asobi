@@ -64,7 +64,12 @@ match_server_test_() ->
         {"disconnect with reconnect policy starts grace", fun disconnect_starts_grace/0},
         {"disconnect without policy is immediate leave", fun disconnect_no_policy_leaves/0},
         {"reconnect within grace keeps player", fun reconnect_within_grace_keeps/0},
-        {"reconnect with no policy returns error", fun reconnect_no_policy_errors/0}
+        {"reconnect with no policy returns error", fun reconnect_no_policy_errors/0},
+        {"join with no live session does not crash",
+            fun join_with_no_live_session_does_not_crash/0},
+        {"reconnect with no live session returns error",
+            fun reconnect_with_no_live_session_returns_error/0},
+        {"failed reconnect leaves grace intact", fun failed_reconnect_leaves_grace_intact/0}
     ]}.
 
 %% --- Tests ---
@@ -382,6 +387,89 @@ reconnect_no_policy_errors() ->
     ok = asobi_match_server:join(Pid, ~"p1"),
     timer:sleep(50),
     ?assertMatch({error, no_reconnect_policy}, asobi_match_server:reconnect(Pid, ~"p1")),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#280: find_player_pid/1 used to fall back
+%% to self() when a player had no live pg registration, which would have
+%% recorded this match server's own pid as that player's session_pid and
+%% monitor_ref - not a crash, but silently wrong. join/2 with no fake_session
+%% registered first is exactly that case.
+join_with_no_live_session_does_not_crash() ->
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"no_session"),
+    ?assert(is_process_alive(Pid)),
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    {_StateName, #{
+        players := #{~"no_session" := #{session_pid := SessionPid, monitor_ref := MonRef}}
+    }} = sys:get_state(Pid),
+    ?assertEqual(undefined, SessionPid),
+    ?assertEqual(undefined, MonRef),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#280: a reconnect attempt with no live
+%% pg-registered session for the player must fail cleanly (the caller
+%% invoking reconnect/2 IS supposed to be that live session) rather than
+%% crash on monitor(process, undefined) or silently monitor this match
+%% server's own pid.
+reconnect_with_no_live_session_returns_error() ->
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 30_000,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    %% Unique player id - other tests in this suite leave dangling
+    %% fake_session processes registered under {player, ~"p1"} in the shared
+    %% nova_scope pg group, which would make find_player_pid/1 see a stray
+    %% live pid instead of the empty-group case this test needs.
+    PlayerId = ~"reconnect_no_session_280",
+    SessionPid = fake_session(PlayerId),
+    ok = asobi_match_server:join(Pid, PlayerId),
+    timer:sleep(50),
+    exit(SessionPid, kill),
+    timer:sleep(100),
+    %% No new session registered before reconnecting.
+    ?assertEqual({error, no_live_session}, asobi_match_server:reconnect(Pid, PlayerId)),
+    ?assert(is_process_alive(Pid)),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#280: the no-live-session check runs before
+%% asobi_reconnect:reconnect/2, so a rejected reconnect must not consume the
+%% player's disconnected/grace entry - a real session arriving afterwards
+%% still gets to reconnect normally.
+failed_reconnect_leaves_grace_intact() ->
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 30_000,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    %% Unique player id - see reconnect_with_no_live_session_returns_error/0.
+    PlayerId = ~"retry_after_no_session_280",
+    SessionPid1 = fake_session(PlayerId),
+    ok = asobi_match_server:join(Pid, PlayerId),
+    timer:sleep(50),
+    exit(SessionPid1, kill),
+    timer:sleep(100),
+    ?assertEqual({error, no_live_session}, asobi_match_server:reconnect(Pid, PlayerId)),
+    {_StateName, #{reconnect_state := #{disconnected := #{PlayerId := _}}}} = sys:get_state(Pid),
+    catch pg:leave(nova_scope, {player, PlayerId}, SessionPid1),
+    _SessionPid2 = fake_session(PlayerId),
+    ?assertEqual(ok, asobi_match_server:reconnect(Pid, PlayerId)),
+    timer:sleep(30),
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
     stop(Pid).
 
 %% --- Helpers ---

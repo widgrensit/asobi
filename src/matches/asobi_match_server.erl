@@ -39,6 +39,8 @@ the place to put callback hardening.
 -export([callback_mode/0, init/1, terminate/3]).
 -export([waiting/3, running/3, paused/3, finished/3]).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% 10 ticks/sec
 -define(DEFAULT_TICK_RATE, 100).
 -define(DEFAULT_MIN_PLAYERS, 2).
@@ -513,8 +515,22 @@ handle_join(
                     %% Monitor the player session so we can run reconnect grace
                     %% (or immediate cleanup) when the WS process dies. Mirrors
                     %% asobi_world_server's handle_join monitor setup.
+                    %% asobi#280: no live session degrades gracefully (no
+                    %% monitor) rather than crashing on
+                    %% monitor(process, undefined).
                     SessionPid = find_player_pid(PlayerId),
-                    MonRef = erlang:monitor(process, SessionPid),
+                    MonRef =
+                        case SessionPid of
+                            undefined ->
+                                ?LOG_WARNING(#{
+                                    event => match_join_no_live_session,
+                                    match_id => maps:get(match_id, State),
+                                    player_id => PlayerId
+                                }),
+                                undefined;
+                            _ ->
+                                erlang:monitor(process, SessionPid)
+                        end,
                     Players1 = Players#{
                         PlayerId => #{
                             joined_at => erlang:system_time(millisecond),
@@ -576,7 +592,7 @@ apply_inputs(Mod, [{PlayerId, Input} | Rest], GS) ->
         {ok, GS1} ->
             apply_inputs(Mod, Rest, GS1);
         {error, Reason} ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"game input rejected",
                 player_id => PlayerId,
                 reason => Reason
@@ -876,33 +892,50 @@ handle_reconnect_call(From, PlayerId, #{players := Players, reconnect_state := R
         false ->
             {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
         true ->
-            {_Events, RS1} = asobi_reconnect:reconnect(PlayerId, RS),
-            %% Re-monitor: the new session pid is whoever is currently
-            %% registered as the WS owner for this player_id.
-            PlayerMeta0 = maps:get(PlayerId, Players),
-            case maps:get(monitor_ref, PlayerMeta0, undefined) of
-                undefined -> ok;
-                OldRef -> erlang:demonitor(OldRef, [flush])
-            end,
-            NewSessionPid = find_player_pid(PlayerId),
-            NewMonRef = erlang:monitor(process, NewSessionPid),
-            PlayerMeta1 = PlayerMeta0#{
-                session_pid => NewSessionPid,
-                monitor_ref => NewMonRef
-            },
-            Players1 = Players#{PlayerId => PlayerMeta1},
-            {keep_state, State#{reconnect_state => RS1, players => Players1}, [
-                {reply, From, ok}
-            ]}
+            %% asobi#280: checked before touching reconnect_state or the old
+            %% monitor at all, so a missing session leaves this a pure no-op
+            %% rather than a monitor(process, undefined) crash - mirrors the
+            %% asobi_world_server handle_reconnect_call fix from asobi#277.
+            case find_player_pid(PlayerId) of
+                undefined ->
+                    ?LOG_WARNING(#{
+                        event => match_reconnect_no_live_session,
+                        match_id => maps:get(match_id, State),
+                        player_id => PlayerId
+                    }),
+                    {keep_state_and_data, [{reply, From, {error, no_live_session}}]};
+                NewSessionPid ->
+                    {_Events, RS1} = asobi_reconnect:reconnect(PlayerId, RS),
+                    %% Re-monitor: the new session pid is whoever is currently
+                    %% registered as the WS owner for this player_id.
+                    PlayerMeta0 = maps:get(PlayerId, Players),
+                    case maps:get(monitor_ref, PlayerMeta0, undefined) of
+                        undefined -> ok;
+                        OldRef -> erlang:demonitor(OldRef, [flush])
+                    end,
+                    NewMonRef = erlang:monitor(process, NewSessionPid),
+                    PlayerMeta1 = PlayerMeta0#{
+                        session_pid => NewSessionPid,
+                        monitor_ref => NewMonRef
+                    },
+                    Players1 = Players#{PlayerId => PlayerMeta1},
+                    {keep_state, State#{reconnect_state => RS1, players => Players1}, [
+                        {reply, From, ok}
+                    ]}
+            end
     end;
 handle_reconnect_call(From, _PlayerId, _State) ->
     {keep_state_and_data, [{reply, From, {error, no_reconnect_policy}}]}.
 
--spec find_player_pid(binary()) -> pid().
+%% widgrensit/asobi#280: fall back to undefined rather than self() when a
+%% player has no live pg-registered session, mirroring the asobi#277 fix in
+%% asobi_world_server - self() would silently monitor/track this match
+%% server's own pid as that player's session instead of failing visibly.
+-spec find_player_pid(binary()) -> pid() | undefined.
 find_player_pid(PlayerId) ->
     case pg:get_members(?PG_SCOPE, {player, PlayerId}) of
         [Pid | _] -> Pid;
-        [] -> self()
+        [] -> undefined
     end.
 
 -spec find_player_by_pid(pid(), map()) -> {ok, binary()} | none.
