@@ -10,7 +10,6 @@
 -define(WS_MAX_PAYLOAD_BYTES, 65536).
 %% F-16: per-connection cap on simultaneously joined chat channels.
 -define(MAX_JOINED_CHANNELS_PER_CONN, 32).
--define(MAX_CHANNEL_ID_BYTES, 256).
 %% #236: at most one `not_in_match` hint per connection per this window.
 -define(NOT_IN_MATCH_HINT_WINDOW_MS, 5000).
 
@@ -805,20 +804,9 @@ to_reason_binary(R) when is_atom(R) -> atom_to_binary(R, utf8).
 
 %% F-16: chat.join must require a small, namespaced channel id so an
 %% attacker can't spawn unbounded chat channel gen_servers via WS.
-%% Allowed prefixes mirror the channel id schemes documented in
-%% asobi_chat_controller's classify/1 (`dm:`, `world:`, `zone:`,
-%% `prox:`, plus a `room:` namespace for app-defined group chats).
-validate_channel_id(ChannelId) when is_binary(ChannelId) ->
-    byte_size(ChannelId) > 0 andalso
-        byte_size(ChannelId) =< ?MAX_CHANNEL_ID_BYTES andalso
-        valid_channel_prefix(ChannelId).
-
-valid_channel_prefix(<<"dm:", _/binary>>) -> true;
-valid_channel_prefix(<<"world:", _/binary>>) -> true;
-valid_channel_prefix(<<"zone:", _/binary>>) -> true;
-valid_channel_prefix(<<"prox:", _/binary>>) -> true;
-valid_channel_prefix(<<"room:", _/binary>>) -> true;
-valid_channel_prefix(_) -> false.
+%% Delegates to asobi_chat_acl, the single source of truth for channel id
+%% shape shared with the HTTP chat-history path.
+validate_channel_id(ChannelId) -> asobi_chat_acl:validate_channel_id(ChannelId).
 
 %% F-29: world.list/match.list filter values must be the right type or we
 %% reject the request rather than silently returning unfiltered results.

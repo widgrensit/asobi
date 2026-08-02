@@ -14,7 +14,9 @@
     chat_history_dm_non_participant_forbidden/1,
     chat_history_dm_participant_allowed/1,
     room_channel_member_authorized/1,
-    room_channel_non_member_rejected/1
+    room_channel_non_member_rejected/1,
+    room_channel_nonexistent_group_denied/1,
+    room_channel_malformed_group_id_denied/1
 ]).
 
 all() -> [{group, groups_api}, {group, chat_api}].
@@ -31,7 +33,9 @@ groups() ->
             chat_history_dm_non_participant_forbidden,
             chat_history_dm_participant_allowed,
             room_channel_member_authorized,
-            room_channel_non_member_rejected
+            room_channel_non_member_rejected,
+            room_channel_nonexistent_group_denied,
+            room_channel_malformed_group_id_denied
         ]}
     ].
 
@@ -84,10 +88,12 @@ init_per_suite(Config) ->
         #{headers => auth(P2Token), json => #{}},
         Config0
     ),
-    %% F-10: chat history is now membership-gated. Use the actual GroupId
-    %% as the channel_id so P1 (creator) is authorized via asobi_group_member;
-    %% P3 will be a non-member who must be denied.
-    ChannelId = GroupId,
+    %% F-10: chat history is now membership-gated. Use the canonical
+    %% `room:<GroupId>` channel id so P1 (creator) is authorized via
+    %% asobi_group_member; P3 will be a non-member who must be denied.
+    %% #295/#301: a bare, unprefixed group id is no longer a valid channel
+    %% id on the HTTP path (validate_channel_id/1 now applies there too).
+    ChannelId = <<"room:", GroupId/binary>>,
     asobi_chat_channel:join(ChannelId, self()),
     asobi_chat_channel:send_message(ChannelId, P1Id, ~"Hello from p1"),
     asobi_chat_channel:send_message(ChannelId, P2Id, ~"Hello from p2"),
@@ -241,7 +247,7 @@ chat_history_dm_participant_allowed(Config) ->
     Config.
 
 %% Regression for #295: `room:<GroupId>` is the channel id shape
-%% `asobi_ws_handler:validate_channel_id/1` accepts for group chat, but
+%% `asobi_chat_acl:validate_channel_id/1` accepts for group chat, but
 %% `asobi_chat_acl:classify/1` was matching the literal "room:<uuid>" as
 %% the group id against `group_members.group_id` (a uuid column), so it
 %% never matched and every member was rejected. A member must authorize.
@@ -263,4 +269,24 @@ room_channel_non_member_rejected(Config) ->
     {player3_id, P3Id} = lists:keyfind(player3_id, 1, Config),
     RoomChannel = <<"room:", GroupId/binary>>,
     ?assertNot(asobi_chat_acl:authorized(RoomChannel, P3Id)),
+    Config.
+
+%% Security-review follow-up (#301): a syntactically-valid uuid that names
+%% no group must be denied, not merely fall through to an empty membership
+%% lookup by coincidence.
+room_channel_nonexistent_group_denied(Config) ->
+    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
+    Ghost = asobi_id:generate(),
+    ?assertNot(asobi_chat_acl:authorized(<<"room:", Ghost/binary>>, P1Id)),
+    Config.
+
+%% Security-review follow-up (#301): non-canonical group ids (too short,
+%% empty, or carrying injection-shaped garbage) must be denied outright by
+%% classify/1's uuid-shape check rather than reaching the DB query.
+room_channel_malformed_group_id_denied(Config) ->
+    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
+    [
+        ?assertNot(asobi_chat_acl:authorized(C, P1Id))
+     || C <- [~"room:abc", ~"room:", ~"room:' OR 1=1 --"]
+    ],
     Config.

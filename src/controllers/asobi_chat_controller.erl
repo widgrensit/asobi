@@ -15,7 +15,10 @@ history(
 ) when
     is_binary(ChannelId), is_binary(Qs), is_binary(PlayerId)
 ->
-    case asobi_chat_acl:authorized(ChannelId, PlayerId) of
+    case
+        asobi_chat_acl:validate_channel_id(ChannelId) andalso
+            asobi_chat_acl:authorized(ChannelId, PlayerId)
+    of
         true ->
             Params = cow_qs:parse_qs(Qs),
             Limit = asobi_qs:integer(
