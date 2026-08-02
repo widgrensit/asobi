@@ -11,10 +11,11 @@ Channel ID schemes:
                                 member of the group named by GroupId
   <anything else>            - treated as a group_id; must be a group member
 
-A `room:` channel naming a group id that does not exist is closed, not an
-open public lobby: `is_group_member/2` finds no rows and `authorized/2`
-returns `false`, matching the closed-by-default posture of every other
-channel scheme here.
+A `room:` channel naming a group id that does not exist (or is malformed,
+e.g. not a UUID) is closed, not an open public lobby: the membership lookup
+yields no match (a non-uuid group id fails the query outright rather than
+returning an empty result), and `authorized/2` returns `false`, matching the
+closed-by-default posture of every other channel scheme here.
 
 Shared by `asobi_chat_controller` (HTTP history) and `asobi_ws_handler`
 (WebSocket `chat.join` / `chat.send`). Keeping a single source of truth
