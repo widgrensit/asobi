@@ -2,6 +2,10 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+%% logger_handler callback used by the #303 rejection tests below to prove
+%% a rejected event name is logged, not silently dropped.
+-export([log/2]).
+
 %% #297: game.broadcast(event, payload) from a Lua world/match script sends
 %% Event as a binary. Before the fix, websocket_info/2's world_event and
 %% match_event clauses were guarded `when is_atom(Event)` only, so a binary
@@ -43,3 +47,72 @@ match_event_atom_name_still_works_test() ->
 world_event_other_type_is_ignored_test() ->
     Msg = {asobi_message, {world_event, 123, #{}}},
     ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})).
+
+%% #303: a script-supplied binary name still reaches the wire when it's
+%% valid ASCII, unreserved, and within the size cap — the happy path the
+%% hardening must not regress.
+world_event_valid_binary_name_still_works_test() ->
+    Msg = {asobi_message, {world_event, ~"pong", #{}}},
+    {reply, {text, Frame}, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertMatch(#{~"type" := ~"world.pong"}, json:decode(iolist_to_binary(Frame))).
+
+%% #303 finding 1: a non-ASCII (here, invalid-UTF-8) event name must not
+%% crash json:encode/1 inside the caller's process — it is dropped with a
+%% logged warning instead of producing a frame or a crash.
+world_event_non_ascii_name_is_rejected_and_logged_test() ->
+    ok = install_log_capture(),
+    BadName = <<"evt", 255>>,
+    Msg = {asobi_message, {world_event, BadName, #{}}},
+    ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})),
+    ?assertEqual(#{namespace => ~"world", reason => invalid_event_name}, await_rejection()),
+    ok = remove_log_capture().
+
+%% #303: an oversized name is dropped rather than silently truncated or
+%% forwarded — same log-not-crash contract as the non-ASCII case.
+world_event_oversized_name_is_rejected_and_logged_test() ->
+    ok = install_log_capture(),
+    TooLong = list_to_binary(lists:duplicate(65, $a)),
+    Msg = {asobi_message, {world_event, TooLong, #{}}},
+    ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})),
+    ?assertEqual(#{namespace => ~"world", reason => invalid_event_name}, await_rejection()),
+    ok = remove_log_capture().
+
+%% #303 finding 2: a name equal to a reserved library event name must be
+%% dropped, not forwarded as a byte-identical forged frame.
+world_event_reserved_name_is_rejected_and_logged_test() ->
+    ok = install_log_capture(),
+    Msg = {asobi_message, {world_event, ~"tick", #{}}},
+    ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})),
+    ?assertEqual(#{namespace => ~"world", reason => reserved_event_name}, await_rejection()),
+    ok = remove_log_capture().
+
+match_event_reserved_name_is_rejected_and_logged_test() ->
+    ok = install_log_capture(),
+    Msg = {asobi_message, {match_event, ~"state", #{}}},
+    ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})),
+    ?assertEqual(#{namespace => ~"match", reason => reserved_event_name}, await_rejection()),
+    ok = remove_log_capture().
+
+%% --- log capture helpers ---
+
+install_log_capture() ->
+    logger:add_handler(?MODULE, ?MODULE, #{level => warning, config => #{pid => self()}}).
+
+remove_log_capture() ->
+    logger:remove_handler(?MODULE).
+
+%% logger_handler callback: forwards only the rejection report this test
+%% suite cares about to the installing test process, filtering out any
+%% unrelated warning-level log traffic from the rest of the system.
+log(#{msg := {report, #{msg := ~"game_broadcast_rejected"} = Report}}, #{config := #{pid := Pid}}) ->
+    Pid ! {game_broadcast_rejected, maps:with([namespace, reason], Report)},
+    ok;
+log(_Event, _Config) ->
+    ok.
+
+await_rejection() ->
+    receive
+        {game_broadcast_rejected, Report} -> Report
+    after 1000 ->
+        error(timeout_waiting_for_rejection_log)
+    end.
