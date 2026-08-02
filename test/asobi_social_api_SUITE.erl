@@ -12,7 +12,9 @@
     chat_history_with_messages/1,
     chat_history_non_member_forbidden/1,
     chat_history_dm_non_participant_forbidden/1,
-    chat_history_dm_participant_allowed/1
+    chat_history_dm_participant_allowed/1,
+    room_channel_member_authorized/1,
+    room_channel_non_member_rejected/1
 ]).
 
 all() -> [{group, groups_api}, {group, chat_api}].
@@ -27,7 +29,9 @@ groups() ->
             chat_history_with_messages,
             chat_history_non_member_forbidden,
             chat_history_dm_non_participant_forbidden,
-            chat_history_dm_participant_allowed
+            chat_history_dm_participant_allowed,
+            room_channel_member_authorized,
+            room_channel_non_member_rejected
         ]}
     ].
 
@@ -234,4 +238,29 @@ chat_history_dm_participant_allowed(Config) ->
         Config
     ),
     ?assertStatus(200, Resp),
+    Config.
+
+%% Regression for #295: `room:<GroupId>` is the channel id shape
+%% `asobi_ws_handler:validate_channel_id/1` accepts for group chat, but
+%% `asobi_chat_acl:classify/1` was matching the literal "room:<uuid>" as
+%% the group id against `group_members.group_id` (a uuid column), so it
+%% never matched and every member was rejected. A member must authorize.
+%%
+%% Use player1 (the group creator): player2 already left the group in
+%% the earlier `leave_group` test case, and both groups share init_per_suite
+%% fixtures, so player1 is the only membership guaranteed still live here.
+room_channel_member_authorized(Config) ->
+    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
+    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
+    RoomChannel = <<"room:", GroupId/binary>>,
+    ?assert(asobi_chat_acl:authorized(RoomChannel, P1Id)),
+    Config.
+
+%% Regression for #295: a non-member must still be rejected once the
+%% `room:` prefix is stripped correctly (closed by default).
+room_channel_non_member_rejected(Config) ->
+    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
+    {player3_id, P3Id} = lists:keyfind(player3_id, 1, Config),
+    RoomChannel = <<"room:", GroupId/binary>>,
+    ?assertNot(asobi_chat_acl:authorized(RoomChannel, P3Id)),
     Config.

@@ -7,7 +7,14 @@ Channel ID schemes:
   world:<WorldId>            - must currently be joined to the world
   zone:<WorldId>:<X>,<Y>     - must currently be joined to the world
   prox:<WorldId>:<X>,<Y>     - must currently be joined to the world
+  room:<GroupId>             - the `room:` prefix is stripped; must be a
+                                member of the group named by GroupId
   <anything else>            - treated as a group_id; must be a group member
+
+A `room:` channel naming a group id that does not exist is closed, not an
+open public lobby: `is_group_member/2` finds no rows and `authorized/2`
+returns `false`, matching the closed-by-default posture of every other
+channel scheme here.
 
 Shared by `asobi_chat_controller` (HTTP history) and `asobi_ws_handler`
 (WebSocket `chat.join` / `chat.send`). Keeping a single source of truth
@@ -39,6 +46,8 @@ classify(<<"zone:", Rest/binary>>) ->
     {world, take_until_colon(Rest)};
 classify(<<"prox:", Rest/binary>>) ->
     {world, take_until_colon(Rest)};
+classify(<<"room:", GroupId/binary>>) when byte_size(GroupId) > 0 ->
+    {group, GroupId};
 classify(ChannelId) ->
     {group, ChannelId}.
 
