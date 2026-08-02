@@ -39,7 +39,11 @@ cleanup(_) ->
 broadcast_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"per-player path delivers match_state per player", fun per_player_path/0},
-        {"shared path delivers match_state_raw with same binary", fun shared_path/0}
+        {"shared path delivers match_state_raw with same binary", fun shared_path/0},
+        {"#304: oversized game.broadcast payload is not fanned out to players",
+            fun oversized_broadcast_rejected/0},
+        {"#304: normal-size game.broadcast payload is still delivered",
+            fun normal_broadcast_delivered/0}
     ]}.
 
 per_player_path() ->
@@ -77,6 +81,36 @@ shared_path() ->
         _ ->
             ?assert(false)
     end,
+    stop(Pid).
+
+%% #304: ?WS_MAX_PAYLOAD_BYTES caps inbound frames but nothing capped what
+%% game.broadcast fanned out to every player in the match - a large payload
+%% multiplied egress bandwidth and per-socket buffer memory by player count.
+%% broadcast_match_event/3 must reject an oversized payload instead of
+%% fanning it out.
+oversized_broadcast_rejected() ->
+    ets:delete_all_objects(?SENT_TAB),
+    Pid = start_match(asobi_test_game),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    ets:delete_all_objects(?SENT_TAB),
+    HugePayload = #{data => binary:copy(~"a", 70000)},
+    asobi_match_server:broadcast_event(Pid, ~"huge", HugePayload),
+    timer:sleep(50),
+    Sent = ets:tab2list(?SENT_TAB),
+    MatchEvents = [X || X = {_, {match_event, ~"huge", _}} <- Sent],
+    ?assertEqual([], MatchEvents),
+    stop(Pid).
+
+normal_broadcast_delivered() ->
+    ets:delete_all_objects(?SENT_TAB),
+    Pid = start_match(asobi_test_game),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    ets:delete_all_objects(?SENT_TAB),
+    asobi_match_server:broadcast_event(Pid, ~"small", #{msg => ~"hi"}),
+    timer:sleep(50),
+    Sent = ets:tab2list(?SENT_TAB),
+    MatchEvents = [X || X = {_, {match_event, ~"small", _}} <- Sent],
+    ?assert(length(MatchEvents) >= 1),
     stop(Pid).
 
 %% --- Helpers ---

@@ -45,6 +45,11 @@ the place to put callback hardening.
 -define(DEFAULT_MAX_PLAYERS, 10).
 -define(WAITING_TIMEOUT, 60000).
 -define(STATE_TABLE, asobi_match_state).
+%% #304: mirrors asobi_ws_handler's ?WS_MAX_PAYLOAD_BYTES. game.broadcast's
+%% payload is fanned out to every player in the match, so an unbounded
+%% payload multiplies egress bandwidth and per-socket buffer memory by
+%% player count; bound it the same way the inbound frame is bounded.
+-define(MAX_BROADCAST_PAYLOAD_BYTES, 65536).
 
 %% --- Public API ---
 
@@ -584,13 +589,36 @@ apply_inputs(Mod, [{PlayerId, Input} | Rest], GS) ->
             apply_inputs(Mod, Rest, GS)
     end.
 
-broadcast_match_event(Event, Payload, #{players := Players}) ->
-    maps:foreach(
-        fun(PlayerId, _Meta) ->
-            asobi_presence:send(PlayerId, {match_event, Event, Payload})
-        end,
-        Players
-    ).
+broadcast_match_event(Event, Payload, #{players := Players, match_id := MatchId}) ->
+    case payload_within_limit(Payload) of
+        true ->
+            maps:foreach(
+                fun(PlayerId, _Meta) ->
+                    asobi_presence:send(PlayerId, {match_event, Event, Payload})
+                end,
+                Players
+            );
+        false ->
+            logger:warning(#{
+                msg => ~"game_broadcast_rejected",
+                namespace => ~"match",
+                reason => ~"payload_too_large",
+                match_id => MatchId
+            })
+    end.
+
+%% #304: measured on the encoded wire form (same unit ?WS_MAX_PAYLOAD_BYTES
+%% bounds inbound), not the raw Erlang term — a small term can still encode
+%% to an oversized JSON payload. An unencodable payload is rejected too,
+%% same as an oversized one, rather than crashing every subscriber's
+%% json:encode/1 downstream in asobi_ws_handler.
+-spec payload_within_limit(map()) -> boolean().
+payload_within_limit(Payload) ->
+    try iolist_size(json:encode(Payload)) of
+        Size -> Size =< ?MAX_BROADCAST_PAYLOAD_BYTES
+    catch
+        _:_ -> false
+    end.
 
 broadcast_state(#{players := Players, game_module := Mod, game_state := GS}) ->
     case erlang:function_exported(Mod, get_state, 1) of

@@ -97,7 +97,11 @@ world_server_test_() ->
         {"reconnect with no live session returns an error, not a crash",
             fun reconnect_with_no_live_session_returns_error/0},
         {"a failed reconnect leaves the disconnected grace entry intact",
-            fun failed_reconnect_leaves_grace_intact/0}
+            fun failed_reconnect_leaves_grace_intact/0},
+        {"#304: oversized game.broadcast payload is not fanned out to players",
+            fun broadcast_oversized_payload_is_rejected/0},
+        {"#304: normal-size game.broadcast payload is still delivered",
+            fun broadcast_normal_payload_is_delivered/0}
     ]}.
 
 starts_running() ->
@@ -593,3 +597,45 @@ pos_to_zone_clamps_both_ends_test() ->
     ?assertEqual({2, 2}, asobi_world_server:pos_to_zone({299.0, 299.0}, 100, 3)),
     ?assertEqual({2, 2}, asobi_world_server:pos_to_zone({1.0e9, 1.0e9}, 100, 3)),
     ?assertEqual({0, 0}, asobi_world_server:pos_to_zone({999.0, 999.0}, 100, 1)).
+
+%% #304: ?WS_MAX_PAYLOAD_BYTES caps inbound frames but nothing capped what
+%% game.broadcast fanned out to every player in the world - a large payload
+%% multiplied egress bandwidth and per-socket buffer memory by player count.
+%% broadcast_world_event/3 must reject an oversized payload instead of
+%% fanning it out.
+broadcast_oversized_payload_is_rejected() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    ok = asobi_world_server:join(Pid, ~"p1"),
+    Self = self(),
+    meck:expect(asobi_presence, send, fun(PlayerId, Msg) ->
+        Self ! {sent, PlayerId, Msg},
+        ok
+    end),
+    HugePayload = #{data => binary:copy(~"a", 70000)},
+    gen_statem:cast(Pid, {broadcast_event, ~"huge", HugePayload}),
+    timer:sleep(50),
+    Received = flush_sent(),
+    ?assertEqual([], [M || {sent, _, {world_event, ~"huge", _}} = M <- Received]),
+    meck:expect(asobi_presence, send, fun(_PlayerId, _Msg) -> ok end),
+    stop_world(Ctx).
+
+broadcast_normal_payload_is_delivered() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    ok = asobi_world_server:join(Pid, ~"p1"),
+    Self = self(),
+    meck:expect(asobi_presence, send, fun(PlayerId, Msg) ->
+        Self ! {sent, PlayerId, Msg},
+        ok
+    end),
+    gen_statem:cast(Pid, {broadcast_event, ~"small", #{msg => ~"hi"}}),
+    timer:sleep(50),
+    Received = flush_sent(),
+    ?assert(length([M || {sent, _, {world_event, ~"small", _}} = M <- Received]) >= 1),
+    meck:expect(asobi_presence, send, fun(_PlayerId, _Msg) -> ok end),
+    stop_world(Ctx).
+
+flush_sent() ->
+    receive
+        {sent, _, _} = M -> [M | flush_sent()]
+    after 0 -> []
+    end.
