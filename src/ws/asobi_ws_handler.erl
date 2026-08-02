@@ -152,8 +152,14 @@ websocket_info({asobi_message, {match_state, MatchState}}, State) ->
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {match_state_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
     {reply, {text, PreEncoded}, State};
-websocket_info({asobi_message, {match_event, Event, Payload}}, State) when is_atom(Event) ->
-    Type = iolist_to_binary([~"match.", atom_to_binary(Event)]),
+websocket_info({asobi_message, {match_event, Event, Payload}}, State) when
+    is_atom(Event); is_binary(Event)
+->
+    %% #297: asobi_match_server:broadcast_event/3 accepts a binary event
+    %% name (Lua's game.broadcast never turns client/script-influenced
+    %% names into atoms — atom_to_binary here, never binary_to_atom).
+    Name = event_name_binary(Event),
+    Type = iolist_to_binary([~"match.", Name]),
     Reply = encode_reply(undefined, Type, Payload),
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {zone_delta_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
@@ -167,8 +173,17 @@ websocket_info({asobi_message, {terrain_chunk, {CX, CY}, Data}}, State) when is_
         data => base64:encode(Data)
     }),
     {reply, {text, Reply}, State};
-websocket_info({asobi_message, {world_event, Event, Payload}}, State) when is_atom(Event) ->
-    Type = iolist_to_binary([~"world.", atom_to_binary(Event)]),
+websocket_info({asobi_message, {world_event, Event, Payload}}, State) when
+    is_atom(Event); is_binary(Event)
+->
+    %% #297: a Lua world script's game.broadcast(event, payload) sends Event
+    %% as a binary via asobi_lua_api:fun_broadcast/1 ->
+    %% asobi_match_server:broadcast_event/3 -> asobi_world_server -> here.
+    %% The old is_atom-only guard silently dropped every such frame. Convert
+    %% atom->binary here at the socket only; never binary_to_atom on a
+    %% client/Lua-influenced name (atom-table exhaustion risk).
+    Name = event_name_binary(Event),
+    Type = iolist_to_binary([~"world.", Name]),
     Reply = encode_reply(undefined, Type, Payload),
     {reply, {text, Reply}, State};
 websocket_info({chat_message, ChannelId, Msg}, State) when is_map(Msg) ->
@@ -802,6 +817,12 @@ encode_reply(Cid, Type, Payload) ->
     json:encode(Msg).
 
 to_reason_binary(R) when is_atom(R) -> atom_to_binary(R, utf8).
+
+%% #297: normalizes a match/world event name to a binary for the wire
+%% `Type` field. Atom->binary only — never binary_to_atom on a
+%% client/Lua-influenced event name (atom-table exhaustion risk).
+event_name_binary(Event) when is_atom(Event) -> atom_to_binary(Event);
+event_name_binary(Event) when is_binary(Event) -> Event.
 
 %% F-16: chat.join must require a small, namespaced channel id so an
 %% attacker can't spawn unbounded chat channel gen_servers via WS.
