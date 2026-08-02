@@ -1,5 +1,7 @@
 -module(asobi_storage_controller).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([list_saves/1, get_save/1, put_save/1]).
 -export([get_storage/1, put_storage/1, delete_storage/1, list_storage/1]).
 
@@ -81,20 +83,46 @@ put_save(
 
 %% --- Generic Storage ---
 
+%% asobi#307: `asobi_storage:indexes/0` maintains two distinct partial-unique
+%% namespaces - a global row (`player_id IS NULL`, written by Lua's
+%% `game.storage.set`) and per-player rows (`player_id IS NOT NULL`). The
+%% HTTP `/storage/:collection/:key` endpoints only ever create and act on
+%% per-player rows (see put_storage_checked/6's insert, and the SUITE
+%% comment on put_storage_per_player_keys_dont_collide/1) - a shared object
+%% owned by whoever wrote it first, gated by the owner/public
+%% read_perm/write_perm ACL. Every query below must exclude the global
+%% namespace explicitly, or a global Lua row and a player's HTTP row can
+%% both match the same collection+key and the result stops being the single
+%% row these ACL-based case clauses assume.
+-define(PLAYER_SCOPE, {player_id, is_not_nil}).
+
 -spec get_storage(cowboy_req:req()) -> {json, map()} | {status, integer()}.
 get_storage(
     #{bindings := #{~"collection" := Col, ~"key" := Key}, auth_data := #{player_id := PlayerId}} =
         _Req
 ) ->
     Q = kura_query:where(
-        kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
-        {key, Key}
+        kura_query:where(
+            kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
+            {key, Key}
+        ),
+        ?PLAYER_SCOPE
     ),
     case asobi_repo:all(Q) of
-        {ok, [#{read_perm := ~"public"} = Obj]} -> {json, Obj};
-        {ok, [#{read_perm := ~"owner", player_id := PlayerId} = Obj]} -> {json, Obj};
-        {ok, [_]} -> {status, 403};
-        {ok, []} -> {status, 404}
+        {ok, [#{read_perm := ~"public"} = Obj]} ->
+            {json, Obj};
+        {ok, [#{read_perm := ~"owner", player_id := PlayerId} = Obj]} ->
+            {json, Obj};
+        {ok, [_]} ->
+            {status, 403};
+        {ok, []} ->
+            {status, 404};
+        {ok, [_, _ | _] = Rows} ->
+            log_storage_invariant_violation(Col, Key, length(Rows)),
+            {status, 500};
+        {error, Reason} ->
+            log_storage_query_failed(Col, Key, Reason),
+            {status, 500}
     end.
 
 -spec put_storage(cowboy_req:req()) ->
@@ -132,8 +160,11 @@ put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm) ->
             {json, 400, #{}, #{error => ~"invalid_perm"}};
         true ->
             Q = kura_query:where(
-                kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
-                {key, Key}
+                kura_query:where(
+                    kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
+                    {key, Key}
+                ),
+                ?PLAYER_SCOPE
             ),
             case asobi_repo:all(Q) of
                 {ok, [#{write_perm := ~"owner", player_id := PlayerId, version := V} = Existing]} ->
@@ -177,7 +208,13 @@ put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm) ->
                         [collection, key, player_id, value, version, read_perm, write_perm]
                     ),
                     {ok, Created} = asobi_repo:insert(CS),
-                    {json, 200, #{}, Created}
+                    {json, 200, #{}, Created};
+                {ok, [_, _ | _] = Rows} ->
+                    log_storage_invariant_violation(Col, Key, length(Rows)),
+                    {json, 500, #{}, #{error => ~"storage_conflict"}};
+                {error, Reason} ->
+                    log_storage_query_failed(Col, Key, Reason),
+                    {json, 500, #{}, #{error => ~"storage_query_failed"}}
             end
     end.
 
@@ -187,8 +224,11 @@ delete_storage(
         _Req
 ) ->
     Q = kura_query:where(
-        kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
-        {key, Key}
+        kura_query:where(
+            kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
+            {key, Key}
+        ),
+        ?PLAYER_SCOPE
     ),
     case asobi_repo:all(Q) of
         {ok, [#{write_perm := ~"owner", player_id := PlayerId} = Obj]} ->
@@ -200,7 +240,13 @@ delete_storage(
         {ok, [_]} ->
             {status, 403};
         {ok, []} ->
-            {status, 404}
+            {status, 404};
+        {ok, [_, _ | _] = Rows} ->
+            log_storage_invariant_violation(Col, Key, length(Rows)),
+            {status, 500};
+        {error, Reason} ->
+            log_storage_query_failed(Col, Key, Reason),
+            {status, 500}
     end.
 
 -spec list_storage(cowboy_req:req()) -> {json, map()}.
@@ -225,6 +271,28 @@ list_storage(
     {json, #{objects => Objects}}.
 
 %% --- Internal ---
+
+%% Should be unreachable now that every query above carries ?PLAYER_SCOPE
+%% (at most one player-owned row can match a given collection+key), but
+%% must not crash the process if it somehow still happens - log it as the
+%% invariant violation it is instead.
+-spec log_storage_invariant_violation(binary(), binary(), pos_integer()) -> ok.
+log_storage_invariant_violation(Col, Key, RowCount) ->
+    ?LOG_ERROR(#{
+        event => storage_multi_row_invariant_violation,
+        collection => Col,
+        key => Key,
+        row_count => RowCount
+    }).
+
+-spec log_storage_query_failed(binary(), binary(), term()) -> ok.
+log_storage_query_failed(Col, Key, Reason) ->
+    ?LOG_ERROR(#{
+        event => storage_query_failed,
+        collection => Col,
+        key => Key,
+        reason => Reason
+    }).
 
 -spec data_within_limit(dynamic()) -> boolean().
 data_within_limit(Data) ->
