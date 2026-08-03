@@ -1,5 +1,10 @@
 -module(asobi_storage_controller).
 
+%% This controller is the worked example for the shared error object: it
+%% returns `{asobi_error, Code}` rather than a flat `#{error => Binary}` body
+%% or a bare `{status, N}` with no body at all. The other controllers still
+%% use their own shapes and are converted in a follow-up. See `asobi_error`.
+
 -include_lib("kernel/include/logger.hrl").
 
 -export([list_saves/1, get_save/1, put_save/1]).
@@ -22,7 +27,7 @@ list_saves(#{auth_data := #{player_id := PlayerId}} = _Req) ->
     {ok, Saves} = asobi_repo:all(Q),
     {json, #{saves => [maps:with([slot, version, updated_at], S) || S <- Saves]}}.
 
--spec get_save(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec get_save(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 get_save(#{bindings := #{~"slot" := Slot}, auth_data := #{player_id := PlayerId}} = _Req) ->
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_cloud_save), {player_id, PlayerId}),
@@ -30,17 +35,21 @@ get_save(#{bindings := #{~"slot" := Slot}, auth_data := #{player_id := PlayerId}
     ),
     case asobi_repo:all(Q) of
         {ok, [Save]} -> {json, Save};
-        {ok, []} -> {status, 404}
+        {ok, []} -> {asobi_error, ~"save.not_found"}
     end.
 
--spec put_save(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec put_save(cowboy_req:req()) ->
+    {json, map()}
+    | {json, integer(), map(), map()}
+    | {asobi_error, asobi_error:code()}
+    | {asobi_error, asobi_error:code(), asobi_error:details()}.
 put_save(
     #{bindings := #{~"slot" := Slot}, json := Params, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_map(Params), is_binary(PlayerId) ->
     Data = maps:get(~"data", Params, #{}),
     case data_within_limit(Data) of
         false ->
-            {json, 413, #{}, #{error => ~"save_data_too_large"}};
+            {asobi_error, ~"save.too_large"};
         true ->
             ClientVersion = maps:get(~"version", Params, undefined),
             Q = kura_query:where(
@@ -49,7 +58,7 @@ put_save(
             ),
             case asobi_repo:all(Q) of
                 {ok, [#{version := V}]} when ClientVersion =/= undefined, ClientVersion =/= V ->
-                    {json, 409, #{}, #{error => ~"version_conflict", current_version => V}};
+                    {asobi_error, ~"save.version_conflict", #{current_version => V}};
                 {ok, [#{version := V} = Existing]} ->
                     CS = kura_changeset:cast(
                         asobi_cloud_save,
@@ -62,7 +71,7 @@ put_save(
                 {ok, []} ->
                     case slots_under_cap(PlayerId) of
                         false ->
-                            {json, 409, #{}, #{error => ~"slot_limit_reached"}};
+                            {asobi_error, ~"save.slot_limit_reached"};
                         true ->
                             CS = kura_changeset:cast(
                                 asobi_cloud_save,
@@ -96,7 +105,7 @@ put_save(
 %% row these ACL-based case clauses assume.
 -define(PLAYER_SCOPE, {player_id, is_not_nil}).
 
--spec get_storage(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec get_storage(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 get_storage(
     #{bindings := #{~"collection" := Col, ~"key" := Key}, auth_data := #{player_id := PlayerId}} =
         _Req
@@ -114,19 +123,19 @@ get_storage(
         {ok, [#{read_perm := ~"owner", player_id := PlayerId} = Obj]} ->
             {json, Obj};
         {ok, [_]} ->
-            {status, 403};
+            {asobi_error, ~"storage.forbidden"};
         {ok, []} ->
-            {status, 404};
+            {asobi_error, ~"storage.not_found"};
         {ok, [_, _ | _] = Rows} ->
             log_storage_invariant_violation(Col, Key, length(Rows)),
-            {status, 500};
+            {asobi_error, ~"storage.conflict"};
         {error, Reason} ->
             log_storage_query_failed(Col, Key, Reason),
-            {status, 500}
+            {asobi_error, ~"storage.query_failed"}
     end.
 
 -spec put_storage(cowboy_req:req()) ->
-    {json, map()} | {json, integer(), map(), map()} | {status, integer()}.
+    {json, map()} | {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 put_storage(
     #{
         bindings := #{~"collection" := Col, ~"key" := Key},
@@ -144,20 +153,20 @@ put_storage(
     %% arbitrary blob under the global ceiling.
     case data_within_limit(Value) of
         false ->
-            {json, 413, #{}, #{error => ~"storage_value_too_large"}};
+            {asobi_error, ~"storage.value_too_large"};
         true ->
             put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm)
     end;
 put_storage(_Req) ->
-    {status, 400}.
+    {asobi_error, ~"storage.invalid_request"}.
 
 -spec put_storage_checked(
     dynamic(), dynamic(), dynamic(), dynamic(), binary(), binary()
-) -> {json, map()} | {json, integer(), map(), map()} | {status, integer()}.
+) -> {json, map()} | {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm) ->
     case valid_perm(ReadPerm) andalso valid_perm(WritePerm) of
         false ->
-            {json, 400, #{}, #{error => ~"invalid_perm"}};
+            {asobi_error, ~"storage.invalid_perm"};
         true ->
             Q = kura_query:where(
                 kura_query:where(
@@ -191,7 +200,7 @@ put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm) ->
                     {ok, Updated} = asobi_repo:update(CS),
                     {json, Updated};
                 {ok, [_]} ->
-                    {status, 403};
+                    {asobi_error, ~"storage.forbidden"};
                 {ok, []} ->
                     CS = kura_changeset:cast(
                         asobi_storage,
@@ -211,14 +220,14 @@ put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm) ->
                     {json, 200, #{}, Created};
                 {ok, [_, _ | _] = Rows} ->
                     log_storage_invariant_violation(Col, Key, length(Rows)),
-                    {json, 500, #{}, #{error => ~"storage_conflict"}};
+                    {asobi_error, ~"storage.conflict"};
                 {error, Reason} ->
                     log_storage_query_failed(Col, Key, Reason),
-                    {json, 500, #{}, #{error => ~"storage_query_failed"}}
+                    {asobi_error, ~"storage.query_failed"}
             end
     end.
 
--spec delete_storage(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec delete_storage(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 delete_storage(
     #{bindings := #{~"collection" := Col, ~"key" := Key}, auth_data := #{player_id := PlayerId}} =
         _Req
@@ -238,15 +247,15 @@ delete_storage(
             _ = asobi_repo:delete(asobi_storage, Obj),
             {json, #{success => true}};
         {ok, [_]} ->
-            {status, 403};
+            {asobi_error, ~"storage.forbidden"};
         {ok, []} ->
-            {status, 404};
+            {asobi_error, ~"storage.not_found"};
         {ok, [_, _ | _] = Rows} ->
             log_storage_invariant_violation(Col, Key, length(Rows)),
-            {status, 500};
+            {asobi_error, ~"storage.conflict"};
         {error, Reason} ->
             log_storage_query_failed(Col, Key, Reason),
-            {status, 500}
+            {asobi_error, ~"storage.query_failed"}
     end.
 
 -spec list_storage(cowboy_req:req()) -> {json, map()}.

@@ -210,7 +210,34 @@ most one per 5 seconds per connection) is answered with an error event so
 the client can tell input is going nowhere:
 
 ```json
-{"type": "error", "payload": {"type": "match.input", "reason": "not_in_match"}}
+{"type": "error", "payload": {"type": "match.input", "reason": "not_in_match", "error": {"code": "match.not_in_match", "message": "This connection is not joined to a match.", "details": {}}}}
+```
+
+### `error` (server push)
+
+Every failure on this socket is an `error` frame, carrying the `cid` of the
+request that caused it when there was one:
+
+```json
+{"type": "error", "cid": "c-17", "payload": {"reason": "world_not_found", "error": {"code": "world.not_found", "message": "No live world exists with this id.", "details": {}}}}
+```
+
+- `error.code` is the contract - stable, machine-readable, and namespaced by
+  domain (`match.`, `world.`, `chat.`, `matchmaker.`) or bare when it is
+  cross-cutting (`rate_limited`, `unauthenticated`). Branch on this. It is the
+  same code set the [REST API](rest-api.md#errors) returns.
+- `error.message` is prose for a human reading a log. Do not parse it.
+- `error.details` is **always** an object, `{}` when there is nothing to add.
+- `reason` is the original, flatter dialect. It is unchanged and still sent, so
+  existing clients keep working, but it is not namespaced and two unrelated
+  failures can share a string. Prefer `error.code`.
+
+A reason with no code of its own yet - including anything a Lua game script
+returns from a rejected join - arrives as `ws.request_failed` with the raw
+string in `details`, so script-supplied text can never mint a code:
+
+```json
+{"type": "error", "payload": {"reason": "party_is_full", "error": {"code": "ws.request_failed", "message": "The request failed. See `details.reason`.", "details": {"reason": "party_is_full"}}}}
 ```
 
 ### `game.error` (server push)

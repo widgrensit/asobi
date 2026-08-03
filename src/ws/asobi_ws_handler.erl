@@ -159,7 +159,7 @@ idle_auth_timeout_ms() ->
 websocket_handle({text, Raw}, State) ->
     case byte_size(Raw) > ?WS_MAX_PAYLOAD_BYTES of
         true ->
-            Reply = encode_reply(undefined, ~"error", #{reason => ~"payload_too_large"}),
+            Reply = encode_error(undefined, ~"payload_too_large"),
             {reply, {text, Reply}, State};
         false ->
             case check_ws_rate_limit(State) of
@@ -169,17 +169,15 @@ websocket_handle({text, Raw}, State) ->
                             asobi_telemetry:ws_message_in(Type),
                             safe_handle_message(Msg, State1);
                         _ ->
-                            Reply = encode_reply(undefined, ~"error", #{
-                                reason => ~"invalid_message"
-                            }),
+                            Reply = encode_error(undefined, ~"invalid_message"),
                             {reply, {text, Reply}, State1}
                     catch
                         _:_ ->
-                            Reply = encode_reply(undefined, ~"error", #{reason => ~"invalid_json"}),
+                            Reply = encode_error(undefined, ~"invalid_json"),
                             {reply, {text, Reply}, State1}
                     end;
                 {rate_limited, State1} ->
-                    Reply = encode_reply(undefined, ~"error", #{reason => ~"rate_limited"}),
+                    Reply = encode_error(undefined, ~"rate_limited"),
                     {reply, {text, Reply}, State1}
             end
     end;
@@ -291,7 +289,7 @@ websocket_info({asobi_message, {script_error, Extension, Payload}}, State) when
         try
             encode_reply(undefined, ~"game.error", Body)
         catch
-            _:_ -> encode_reply(undefined, ~"error", #{reason => ~"internal"})
+            _:_ -> encode_error(undefined, ~"internal")
         end,
     {reply, {text, Reply}, State};
 websocket_info({session_revoked, Reason}, State) ->
@@ -375,7 +373,7 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
             State1 = cancel_idle_auth_timer(State),
             {reply, {text, Reply}, State1#{session => SessionPid, player_id => PlayerId}};
         {error, Reason} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
     end;
 handle_message(#{~"type" := ~"session.heartbeat"} = Msg, State) ->
@@ -437,7 +435,7 @@ handle_message(
                     asobi_chat_channel:send_message(ChannelId, PlayerId, Content),
                     {ok, State};
                 false ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => ~"not_authorized"}),
+                    Reply = encode_error(Cid, ~"not_authorized"),
                     {reply, {text, Reply}, State}
             end
     end;
@@ -453,7 +451,7 @@ handle_message(
             }),
             {reply, {text, Reply}, State};
         {error, Reason} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => to_reason_binary(Reason)}),
+            Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
     end;
 handle_message(
@@ -468,18 +466,18 @@ handle_message(
     %% third party cannot silently join `dm:<alice>:<bob>` and eavesdrop.
     case validate_channel_id(ChannelId) of
         false ->
-            Reply = encode_reply(Cid, ~"error", #{reason => ~"invalid_channel_id"}),
+            Reply = encode_error(Cid, ~"invalid_channel_id"),
             {reply, {text, Reply}, State};
         true ->
             case asobi_chat_acl:authorized(ChannelId, PlayerId) of
                 false ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => ~"not_authorized"}),
+                    Reply = encode_error(Cid, ~"not_authorized"),
                     {reply, {text, Reply}, State};
                 true ->
                     Joined = maps:get(joined_channels, State, #{}),
                     case map_size(Joined) >= ?MAX_JOINED_CHANNELS_PER_CONN of
                         true ->
-                            Reply = encode_reply(Cid, ~"error", #{reason => ~"too_many_channels"}),
+                            Reply = encode_error(Cid, ~"too_many_channels"),
                             {reply, {text, Reply}, State};
                         false ->
                             asobi_chat_channel:join(ChannelId, self()),
@@ -507,9 +505,7 @@ handle_message(
     Reply =
         case asobi_matchmaker:known_mode(Mode) of
             false ->
-                encode_reply(Cid, ~"error", #{
-                    type => ~"matchmaker.add", reason => ~"unknown_mode"
-                });
+                encode_error(Cid, ~"unknown_mode", #{type => ~"matchmaker.add"});
             true ->
                 case
                     asobi_matchmaker:add(PlayerId, #{
@@ -522,9 +518,7 @@ handle_message(
                             ticket_id => TicketId, status => ~"pending"
                         });
                     {error, queue_full} ->
-                        encode_reply(Cid, ~"error", #{
-                            type => ~"matchmaker.add", reason => ~"queue_full"
-                        })
+                        encode_error(Cid, ~"queue_full", #{type => ~"matchmaker.add"})
                 end
         end,
     {reply, {text, Reply}, State};
@@ -538,9 +532,7 @@ handle_message(
             ok ->
                 encode_reply(Cid, ~"matchmaker.removed", #{success => true});
             {error, Reason} ->
-                encode_reply(Cid, ~"error", #{
-                    type => ~"matchmaker.remove", reason => atom_to_binary(Reason, utf8)
-                })
+                encode_error(Cid, Reason, #{type => ~"matchmaker.remove"})
         end,
     {reply, {text, Reply}, State};
 handle_message(
@@ -563,17 +555,17 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     case asobi_match_server:whereis(MatchId) of
         error ->
-            Reply = encode_reply(Cid, ~"error", #{reason => ~"match_not_found"}),
+            Reply = encode_error(Cid, ~"match_not_found"),
             {reply, {text, Reply}, State};
         {ok, MatchPid} ->
             case check_join_rate(PlayerId) of
                 denied ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => ~"join_rate_limited"}),
+                    Reply = encode_error(Cid, ~"join_rate_limited"),
                     {reply, {text, Reply}, State};
                 allowed ->
                     case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
                         {error, CtxErr} ->
-                            Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
+                            Reply = encode_error(Cid, CtxErr),
                             {reply, {text, Reply}, State};
                         {ok, Ctx} ->
                             join_match_and_reply(Cid, MatchPid, PlayerId, Ctx, State)
@@ -603,7 +595,7 @@ handle_message(
         #{player_id := PlayerId} = SState ->
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => ~"not_in_match"}),
+                    Reply = encode_error(Cid, ~"not_in_match"),
                     {reply, {text, Reply}, State};
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
@@ -613,7 +605,7 @@ handle_message(
                             Reply = encode_reply(Cid, ~"vote.cast_ok", #{success => true}),
                             {reply, {text, Reply}, State};
                         {error, Reason} ->
-                            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+                            Reply = encode_error(Cid, Reason),
                             {reply, {text, Reply}, State}
                     end
             end
@@ -630,7 +622,7 @@ handle_message(
         #{player_id := PlayerId} = SState ->
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => ~"not_in_match"}),
+                    Reply = encode_error(Cid, ~"not_in_match"),
                     {reply, {text, Reply}, State};
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
@@ -639,7 +631,7 @@ handle_message(
                             Reply = encode_reply(Cid, ~"vote.veto_ok", #{success => true}),
                             {reply, {text, Reply}, State};
                         {error, Reason} ->
-                            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+                            Reply = encode_error(Cid, Reason),
                             {reply, {text, Reply}, State}
                     end
             end
@@ -663,7 +655,7 @@ handle_message(
             Reply = encode_reply(Cid, ~"world.list", #{worlds => Worlds}),
             {reply, {text, Reply}, State};
         {error, Reason} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
     end;
 handle_message(
@@ -677,7 +669,7 @@ handle_message(
             Reply = encode_reply(Cid, ~"match.list", #{matches => Matches}),
             {reply, {text, Reply}, State};
         {error, Reason} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
     end;
 handle_message(
@@ -689,7 +681,7 @@ handle_message(
         {ok, WorldPid, _Info} ->
             join_and_reply(Cid, WorldPid, PlayerId, State);
         {error, Reason} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
     end;
 handle_message(
@@ -701,7 +693,7 @@ handle_message(
         {ok, WorldPid, _Info} ->
             join_and_reply(Cid, WorldPid, PlayerId, State);
         {error, Reason} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
     end;
 handle_message(
@@ -711,17 +703,17 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     case asobi_world_server:whereis(WorldId) of
         error ->
-            Reply = encode_reply(Cid, ~"error", #{reason => ~"world_not_found"}),
+            Reply = encode_error(Cid, ~"world_not_found"),
             {reply, {text, Reply}, State};
         {ok, WorldPid} ->
             case check_join_rate(PlayerId) of
                 denied ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => ~"join_rate_limited"}),
+                    Reply = encode_error(Cid, ~"join_rate_limited"),
                     {reply, {text, Reply}, State};
                 allowed ->
                     case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
                         {error, CtxErr} ->
-                            Reply = encode_reply(Cid, ~"error", #{reason => CtxErr}),
+                            Reply = encode_error(Cid, CtxErr),
                             {reply, {text, Reply}, State};
                         {ok, Ctx} ->
                             join_and_reply(Cid, WorldPid, PlayerId, Ctx, State)
@@ -771,7 +763,7 @@ handle_message(#{~"type" := _Type} = Msg, State) ->
     %% structured-log pipeline. The client knows what it sent, so the
     %% reason alone is enough.
     Cid = maps:get(~"cid", Msg, undefined),
-    Reply = encode_reply(Cid, ~"error", #{reason => ~"unknown_type"}),
+    Reply = encode_error(Cid, ~"unknown_type"),
     {reply, {text, Reply}, State};
 handle_message(_Msg, State) ->
     {ok, State}.
@@ -802,7 +794,7 @@ safe_handle_message(Msg, State) ->
 
 reply_error(Msg, Reason, State) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+    Reply = encode_error(Cid, Reason),
     {reply, {text, Reply}, State}.
 
 %% asobi#193: joining is how a client reaches a roster and leaving is free,
@@ -826,7 +818,7 @@ join_match_and_reply(Cid, MatchPid, PlayerId, Ctx, State) ->
             Reply = encode_reply(Cid, ~"match.joined", Info),
             {reply, {text, Reply}, State};
         {error, Reason} ->
-            Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+            Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
     end.
 
@@ -840,7 +832,7 @@ join_and_reply(Cid, WorldPid, PlayerId, Ctx, #{session := SessionPid} = State) w
         {ok, ExistingPid} when ExistingPid =/= WorldPid ->
             %% Player is already in a different (live) world. Force them to
             %% world.leave first; otherwise they'd appear in two worlds at once.
-            Reply = encode_reply(Cid, ~"error", #{reason => ~"already_in_world"}),
+            Reply = encode_error(Cid, ~"already_in_world"),
             {reply, {text, Reply}, State};
         _ ->
             %% join/3 (vs join/2) sets zone_pid synchronously in the player_session
@@ -852,7 +844,7 @@ join_and_reply(Cid, WorldPid, PlayerId, Ctx, #{session := SessionPid} = State) w
                     Reply = encode_reply(Cid, ~"world.joined", Info),
                     {reply, {text, Reply}, State};
                 {error, Reason} ->
-                    Reply = encode_reply(Cid, ~"error", #{reason => Reason}),
+                    Reply = encode_error(Cid, Reason),
                     {reply, {text, Reply}, State}
             end
     end.
@@ -900,9 +892,7 @@ not_in_match_hint(State) ->
     Last = maps:get(not_in_match_hint_at, State, 0),
     case Now - Last >= ?NOT_IN_MATCH_HINT_WINDOW_MS of
         true ->
-            Reply = encode_reply(undefined, ~"error", #{
-                type => ~"match.input", reason => ~"not_in_match"
-            }),
+            Reply = encode_error(undefined, ~"not_in_match", #{type => ~"match.input"}),
             {reply, {text, Reply}, State#{not_in_match_hint_at => Now}};
         false ->
             {ok, State}
@@ -928,7 +918,21 @@ encode_reply(Cid, Type, Payload) ->
         end,
     json:encode(Msg).
 
-to_reason_binary(R) when is_atom(R) -> atom_to_binary(R, utf8).
+%% Every error frame now carries both dialects. `reason` is the original
+%% WebSocket string and is unchanged, byte for byte, so existing clients keep
+%% working; `error` is the shared object (see `asobi_error`) that new clients
+%% and the ops/RPC surfaces branch on. One funnel, so a converted call site
+%% cannot drift back to the bare-`reason` shape.
+encode_error(Cid, Reason) ->
+    encode_error(Cid, Reason, #{}).
+
+encode_error(Cid, Reason, Extra) when is_map(Extra) ->
+    Bin = to_reason_binary(Reason),
+    Payload = maps:merge(Extra#{reason => Bin}, asobi_error:from_ws_reason(Bin)),
+    encode_reply(Cid, ~"error", Payload).
+
+to_reason_binary(R) when is_atom(R) -> atom_to_binary(R, utf8);
+to_reason_binary(R) when is_binary(R) -> R.
 
 -spec reserved_event_names() -> [binary()].
 reserved_event_names() -> ?RESERVED_EVENT_NAMES.

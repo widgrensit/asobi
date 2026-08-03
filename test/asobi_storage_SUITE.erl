@@ -137,6 +137,19 @@ save_version_conflict(Config) ->
         Config
     ),
     ?assertStatus(409, Resp),
+    %% The shared error object (asobi_error): a machine-readable, namespaced
+    %% `code` plus the one detail a client needs to resolve the conflict.
+    %% `details` is a map even when the flat shape carried nothing.
+    ?assertMatch(
+        #{
+            ~"error" := #{
+                ~"code" := ~"save.version_conflict",
+                ~"message" := _,
+                ~"details" := #{~"current_version" := 2}
+            }
+        },
+        nova_test:json(Resp)
+    ),
     Config.
 
 %% --- Generic Storage ---
@@ -168,7 +181,10 @@ put_storage_rejects_oversized_value(Config) ->
         Config
     ),
     ?assertStatus(413, Resp),
-    ?assertMatch(#{~"error" := ~"storage_value_too_large"}, nova_test:json(Resp)),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"storage.value_too_large", ~"details" := #{}}},
+        nova_test:json(Resp)
+    ),
     Config.
 
 get_storage(Config) ->
@@ -255,6 +271,11 @@ delete_storage(Config) ->
         Config
     ),
     ?assertStatus(404, Resp2),
+    %% A 404 used to be an empty body with nothing to branch on.
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"storage.not_found", ~"details" := #{}}},
+        nova_test:json(Resp2)
+    ),
     Config.
 
 storage_owner_permission(Config) ->
@@ -272,6 +293,10 @@ storage_owner_permission(Config) ->
         Config
     ),
     ?assertStatus(403, Resp),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"storage.forbidden", ~"details" := #{}}},
+        nova_test:json(Resp)
+    ),
     Config.
 
 %% Regression for https://github.com/widgrensit/asobi/issues/122:

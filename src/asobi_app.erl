@@ -6,6 +6,7 @@
 -spec start(application:start_type(), term()) -> {ok, pid()} | {error, term()}.
 start(_StartType, _StartArgs) ->
     setup_telemetry(),
+    asobi_error:register_handler(),
     register_lua_game_modes(),
     case kura_migrator:migrate(asobi_repo) of
         {ok, Applied} ->

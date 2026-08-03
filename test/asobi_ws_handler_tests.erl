@@ -168,15 +168,92 @@ script_error_carries_the_producing_extension_test() ->
     ).
 
 %% The defensive encode path must still degrade to an `error` frame rather
-%% than crashing the connection process.
+%% than crashing the connection process. Asserted on `reason` rather than the
+%% whole payload: the shared error object rides alongside it, and a test that
+%% pins every key would fail on an additive change that breaks nothing.
+%% Nothing of the unencodable payload may reach the client either way.
 script_error_unencodable_payload_degrades_test() ->
     Msg = {asobi_message, {script_error, #{~"message" => {not_json}}}},
     {reply, Frame, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
-    ?assertEqual(#{~"reason" => ~"internal"}, payload_of(~"error", Frame)).
+    Payload = payload_of(~"error", Frame),
+    ?assertEqual(~"internal", maps:get(~"reason", Payload)),
+    ?assertEqual(~"internal", maps:get(~"code", maps:get(~"error", Payload))),
+    ?assertEqual([~"error", ~"reason"], lists:sort(maps:keys(Payload))).
 
 payload_of(Type, {text, Raw}) ->
     #{~"type" := Type, ~"payload" := Payload} = json:decode(iolist_to_binary(Raw)),
     Payload.
+
+%% --- error frames carry both dialects ---
+
+%% The shared error object (asobi_error) is additive: `reason` stays exactly
+%% as it was so existing clients keep working, and `error` is added alongside
+%% it for anything that wants to branch on a code.
+oversized_frame_error_carries_reason_and_object_test() ->
+    Big = binary:copy(~"x", 65537),
+    {reply, {text, Frame}, _State} = asobi_ws_handler:websocket_handle({text, Big}, #{}),
+    ?assertMatch(
+        #{
+            ~"type" := ~"error",
+            ~"payload" := #{
+                ~"reason" := ~"payload_too_large",
+                ~"error" := #{
+                    ~"code" := ~"payload_too_large",
+                    ~"message" := _,
+                    ~"details" := #{}
+                }
+            }
+        },
+        decode(Frame)
+    ).
+
+invalid_json_error_carries_object_test() ->
+    {reply, {text, Frame}, _State} =
+        asobi_ws_handler:websocket_handle({text, ~"{not json"}, fresh_state()),
+    ?assertMatch(
+        #{~"payload" := #{~"reason" := ~"invalid_json", ~"error" := #{~"code" := ~"invalid_json"}}},
+        decode(Frame)
+    ).
+
+%% A reply to a request keeps its correlation id, and the error object rides
+%% next to the legacy reason rather than replacing it.
+unknown_type_error_keeps_cid_test() ->
+    Raw = iolist_to_binary(json:encode(#{~"type" => ~"nope.nope", ~"cid" => ~"c-1"})),
+    {reply, {text, Frame}, _State} =
+        asobi_ws_handler:websocket_handle({text, Raw}, fresh_state()),
+    ?assertMatch(
+        #{
+            ~"cid" := ~"c-1",
+            ~"payload" := #{
+                ~"reason" := ~"unknown_type",
+                ~"error" := #{~"code" := ~"unknown_type", ~"details" := #{}}
+            }
+        },
+        decode(Frame)
+    ).
+
+%% The interesting case: a legacy reason whose code is deliberately a
+%% different, namespaced string. `invalid_token` stays on the wire untouched
+%% while the code says `unauthenticated`.
+reason_and_code_may_differ_test() ->
+    Raw = iolist_to_binary(json:encode(#{~"type" => ~"session.connect", ~"payload" => #{}})),
+    {reply, {text, Frame}, _State} =
+        asobi_ws_handler:websocket_handle({text, Raw}, fresh_state()),
+    ?assertMatch(
+        #{
+            ~"payload" := #{
+                ~"reason" := ~"invalid_token",
+                ~"error" := #{~"code" := ~"unauthenticated"}
+            }
+        },
+        decode(Frame)
+    ).
+
+decode(Frame) ->
+    json:decode(iolist_to_binary(Frame)).
+
+fresh_state() ->
+    #{ws_msg_count => 0, ws_msg_window_start => erlang:system_time(millisecond)}.
 
 %% --- log capture helpers ---
 

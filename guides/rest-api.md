@@ -230,6 +230,8 @@ PUT    /api/v1/storage/:collection/:key        Write object
 DELETE /api/v1/storage/:collection/:key        Delete object
 ```
 
+These routes return the [error object](#errors) below on failure.
+
 ## Ops
 
 ```
@@ -300,6 +302,37 @@ extension registry exists; entries will have the same shape as `core`.
 > any authenticated player can read them, and their fields are held to exactly
 > what the public endpoints already expose. An operator capability model is
 > the follow-up.
+
+## Errors
+
+A failing request returns its HTTP status and one object:
+
+```json
+{"error": {"code": "storage.not_found", "message": "No object exists at this collection and key.", "details": {}}}
+```
+
+- `code` is the contract. It is stable, machine-readable, and namespaced by
+  domain (`storage.`, `save.`, `match.`, `world.`, `chat.`, `matchmaker.`) or
+  bare when it is cross-cutting (`rate_limited`, `internal`). Branch on this.
+- `message` is prose for a human reading a log. It may be reworded at any
+  time. Do not parse it.
+- `details` is **always** an object, `{}` when there is nothing to add, so no
+  client needs a null branch. A version conflict, for example, carries what
+  the client needs to retry:
+
+```json
+{"error": {"code": "save.version_conflict", "message": "The slot was written by another client.", "details": {"current_version": 4}}}
+```
+
+Codes are a closed set. A string supplied by a client or by a Lua game script
+never becomes a code; it arrives inside `details` instead.
+
+> #### Rollout {: .info}
+>
+> The storage and cloud-save routes above return this shape today. Every other
+> route still returns its older, flat body (`{"error": "some_string"}`) or an
+> empty body with only a status. Those are converted in a follow-up; until
+> then, branch on the HTTP status outside `/saves` and `/storage`.
 
 ## Next steps
 
