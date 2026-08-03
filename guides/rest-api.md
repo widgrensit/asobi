@@ -230,6 +230,77 @@ PUT    /api/v1/storage/:collection/:key        Write object
 DELETE /api/v1/storage/:collection/:key        Delete object
 ```
 
+## Ops
+
+```
+GET /api/v1/ops/players     Paginated player list
+GET /api/v1/ops/matches     Paginated match-record list
+GET /api/v1/ops/features    Installed feature set
+```
+
+The game-operations read plane, for a console rather than a game client. The
+lists differ from the ones above in three ways: they report a total, they
+accept a sort, and they page by offset.
+
+Every list returns the same envelope:
+
+```json
+{
+  "data": [ ... ],
+  "page": { "limit": 50, "offset": 0, "total": 137 }
+}
+```
+
+Parameters shared by `ops/players` and `ops/matches`:
+
+| Parameter | Meaning |
+| --- | --- |
+| `limit` | Rows per page. Default 50, clamped to 1-200. |
+| `page` | 1-based page number. Wins over `offset` when both are given. |
+| `offset` | Rows to skip. Clamped to 0-100000 and snapped down to a multiple of `limit`, so the `offset` in the response is the one the query ran with. |
+| `sort` | Field to sort by. Must be one of the fields listed below - anything else is **400**, never a silent fallback. |
+| `order` | `asc` (default) or `desc`. Anything else is **400**. |
+| `q` | Case-insensitive substring search. `%` and `_` are matched literally. |
+
+A malformed number is never an error: `?limit=abc` uses the default. A
+malformed *sort* always is, because ordering the wrong rows silently is worse
+than a 400.
+
+Sorts always end on `id`, so paging by offset cannot repeat or skip a row when
+the sort key has duplicates.
+
+`ops/players` sorts on `id`, `username`, `display_name`, `inserted_at`,
+`updated_at`, and searches username and display name. `ops/matches` sorts on
+`id`, `mode`, `status`, `started_at`, `finished_at`, `inserted_at`, filters on
+`mode` and `status`, and searches mode. Both return the same fields as their
+public counterparts - no roster, no credentials.
+
+`GET /api/v1/ops/features` reports what this deployment has installed:
+
+```json
+{
+  "data": {
+    "core": {
+      "name": "asobi",
+      "version": "0.46.0",
+      "capabilities": [{ "name": "guest_auth", "enabled": true }]
+    },
+    "extensions": []
+  }
+}
+```
+
+Capabilities report what is *configured*, not what is compiled in, and carry a
+boolean only - never the configured value. `extensions` is empty until an
+extension registry exists; entries will have the same shape as `core`.
+
+> #### Ops routes use player auth today {: .warning}
+>
+> These routes sit behind the same bearer check as the rest of `/api/v1`, so
+> any authenticated player can read them, and their fields are held to exactly
+> what the public endpoints already expose. An operator capability model is
+> the follow-up.
+
 ## Next steps
 
 - [WebSocket protocol](websocket-protocol.md) - the push side of the API.

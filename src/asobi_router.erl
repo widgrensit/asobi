@@ -178,6 +178,12 @@ api_routes() ->
             {~"/saves/:slot", fun asobi_storage_controller:get_save/1, #{methods => [get, options]}},
             {~"/saves/:slot", fun asobi_storage_controller:put_save/1, #{methods => [put, options]}},
 
+            %% Ops - read plane. Mounted on the existing player-scoped auth
+            %% plugin; the operator capability model is ADR 0007 (follow-up).
+            {~"/ops/players", fun asobi_ops_controller:players/1, #{methods => [get, options]}},
+            {~"/ops/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
+            {~"/ops/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}},
+
             %% Storage - Generic
             {~"/storage/:collection", fun asobi_storage_controller:list_storage/1, #{
                 methods => [get, options]

@@ -1,0 +1,170 @@
+-module(asobi_ops_params).
+-moduledoc """
+Query-string parsing for the ops read plane.
+
+Three rules, each of them load-bearing:
+
+* Numbers are parsed safely and clamped. `?limit=abc` must never reach
+  `binary_to_integer/1` (a `badarg` is a 500 and a free log-flood), and
+  `?limit=10000000` must never reach the database. Parsing goes through
+  `asobi_qs:integer/5`, which already fails soft to a default.
+* `order_by` is built from a per-endpoint allowlist of atoms and nothing else.
+  A user-supplied string reaching `order_by` is SQL injection, so an unknown
+  sort field is *rejected* rather than ignored - silently falling back to a
+  default would hide the mistake from the caller.
+* Every sort ends on a unique column. Offset pagination over a non-unique key
+  can return one row twice and skip another between pages, so `sort/3` appends
+  the primary key as a tie-breaker.
+
+`?page=N` and `?offset=N` both select a window. `page` wins when both are
+given. The offset returned is the one the query actually used - see `page/1`.
+""".
+
+-export([page/1, sort/3, like_pattern/2, cursor/1, encode_cursor/1]).
+
+-export_type([params/0, page_spec/0, sort_spec/0, sort_allowlist/0]).
+
+-type params() :: #{binary() => binary() | true}.
+-type page_spec() :: #{limit := pos_integer(), offset := non_neg_integer()}.
+-type sort_spec() :: [{atom(), asc | desc}].
+-type sort_allowlist() :: [{binary(), atom()}].
+
+-define(DEFAULT_LIMIT, 50).
+-define(MIN_LIMIT, 1).
+-define(MAX_LIMIT, 200).
+-define(MAX_OFFSET, 100000).
+-define(MAX_PAGE, 10000).
+-define(MAX_SEARCH_BYTES, 64).
+-define(MAX_CURSOR_BYTES, 128).
+
+-doc """
+Window for a list endpoint: a clamped limit and a clamped offset.
+
+`limit` defaults to 50 and is clamped to `[1, 200]`. `offset` is clamped to
+`[0, 100000]` - a deeper offset is a sequential scan, not a page.
+
+The offset is then snapped down to a whole multiple of the limit, because
+`kura_paginator:paginate/3` is page-based and can only express offsets that
+land on a page boundary. Snapping keeps the offset reported in the envelope
+equal to the offset the query ran with, rather than echoing one the caller
+asked for and did not get.
+""".
+-spec page(params()) -> page_spec().
+page(Params) ->
+    Props = maps:to_list(Params),
+    Limit = asobi_qs:integer(~"limit", Props, ?DEFAULT_LIMIT, ?MIN_LIMIT, ?MAX_LIMIT),
+    #{limit => Limit, offset => offset(Params, Props, Limit)}.
+
+-spec offset(params(), [{binary(), binary() | true}], pos_integer()) -> non_neg_integer().
+offset(Params, Props, Limit) ->
+    Requested =
+        case maps:is_key(~"page", Params) of
+            true -> (asobi_qs:integer(~"page", Props, 1, 1, ?MAX_PAGE) - 1) * Limit;
+            false -> asobi_qs:integer(~"offset", Props, 0, 0, ?MAX_OFFSET)
+        end,
+    min(Requested, ?MAX_OFFSET) div Limit * Limit.
+
+-doc """
+Resolve `?sort=` and `?order=` against a per-endpoint allowlist.
+
+`Allowed` maps the wire name to the column atom; only atoms already in that
+list can reach the query. An unknown field or direction is an error, so the
+caller answers 400 instead of quietly returning differently-ordered rows.
+
+`Default` is used when no sort is requested. Either way the result is
+completed with `{id, desc}` so the ordering is total.
+""".
+-spec sort(params(), sort_allowlist(), sort_spec()) ->
+    {ok, sort_spec()} | {error, {unknown_sort, binary()} | {unknown_order, binary()}}.
+sort(Params, Allowed, Default) ->
+    case maps:get(~"sort", Params, undefined) of
+        Field when is_binary(Field), Field =/= ~"" ->
+            case lists:keyfind(Field, 1, Allowed) of
+                {_, Column} -> sorted_by(Column, Params);
+                false -> {error, {unknown_sort, Field}}
+            end;
+        _ ->
+            {ok, deterministic(Default)}
+    end.
+
+-spec sorted_by(atom(), params()) -> {ok, sort_spec()} | {error, {unknown_order, binary()}}.
+sorted_by(Column, Params) ->
+    case order(Params) of
+        {ok, Direction} -> {ok, deterministic([{Column, Direction}])};
+        {error, _} = Error -> Error
+    end.
+
+-spec order(params()) -> {ok, asc | desc} | {error, {unknown_order, binary()}}.
+order(Params) ->
+    case maps:get(~"order", Params, undefined) of
+        Raw when is_binary(Raw), Raw =/= ~"" ->
+            case string:lowercase(Raw) of
+                ~"asc" -> {ok, asc};
+                ~"desc" -> {ok, desc};
+                _ -> {error, {unknown_order, Raw}}
+            end;
+        _ ->
+            {ok, asc}
+    end.
+
+-spec deterministic(sort_spec()) -> sort_spec().
+deterministic(Orders) ->
+    case lists:keymember(id, 1, Orders) of
+        true -> Orders;
+        false -> Orders ++ [{id, desc}]
+    end.
+
+-doc """
+Build an `ILIKE` pattern for a free-text search parameter.
+
+Returns `none` when the parameter is absent, empty, or longer than 64 bytes.
+""".
+-spec like_pattern(params(), binary()) -> {ok, binary()} | none.
+like_pattern(Params, Key) ->
+    case maps:get(Key, Params, undefined) of
+        Term when is_binary(Term), Term =/= ~"", byte_size(Term) =< ?MAX_SEARCH_BYTES ->
+            {ok, iolist_to_binary([~"%", escape_like(Term), ~"%"])};
+        _ ->
+            none
+    end.
+
+%% `%` and `_` are ILIKE wildcards and `\` is its escape character, so an
+%% unescaped search term changes what the query means - a lone `%` matches
+%% every row. Escape the backslash first, or the escapes added below get
+%% escaped in turn.
+-spec escape_like(binary()) -> binary().
+escape_like(Term) ->
+    Backslashes = binary:replace(Term, ~"\\", ~"\\\\", [global]),
+    Percents = binary:replace(Backslashes, ~"%", ~"\\%", [global]),
+    binary:replace(Percents, ~"_", ~"\\_", [global]).
+
+-doc """
+Decode an opaque `?cursor=` token back to its keyset value.
+
+Cursors are base64url without padding so they survive a query string intact
+and carry no meaning a caller can hand-craft. Anything that is not a valid
+token is an error, never a silent fall back to the first page.
+""".
+-spec cursor(params()) -> {ok, binary()} | none | {error, invalid_cursor}.
+cursor(Params) ->
+    case maps:get(~"cursor", Params, undefined) of
+        Token when is_binary(Token), Token =/= ~"", byte_size(Token) =< ?MAX_CURSOR_BYTES ->
+            decode_cursor(Token);
+        undefined ->
+            none;
+        _ ->
+            {error, invalid_cursor}
+    end.
+
+-spec decode_cursor(binary()) -> {ok, binary()} | {error, invalid_cursor}.
+decode_cursor(Token) ->
+    try base64:decode(Token, #{mode => urlsafe, padding => false}) of
+        Value -> {ok, Value}
+    catch
+        _:_ -> {error, invalid_cursor}
+    end.
+
+-doc "Encode a keyset value as the opaque cursor token `cursor/1` accepts.".
+-spec encode_cursor(binary()) -> binary().
+encode_cursor(Value) when is_binary(Value) ->
+    base64:encode(Value, #{mode => urlsafe, padding => false}).
