@@ -122,6 +122,22 @@ Shorthand (Erlang module only):
 | `listed` | `false` for matches, `true` for worlds | Whether instances of this mode appear in discovery (`match.list` / `world.list`). **Matches are unlisted by default** — a matchmaker-spawned match is already assigned to its players, so opt in explicitly. |
 | `quick_play` | `true` | Worlds only. Whether `world.find_or_create` may place a player into an existing world of this mode. Independent of `listed` — see [World Server](world-server.md#visibility). |
 
+### Operator Modes vs Game-Declared Modes
+
+Modes come from two independent places and asobi keeps them apart (ADR 0006):
+
+- **Operator modes** are the ones above, in your `sys.config` `game_modes`.
+  asobi never rewrites that key.
+- **Game-declared modes** are what a Lua game declares in its `match.lua` or
+  `config.lua` manifest. Loading a game replaces that set wholesale, so a mode
+  you delete from `config.lua` is gone the next time the config loads instead
+  of lingering until a restart.
+
+The effective registry is the game-declared set with the operator set on top:
+an operator mode wins a name clash and a game bundle can never drop or
+redefine it. Read it with `asobi_game_config:modes/0` - the raw `game_modes`
+app-env key is only the operator half.
+
 ## Matchmaker
 
 ```erlang

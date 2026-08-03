@@ -57,6 +57,10 @@ which uses the `asobi_lua_match` bridge (tick/1 + wrapped-state callbacks).
 manifest) in multi-mode. It only *declares* intent; guest auth is on iff the
 operator also supplies a >= 32-byte pepper (ADR 0004).
 
+This module reads Lua and nothing else: it hands the config term it derived to
+`asobi_game_config:apply_config/1`, which owns the merge with operator config
+and the order the app-env keys are written in (ADR 0006).
+
 Bot scripts can export a `names` list that the platform reads after loading:
 
 ```lua
@@ -74,9 +78,17 @@ names = {"Spark", "Blitz", "Volt"}
 
 -spec maybe_load_game_config() -> ok | {error, term()}.
 maybe_load_game_config() ->
-    GameDirStr = to_string(application:get_env(asobi, game_dir, ~"/app/game")),
-    _ = apply_guest_auth(GameDirStr),
-    reload_game_modes().
+    GameDirStr = game_dir(),
+    GuestAuth = declared_guest_auth(GameDirStr),
+    case read_modes(GameDirStr) of
+        {ok, Modes} ->
+            asobi_game_config:apply_config(#{guest_auth => GuestAuth, modes => Modes});
+        {error, _} = Err ->
+            %% A broken bundle must still land its auth posture: leaving a stale
+            %% `true` behind is the one failure the loader cannot fail soft on.
+            ok = asobi_game_config:apply_config(#{guest_auth => GuestAuth}),
+            Err
+    end.
 
 %% Refresh only the game_modes registry from the mode scripts, WITHOUT
 %% re-deriving guest_auth. The config watcher (asobi#232) calls this on a live
@@ -84,26 +96,46 @@ maybe_load_game_config() ->
 %% boot-only decision that a bundle write cannot flip at runtime.
 -spec reload_game_modes() -> ok | {error, term()}.
 reload_game_modes() ->
-    GameDirStr = to_string(application:get_env(asobi, game_dir, ~"/app/game")),
-    ConfigPath = filename:join(GameDirStr, "config.lua"),
-    MatchPath = filename:join(GameDirStr, "match.lua"),
+    case read_modes(game_dir()) of
+        {ok, Modes} ->
+            asobi_game_config:apply_config(#{modes => Modes});
+        {error, _} = Err ->
+            Err
+    end.
+
+%% The complete set of modes the game declares right now. A game dir with
+%% neither entry point declares none, which is what lets a mode deleted from
+%% config.lua (or the whole bundle) actually disappear.
+-spec read_modes(string()) -> {ok, asobi_game_config:modes()} | {error, term()}.
+read_modes(GameDir) ->
+    ConfigPath = filename:join(GameDir, "config.lua"),
+    MatchPath = filename:join(GameDir, "match.lua"),
     case {filelib:is_regular(ConfigPath), filelib:is_regular(MatchPath)} of
         {true, _} ->
-            load_multi_mode(GameDirStr, ConfigPath);
+            read_multi_mode(GameDir, ConfigPath);
         {false, true} ->
-            load_single_mode(GameDirStr, MatchPath);
+            read_single_mode(MatchPath);
         {false, false} ->
-            ok
+            {ok, #{}}
     end.
+
+-spec game_dir() -> string().
+game_dir() ->
+    to_string(application:get_env(asobi, game_dir, ~"/app/game")).
 
 %% The game opts into anonymous guest auth by declaring `guest_auth = true` in
 %% its config script (config.lua for multi-mode, else match.lua). We read that
-%% global and flip the asobi app-env flag; the operator still has to supply a
-%% >= 32-byte guest_verifier_pepper, so guest auth is on iff BOTH agree (ADR
-%% 0004). Best-effort: any error just leaves the flag at its `false` default.
-%% Shared with asobi_engine's bundle loader so managed cloud behaves the same.
+%% global and hand it to core, which owns the flag; the operator still has to
+%% supply a >= 32-byte guest_verifier_pepper, so guest auth is on iff BOTH
+%% agree (ADR 0004). Best-effort: any error just leaves the flag at its `false`
+%% default. Shared with asobi_engine's bundle loader so managed cloud behaves
+%% the same.
 -spec apply_guest_auth(string() | binary()) -> ok.
 apply_guest_auth(GameDir) ->
+    asobi_game_config:apply_config(#{guest_auth => declared_guest_auth(GameDir)}).
+
+-spec declared_guest_auth(string() | binary()) -> boolean().
+declared_guest_auth(GameDir) ->
     GameDirStr = to_string(GameDir),
     ConfigPath = filename:join(GameDirStr, "config.lua"),
     MatchPath = filename:join(GameDirStr, "match.lua"),
@@ -112,32 +144,25 @@ apply_guest_auth(GameDir) ->
             true -> ConfigPath;
             false -> MatchPath
         end,
-    Declared =
-        case filelib:is_regular(Script) of
-            false ->
-                false;
-            true ->
-                St0 = asobi_lua_loader:init_sandboxed(),
-                case do_file(Script, St0) of
-                    {ok, _Results, St1} -> read_global_bool(~"guest_auth", St1) =:= true;
-                    {error, _} -> false
-                end
-        end,
-    application:set_env(asobi, guest_auth, Declared).
+    case filelib:is_regular(Script) of
+        false ->
+            false;
+        true ->
+            St0 = asobi_lua_loader:init_sandboxed(),
+            case do_file(Script, St0) of
+                {ok, _Results, St1} -> read_global_bool(~"guest_auth", St1) =:= true;
+                {error, _} -> false
+            end
+    end.
 
 %% --- Multi-mode: config.lua maps mode names to script paths ---
 
-load_multi_mode(GameDir, ConfigPath) ->
+read_multi_mode(GameDir, ConfigPath) ->
     St0 = asobi_lua_loader:init_sandboxed(),
     case do_file(ConfigPath, St0) of
         {ok, [Table | _], St1} ->
             Decoded = luerl:decode(Table, St1),
-            case build_modes_from_manifest(GameDir, Decoded) of
-                {ok, Modes} ->
-                    apply_game_modes(Modes);
-                {error, _} = Err ->
-                    Err
-            end;
+            build_modes_from_manifest(GameDir, Decoded);
         {ok, [], _} ->
             {error, {config_error, ~"config.lua must return a table"}};
         {error, Reason} ->
@@ -180,11 +205,10 @@ build_modes_from_manifest(_, _) ->
 
 %% --- Single-mode: just match.lua in the game dir ---
 
-load_single_mode(_GameDir, MatchPath) ->
+read_single_mode(MatchPath) ->
     case load_match_config(MatchPath) of
         {ok, ModeConfig} ->
-            Modes = #{~"default" => ModeConfig},
-            apply_game_modes(Modes);
+            {ok, #{~"default" => ModeConfig}};
         {error, _} = Err ->
             Err
     end.
@@ -421,22 +445,6 @@ is_safe_relative(Bin) ->
         end,
         Parts
     ).
-
-%% --- Apply to app env ---
-
-apply_game_modes(Modes) ->
-    Existing =
-        case application:get_env(asobi, game_modes, #{}) of
-            M when is_map(M) -> M;
-            _ -> #{}
-        end,
-    Merged = maps:merge(Existing, Modes),
-    application:set_env(asobi, game_modes, Merged),
-    logger:notice(#{
-        msg => ~"lua game config loaded",
-        modes => maps:keys(Merged)
-    }),
-    ok.
 
 %% --- Lua helpers ---
 

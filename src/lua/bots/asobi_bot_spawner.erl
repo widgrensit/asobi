@@ -206,12 +206,7 @@ load_bot_names(_) ->
     default_names().
 
 mode_config(Mode) ->
-    Modes =
-        case application:get_env(asobi, game_modes, #{}) of
-            M when is_map(M) -> M;
-            _ -> #{}
-        end,
-    maps:get(Mode, Modes, #{}).
+    maps:get(Mode, asobi_game_config:modes(), #{}).
 
 bot_config(Mode) ->
     case mode_config(Mode) of

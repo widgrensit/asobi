@@ -57,7 +57,7 @@ unregister_game_mode(Kind) when ?IS_KIND(Kind) ->
 
 -spec mode_config(binary()) -> map().
 mode_config(Mode) ->
-    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
+    Modes = asobi_game_config:modes(),
     case Modes of
         #{Mode := Config} when is_map(Config) -> Config;
         #{Mode := Mod} when is_atom(Mod) -> #{module => Mod};
@@ -133,7 +133,7 @@ what `asobi_chat_acl` authorises against.
 """.
 -spec global_chat_channels() -> [binary()].
 global_chat_channels() ->
-    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
+    Modes = asobi_game_config:modes(),
     lists:usort([
         Name
      || Config <- maps:values(Modes),
@@ -149,7 +149,3 @@ forward_optional(Src, [Key | Rest], Acc) ->
         #{Key := Val} -> forward_optional(Src, Rest, Acc#{Key => Val});
         _ -> forward_optional(Src, Rest, Acc)
     end.
-
--spec ensure_map(term()) -> #{term() => term()}.
-ensure_map(M) when is_map(M) -> M;
-ensure_map(_) -> #{}.

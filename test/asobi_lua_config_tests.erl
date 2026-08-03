@@ -26,71 +26,58 @@ safe_lib_dir() ->
 %% --- Tests ---
 
 config_test_() ->
-    {foreach,
-        fun() ->
-            %% Same registration asobi_app:start/2 performs: without it every
-            %% {lua, _} mode resolves to lua_runtime_unavailable.
-            ok = asobi_lua_sup:register_game_modes(),
-            application:set_env(asobi, game_modes, #{})
-        end,
-        fun(_) ->
-            [
-                asobi_game_modes:unregister_game_mode(K)
-             || K <- [lua_match, lua_match_shared, lua_world]
-            ],
-            application:set_env(asobi, game_modes, #{})
-        end,
-        [
-            {"single mode: loads match.lua globals", fun single_mode_loads_globals/0},
-            {"single mode: registers 'default' key in game_modes (load-bearing, asobi#244)",
-                fun single_mode_registers_default_key/0},
-            {"single mode: minimal config (only match_size)", fun single_mode_minimal/0},
-            {"single mode: missing match_size fails", fun single_mode_missing_size/0},
-            {"multi mode: loads config.lua manifest", fun multi_mode_manifest/0},
-            {"no config files: no-op", fun no_config_noop/0},
-            {"bot names: reads from bot script", fun bot_names_from_script/0},
-            {"bot names: falls back to defaults", fun bot_names_fallback/0},
-            {"world config: reads zone settings", fun world_config_zone_settings/0},
-            {"world config: reads phase 2 settings", fun world_config_phase2_settings/0},
-            {"game_type world selects world bridge", fun game_type_world_selects_world_bridge/0},
-            {"game_type absent defaults to match bridge", fun game_type_absent_defaults_to_match/0},
-            {"empty_grace_ms global is forwarded to mode config", fun empty_grace_ms_forwarded/0},
-            {"player_ttl_ms positive is forwarded", fun player_ttl_ms_positive_forwarded/0},
-            {"player_ttl_ms = -1 is forwarded (persistent world opt-in)",
-                fun player_ttl_ms_minus_one_forwarded/0},
-            {"player_ttl_ms = 0 is forwarded (explicit immediate cleanup)",
-                fun player_ttl_ms_zero_forwarded/0},
-            {"player_ttl_ms absent: key omitted from mode config",
-                fun player_ttl_ms_absent_omitted/0},
-            {"match_size = 0 is rejected", fun match_size_zero_rejected/0},
-            {"match_size negative is rejected", fun match_size_negative_rejected/0},
-            {"match_size float is truncated then rejected", fun match_size_float_rejected/0},
-            {"unknown strategy is preserved as-is", fun unknown_strategy_preserved/0},
-            {"strategy = skill_based is recognised", fun strategy_skill_based/0},
-            {"state_strategy = shared resolves to asobi_lua_match_shared",
-                fun state_strategy_shared/0},
-            {"state_strategy absent resolves to asobi_lua_match", fun state_strategy_absent/0},
-            {"state_strategy = unknown is ignored", fun state_strategy_unknown/0},
-            {"config.lua returning non-table errors", fun config_returns_non_table/0},
-            {"config.lua referencing missing match script errors",
-                fun config_missing_match_script/0},
-            {"bot_config table with min_players is forwarded", fun bot_config_min_players/0},
-            {"bot_config min_players defaults to match_size",
-                fun bot_config_min_players_defaults_to_match_size/0},
-            {"bot_config enabled = false overrides the default true",
-                fun bot_config_enabled_false_override/0},
-            {"bot_config min_players far exceeding the ceiling is clamped, not rejected",
-                fun bot_config_min_players_clamped_at_ceiling/0},
-            {"world dimension globals (tick_rate/grid_size/zone_size/view_radius/persistent)",
-                fun world_dimension_globals_forwarded/0},
-            {"guest_auth = true global enables the asobi guest_auth flag",
-                fun guest_auth_global_enables/0},
-            {"guest_auth absent leaves the flag off", fun guest_auth_absent_leaves_off/0},
-            {"guest_auth truthy non-bool does not enable",
-                fun guest_auth_truthy_nonbool_stays_off/0},
-            {"guest_auth resets a stale true when a later bundle omits it",
-                fun guest_auth_stale_true_is_reset/0}
-        ]}.
+    {foreach, fun setup_modes/0, fun(_) -> teardown_modes() end, [
+        {"single mode: loads match.lua globals", fun single_mode_loads_globals/0},
+        {"single mode: registers 'default' key in game_modes (load-bearing, asobi#244)",
+            fun single_mode_registers_default_key/0},
+        {"single mode: minimal config (only match_size)", fun single_mode_minimal/0},
+        {"single mode: missing match_size fails", fun single_mode_missing_size/0},
+        {"multi mode: loads config.lua manifest", fun multi_mode_manifest/0},
+        {"no config files: declares no modes, operator modes untouched",
+            fun no_config_leaves_operator_modes/0},
+        {"bot names: reads from bot script", fun bot_names_from_script/0},
+        {"bot names: falls back to defaults", fun bot_names_fallback/0},
+        {"world config: reads zone settings", fun world_config_zone_settings/0},
+        {"world config: reads phase 2 settings", fun world_config_phase2_settings/0},
+        {"game_type world selects world bridge", fun game_type_world_selects_world_bridge/0},
+        {"game_type absent defaults to match bridge", fun game_type_absent_defaults_to_match/0},
+        {"empty_grace_ms global is forwarded to mode config", fun empty_grace_ms_forwarded/0},
+        {"player_ttl_ms positive is forwarded", fun player_ttl_ms_positive_forwarded/0},
+        {"player_ttl_ms = -1 is forwarded (persistent world opt-in)",
+            fun player_ttl_ms_minus_one_forwarded/0},
+        {"player_ttl_ms = 0 is forwarded (explicit immediate cleanup)",
+            fun player_ttl_ms_zero_forwarded/0},
+        {"player_ttl_ms absent: key omitted from mode config", fun player_ttl_ms_absent_omitted/0},
+        {"match_size = 0 is rejected", fun match_size_zero_rejected/0},
+        {"match_size negative is rejected", fun match_size_negative_rejected/0},
+        {"match_size float is truncated then rejected", fun match_size_float_rejected/0},
+        {"unknown strategy is preserved as-is", fun unknown_strategy_preserved/0},
+        {"strategy = skill_based is recognised", fun strategy_skill_based/0},
+        {"state_strategy = shared resolves to asobi_lua_match_shared", fun state_strategy_shared/0},
+        {"state_strategy absent resolves to asobi_lua_match", fun state_strategy_absent/0},
+        {"state_strategy = unknown is ignored", fun state_strategy_unknown/0},
+        {"config.lua returning non-table errors", fun config_returns_non_table/0},
+        {"config.lua referencing missing match script errors", fun config_missing_match_script/0},
+        {"bot_config table with min_players is forwarded", fun bot_config_min_players/0},
+        {"bot_config min_players defaults to match_size",
+            fun bot_config_min_players_defaults_to_match_size/0},
+        {"bot_config enabled = false overrides the default true",
+            fun bot_config_enabled_false_override/0},
+        {"bot_config min_players far exceeding the ceiling is clamped, not rejected",
+            fun bot_config_min_players_clamped_at_ceiling/0},
+        {"world dimension globals (tick_rate/grid_size/zone_size/view_radius/persistent)",
+            fun world_dimension_globals_forwarded/0},
+        {"guest_auth = true global enables the asobi guest_auth flag",
+            fun guest_auth_global_enables/0},
+        {"guest_auth absent leaves the flag off", fun guest_auth_absent_leaves_off/0},
+        {"guest_auth truthy non-bool does not enable", fun guest_auth_truthy_nonbool_stays_off/0},
+        {"guest_auth resets a stale true when a later bundle omits it",
+            fun guest_auth_stale_true_is_reset/0},
+        {"a mode deleted from config.lua disappears on reload",
+            fun deleted_mode_disappears_on_reload/0},
+        {"an operator sys.config mode survives a bundle load",
+            fun operator_mode_survives_bundle_load/0}
+    ]}.
 
 single_mode_loads_globals() ->
     application:set_env(asobi, game_dir, fixture_dir()),
@@ -108,14 +95,13 @@ single_mode_registers_default_key() ->
     %% load_single_mode/2's #{~"default" => ModeConfig} registration is
     %% what keeps single-mode games recognised at all now. Exercised via
     %% the real reload path (maybe_load_game_config/0 -> reload_game_modes/0
-    %% -> load_single_mode/2), asserting directly against the app-env key
-    %% asobi reads rather than the local get_game_modes/0 helper.
+    %% -> read_single_mode/1), asserting against the registry asobi actually
+    %% reads (asobi_game_config:modes/0) rather than a local helper.
     TmpDir = make_temp_dir(),
     ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
     application:set_env(asobi, game_dir, TmpDir),
     ok = asobi_lua_config:maybe_load_game_config(),
-    {ok, Modes} = application:get_env(asobi, game_modes),
-    ?assert(is_map_key(~"default", Modes)),
+    ?assert(is_map_key(~"default", asobi_game_config:modes())),
     cleanup_temp_dir(TmpDir).
 
 single_mode_minimal() ->
@@ -175,6 +161,42 @@ guest_auth_stale_true_is_reset() ->
     application:unset_env(asobi, guest_auth),
     cleanup_temp_dir(TmpDir).
 
+%% The registry used to be a "new wins, nothing is ever removed" merge, so a
+%% mode dropped from config.lua stayed matchable for the life of the node. The
+%% script layer is now replaced wholesale by asobi_game_config (ADR 0006).
+deleted_mode_disappears_on_reload() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "arena.lua"), ~"match_size = 4\n"),
+    ok = file:write_file(filename:join(TmpDir, "ctf.lua"), ~"match_size = 8\n"),
+    ConfigPath = filename:join(TmpDir, "config.lua"),
+    ok = file:write_file(ConfigPath, ~"return { arena = \"arena.lua\", ctf = \"ctf.lua\" }\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual([~"arena", ~"ctf"], lists:sort(maps:keys(get_game_modes()))),
+
+    ok = file:write_file(ConfigPath, ~"return { arena = \"arena.lua\" }\n"),
+    ok = asobi_lua_config:reload_game_modes(),
+    ?assertEqual([~"arena"], maps:keys(get_game_modes())),
+    ?assertEqual(#{}, asobi_game_modes:mode_config(~"ctf")),
+    ?assertEqual({error, not_found}, asobi_game_modes:resolve_game_module(~"ctf")),
+    cleanup_temp_dir(TmpDir).
+
+%% A bundle load must not overwrite or drop what the operator put in
+%% sys.config: the two layers live in separate keys and the operator wins.
+operator_mode_survives_bundle_load() ->
+    application:set_env(asobi, game_modes, #{~"ranked" => #{module => my_mod, match_size => 2}}),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 4\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual([~"default", ~"ranked"], lists:sort(maps:keys(get_game_modes()))),
+    ok = asobi_lua_config:reload_game_modes(),
+    ?assertEqual(
+        #{module => my_mod, match_size => 2},
+        asobi_game_modes:mode_config(~"ranked")
+    ),
+    cleanup_temp_dir(TmpDir).
+
 single_mode_missing_size() ->
     TmpDir = make_temp_dir(),
     {ok, Content} = file:read_file(fixture("config_no_size.lua")),
@@ -209,13 +231,13 @@ multi_mode_manifest() ->
     ?assertEqual(2, maps:get(match_size, Minimal2)),
     cleanup_temp_dir(TmpDir).
 
-no_config_noop() ->
+no_config_leaves_operator_modes() ->
     TmpDir = make_temp_dir(),
     application:set_env(asobi, game_dir, TmpDir),
     application:set_env(asobi, game_modes, #{~"existing" => #{module => my_mod}}),
     ok = asobi_lua_config:maybe_load_game_config(),
     Modes = get_game_modes(),
-    ?assert(is_map_key(~"existing", Modes)),
+    ?assertEqual([~"existing"], maps:keys(Modes)),
     cleanup_temp_dir(TmpDir).
 
 bot_names_from_script() ->
@@ -574,10 +596,28 @@ world_dimension_globals_forwarded() ->
 
 -spec get_game_modes() -> #{dynamic() => dynamic()}.
 get_game_modes() ->
-    case application:get_env(asobi, game_modes, #{}) of
-        M when is_map(M) -> M;
-        _ -> #{}
-    end.
+    asobi_game_config:modes().
+
+%% Both layers, so neither a leftover operator mode nor a leftover script mode
+%% from an earlier case leaks into the next one.
+%% Same registration asobi_app:start/2 performs: without it every {lua, _}
+%% mode resolves to lua_runtime_unavailable. Undone after each case because
+%% the registry is a global persistent_term and would otherwise decide the
+%% result of any later module that asserts a provider is absent.
+setup_modes() ->
+    ok = asobi_lua_sup:register_game_modes(),
+    reset_modes().
+
+teardown_modes() ->
+    [
+        asobi_game_modes:unregister_game_mode(K)
+     || K <- [lua_match, lua_match_shared, lua_world]
+    ],
+    reset_modes().
+
+reset_modes() ->
+    application:set_env(asobi, game_modes, #{}),
+    application:set_env(asobi, script_game_modes, #{}).
 
 -spec assert_luerl_state(dynamic()) -> dynamic().
 assert_luerl_state(St) when is_tuple(St), element(1, St) =:= luerl ->

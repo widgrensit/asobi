@@ -5,11 +5,11 @@
 watcher_test_() ->
     {foreach,
         fun() ->
-            application:set_env(asobi, game_modes, #{}),
+            reset_modes(),
             application:set_env(asobi_lua, reload_mode, auto)
         end,
         fun(_) ->
-            application:set_env(asobi, game_modes, #{}),
+            reset_modes(),
             application:unset_env(asobi_lua, reload_mode),
             application:unset_env(asobi, game_dir)
         end,
@@ -77,13 +77,12 @@ stale_mtimes() ->
     #{"/nonexistent/stale/path" => 0}.
 
 match_size() ->
-    Modes =
-        case application:get_env(asobi, game_modes, #{}) of
-            M when is_map(M) -> M;
-            _ -> #{}
-        end,
-    [Mode | _] = maps:values(Modes),
+    [Mode | _] = maps:values(asobi_game_config:modes()),
     maps:get(match_size, Mode).
+
+reset_modes() ->
+    application:set_env(asobi, game_modes, #{}),
+    application:set_env(asobi, script_game_modes, #{}).
 
 temp_dir() ->
     Base = filename:join([

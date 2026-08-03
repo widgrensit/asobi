@@ -3,8 +3,9 @@
 Keeps the game-mode registry (`game_modes`) in sync with its Lua source.
 
 Mode-shape config (`match_size`, `strategy`, `max_players`, the `config.lua`
-mode manifest) is read into the `asobi` `game_modes` app-env once at boot by
-`asobi_lua_config:maybe_load_game_config/0`. The in-match hot-reload
+mode manifest) is read once at boot by
+`asobi_lua_config:maybe_load_game_config/0` and applied via
+`asobi_game_config:apply_config/1`. The in-match hot-reload
 (`asobi_lua_reload`) re-evaluates a script body inside already-running match and
 world servers, but the reported bug is at match *formation* - before any server
 exists for the new config - so that path is structurally blind to it. Without a
@@ -92,7 +93,7 @@ watched_files() ->
         filename:join(GameDir, "config.lua"),
         filename:join(GameDir, "match.lua")
     ],
-    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
+    Modes = asobi_game_config:modes(),
     %% Fail soft on a hand-written game_modes with a non-string script path: skip
     %% the bad entry rather than crash the watcher (and, via the sup, the app).
     Scripts = [
@@ -128,7 +129,3 @@ to_string(L) when is_list(L) -> L.
 to_path(B) when is_binary(B) -> binary_to_list(B);
 to_path(L) when is_list(L) -> L;
 to_path(_) -> undefined.
-
--spec ensure_map(term()) -> map().
-ensure_map(M) when is_map(M) -> M;
-ensure_map(_) -> #{}.
