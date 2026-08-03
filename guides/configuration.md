@@ -93,6 +93,13 @@ Lua scripts work too:
 }}
 ```
 
+`{lua, ...}` needs a scripting runtime in the release. asobi itself has no Lua
+dependency: [asobi_lua](https://github.com/widgrensit/asobi_lua) registers the
+modules that run scripted modes (`asobi_game_modes:register_game_mode/2`) when it
+starts. Consume asobi directly without it and every `{lua, _}` mode fails with
+`{error, lua_runtime_unavailable}` — matchmaking rejects the mode as unknown and
+world creation refuses it. Erlang-module modes are unaffected.
+
 Shorthand (Erlang module only):
 
 ```erlang

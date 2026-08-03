@@ -37,9 +37,14 @@ add(PlayerId, Params) ->
 %% that each slip past the per-(player, mode) ticket guard, and turns a
 %% typo'd/omitted/half-configured mode into an immediate 400 instead of a
 %% silent queue that only ever ends in `matchmaker_expired' after `max_wait'.
+%% `lua_runtime_unavailable' (a Lua mode in a release with no scripting runtime)
+%% is rejected here for the same reason: it can never spawn either.
 -spec known_mode(term()) -> boolean().
 known_mode(Mode) when is_binary(Mode), byte_size(Mode) =< 64 ->
-    resolve_game_module(Mode) =/= {error, not_found};
+    case asobi_game_modes:resolve_game_module(Mode) of
+        {ok, _Module, _GameConfig} -> true;
+        {error, _} -> false
+    end;
 known_mode(_) ->
     false.
 
@@ -50,7 +55,7 @@ known_mode(_) ->
 %% opt-in, tracked in asobi#232's follow-up.
 -spec queue_meta(binary()) -> map().
 queue_meta(Mode) ->
-    case maps:get(match_size, mode_config(Mode), undefined) of
+    case maps:get(match_size, asobi_game_modes:mode_config(Mode), undefined) of
         N when is_integer(N) -> #{players_needed => N};
         _ -> #{players_needed => null}
     end.
@@ -286,7 +291,7 @@ ensure_typed_map(Map) ->
 match_all_modes(ByMode) ->
     maps:fold(
         fun(Mode, ModeTickets, {AllMatched, AllUnmatched}) ->
-            ModeConfig = mode_config(Mode),
+            ModeConfig = asobi_game_modes:mode_config(Mode),
             Strategy = resolve_strategy(ModeConfig),
             {M, U} = Strategy:match(ModeTickets, ModeConfig),
             %% Defence in depth for any strategy, including user-supplied ones:
@@ -335,15 +340,6 @@ find_player_ticket(PlayerId, Mode, Tickets) ->
         false -> error
     end.
 
--spec mode_config(binary()) -> map().
-mode_config(Mode) ->
-    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
-    case Modes of
-        #{Mode := Config} when is_map(Config) -> Config;
-        #{Mode := Mod} when is_atom(Mod) -> #{module => Mod};
-        _ -> #{}
-    end.
-
 -spec resolve_strategy(map()) -> module().
 resolve_strategy(#{strategy := Strategy}) when is_atom(Strategy) ->
     case Strategy of
@@ -353,21 +349,6 @@ resolve_strategy(#{strategy := Strategy}) when is_atom(Strategy) ->
     end;
 resolve_strategy(_) ->
     asobi_matchmaker_fill.
-
--spec resolve_game_module(binary()) -> {ok, module(), map()} | {error, not_found}.
-resolve_game_module(Mode) ->
-    case mode_config(Mode) of
-        #{type := world, module := {lua, Script}} ->
-            {ok, asobi_lua_world, #{lua_script => Script}};
-        #{module := {lua, Script}, state_strategy := shared} ->
-            {ok, asobi_lua_match_shared, #{lua_script => Script}};
-        #{module := {lua, Script}} ->
-            {ok, asobi_lua_match, #{lua_script => Script}};
-        #{module := Mod} when is_atom(Mod) ->
-            {ok, Mod, #{}};
-        _ ->
-            {error, not_found}
-    end.
 
 -spec spawn_matches([[map()]]) -> [[map()]].
 spawn_matches(Groups) ->
@@ -379,7 +360,7 @@ spawn_matches([Group | Rest], Failed) ->
     PlayerIds = [maps:get(player_id, T) || T <- Group],
     [First | _] = Group,
     Mode = maps:get(mode, First),
-    ModeConfig = mode_config(Mode),
+    ModeConfig = asobi_game_modes:mode_config(Mode),
     case maps:get(type, ModeConfig, match) of
         world ->
             spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed);
@@ -390,7 +371,7 @@ spawn_matches([Group | Rest], Failed) ->
 spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
     MatchSize = maps:get(match_size, ModeConfig, length(PlayerIds)),
     MaxPlayers = maps:get(max_players, ModeConfig, MatchSize),
-    case resolve_game_module(Mode) of
+    case asobi_game_modes:resolve_game_module(Mode) of
         {ok, GameMod, ExtraConfig} ->
             Config = #{
                 mode => Mode,
@@ -418,8 +399,8 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                     }),
                     handle_spawn_failure(Group, Mode, PlayerIds, Rest, Failed)
             end;
-        {error, _} ->
-            notify_no_game_module(Mode, PlayerIds),
+        {error, Reason} ->
+            notify_no_game_module(Mode, Reason, PlayerIds),
             spawn_matches(Rest, Failed)
     end.
 
@@ -465,7 +446,7 @@ join_matched_players(MatchPid, Mode, PlayerIds) ->
 %% direction (players told immediately, never left queued).
 spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
     MaxPlayers = maps:get(max_players, ModeConfig, 500),
-    case resolve_game_module(Mode) of
+    case asobi_game_modes:resolve_game_module(Mode) of
         {ok, GameMod, ExtraConfig} ->
             Config = #{
                 mode => Mode,
@@ -550,13 +531,16 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                 end
             end),
             spawn_matches(Rest, Failed);
-        {error, _} ->
-            notify_no_game_module(Mode, PlayerIds),
+        {error, Reason} ->
+            notify_no_game_module(Mode, Reason, PlayerIds),
             spawn_matches(Rest, Failed)
     end.
 
-notify_no_game_module(Mode, PlayerIds) ->
-    logger:warning(#{msg => ~"no game module for mode", mode => Mode}),
+%% The player-facing reason stays coarse and stable; the resolver's own reason
+%% (`not_found' vs `lua_runtime_unavailable', i.e. a Lua mode with no scripting
+%% runtime in the release) only goes to the log, where the operator needs it.
+notify_no_game_module(Mode, Reason, PlayerIds) ->
+    logger:warning(#{msg => ~"no game module for mode", mode => Mode, reason => Reason}),
     notify_matchmaker_failed(PlayerIds, ~"no_game_module").
 
 %% A match failed to spawn (e.g. the game's Lua init crashed). Re-queue the group
@@ -708,6 +692,35 @@ known_mode_single_mode_default_test_() ->
             (undefined) -> application:unset_env(asobi, game_modes)
         end, [
             ?_assert(known_mode(~"default"))
+        ]}.
+
+%% A mode declaring a Lua script in a release with no scripting runtime resolves
+%% to {error, lua_runtime_unavailable}: it can never spawn, so the edge rejects
+%% it exactly like a half-configured mode. Once a provider is registered the
+%% same mode is accepted.
+known_mode_lua_runtime_test_() ->
+    {setup,
+        fun() ->
+            Prev = application:get_env(asobi, game_modes),
+            application:set_env(asobi, game_modes, #{
+                ~"scripted" => #{module => {lua, "game/match.lua"}}
+            }),
+            ok = asobi_game_modes:unregister_game_mode(lua_match),
+            Prev
+        end,
+        fun(Prev) ->
+            ok = asobi_game_modes:unregister_game_mode(lua_match),
+            case Prev of
+                {ok, V} -> application:set_env(asobi, game_modes, V);
+                undefined -> application:unset_env(asobi, game_modes)
+            end
+        end,
+        [
+            ?_assertNot(known_mode(~"scripted")),
+            ?_test(begin
+                ok = asobi_game_modes:register_game_mode(lua_match, fake_lua_match),
+                ?assert(known_mode(~"scripted"))
+            end)
         ]}.
 
 -endif.
