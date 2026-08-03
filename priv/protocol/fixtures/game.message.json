@@ -1,1 +1,1 @@
-{"type":"game.message","payload":{"message":"jij bent speler nummer 3"}}
+{"type":"game.message","payload":{"module":"lua","message":"jij bent speler nummer 3"}}

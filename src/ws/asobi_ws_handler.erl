@@ -24,14 +24,16 @@
 %% holding cowboy acceptors. Override via `asobi.ws_idle_auth_timeout_ms`.
 -define(DEFAULT_IDLE_AUTH_TIMEOUT_MS, 10000).
 
-%% Extension frames (`module.message`, `module.error`) name their producer
-%% in the payload, not in the wire type. A producer that sends the legacy
-%% two-element shape (`{game_message, Payload}`, `{script_error, Payload}`)
-%% predates that and can only be asobi_lua.
+%% `game.message` and `game.error` name their producer in the payload's
+%% `module` key, not in the wire type, so an extension can emit them
+%% without a new frame type per extension. A producer that sends the
+%% legacy two-element shape (`{game_message, Payload}`,
+%% `{script_error, Payload}`) predates that and can only be asobi_lua.
 %%
-%% DEPRECATED: `game.message` and `game.error` are emitted alongside
-%% `module.message`/`module.error` for one release so no SDK breaks, then
-%% removed. New SDK code must dispatch on the `module.` types.
+%% The `module.`-prefixed type rename is deliberately deferred to the 1.0
+%% wire break: the payload key is the part SDKs dispatch on, and renaming
+%% the type now would either break every shipped SDK or double every
+%% frame on the hot path.
 -define(DEFAULT_EXTENSION, lua).
 
 %% #303: script-controlled `game.broadcast` event names share the wire
@@ -187,7 +189,6 @@ websocket_handle(_Frame, State) ->
 -spec websocket_info(term(), map()) ->
     {ok, map()}
     | {reply, {text, binary()}, map()}
-    | {reply, [{text, binary()}], map()}
     | {reply, {close, non_neg_integer(), binary()}, map()}
     | {stop, map()}.
 websocket_info({asobi_message, {match_state, MatchState}}, State) ->
@@ -274,12 +275,7 @@ websocket_info({asobi_message, {game_message, Extension, Payload}}, State) when
     %% convention and couldn't carry more fields later without a
     %% breaking change.
     Body = #{~"module" => atom_to_binary(Extension), ~"message" => Payload},
-    {reply,
-        [
-            {text, encode_reply(undefined, ~"game.message", #{~"message" => Payload})},
-            {text, encode_reply(undefined, ~"module.message", Body)}
-        ],
-        State};
+    {reply, {text, encode_reply(undefined, ~"game.message", Body)}, State};
 websocket_info({asobi_message, {script_error, Payload}}, State) when is_map(Payload) ->
     websocket_info({asobi_message, {script_error, ?DEFAULT_EXTENSION, Payload}}, State);
 websocket_info({asobi_message, {script_error, Extension, Payload}}, State) when
@@ -291,16 +287,13 @@ websocket_info({asobi_message, {script_error, Extension, Payload}}, State) when
     %% future producer sending a non-JSON-encodable map must degrade to an
     %% error frame, not crash the connection process.
     Body = Payload#{~"module" => atom_to_binary(Extension)},
-    Frames =
+    Reply =
         try
-            [
-                {text, encode_reply(undefined, ~"game.error", Payload)},
-                {text, encode_reply(undefined, ~"module.error", Body)}
-            ]
+            encode_reply(undefined, ~"game.error", Body)
         catch
-            _:_ -> [{text, encode_reply(undefined, ~"error", #{reason => ~"internal"})}]
+            _:_ -> encode_reply(undefined, ~"error", #{reason => ~"internal"})
         end,
-    {reply, Frames, State};
+    {reply, {text, Reply}, State};
 websocket_info({session_revoked, Reason}, State) ->
     logger:notice(#{msg => ~"session_revoked", reason => Reason}),
     {stop, State#{session => undefined}};

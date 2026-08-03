@@ -131,6 +131,7 @@ ws_script_error_rendered_as_game_error(Config) ->
     ?assertMatch(
         #{
             ~"payload" := #{
+                ~"module" := ~"lua",
                 ~"callback" := ~"handle_input",
                 ~"script" := ~"match.lua",
                 ~"message" := ~"bad arithmetic + on nil, 1"
