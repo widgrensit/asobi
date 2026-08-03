@@ -47,14 +47,6 @@ secret() ->
 device_id() ->
     base64:encode(crypto:strong_rand_bytes(16)).
 
-%% The reaper only starts at boot when guest_auth is set then; the suite enables
-%% guest_auth for its run, so start it on demand for the reaping test.
-ensure_reaper() ->
-    case whereis(asobi_guest_reaper) of
-        undefined -> {ok, _} = asobi_guest_reaper:start_link();
-        _ -> ok
-    end.
-
 create(DeviceId, Secret, Config) ->
     nova_test:post(
         "/api/v1/auth/guest",
@@ -184,7 +176,9 @@ upgrade_clears_stale_auth_cache_entries(Config) ->
     Config.
 
 reaper_removes_unclaimed_guest_and_children(Config) ->
-    ensure_reaper(),
+    %% asobi#327: supervised unconditionally, so it is up from boot whenever the
+    %% app is - no start-on-demand, and no dependency on when guest_auth is set.
+    ?assert(is_pid(whereis(asobi_guest_reaper))),
     {ok, R1} = create(device_id(), secret(), Config),
     #{~"player_id" := Pid} = nova_test:json(R1),
     %% guest_reap_after is 1s and the cutoff is computed at whole-second

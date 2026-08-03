@@ -2,10 +2,11 @@
 -behaviour(gen_server).
 
 %% Opt-in sweeper for stale, unclaimed guest accounts. Retention is operator
-%% policy, never a core default: it does nothing unless `guest_reap_after` (a
-%% number of seconds) is configured. "Permanent guests" = leave it unset. It
-%% only removes guests that were never claimed - no password and no non-device
-%% identity - so an upgraded account is never touched.
+%% policy, never a core default: a sweep does nothing unless guest auth is on
+%% and `guest_reap_after` (a number of seconds) is configured, both read at
+%% sweep time. "Permanent guests" = leave it unset. It only removes guests that
+%% were never claimed - no password and no non-device identity - so an upgraded
+%% account is never touched.
 
 -export([start_link/0, sweep_now/0, cached_unlinked_count/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
@@ -19,14 +20,15 @@
 -define(COUNT_CACHE, asobi_guest_count_cache).
 -define(DEFAULT_COUNT_TTL_MS, 2000).
 
-%% Only runs when guest auth is enabled - otherwise no process, no timer on
-%% deployments that don't use guest auth.
--spec start_link() -> {ok, pid()} | ignore | {error, term()}.
+%% Always started; `guest_auth` is read when a sweep runs, not here (asobi#327).
+%% Gating the start on the flag made this a permanent child that returned
+%% `ignore`, which a supervisor skips and never retries - and every writer of
+%% guest_auth lives in an application that starts after asobi, so the flag was
+%% always false at that moment and the reaper never ran at all. Reading it
+%% lazily also self-corrects when the flag is set later, e.g. a bundle reload.
+-spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
-    case application:get_env(asobi, guest_auth, false) of
-        true -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []);
-        _ -> ignore
-    end.
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %% For tests/ops: run a sweep synchronously.
 -spec sweep_now() -> {ok, non_neg_integer()}.
@@ -130,8 +132,9 @@ schedule() ->
 
 -spec run_sweep() -> non_neg_integer().
 run_sweep() ->
+    GuestAuth = application:get_env(asobi, guest_auth, false),
     case application:get_env(asobi, guest_reap_after, undefined) of
-        Seconds when is_integer(Seconds), Seconds > 0 ->
+        Seconds when GuestAuth =:= true, is_integer(Seconds), Seconds > 0 ->
             Cutoff = subtract_seconds(erlang:universaltime(), Seconds),
             Reaped = reap_older_than(Cutoff),
             Reaped > 0 andalso
