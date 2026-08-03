@@ -1,6 +1,6 @@
 # If asobi disappears tomorrow
 
-This is a one-page runbook for keeping your game alive if Widgrensit AB
+This is a one-page runbook for keeping your game alive if Widgrens IT AB
 (the company behind asobi) vanishes, pivots to AI, gets acquired, or
 otherwise ceases to exist. **We wrote it because you shouldn't have to
 trust us.**
