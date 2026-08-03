@@ -18,6 +18,8 @@ the place to put callback hardening.
 """.
 -behaviour(gen_statem).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([
     start_link/1,
     join/2,
@@ -247,6 +249,24 @@ waiting(info, {'DOWN', _MonRef, process, DownPid, _Reason}, State) when is_pid(D
 %% {error, not_in_match} correctly for this state, it was just unreachable.
 waiting({call, From}, {reconnect, PlayerId}, State) when is_binary(PlayerId) ->
     handle_reconnect_call(From, PlayerId, State);
+%% asobi#290: asobi_ws_handler casts input as soon as the client holds a
+%% match_pid, which can be before the last player has joined - waiting/3 had
+%% no clause and no catch-all, so early input crashed the whole match. The
+%% input is dropped rather than queued: there is no tick before `running` to
+%% apply it, so queuing would both replay stale pre-match input on the first
+%% tick and grow without bound for the whole waiting window.
+waiting(cast, {input, PlayerId, _Input}, #{match_id := MatchId}) ->
+    log_dropped_input(MatchId, PlayerId, match_not_started),
+    keep_state_and_data;
+%% asobi#290: no votes before the match starts - explicit replies, because
+%% waiting/3 deliberately has no catch-all and these would otherwise crash
+%% the match with function_clause.
+waiting({call, From}, {start_vote, _VoteConfig}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, match_not_started}}]};
+waiting({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, match_not_started}}]};
+waiting({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, match_not_started}}]};
 waiting(cast, cancel, State) ->
     {stop, {shutdown, cancelled}, State}.
 
@@ -462,6 +482,13 @@ paused({call, From}, {get_info, listing}, State) ->
 paused(cast, {broadcast_event, Event, Payload}, State) ->
     broadcast_match_event(Event, Payload, State),
     keep_state_and_data;
+%% asobi#290: a paused match has no tick to apply input against, so input is
+%% dropped, not queued (a long pause would otherwise grow the queue without
+%% bound and replay stale input on resume). Explicit clause so the drop is
+%% observable instead of being silently swallowed by the catch-all below.
+paused(cast, {input, PlayerId, _Input}, #{match_id := MatchId}) ->
+    log_dropped_input(MatchId, PlayerId, match_paused),
+    keep_state_and_data;
 paused(
     info, {vote_resolved, VoteId, Template, Result}, #{game_module := Mod, game_state := GS} = State
 ) ->
@@ -501,6 +528,13 @@ paused(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := 
         none ->
             keep_state_and_data
     end;
+%% asobi#290: every call with no clause above (start_vote, cast_vote,
+%% use_veto, join) used to fall through to the catch-all, which never
+%% replies - gen_statem:call/2 defaults to timeout infinity, so the caller
+%% hung forever. Replying an error keeps that defect closed for calls added
+%% later too; only non-call events reach the catch-all now.
+paused({call, From}, _Event, _State) ->
+    {keep_state_and_data, [{reply, From, {error, match_paused}}]};
 paused(_EventType, _Event, _State) ->
     keep_state_and_data.
 
@@ -550,6 +584,23 @@ terminate(_Reason, StateName, #{match_id := MatchId} = State) ->
     ok.
 
 %% --- Internal ---
+
+%% Rate-limited: input arrives per client per tick, so an unbounded log here
+%% would be a flood channel a client controls.
+-spec log_dropped_input(binary(), binary(), atom()) -> ok.
+log_dropped_input(MatchId, PlayerId, Reason) ->
+    case asobi_script_log_limiter:allow({?MODULE, input_dropped, MatchId}) of
+        {true, Dropped} ->
+            ?LOG_INFO(#{
+                event => match_input_dropped,
+                match_id => MatchId,
+                player_id => PlayerId,
+                reason => Reason,
+                suppressed_since_last => Dropped
+            });
+        false ->
+            ok
+    end.
 
 handle_join(
     From,

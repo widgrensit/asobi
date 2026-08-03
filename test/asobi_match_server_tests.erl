@@ -72,7 +72,13 @@ match_server_test_() ->
             fun paused_down_starts_grace/0},
         {"reconnect while paused succeeds instead of hanging",
             fun reconnect_while_paused_succeeds/0},
-        {"reconnect while waiting does not crash", fun reconnect_while_waiting_does_not_crash/0}
+        {"reconnect while waiting does not crash", fun reconnect_while_waiting_does_not_crash/0},
+        {"input while waiting is dropped without crashing", fun input_while_waiting_is_dropped/0},
+        {"vote calls while waiting error instead of crashing",
+            fun vote_calls_while_waiting_error/0},
+        {"input while paused is dropped without crashing", fun input_while_paused_is_dropped/0},
+        {"vote calls while paused error instead of hanging", fun vote_calls_while_paused_error/0},
+        {"join while paused errors instead of hanging", fun join_while_paused_errors/0}
     ]}.
 
 %% --- Tests ---
@@ -528,6 +534,85 @@ reconnect_while_waiting_does_not_crash() ->
         {error, no_reconnect_policy}, gen_statem:call(Pid, {reconnect, PlayerId}, 2000)
     ),
     ?assert(is_process_alive(Pid)),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#290: waiting/3 had no {input, _, _} clause
+%% and no catch-all, so a client casting input before the last player joined
+%% crashed the match with function_clause.
+input_while_waiting_is_dropped() ->
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"p290_waiting_input"),
+    asobi_match_server:handle_input(Pid, ~"p290_waiting_input", #{~"action" => ~"move"}),
+    timer:sleep(50),
+    ?assert(is_process_alive(Pid)),
+    ?assertMatch(#{status := waiting}, asobi_match_server:get_info(Pid)),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#290: the vote trio had no clause in
+%% waiting/3 either - same function_clause crash. Bounded timeout so a
+%% regression fails fast instead of hanging the run.
+vote_calls_while_waiting_error() ->
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"p290_waiting_vote"),
+    ?assertEqual(
+        {error, match_not_started}, gen_statem:call(Pid, {start_vote, #{}}, 2000)
+    ),
+    ?assertEqual(
+        {error, match_not_started},
+        gen_statem:call(Pid, {cast_vote, ~"p290_waiting_vote", ~"v1", ~"o1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, match_not_started},
+        gen_statem:call(Pid, {use_veto, ~"p290_waiting_vote", ~"v1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#290: input while paused was swallowed by
+%% paused/3's catch-all; it now hits an explicit clause that logs the drop.
+%% The observable contract is the same from the client's side - the match
+%% survives and stays paused - so this guards the crash/regression case.
+input_while_paused_is_dropped() ->
+    Pid = start_match(#{min_players => 1, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"p290_paused_input"),
+    timer:sleep(50),
+    ok = asobi_match_server:pause(Pid),
+    asobi_match_server:handle_input(Pid, ~"p290_paused_input", #{~"action" => ~"move"}),
+    timer:sleep(50),
+    ?assert(is_process_alive(Pid)),
+    ?assertMatch(#{status := paused}, asobi_match_server:get_info(Pid)),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#290: the vote trio fell through to
+%% paused/3's catch-all, which never replies - gen_statem:call/2 defaults to
+%% timeout infinity, so the caller hung forever.
+vote_calls_while_paused_error() ->
+    Pid = start_match(#{min_players => 1, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"p290_paused_vote"),
+    timer:sleep(50),
+    ok = asobi_match_server:pause(Pid),
+    ?assertEqual({error, match_paused}, gen_statem:call(Pid, {start_vote, #{}}, 2000)),
+    ?assertEqual(
+        {error, match_paused},
+        gen_statem:call(Pid, {cast_vote, ~"p290_paused_vote", ~"v1", ~"o1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, match_paused}, gen_statem:call(Pid, {use_veto, ~"p290_paused_vote", ~"v1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    stop(Pid).
+
+%% Regression for widgrensit/asobi#290: join is the fourth call with no
+%% paused/3 clause, and hung the caller the same way.
+join_while_paused_errors() ->
+    Pid = start_match(#{min_players => 1, max_players => 4}),
+    ok = asobi_match_server:join(Pid, ~"p290_paused_join1"),
+    timer:sleep(50),
+    ok = asobi_match_server:pause(Pid),
+    ?assertEqual(
+        {error, match_paused}, gen_statem:call(Pid, {join, ~"p290_paused_join2", #{}}, 2000)
+    ),
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
     stop(Pid).
 
 %% --- Helpers ---
