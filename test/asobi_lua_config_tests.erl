@@ -26,8 +26,21 @@ safe_lib_dir() ->
 %% --- Tests ---
 
 config_test_() ->
-    {foreach, fun() -> application:set_env(asobi, game_modes, #{}) end,
-        fun(_) -> application:set_env(asobi, game_modes, #{}) end, [
+    {foreach,
+        fun() ->
+            %% Same registration asobi_app:start/2 performs: without it every
+            %% {lua, _} mode resolves to lua_runtime_unavailable.
+            ok = asobi_lua_sup:register_game_modes(),
+            application:set_env(asobi, game_modes, #{})
+        end,
+        fun(_) ->
+            [
+                asobi_game_modes:unregister_game_mode(K)
+             || K <- [lua_match, lua_match_shared, lua_world]
+            ],
+            application:set_env(asobi, game_modes, #{})
+        end,
+        [
             {"single mode: loads match.lua globals", fun single_mode_loads_globals/0},
             {"single mode: registers 'default' key in game_modes (load-bearing, asobi#244)",
                 fun single_mode_registers_default_key/0},

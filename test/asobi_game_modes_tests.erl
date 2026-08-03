@@ -74,6 +74,10 @@ cleanup_lua(Prev) ->
     cleanup(Prev).
 
 lua_without_provider() ->
+    %% Establish the absence this asserts on rather than assuming it: the
+    %% registry is a global persistent_term, so any earlier test module that
+    %% registers a provider would otherwise decide this one's result.
+    ok = asobi_game_modes:unregister_game_mode(lua_match),
     ?assertEqual(
         {error, lua_runtime_unavailable}, asobi_game_modes:resolve_game_module(~"arena")
     ).

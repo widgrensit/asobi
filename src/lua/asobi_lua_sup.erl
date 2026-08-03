@@ -1,8 +1,23 @@
 -module(asobi_lua_sup).
 -behaviour(supervisor).
 
--export([start_link/0]).
+-export([start_link/0, register_game_modes/0]).
 -export([init/1]).
+
+-doc """
+Register the Lua bridge modules as the providers for the three Lua game-mode
+kinds `asobi_game_modes` knows about.
+
+Called from `asobi_app:start/2` before the supervision tree comes up, and by
+any test that resolves a `{lua, _}` mode without booting the application. The
+mapping lives here, next to the bridges, so `asobi_game_modes` keeps knowing
+nothing about the scripting runtime.
+""".
+-spec register_game_modes() -> ok.
+register_game_modes() ->
+    ok = asobi_game_modes:register_game_mode(lua_match, asobi_lua_match),
+    ok = asobi_game_modes:register_game_mode(lua_match_shared, asobi_lua_match_shared),
+    ok = asobi_game_modes:register_game_mode(lua_world, asobi_lua_world).
 
 -spec start_link() -> supervisor:startlink_ret().
 start_link() ->
