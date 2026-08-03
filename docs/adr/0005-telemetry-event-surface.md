@@ -59,17 +59,17 @@ building an exporter safely - not a step to defer until after one is built.
     literal type.
 - **Game-author-controlled metadata** - `from_phase` and `to_phase` (world
   phases), `method` (vote), `currency` and `reason` (economy), `item_id`
-  (store), `channel_id` (chat). Free-form binaries with no core-side
-  allowlist: bounded in practice by the game's own config and catalogue, but
-  their size is controlled by the game author, not asobi. A consumer must
-  not assume they stay small - use one as a label only behind an explicit
-  per-deployment cardinality cap.
+  (store). Free-form binaries with no core-side allowlist: bounded in
+  practice by the game's own config and catalogue, but their size is
+  controlled by the game author, not asobi. A consumer must not assume they
+  stay small - use one as a label only behind an explicit per-deployment
+  cardinality cap.
 - **Unbounded metadata** - per-entity identifiers, client-controlled values,
   or free-form data: `match_id`, `world_id`, `player_id`, `sender_id`,
-  `vote_id`, `peer_ip`, `details`, `result`, and `type` on `ws/message_in`
-  and `ws/message_out`. **Never** route these into a metric label. They stay
-  on the raw event for tracing/audit sinks (e.g. `opentelemetry_asobi`
-  spans) that can afford per-entity cardinality.
+  `vote_id`, `peer_ip`, `channel_id`, `details`, `result`, and `type` on
+  `ws/message_in` and `ws/message_out`. **Never** route these into a metric
+  label. They stay on the raw event for tracing/audit sinks (e.g.
+  `opentelemetry_asobi` spans) that can afford per-entity cardinality.
 
 ### Events
 
@@ -146,7 +146,36 @@ building an exporter safely - not a step to defer until after one is built.
 
 #### Chat - `[asobi, chat, message_sent]`
 
-- Metadata `#{channel_id, sender_id}`
+- Metadata `#{channel_id, sender_id}` - both unbounded; never a label.
+  `channel_id` is not a game-author catalogue value: it is a structured
+  per-entity address. `asobi_chat_acl:validate_channel_id/1` accepts only
+  these prefixes, and `classify/1` gives each its meaning:
+  - `dm:<PlayerA>:<PlayerB>` - a direct-message pair. Cardinality grows with
+    the square of the known-player count; #305 bounds minting to real player
+    ids, which is a bound on abuse, not a bound useful to a label.
+  - `world:<WorldId>` - one channel per live world.
+  - `zone:<WorldId>:<X>,<Y>` and `prox:<WorldId>:<X>,<Y>` - one channel per
+    zone or proximity cell, so cardinality is world count times grid size.
+  - `room:<GroupUuid>` - one channel per group, keyed by a canonical uuid.
+
+  A bare unprefixed id is also treated as a group id by `classify/1`, but
+  `validate_channel_id/1` rejects it on both the WS and HTTP paths, so it is
+  not reachable in practice. `?MAX_CHANNEL_ID_BYTES` caps each value at 256
+  bytes; that caps the size of one label value, not how many distinct ones
+  exist. Every scheme above is keyed by a runtime entity - a player pair, a
+  world, a zone coordinate, a group uuid - so the set grows with the running
+  game, not with a fixed catalogue. Count the event and, if a breakdown is
+  needed, derive the bounded prefix (`dm` / `world` / `zone` / `prox` /
+  `room`) in the consumer rather than labelling on the full id.
+
+  Pending: asobi#320 adds a `global:<Name>` tier above `world:`, for
+  game-wide channels that outlive a single world. That one scheme is
+  operator-declared - `<Name>` must appear in a configured mode's
+  `chat => #{global => [...]}` - so it is bounded like `mode` is. It does
+  not change the classification of `channel_id` as a whole, which stays
+  unbounded because the per-entity schemes above dominate it. When #320
+  merges, add `global:<Name>` to the list above and to the derivable prefix
+  set.
 
 #### Vote - `[asobi, vote, started | cast | resolved]`
 
