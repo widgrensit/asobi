@@ -399,6 +399,8 @@ Hybrid ETS + PostgreSQL. ETS for hot reads, Kura for persistence.
 - `rank(BoardId, PlayerId)` — player's rank via ETS position
 - `reset(BoardId)` — snapshot to archive table, clear ETS, Shigoto job
 
+**Lifecycle:** a board hydrates its ETS tables from `leaderboard_entries` before it accepts reads, and flushes pending scores on shutdown, so a restart does not reset the board. Each flush writes only the players that changed since the previous flush; a player whose write fails stays pending and is retried on the next tick.
+
 **Time-scoped boards:** Shigoto schedules resets (daily/weekly/monthly). On reset, current entries archived to `asobi_leaderboard_archive` with period metadata.
 
 ### Chat Channel (`asobi_chat_channel` — gen_server)

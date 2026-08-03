@@ -1,6 +1,8 @@
 -module(asobi_leaderboard_server).
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/1, submit/3, top/2, rank/2, around/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -96,17 +98,21 @@ whereis_board_optional(BoardId) ->
         [] -> not_found
     end.
 
+%% ETS is the source of truth for reads, so a board that starts empty
+%% serves an empty leaderboard even though the rows are still in
+%% Postgres. Load them back before the process becomes reachable.
 -spec init(binary()) -> {ok, map()}.
 init(BoardId) ->
     pg:join(?PG_SCOPE, {?MODULE, BoardId}, self()),
     Table = ets:new(leaderboard, [ordered_set, private]),
     PlayerIndex = ets:new(player_index, [set, private]),
+    hydrate(BoardId, Table, PlayerIndex),
     erlang:send_after(30000, self(), persist),
     {ok, #{
         board_id => BoardId,
         table => Table,
         player_index => PlayerIndex,
-        dirty => false
+        dirty => #{}
     }}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
@@ -135,7 +141,9 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({submit, PlayerId, Score}, #{table := Table, player_index := Idx} = State) when
+handle_cast(
+    {submit, PlayerId, Score}, #{table := Table, player_index := Idx, dirty := Dirty} = State
+) when
     is_number(Score)
 ->
     case ets:lookup(Idx, PlayerId) of
@@ -146,28 +154,74 @@ handle_cast({submit, PlayerId, Score}, #{table := Table, player_index := Idx} = 
     end,
     ets:insert(Table, {{-Score, PlayerId}, Score}),
     ets:insert(Idx, {PlayerId, Score}),
-    {noreply, State#{dirty => true}};
+    {noreply, State#{dirty => Dirty#{PlayerId => true}}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 -spec handle_info(term(), map()) -> {noreply, map()}.
-handle_info(persist, #{dirty := true, board_id := BoardId, table := Table} = State) ->
-    flush_to_db(BoardId, Table),
+handle_info(persist, #{dirty := Dirty} = State) when map_size(Dirty) > 0 ->
+    Pending = flush_to_db(State),
     erlang:send_after(30000, self(), persist),
-    {noreply, State#{dirty => false}};
+    {noreply, State#{dirty => Pending}};
 handle_info(persist, State) ->
     erlang:send_after(30000, self(), persist),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
+%% Best effort: terminate runs inside the supervisor's 5s shutdown
+%% budget, so a slow or unreachable database costs a brutal kill and the
+%% pending scores, not a hung shutdown.
 -spec terminate(term(), map()) -> ok.
-terminate(_Reason, #{table := Table, player_index := Idx}) ->
+terminate(_Reason, #{dirty := Dirty} = State) when map_size(Dirty) > 0 ->
+    _ = flush_to_db(State),
+    delete_tables(State);
+terminate(_Reason, State) ->
+    delete_tables(State).
+
+%% --- Internal ---
+
+delete_tables(#{table := Table, player_index := Idx}) ->
     ets:delete(Table),
     ets:delete(Idx),
     ok.
 
-%% --- Internal ---
+hydrate(BoardId, Table, Idx) ->
+    Q = kura_query:where(kura_query:from(asobi_leaderboard_entry), {leaderboard_id, BoardId}),
+    try asobi_repo:all(Q) of
+        {ok, Rows} ->
+            lists:foreach(fun(Row) -> hydrate_row(BoardId, Table, Idx, Row) end, Rows);
+        %% A board that cannot read its rows still starts, on empty
+        %% tables: flush_to_db/1 upserts per player and never deletes, so
+        %% the persisted board degrades to partial reads until the next
+        %% start rather than being erased.
+        {error, Reason} ->
+            log_hydrate_failure(BoardId, Reason)
+    catch
+        Class:CaughtReason ->
+            log_hydrate_failure(BoardId, {Class, CaughtReason})
+    end.
+
+hydrate_row(_BoardId, Table, Idx, #{player_id := PlayerId, score := Score}) when
+    is_binary(PlayerId), is_number(Score)
+->
+    ets:insert(Table, {{-Score, PlayerId}, Score}),
+    ets:insert(Idx, {PlayerId, Score}),
+    ok;
+hydrate_row(BoardId, _Table, _Idx, Row) ->
+    ?LOG_WARNING(#{
+        msg => ~"leaderboard hydrate skipped unusable row",
+        board_id => BoardId,
+        row => Row
+    }),
+    ok.
+
+log_hydrate_failure(BoardId, Reason) ->
+    ?LOG_ERROR(#{
+        msg => ~"leaderboard hydrate failed",
+        board_id => BoardId,
+        error => Reason
+    }).
 
 take_top(Table, N) ->
     take_top(Table, ets:first(Table), N, 1, []).
@@ -233,52 +287,74 @@ assign_ranks([], _Rank, Acc) ->
 assign_ranks([{PlayerId, Score, _} | Rest], Rank, Acc) ->
     assign_ranks(Rest, Rank + 1, [{PlayerId, Score, Rank} | Acc]).
 
-flush_to_db(BoardId, Table) ->
-    flush_entries(BoardId, Table, ets:first(Table)).
+%% Returns the players whose write failed so they stay dirty and are
+%% retried on the next tick instead of being silently dropped.
+flush_to_db(#{board_id := BoardId, player_index := Idx, dirty := Dirty}) ->
+    flush_players(BoardId, Idx, maps:keys(Dirty), #{}).
 
-flush_entries(_BoardId, _Table, '$end_of_table') ->
-    ok;
-flush_entries(BoardId, Table, {_NegScore, PlayerId} = Key) ->
-    [{_, Score}] = ets:lookup(Table, Key),
+flush_players(_BoardId, _Idx, [], Pending) ->
+    Pending;
+flush_players(BoardId, Idx, [PlayerId | Rest], Pending) ->
+    Next =
+        case ets:lookup(Idx, PlayerId) of
+            [{PlayerId, Score}] ->
+                case upsert_entry(BoardId, PlayerId, Score) of
+                    ok -> Pending;
+                    {error, _} -> Pending#{PlayerId => true}
+                end;
+            [] ->
+                Pending
+        end,
+    flush_players(BoardId, Idx, Rest, Next).
+
+upsert_entry(BoardId, PlayerId, Score) ->
+    try write_entry(BoardId, PlayerId, Score) of
+        {ok, _} ->
+            ok;
+        {error, Reason} ->
+            log_flush_failure(BoardId, PlayerId, Reason),
+            {error, Reason}
+    catch
+        Class:CaughtReason ->
+            log_flush_failure(BoardId, PlayerId, {Class, CaughtReason}),
+            {error, CaughtReason}
+    end.
+
+write_entry(BoardId, PlayerId, Score) ->
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_leaderboard_entry), {leaderboard_id, BoardId}),
         {player_id, PlayerId}
     ),
-    Result =
-        case asobi_repo:all(Q) of
-            {ok, [Existing]} ->
-                CS = kura_changeset:cast(
-                    asobi_leaderboard_entry,
-                    Existing,
-                    #{score => Score},
-                    [score]
-                ),
-                asobi_repo:update(CS);
-            {ok, []} ->
-                CS = kura_changeset:cast(
-                    asobi_leaderboard_entry,
-                    #{},
-                    #{
-                        leaderboard_id => BoardId,
-                        player_id => PlayerId,
-                        score => Score,
-                        sub_score => 0
-                    },
-                    [leaderboard_id, player_id, score, sub_score]
-                ),
-                asobi_repo:insert(CS);
-            {error, Reason} ->
-                {error, Reason}
-        end,
-    case Result of
-        {ok, _} ->
-            ok;
-        {error, FlushErr} ->
-            logger:error(#{
-                msg => ~"leaderboard flush failed",
-                board_id => BoardId,
-                player_id => PlayerId,
-                error => FlushErr
-            })
-    end,
-    flush_entries(BoardId, Table, ets:next(Table, Key)).
+    case asobi_repo:all(Q) of
+        {ok, [Existing | _]} ->
+            CS = kura_changeset:cast(
+                asobi_leaderboard_entry,
+                Existing,
+                #{score => Score},
+                [score]
+            ),
+            asobi_repo:update(CS);
+        {ok, []} ->
+            CS = kura_changeset:cast(
+                asobi_leaderboard_entry,
+                #{},
+                #{
+                    leaderboard_id => BoardId,
+                    player_id => PlayerId,
+                    score => Score,
+                    sub_score => 0
+                },
+                [leaderboard_id, player_id, score, sub_score]
+            ),
+            asobi_repo:insert(CS);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+log_flush_failure(BoardId, PlayerId, Reason) ->
+    ?LOG_ERROR(#{
+        msg => ~"leaderboard flush failed",
+        board_id => BoardId,
+        player_id => PlayerId,
+        error => Reason
+    }).
