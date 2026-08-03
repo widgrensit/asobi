@@ -83,7 +83,13 @@ match_server_test_() ->
             fun vote_calls_while_waiting_error/0},
         {"input while paused is dropped without crashing", fun input_while_paused_is_dropped/0},
         {"vote calls while paused error instead of hanging", fun vote_calls_while_paused_error/0},
-        {"join while paused errors instead of hanging", fun join_while_paused_errors/0}
+        {"join while paused errors instead of hanging", fun join_while_paused_errors/0},
+        {timeout, 15,
+            {"grace expiry of the last player stops the match",
+                fun grace_expiry_of_last_player_stops_match/0}},
+        {timeout, 15,
+            {"grace expiry with players left keeps the match running",
+                fun grace_expiry_with_players_left_keeps_match/0}}
     ]}.
 
 %% --- Tests ---
@@ -557,6 +563,8 @@ paused_down_starts_grace() ->
             max_offline_total => infinity
         }
     }),
+    unlink(Pid),
+    Ref = monitor(process, Pid),
     SessionPid = fake_session(~"p285_paused_policy"),
     ok = asobi_match_server:join(Pid, ~"p285_paused_policy"),
     timer:sleep(50),
@@ -571,9 +579,74 @@ paused_down_starts_grace() ->
     ?assertEqual(paused, maps:get(status, Info)),
     ?assertEqual(1, maps:get(player_count, Info)),
 
+    %% asobi#292: resuming lets the grace expire, which empties the roster
+    %% and must shut the match down (it used to tick on with no players).
     ok = asobi_match_server:resume(Pid),
+    receive
+        {'DOWN', Ref, process, Pid, {shutdown, empty}} -> ok
+    after 2000 ->
+        ?assert(false)
+    end.
+
+%% Regression for widgrensit/asobi#292: when the last player's reconnect
+%% grace expired, handle_reconnect_events/2 removed them from the roster but
+%% (unlike handle_leave/2) never checked for an empty roster, so the match
+%% kept ticking forever with no players.
+grace_expiry_of_last_player_stops_match() ->
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 100,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    unlink(Pid),
+    Ref = monitor(process, Pid),
+    PlayerId = ~"p292_grace_last",
+    SessionPid = fake_session(PlayerId),
+    ok = asobi_match_server:join(Pid, PlayerId),
+    timer:sleep(50),
+    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+
+    exit(SessionPid, kill),
+    receive
+        {'DOWN', Ref, process, Pid, {shutdown, empty}} -> ok
+    after 2000 ->
+        ?assert(false)
+    end.
+
+%% asobi#292: only the *last* player's grace expiry stops the match - the
+%% roster still having someone in it must leave the match running.
+grace_expiry_with_players_left_keeps_match() ->
+    Pid = start_match(#{
+        min_players => 1,
+        max_players => 2,
+        reconnect => #{
+            grace_period => 100,
+            during_grace => idle,
+            on_reconnect => resume,
+            on_expire => remove,
+            pause_match => false,
+            max_offline_total => infinity
+        }
+    }),
+    SessionPid = fake_session(~"p292_grace_gone"),
+    ok = asobi_match_server:join(Pid, ~"p292_grace_gone"),
+    ok = asobi_match_server:join(Pid, ~"p292_grace_stays"),
+    timer:sleep(50),
+    ?assertEqual(2, maps:get(player_count, asobi_match_server:get_info(Pid))),
+
+    exit(SessionPid, kill),
     timer:sleep(500),
-    ?assertEqual(0, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    ?assert(is_process_alive(Pid)),
+    Info = asobi_match_server:get_info(Pid),
+    ?assertEqual(1, maps:get(player_count, Info)),
+    ?assertEqual([~"p292_grace_stays"], maps:get(players, Info)),
     stop(Pid).
 
 %% Regression for widgrensit/asobi#285: paused/3 had no {call, reconnect}

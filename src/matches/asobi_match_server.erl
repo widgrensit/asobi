@@ -289,15 +289,20 @@ running(state_timeout, tick, #{game_module := Mod, game_state := GS, input_queue
                 {ok, GS2} ->
                     State1 = State#{game_state => GS2, input_queue => []},
                     State2 = maybe_start_vote(Mod, State1),
-                    State3 = tick_reconnect(TickRate, tick_phases(TickRate, State2)),
-                    case asobi_phase:is_complete(maps:get(phase_state, State3)) of
+                    {State3, Removed} = tick_reconnect(TickRate, tick_phases(TickRate, State2)),
+                    case roster_emptied(State3, Removed) of
                         true ->
-                            {next_state, finished, State3#{
-                                result => #{status => ~"phases_complete"}
-                            }};
+                            {stop, {shutdown, empty}, State3};
                         false ->
-                            broadcast_state(State3),
-                            {keep_state, State3, [{state_timeout, TickRate, tick}]}
+                            case asobi_phase:is_complete(maps:get(phase_state, State3)) of
+                                true ->
+                                    {next_state, finished, State3#{
+                                        result => #{status => ~"phases_complete"}
+                                    }};
+                                false ->
+                                    broadcast_state(State3),
+                                    {keep_state, State3, [{state_timeout, TickRate, tick}]}
+                            end
                     end;
                 {finished, Result, GS2} ->
                     {next_state, finished, State#{game_state => GS2, result => Result}}
@@ -342,8 +347,11 @@ running(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state :=
         {ok, PlayerId} ->
             Now = erlang:system_time(millisecond),
             {Events, RS1} = asobi_reconnect:disconnect(PlayerId, Now, RS),
-            State1 = handle_reconnect_events(Events, State#{reconnect_state => RS1}),
-            {keep_state, State1};
+            {State1, Removed} = handle_reconnect_events(Events, State#{reconnect_state => RS1}),
+            case roster_emptied(State1, Removed) of
+                true -> {stop, {shutdown, empty}, State1};
+                false -> {keep_state, State1}
+            end;
         none ->
             keep_state_and_data
     end;
@@ -525,8 +533,11 @@ paused(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := 
         {ok, PlayerId} ->
             Now = erlang:system_time(millisecond),
             {Events, RS1} = asobi_reconnect:disconnect(PlayerId, Now, RS),
-            State1 = handle_reconnect_events(Events, State#{reconnect_state => RS1}),
-            {keep_state, State1};
+            {State1, Removed} = handle_reconnect_events(Events, State#{reconnect_state => RS1}),
+            case roster_emptied(State1, Removed) of
+                true -> {stop, {shutdown, empty}, State1};
+                false -> {keep_state, State1}
+            end;
         none ->
             keep_state_and_data
     end;
@@ -1006,11 +1017,10 @@ init_reconnect(Config) ->
     end.
 
 tick_reconnect(_DeltaMs, #{reconnect_state := undefined} = State) ->
-    State;
+    {State, false};
 tick_reconnect(DeltaMs, #{reconnect_state := RS} = State) ->
     {Events, RS1} = asobi_reconnect:tick(DeltaMs, RS),
-    State1 = State#{reconnect_state => RS1},
-    handle_reconnect_events(Events, State1).
+    handle_reconnect_events(Events, State#{reconnect_state => RS1}).
 
 handle_reconnect_call(From, PlayerId, #{players := Players, reconnect_state := RS} = State) when
     RS =/= undefined
@@ -1078,29 +1088,34 @@ find_player_by_pid(Pid, #{players := Players}) ->
         Players
     ).
 
-handle_reconnect_events([], State) ->
-    State;
-handle_reconnect_events([{grace_expired, PlayerId, Action} | Rest], State) ->
-    State1 =
-        case Action of
-            remove ->
-                #{players := Players, game_module := Mod, game_state := GS} = State,
-                case maps:is_key(PlayerId, Players) of
-                    false ->
-                        State;
-                    true ->
-                        {ok, GS1} = Mod:leave(PlayerId, GS),
-                        State#{
-                            players => maps:remove(PlayerId, Players),
-                            game_state => GS1
-                        }
-                end;
-            _ ->
-                State
-        end,
-    handle_reconnect_events(Rest, State1);
-handle_reconnect_events([_ | Rest], State) ->
-    handle_reconnect_events(Rest, State).
+handle_reconnect_events(Events, State) ->
+    handle_reconnect_events(Events, State, false).
+
+handle_reconnect_events([], State, Removed) ->
+    {State, Removed};
+handle_reconnect_events([{grace_expired, PlayerId, remove} | Rest], State, Removed) ->
+    #{players := Players, game_module := Mod, game_state := GS} = State,
+    case maps:is_key(PlayerId, Players) of
+        false ->
+            handle_reconnect_events(Rest, State, Removed);
+        true ->
+            {ok, GS1} = Mod:leave(PlayerId, GS),
+            State1 = State#{
+                players => maps:remove(PlayerId, Players),
+                game_state => GS1
+            },
+            handle_reconnect_events(Rest, State1, true)
+    end;
+handle_reconnect_events([_ | Rest], State, Removed) ->
+    handle_reconnect_events(Rest, State, Removed).
+
+%% asobi#292: grace expiry removes a player without going through
+%% handle_leave/2, so the "last player gone" shutdown has to be applied by
+%% every caller of handle_reconnect_events/2 as well.
+roster_emptied(_State, false) ->
+    false;
+roster_emptied(#{players := Players}, true) ->
+    map_size(Players) =:= 0.
 
 generate_id() ->
     asobi_id:generate().
