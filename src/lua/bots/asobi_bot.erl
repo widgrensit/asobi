@@ -6,6 +6,11 @@ The bot joins a match as a player, receives game state updates,
 and sends input decisions based on the Lua `think(bot_id, state)` function.
 
 Also handles auto boon picking and auto voting.
+
+A bot is tracked through `asobi_presence:track_bot/2`, so it is a delivery
+target for `asobi_presence:send/2` like any player session but is never
+counted by `asobi_presence:online_count/0`. The messages it consumes are the
+public `t:asobi_presence:message/0` contract, not an ad-hoc shape.
 """.
 
 -behaviour(gen_server).
@@ -13,7 +18,6 @@ Also handles auto boon picking and auto voting.
 -export([start_link/3]).
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, terminate/2]).
 
--define(PG_SCOPE, nova_scope).
 -define(TICK_INTERVAL, 100).
 
 -spec start_link(pid(), binary(), binary() | undefined) -> gen_server:start_ret().
@@ -30,7 +34,7 @@ start_link(MatchPid, BotId, LuaScript) ->
 
 -spec init(map()) -> {ok, map()} | {stop, term()}.
 init(#{match_pid := MatchPid, bot_id := BotId, lua_script := LuaScript}) ->
-    pg:join(?PG_SCOPE, {player, BotId}, self()),
+    asobi_presence:track_bot(BotId, self()),
     monitor(process, MatchPid),
     _ = asobi_match_server:join(MatchPid, BotId),
     erlang:send_after(?TICK_INTERVAL, self(), tick),
@@ -67,22 +71,31 @@ handle_info(tick, #{phase := playing} = State) ->
 handle_info(tick, State) ->
     erlang:send_after(?TICK_INTERVAL, self(), tick),
     {noreply, State};
-handle_info({asobi_message, {match_state, GameState}}, State) when is_map(GameState) ->
+handle_info({asobi_message, Message}, State) ->
+    handle_presence_message(Message, State);
+handle_info({'DOWN', _, process, MatchPid, _}, #{match_pid := MatchPid} = State) ->
+    {stop, normal, State};
+handle_info(_, State) ->
+    {noreply, State}.
+
+%% Spec'd against the presence contract rather than term(): these are named
+%% shapes core has to keep, not an ad-hoc guess at an internal protocol.
+%% Reshaping one means editing asobi_presence:message/0, which breaks
+%% dialyzer at the producing send/2 call.
+-spec handle_presence_message(asobi_presence:message(), map()) ->
+    {noreply, map()} | {stop, term(), map()}.
+handle_presence_message({match_state, GameState}, State) when is_map(GameState) ->
     Phase = extract_phase(GameState),
     State1 = State#{game_state => GameState, phase => Phase},
     State2 = maybe_auto_pick_boon(State1),
     {noreply, State2};
-handle_info({asobi_message, {match_event, vote_start, VotePayload}}, State) when
+handle_presence_message({match_event, vote_start, VotePayload}, State) when
     is_map(VotePayload)
 ->
     handle_vote_start(VotePayload, State);
-handle_info({asobi_message, {match_event, finished, _}}, State) ->
+handle_presence_message({match_event, finished, _}, State) ->
     {stop, normal, State};
-handle_info({asobi_message, _}, State) ->
-    {noreply, State};
-handle_info({'DOWN', _, process, MatchPid, _}, #{match_pid := MatchPid} = State) ->
-    {stop, normal, State};
-handle_info(_, State) ->
+handle_presence_message(_, State) ->
     {noreply, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
@@ -95,7 +108,7 @@ handle_call(_, _From, State) ->
 
 -spec terminate(term(), map()) -> ok.
 terminate(_Reason, #{bot_id := BotId, match_pid := MatchPid}) ->
-    pg:leave(?PG_SCOPE, {player, BotId}, self()),
+    asobi_presence:untrack_bot(BotId, self()),
     try
         asobi_match_server:leave(MatchPid, BotId)
     catch

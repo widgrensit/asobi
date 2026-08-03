@@ -213,6 +213,24 @@ end
 Clients receive bot players in the normal game state. Whether to show them
 differently (e.g., "AI" tag) is up to the client.
 
+## Bots and presence
+
+A bot is tracked with `asobi_presence:track_bot/2`. That makes it a delivery
+target for everything the match server broadcasts -- state, match events,
+votes -- exactly like a connected player session.
+
+It deliberately does not make the bot *online*:
+
+- `asobi_presence:online_count/0` counts connected humans only. Bots are
+  never added to it, so your concurrency figure stays a real player count and
+  bot-fill (which is driven by how few humans are queued) cannot feed itself.
+- Bots emit no `player_online` / `player_offline` presence broadcasts, so
+  friend lists and presence subscribers never see a bot appear or disappear.
+
+`asobi_presence:get_status/1` on a bot id does answer `online`, because that
+function reports whether the id is addressable. Filter on the `bot_` prefix
+if you need the human answer.
+
 ## Next steps
 
 - [Lua scripting](lua-scripting.md) - the `game.*` API a bot's `think` shares with match logic.

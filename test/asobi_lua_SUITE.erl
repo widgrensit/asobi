@@ -81,6 +81,12 @@ init_per_testcase(_TC, Config) ->
     meck:expect(asobi_player_stats, record_match, fun(_Participants, _Result) -> ok end),
     meck:new(asobi_presence, [non_strict, no_link]),
     meck:expect(asobi_presence, send, fun(_PlayerId, _Msg) -> ok end),
+    %% Bots now register themselves as delivery targets. The mock replaces the
+    %% whole module, so anything asobi_bot reaches for and this suite has not
+    %% stubbed is `undef` and kills the bot at init - surfacing here as a bot
+    %% that never joined rather than as a missing stub.
+    meck:expect(asobi_presence, track_bot, fun(_BotId, _Pid) -> ok end),
+    meck:expect(asobi_presence, untrack_bot, fun(_BotId, _Pid) -> ok end),
     Config.
 
 end_per_testcase(_TC, _Config) ->

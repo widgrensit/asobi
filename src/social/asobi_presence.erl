@@ -1,29 +1,104 @@
 -module(asobi_presence).
+-moduledoc """
+Who is reachable, and who counts as online.
+
+Those are two different facts and this module keeps them apart:
+
+- *addressable* - the process is a delivery target for `send/2`, keyed by
+  player id. Player sessions and bots are both addressable.
+- *online* - a connected human player. Only `track/2` records that, and
+  `online_count/0` counts exactly those.
+
+Bots (`asobi_bot`) are addressable but never online. `track_bot/2` joins the
+delivery group and nothing else: a bot does not count toward
+`online_count/0` and does not emit `player_online` / `player_offline`
+presence broadcasts. `online_count/0` is the operator-facing concurrency
+number, and bot fill is itself driven by how few humans are queued, so
+counting server-spawned bots would both inflate the figure and feed it back
+into its own input.
+
+## Message contract
+
+Everything `send/2` delivers arrives at the target process as
+`{asobi_message, message()}`. `message/0` is the contract between the core
+servers that produce those terms (`asobi_match_server`, `asobi_world_server`,
+`asobi_zone`, `asobi_matchmaker`, the Lua runtime) and the processes that
+pattern-match them (`asobi_ws_handler`, `asobi_player_session`, `asobi_bot`).
+
+It is a public type on purpose. `send/2` is spec'd with it, so a producer
+that invents a shape fails dialyzer instead of quietly emitting a term no
+consumer handles, and a consumer (`asobi_bot` does this) can spec its own
+clauses against the same named type rather than an ad-hoc guess.
+""".
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([track/2, untrack/1, update/2, get_status/1, send/2, online_count/0]).
+-export([track/2, track_bot/2, untrack/1, untrack_bot/2, update/2, get_status/1, send/2]).
+-export([online_count/0]).
 -export([disconnect/2, revoke_session/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(PRESENCE_GROUP, asobi_online).
 -define(PG_SCOPE, nova_scope).
 
+-type event_name() :: atom() | binary().
+-type message() ::
+    {match_joined, pid()}
+    | {match_state, map()}
+    | {match_state_raw, binary()}
+    | {match_event, event_name(), map()}
+    | {world_joined, pid(), pid() | undefined}
+    | {world_zone_changed, pid()}
+    | {world_event, event_name(), map()}
+    | {zone_delta, non_neg_integer(), [map()]}
+    | {zone_delta_raw, binary()}
+    | {terrain_chunk, {integer(), integer()}, binary()}
+    | {dm_message, map()}
+    | {notification, map()}
+    | {game_message, term()}
+    | {script_error, map()}.
+
+-export_type([event_name/0, message/0]).
+
 -spec start_link() -> gen_server:start_ret().
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+-doc """
+Track a connected player session: addressable by `send/2` and counted by
+`online_count/0`.
+""".
 -spec track(binary(), pid()) -> ok.
 track(PlayerId, Pid) ->
     nova_pubsub:join(?PRESENCE_GROUP, Pid),
-    pg:join(?PG_SCOPE, {player, PlayerId}, Pid),
+    join_delivery_group(PlayerId, Pid),
     nova_pubsub:broadcast(presence, ~"player_online", #{player_id => PlayerId}),
+    ok.
+
+-doc """
+Track a bot process: addressable by `send/2`, deliberately not online.
+
+A bot never counts toward `online_count/0` and never emits a presence
+broadcast. See the module docs for why.
+""".
+-spec track_bot(binary(), pid()) -> ok.
+track_bot(BotId, Pid) ->
+    join_delivery_group(BotId, Pid),
     ok.
 
 -spec untrack(binary()) -> ok.
 untrack(PlayerId) ->
     nova_pubsub:broadcast(presence, ~"player_offline", #{player_id => PlayerId}),
     ok.
+
+-spec untrack_bot(binary(), pid()) -> ok.
+untrack_bot(BotId, Pid) ->
+    pg:leave(?PG_SCOPE, {player, BotId}, Pid),
+    ok.
+
+-spec join_delivery_group(binary(), pid()) -> ok.
+join_delivery_group(Id, Pid) ->
+    pg:join(?PG_SCOPE, {player, Id}, Pid).
 
 -spec update(binary(), map()) -> ok.
 update(PlayerId, Status) ->
@@ -37,7 +112,7 @@ get_status(PlayerId) ->
         _ -> online
     end.
 
--spec send(binary(), term()) -> ok.
+-spec send(binary(), message()) -> ok.
 send(PlayerId, Message) ->
     Members = pg:get_members(?PG_SCOPE, {player, PlayerId}),
     lists:foreach(fun(Pid) when is_pid(Pid) -> Pid ! {asobi_message, Message} end, Members),
