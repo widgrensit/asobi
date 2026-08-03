@@ -1,6 +1,11 @@
 # Asobi WebSocket Protocol Fixtures
 
-Canonical examples of every server-to-client message asobi emits over its WebSocket.
+Canonical examples of every server-to-client message the asobi library itself emits over its WebSocket.
+
+The `match.` and `world.` namespaces are open: a game can push its own events
+through them, and those are not (and cannot be) in this corpus. See
+[Game-defined events](#game-defined-events-are-not-in-the-corpus) before
+writing an SDK dispatcher that switches exhaustively on `type`.
 
 ## What this is for
 
@@ -11,6 +16,16 @@ The corpus only covers **envelope routing** — `type` plus a representative `pa
 ## Coverage contract
 
 `asobi_protocol_coverage_tests.erl` is the keeper. It scans the asobi source for every emit site (`encode_reply/3` calls plus `{match_event, _, _}` and `{world_event, _, _}` send sites) and asserts that each event has exactly one fixture file. Adding an emit site without a fixture fails CI. Adding a stale fixture for a removed event fails CI.
+
+The scan only recognises literal lowercase atoms, so an emit site whose event name is a variable is invisible to it. That is deliberate: the only such sites are the `game.broadcast` relays described below, whose names are game-owned and unenumerable.
+
+## Game-defined events are not in the corpus
+
+A game script's `game.broadcast("round_start", ...)` reaches clients as `{"type": "match.round_start"}` from a match, or `{"type": "world.round_start"}` from a world. asobi owns the prefix and validates the leaf name (1-64 bytes, `[A-Za-z0-9_-]`, and never one of asobi's own leaf names - see `asobi_ws_handler:reserved_event_names/0`); the leaf itself belongs entirely to the game.
+
+That class of message is open-ended by design and can never be enumerated here. **Do not read this corpus as a closed set of wire types.** Every official SDK already has a generic fallback for exactly this reason - Unity's `AsobiDispatcher.HandleMessage` has a `default:` branch that strips the `match.`/`world.` prefix and fires `OnMatchEvent`/`OnWorldEvent`, and Godot and the JS SDK have the same path. A new SDK needs that fallback too; without it, every game-defined event is silently dropped.
+
+The wire-level detail, including what happens to a rejected name, is in [guides/websocket-protocol.md](../../guides/websocket-protocol.md#custom-events).
 
 ## Layout
 
@@ -56,5 +71,5 @@ The pattern is identical across every SDK.
 
 - Client→server messages (the SDK *sends* these — different test category).
 - Payload field-rename drift inside an event (e.g. `match.state` payload schema). Game modes own their payload shape, not the asobi library.
-- Lua-side `world.broadcast_event/3` and `match.broadcast_event/3` — those are user code; their event names are mode-specific.
+- Game-defined `match.<name>`/`world.<name>` events from `game.broadcast` - the leaf name is game-owned, so there is no finite set to fixture. Dispatch-test those in the game's own SDK tests, against the generic `match.*`/`world.*` fallback.
 - Authoring docs or types from these fixtures — that's a separate codegen step, not built today.

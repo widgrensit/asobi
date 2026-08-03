@@ -80,7 +80,10 @@ what a lobby shows differs per game - a bare count, a full roster, nothing
 until it fills.
 
 `game.broadcast` from your join callback is the whole of it, as above. It
-reaches every player currently in the match.
+reaches every player currently in the match, and the example above arrives
+client-side as `{"type": "match.lobby_update", "payload": {"players": ...}}`.
+Naming rules and the SDK-side handler for these are in
+[Custom events](websocket-protocol.md#custom-events).
 
 ### Chat in a lobby
 

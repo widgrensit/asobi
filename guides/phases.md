@@ -89,7 +89,10 @@ end
 ```
 
 `game.broadcast` is how the phase reaches your own clients with your own
-shape. See the callback reference for the full callback list.
+shape. The two calls above arrive as `{"type": "match.round_start"}` and
+`{"type": "match.round_over"}` (`world.*` from a world script); see
+[Custom events](websocket-protocol.md#custom-events) for the naming rules.
+See the callback reference for the full callback list.
 
 ### What the client sees on the wire
 

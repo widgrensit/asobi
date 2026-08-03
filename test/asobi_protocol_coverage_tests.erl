@@ -4,6 +4,7 @@
 
 -define(FIXTURE_DIR, "priv/protocol/fixtures").
 -define(WS_HANDLER, "src/ws/asobi_ws_handler.erl").
+-define(WS_GUIDE, "guides/websocket-protocol.md").
 -define(MATCH_SERVER, "src/matches/asobi_match_server.erl").
 -define(WORLD_SERVER, "src/world/asobi_world_server.erl").
 -define(DYNAMIC_EMIT_SOURCES, [
@@ -223,6 +224,27 @@ every_emitted_match_or_world_event_is_reserved_test() ->
             )
         )
     ).
+
+%% #302: the reserved set is a contract game authors design event names
+%% against, so the guide spells it out rather than sending them to the
+%% source. A library event added later moves ?RESERVED_EVENT_NAMES (the
+%% test above sees to that) and would leave the guide quietly wrong.
+guide_documents_the_reserved_event_names_test() ->
+    Documented = lists:usort(scan_documented_reserved_names(read_file(?WS_GUIDE))),
+    Reserved = lists:usort(asobi_ws_handler:reserved_event_names()),
+    ?assertEqual(
+        Reserved,
+        Documented,
+        "reserved-event-names block in guides/websocket-protocol.md is out of sync "
+        "with asobi_ws_handler:reserved_event_names/0"
+    ).
+
+scan_documented_reserved_names(Bin) ->
+    Re = "BEGIN reserved-event-names.*?```\\s*(.*?)```",
+    case re:run(Bin, Re, [dotall, {capture, all_but_first, binary}]) of
+        {match, [Block]} -> binary:split(Block, [~" ", ~"\n"], [global, trim_all]);
+        nomatch -> []
+    end.
 
 match_or_world_suffix(<<"match.", Suffix/binary>>) -> {true, Suffix};
 match_or_world_suffix(<<"world.", Suffix/binary>>) -> {true, Suffix};

@@ -35,6 +35,59 @@ are JSON with a common envelope format.
 The `cid` field is optional. When provided, the server echoes it back in
 the response so the client can correlate request/response pairs.
 
+## Custom events
+
+The events listed on this page are the ones asobi itself emits. They are not
+the whole `type` space: a game script owns the leaf name under `match.` and
+`world.`, so a client must never switch exhaustively on the list below.
+
+`game.broadcast` from a match script:
+
+```lua
+game.broadcast("round_start", { phase = "combat" })
+```
+
+reaches every player in that match as:
+
+```json
+{"type": "match.round_start", "payload": {"phase": "combat"}}
+```
+
+The same call from a world script produces `world.round_start` and reaches
+every player in the world. There is no `cid` - these are pushes, never
+replies.
+
+The runtime validates the leaf name before it goes on the wire:
+
+- 1 to 64 bytes.
+- `A-Z`, `a-z`, `0-9`, `_` and `-` only. `.` is excluded, so a script cannot
+  mint a deeper `world.foo.bar` sub-namespace.
+- Not one of asobi's own leaf names, otherwise a script could forge a frame
+  byte-identical to an authoritative event such as `world.tick` or
+  `match.finished`. The reserved set is
+  `asobi_ws_handler:reserved_event_names/0`:
+
+<!-- BEGIN reserved-event-names (verified against asobi_ws_handler:reserved_event_names/0 by asobi_protocol_coverage_tests) -->
+```
+finished            joined              left                list
+matched             matchmaker_expired  matchmaker_failed   phase_changed
+state               terrain             tick                vote_result
+vote_start          vote_tally          vote_vetoed
+```
+<!-- END reserved-event-names -->
+
+The payload is also capped at 64 KiB encoded, the same bound as an inbound
+frame, because it fans out to every player. A payload that cannot be encoded
+as JSON at all is rejected on the same path.
+
+A broadcast that fails any of these is dropped and logged server-side. The
+client is told nothing, so do not wait for an error frame that will not come.
+
+Client SDKs handle this open namespace with a generic fallback: any
+`match.*`/`world.*` type with no dedicated callback has its prefix stripped
+and is handed to a catch-all match/world event handler. Every official SDK
+has one; a client written from scratch needs one too.
+
 ## Connection
 
 ### `session.connect`
