@@ -320,6 +320,15 @@ post_tick(_TickN, State) ->
 | `get_state/2` | no | Per-player state view |
 | `vote_resolved/3` | no | Handle vote result (inherited from match voting) |
 
+### Entity keys
+
+Entity maps are yours: asobi stores whatever a callback returns and only
+reads `x`, `y`, `type` and `persistent` from them, for zone crossings,
+spatial queries, hibernation and snapshots. Those four are read under either
+an atom key (`x`) or a binary one (`~"x"`), so a scripting bridge that hands
+entities back binary-keyed works the same as a native Erlang module. Mixing
+shapes within one entity is not supported - keep an entity's keys consistent.
+
 ### Configuration
 
 Register your world mode in `sys.config`:

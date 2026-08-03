@@ -64,6 +64,8 @@ world_zone_integration_test_() ->
         {"small grid backward compat", fun small_grid_backward_compat/0},
         {"world.input crossing a zone boundary rehomes the player",
             fun world_input_rehomes_across_boundary/0},
+        {"a binary-keyed (Lua-shaped) player entity rehomes across a boundary",
+            fun binary_keyed_player_rehomes_across_boundary/0},
         {"world.input past the world's far edge does not crash the world server",
             fun world_input_past_far_edge_survives/0},
         {"a script-owned player-typed entity the world server never joined survives crossing",
@@ -712,4 +714,33 @@ small_grid_backward_compat() ->
     Info = asobi_world_server:get_info(Pid),
     ?assertEqual(1, maps:get(player_count, Info)),
     ?assertEqual(running, maps:get(status, Info)),
+    stop_world(Ctx).
+
+%% Regression for widgrensit/asobi#269: the crossing check matched entity
+%% fields by atom key only, but every entity map a Lua world produces comes
+%% back from Luerl binary-keyed - so no player in a Lua world ever crossed a
+%% boundary, and their interest ring stayed frozen at the spawn zone for the
+%% whole session. asobi_lua_shaped_world_game reproduces that key shape
+%% without pulling Lua into this repo.
+binary_keyed_player_rehomes_across_boundary() ->
+    Ctx =
+        #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{
+            lazy_zones => true, game_module => asobi_lua_shaped_world_game
+        }),
+    ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
+    timer:sleep(20),
+    %% Spawns at {100.0, 100.0} => zone {1,1}.
+    {ok, ZonePid1} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+    ?assert(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid1))),
+
+    asobi_zone:player_input(ZonePid1, ~"p1", #{
+        ~"action" => ~"move", ~"x" => 250.0, ~"y" => 250.0
+    }),
+    timer:sleep(150),
+
+    ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, {2, 2})),
+    {ok, ZonePid2} = asobi_zone_manager:get_zone(Mgr, {2, 2}),
+    Entity = maps:get(~"p1", asobi_zone:get_entities(ZonePid2)),
+    ?assertEqual(250.0, maps:get(~"x", Entity)),
+    ?assertNot(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid1))),
     stop_world(Ctx).

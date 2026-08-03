@@ -38,20 +38,22 @@ query_radius(Entities, {CX, CY}, Radius, Opts) ->
     Exclude = exclude_set(Opts),
     CustomFilter = maps:get(filter, Opts, fun(_, _) -> true end),
     Results = maps:fold(
-        fun
-            (Id, #{x := X, y := Y} = Entity, Acc) ->
-                D2 = (X - CX) * (X - CX) + (Y - CY) * (Y - CY),
-                case
-                    D2 =< R2 andalso
-                        TypeFilter(Entity) andalso
-                        not maps:is_key(Id, Exclude) andalso
-                        CustomFilter(Id, Entity)
-                of
-                    true -> [{Id, Entity, math:sqrt(D2)} | Acc];
-                    false -> Acc
-                end;
-            (_Id, _Entity, Acc) ->
-                Acc
+        fun(Id, Entity, Acc) ->
+            case pos(Entity) of
+                {X, Y} ->
+                    D2 = (X - CX) * (X - CX) + (Y - CY) * (Y - CY),
+                    case
+                        D2 =< R2 andalso
+                            TypeFilter(Entity) andalso
+                            not maps:is_key(Id, Exclude) andalso
+                            CustomFilter(Id, Entity)
+                    of
+                        true -> [{Id, Entity, math:sqrt(D2)} | Acc];
+                        false -> Acc
+                    end;
+                undefined ->
+                    Acc
+            end
         end,
         [],
         Entities
@@ -74,20 +76,22 @@ query_rect(Entities, {MinX, MinY}, {MaxX, MaxY}, Opts) ->
     Exclude = exclude_set(Opts),
     CustomFilter = maps:get(filter, Opts, fun(_, _) -> true end),
     Results = maps:fold(
-        fun
-            (Id, #{x := X, y := Y} = Entity, Acc) ->
-                case
-                    X >= MinX andalso X =< MaxX andalso
-                        Y >= MinY andalso Y =< MaxY andalso
-                        TypeFilter(Entity) andalso
-                        not maps:is_key(Id, Exclude) andalso
-                        CustomFilter(Id, Entity)
-                of
-                    true -> [{Id, Entity} | Acc];
-                    false -> Acc
-                end;
-            (_Id, _Entity, Acc) ->
-                Acc
+        fun(Id, Entity, Acc) ->
+            case pos(Entity) of
+                {X, Y} ->
+                    case
+                        X >= MinX andalso X =< MaxX andalso
+                            Y >= MinY andalso Y =< MaxY andalso
+                            TypeFilter(Entity) andalso
+                            not maps:is_key(Id, Exclude) andalso
+                            CustomFilter(Id, Entity)
+                    of
+                        true -> [{Id, Entity} | Acc];
+                        false -> Acc
+                    end;
+                undefined ->
+                    Acc
+            end
         end,
         [],
         Entities
@@ -134,12 +138,17 @@ take([H | T], N) -> [H | take(T, N - 1)].
 ) -> [{float(), binary(), map()}].
 collect_with_distance([], _, _, _, _, _, Acc) ->
     Acc;
-collect_with_distance([{Id, #{x := X, y := Y} = Entity} | Rest], CX, CY, TF, Excl, CF, Acc) ->
-    case TF(Entity) andalso not maps:is_key(Id, Excl) andalso CF(Id, Entity) of
-        true ->
-            D2 = (X - CX) * (X - CX) + (Y - CY) * (Y - CY),
-            collect_with_distance(Rest, CX, CY, TF, Excl, CF, [{D2, Id, Entity} | Acc]);
-        false ->
+collect_with_distance([{Id, Entity} | Rest], CX, CY, TF, Excl, CF, Acc) when is_map(Entity) ->
+    case pos(Entity) of
+        {X, Y} ->
+            case TF(Entity) andalso not maps:is_key(Id, Excl) andalso CF(Id, Entity) of
+                true ->
+                    D2 = (X - CX) * (X - CX) + (Y - CY) * (Y - CY),
+                    collect_with_distance(Rest, CX, CY, TF, Excl, CF, [{D2, Id, Entity} | Acc]);
+                false ->
+                    collect_with_distance(Rest, CX, CY, TF, Excl, CF, Acc)
+            end;
+        undefined ->
             collect_with_distance(Rest, CX, CY, TF, Excl, CF, Acc)
     end;
 collect_with_distance([_ | Rest], CX, CY, TF, Excl, CF, Acc) ->
@@ -156,14 +165,16 @@ format_nearest([{D2, Id, E} | Rest]) ->
 %% -------------------------------------------------------------------
 
 -spec in_range(map(), map(), number()) -> boolean().
-in_range(#{x := X1, y := Y1}, #{x := X2, y := Y2}, Range) ->
+in_range(A, B, Range) ->
+    {X1, Y1} = pos(A),
+    {X2, Y2} = pos(B),
     DX = X2 - X1,
     DY = Y2 - Y1,
     DX * DX + DY * DY =< Range * Range.
 
 -spec distance(map(), map()) -> float().
-distance(#{x := X1, y := Y1}, #{x := X2, y := Y2}) ->
-    distance_pos({X1, Y1}, {X2, Y2}).
+distance(A, B) ->
+    distance_pos(pos(A), pos(B)).
 
 -spec distance_pos({number(), number()}, {number(), number()}) -> float().
 distance_pos({X1, Y1}, {X2, Y2}) ->
@@ -177,17 +188,25 @@ distance_pos({X1, Y1}, {X2, Y2}) ->
 
 type_filter(#{type := Types}) when is_list(Types) ->
     Set = maps:from_keys(Types, true),
-    fun
-        (#{type := T}) -> maps:is_key(T, Set);
-        (_) -> false
-    end;
+    fun(E) -> maps:is_key(entity_type(E), Set) end;
 type_filter(#{type := Type}) ->
-    fun
-        (#{type := T}) -> T =:= Type;
-        (_) -> false
-    end;
+    fun(E) -> entity_type(E) =:= Type end;
 type_filter(_) ->
     fun(_) -> true end.
+
+%% Entity maps are game-supplied: an Erlang game module hands them over
+%% atom-keyed, the Lua bridge hands them over binary-keyed. Read both, or
+%% every query silently skips every entity a Lua world owns. See
+%% widgrensit/asobi#269.
+-spec pos(term()) -> {number(), number()} | undefined.
+pos(#{x := X, y := Y}) when is_number(X), is_number(Y) -> {X, Y};
+pos(#{~"x" := X, ~"y" := Y}) when is_number(X), is_number(Y) -> {X, Y};
+pos(_Entity) -> undefined.
+
+-spec entity_type(term()) -> term().
+entity_type(#{type := T}) -> T;
+entity_type(#{~"type" := T}) -> T;
+entity_type(_Entity) -> undefined.
 
 exclude_set(#{exclude := Ids}) when is_list(Ids) ->
     maps:from_keys(Ids, true);

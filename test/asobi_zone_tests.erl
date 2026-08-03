@@ -72,6 +72,10 @@ zone_test_() ->
             fun npc_transfer_zone_manager_error_keeps_entity/0},
         {"an NPC crossing into an unloaded zone has it created for it",
             fun npc_transfer_creates_unloaded_target_zone/0},
+        {"a binary-keyed NPC past the boundary margin transfers too",
+            fun binary_keyed_npc_past_margin_transfers/0},
+        {"a zone holding only binary-keyed NPCs does not hibernate",
+            fun tick_no_hibernate_with_binary_keyed_npcs/0},
         {"reap stops a zone with no entities", fun reap_stops_empty_zone/0},
         {"reap declines and re-touches a zone that still has entities",
             fun reap_declines_when_occupied/0}
@@ -678,6 +682,40 @@ npc_transfer_creates_unloaded_target_zone() ->
         gen_server:stop(Pid),
         ZMPid ! stop
     end.
+
+%% Regression for widgrensit/asobi#269: the crossing fold matched entity
+%% fields by atom key only, so an entity map shaped the way the Lua bridge
+%% hands one over - every key a binary - never reached classify_crossing/5 at
+%% all and simply stayed in the wrong zone forever.
+binary_keyed_npc_past_margin_transfers() ->
+    WorldId = ~"npc_margin_past_binary",
+    Config = #{
+        world_id => WorldId,
+        zone_size => ?NPC_MARGIN_ZONE_SIZE,
+        rehome_margin => ?NPC_MARGIN_REHOME_MARGIN
+    },
+    Pid = start_zone(Config#{coords => {0, 0}}),
+    TargetPid = start_zone(Config#{coords => {1, 0}}),
+    asobi_zone:add_entity(Pid, ~"npc1", #{~"type" => ~"npc", ~"x" => 245.0, ~"y" => 0.0}),
+    timer:sleep(10),
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
+    ?assertNot(maps:is_key(~"npc1", asobi_zone:get_entities(Pid))),
+    ?assert(maps:is_key(~"npc1", asobi_zone:get_entities(TargetPid))),
+    gen_server:stop(Pid),
+    gen_server:stop(TargetPid).
+
+%% Same root cause as above: has_tickable_entities/1 read the type by atom
+%% key, so a zone full of Lua-owned NPCs looked empty and hibernated.
+tick_no_hibernate_with_binary_keyed_npcs() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, ~"npc1", #{~"type" => ~"npc", ~"x" => 0, ~"y" => 0}),
+    timer:sleep(10),
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(50),
+    {current_function, CF} = erlang:process_info(Pid, current_function),
+    ?assertNotEqual({erlang, hibernate, 3}, CF),
+    gen_server:stop(Pid).
 
 reap_stops_empty_zone() ->
     Pid = start_zone(),

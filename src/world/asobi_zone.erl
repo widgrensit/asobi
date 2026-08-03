@@ -306,8 +306,9 @@ handle_call(
         case Grid of
             undefined ->
                 [
-                    {Id, {maps:get(x, E), maps:get(y, E)}}
-                 || {Id, E, _Dist} <- asobi_spatial:query_radius(Entities, Center, Radius)
+                    {Id, entity_pos(E)}
+                 || {Id, E, _Dist} <- asobi_spatial:query_radius(Entities, Center, Radius),
+                    entity_pos(E) =/= undefined
                 ];
             _ ->
                 asobi_spatial_grid:query_radius(Center, Radius, Grid)
@@ -322,8 +323,9 @@ handle_call(
         case Grid of
             undefined ->
                 [
-                    {Id, {maps:get(x, E), maps:get(y, E)}}
-                 || {Id, E} <- asobi_spatial:query_rect(Entities, TopLeft, BottomRight)
+                    {Id, entity_pos(E)}
+                 || {Id, E} <- asobi_spatial:query_rect(Entities, TopLeft, BottomRight),
+                    entity_pos(E) =/= undefined
                 ];
             _ ->
                 asobi_spatial_grid:query_rect(TopLeft, BottomRight, Grid)
@@ -861,8 +863,11 @@ reindex_clamped(_DeniedList, undefined) ->
     undefined;
 reindex_clamped([], Grid) ->
     Grid;
-reindex_clamped([{Id, #{x := X, y := Y}} | Rest], Grid) ->
-    reindex_clamped(Rest, asobi_spatial_grid:update(Id, {X, Y}, Grid));
+reindex_clamped([{Id, Entity} | Rest], Grid) when is_map(Entity) ->
+    case entity_pos(Entity) of
+        undefined -> reindex_clamped(Rest, Grid);
+        Pos -> reindex_clamped(Rest, asobi_spatial_grid:update(Id, Pos, Grid))
+    end;
 reindex_clamped([_ | Rest], Grid) ->
     reindex_clamped(Rest, Grid).
 
@@ -891,14 +896,20 @@ rehome_or_clamp(WorldServerPid, Id, Pos, Entity, Coords, ZoneSize) ->
 %% it. Epsilon keeps the clamped point strictly inside (at the exact upper
 %% edge, pos_to_zone/3 would compute the next zone over again).
 -spec clamp_to_zone(map(), {integer(), integer()}, pos_integer()) -> map().
-clamp_to_zone(#{x := X, y := Y} = Entity, {ZX, ZY}, ZoneSize) ->
-    Eps = 1.0e-6,
-    XLo = ZX * ZoneSize * 1.0,
-    YLo = ZY * ZoneSize * 1.0,
-    Entity#{
-        x => min(max(X, XLo), XLo + ZoneSize - Eps),
-        y => min(max(Y, YLo), YLo + ZoneSize - Eps)
-    }.
+clamp_to_zone(Entity, {ZX, ZY}, ZoneSize) ->
+    case entity_pos(Entity) of
+        undefined ->
+            Entity;
+        {X, Y} ->
+            Eps = 1.0e-6,
+            XLo = ZX * ZoneSize * 1.0,
+            YLo = ZY * ZoneSize * 1.0,
+            entity_with_pos(
+                Entity,
+                min(max(X, XLo), XLo + ZoneSize - Eps),
+                min(max(Y, YLo), YLo + ZoneSize - Eps)
+            )
+    end.
 
 %% Explicit -spec so eqwalizer treats ToRehome's element type as ground truth
 %% at the move_player/4 call site above, rather than inferring term() through
@@ -909,31 +920,69 @@ clamp_to_zone(#{x := X, y := Y} = Entity, {ZX, ZY}, ZoneSize) ->
     ]}.
 find_zone_crossings(Entities, Coords, ZoneSize, GridSize, RehomeMargin) ->
     maps:fold(
-        fun
-            (Id, #{type := ~"npc", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
-                is_binary(Id), is_number(X), is_number(Y)
-            ->
-                case classify_crossing({X, Y}, Coords, ZoneSize, GridSize, RehomeMargin) of
-                    same ->
-                        {Rem, Trans, Rehome};
-                    {crossed, NewCoords} ->
-                        {[Id | Rem], [{Id, NewCoords, Entity} | Trans], Rehome}
-                end;
-            (Id, #{type := ~"player", x := X, y := Y} = Entity, {Rem, Trans, Rehome}) when
-                is_binary(Id), is_number(X), is_number(Y)
-            ->
-                case classify_crossing({X, Y}, Coords, ZoneSize, GridSize, RehomeMargin) of
-                    same ->
-                        {Rem, Trans, Rehome};
-                    {crossed, _NewCoords} ->
-                        {Rem, Trans, [{Id, {X, Y}, Entity} | Rehome]}
-                end;
-            (_, _, Acc) ->
-                Acc
+        fun(Id, Entity, Acc) ->
+            fold_crossing(Id, Entity, Acc, {Coords, ZoneSize, GridSize, RehomeMargin})
         end,
         {[], [], []},
         Entities
     ).
+
+-spec fold_crossing(
+    term(),
+    term(),
+    Acc,
+    {{integer(), integer()}, pos_integer(), pos_integer(), number()}
+) -> Acc when
+    Acc ::
+        {[binary()], [{binary(), {integer(), integer()}, map()}], [
+            {binary(), {number(), number()}, map()}
+        ]}.
+fold_crossing(Id, Entity, {Rem, Trans, Rehome} = Acc, {Coords, ZoneSize, GridSize, Margin}) when
+    is_binary(Id), is_map(Entity)
+->
+    case {entity_type(Entity, ~"unknown"), entity_pos(Entity)} of
+        {~"npc", {_, _} = Pos} ->
+            case classify_crossing(Pos, Coords, ZoneSize, GridSize, Margin) of
+                same -> Acc;
+                {crossed, NewCoords} -> {[Id | Rem], [{Id, NewCoords, Entity} | Trans], Rehome}
+            end;
+        {~"player", {_, _} = Pos} ->
+            case classify_crossing(Pos, Coords, ZoneSize, GridSize, Margin) of
+                same -> Acc;
+                {crossed, _NewCoords} -> {Rem, Trans, [{Id, Pos, Entity} | Rehome]}
+            end;
+        _ ->
+            Acc
+    end;
+fold_crossing(_Id, _Entity, Acc, _Cfg) ->
+    Acc.
+
+%% Entity maps are game-supplied data. An Erlang game module hands the zone
+%% atom keys, but the Lua bridge decodes Luerl tables straight into
+%% binary-keyed maps, so every entity field the zone reads has to accept
+%% both shapes - otherwise re-homing, NPC transfer, snapshotting and grid
+%% indexing are all silently inert for a Lua world. See widgrensit/asobi#269.
+-spec entity_pos(map()) -> {number(), number()} | undefined.
+entity_pos(#{x := X, y := Y}) when is_number(X), is_number(Y) ->
+    {X, Y};
+entity_pos(#{~"x" := X, ~"y" := Y}) when is_number(X), is_number(Y) ->
+    {X, Y};
+entity_pos(_Entity) ->
+    undefined.
+
+-spec entity_with_pos(map(), number(), number()) -> map().
+entity_with_pos(#{x := _, y := _} = Entity, X, Y) -> Entity#{x => X, y => Y};
+entity_with_pos(Entity, X, Y) -> Entity#{~"x" => X, ~"y" => Y}.
+
+-spec entity_type(map(), binary()) -> binary().
+entity_type(#{type := Type}, _Default) when is_binary(Type) -> Type;
+entity_type(#{~"type" := Type}, _Default) when is_binary(Type) -> Type;
+entity_type(_Entity, Default) -> Default.
+
+-spec entity_persistent(map()) -> boolean().
+entity_persistent(#{persistent := P}) when is_boolean(P) -> P;
+entity_persistent(#{~"persistent" := P}) when is_boolean(P) -> P;
+entity_persistent(_Entity) -> true.
 
 %% Hysteresis: pos_to_zone/3 disagreeing with Coords alone is a hard edge
 %% with zero margin, so an entity jittering across a boundary crosses every
@@ -970,8 +1019,8 @@ past_zone_margin({X, Y}, {ZX, ZY}, ZoneSize, RehomeMargin) ->
 snapshot_entities(Entities) ->
     maps:filter(
         fun(_Id, E) ->
-            maps:get(type, E, ~"unknown") =/= ~"player" andalso
-                maps:get(persistent, E, true)
+            entity_type(E, ~"unknown") =/= ~"player" andalso
+                entity_persistent(E)
         end,
         Entities
     ).
@@ -1039,7 +1088,7 @@ notify_zone_manager_terminated(_) ->
 has_tickable_entities(Entities) ->
     maps:fold(
         fun
-            (_, #{type := ~"npc"}, _) -> true;
+            (_, E, Acc) when is_map(E) -> Acc orelse entity_type(E, ~"unknown") =:= ~"npc";
             (_, _, Acc) -> Acc
         end,
         false,
@@ -1176,8 +1225,11 @@ bound_debug_term(Term) ->
 
 spatial_grid_insert(_EntityId, _EntityState, undefined) ->
     undefined;
-spatial_grid_insert(EntityId, #{x := X, y := Y}, Grid) ->
-    asobi_spatial_grid:insert(EntityId, {X, Y}, Grid);
+spatial_grid_insert(EntityId, EntityState, Grid) when is_map(EntityState) ->
+    case entity_pos(EntityState) of
+        undefined -> Grid;
+        Pos -> asobi_spatial_grid:insert(EntityId, Pos, Grid)
+    end;
 spatial_grid_insert(_EntityId, _EntityState, Grid) ->
     Grid.
 
@@ -1240,10 +1292,20 @@ sync_spatial_grid(OldEntities, NewEntities, Grid) when is_map(Grid) ->
     %% Update/insert entities with changed or new positions
     maps:fold(
         fun
-            (Id, #{x := X, y := Y}, G) ->
-                case maps:find(Id, OldEntities) of
-                    {ok, #{x := X, y := Y}} -> G;
-                    _ -> asobi_spatial_grid:update(Id, {X, Y}, G)
+            (Id, Entity, G) when is_map(Entity) ->
+                case entity_pos(Entity) of
+                    undefined ->
+                        G;
+                    Pos ->
+                        case maps:find(Id, OldEntities) of
+                            {ok, Old} when is_map(Old) ->
+                                case entity_pos(Old) of
+                                    Pos -> G;
+                                    _ -> asobi_spatial_grid:update(Id, Pos, G)
+                                end;
+                            _ ->
+                                asobi_spatial_grid:update(Id, Pos, G)
+                        end
                 end;
             (_Id, _Entity, G) ->
                 G

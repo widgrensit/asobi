@@ -20,7 +20,8 @@
     in_range_false/1,
     distance_entities/1,
     distance_pos/1,
-    entities_without_coords_skipped/1
+    entities_without_coords_skipped/1,
+    binary_keyed_entities_queryable/1
 ]).
 
 all() ->
@@ -41,7 +42,8 @@ all() ->
         in_range_false,
         distance_entities,
         distance_pos,
-        entities_without_coords_skipped
+        entities_without_coords_skipped,
+        binary_keyed_entities_queryable
     ].
 
 %% --- Test data ---
@@ -194,4 +196,27 @@ entities_without_coords_skipped(_Config) ->
     E = #{~"no_pos" => #{name => ~"test"}, ~"with_pos" => #{x => 1.0, y => 1.0, type => ~"npc"}},
     Results = asobi_spatial:query_radius(E, {0.0, 0.0}, 10.0),
     ?assertEqual(1, length(Results)),
+    ok.
+
+%% Regression for widgrensit/asobi#269: entity maps are game-supplied, and
+%% the Lua bridge hands them over binary-keyed. Matching x/y/type by atom key
+%% alone silently skipped every entity a Lua world owns, so every spatial
+%% query answered empty.
+binary_keyed_entities_queryable(_Config) ->
+    E = #{
+        ~"a" => #{~"x" => 0.0, ~"y" => 0.0, ~"type" => ~"npc"},
+        ~"b" => #{~"x" => 3.0, ~"y" => 4.0, ~"type" => ~"player"}
+    },
+    Radius = asobi_spatial:query_radius(E, {0.0, 0.0}, 6.0),
+    ?assertEqual(2, length(Radius)),
+    Typed = asobi_spatial:query_radius(E, {0.0, 0.0}, 6.0, #{type => ~"npc"}),
+    ?assertEqual([~"a"], [Id || {Id, _, _} <- Typed]),
+    Rect = asobi_spatial:query_rect(E, {-1.0, -1.0}, {5.0, 5.0}),
+    ?assertEqual(2, length(Rect)),
+    [{Nearest, _, _}] = asobi_spatial:nearest(E, {3.0, 4.0}, 1),
+    ?assertEqual(~"b", Nearest),
+    A = maps:get(~"a", E),
+    B = maps:get(~"b", E),
+    ?assert(asobi_spatial:in_range(A, B, 5.0)),
+    ?assert(abs(asobi_spatial:distance(A, B) - 5.0) < 0.001),
     ok.
