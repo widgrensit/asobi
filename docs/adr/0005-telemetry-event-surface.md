@@ -148,14 +148,14 @@ breaking, because a consumer may already have keyed a label on it.
   `ws/connect_rate_limited`, `rehome/rate_limited`, `ws/idle_auth_timeout`,
   `ws/origin_rejected`, `anticheat/violation`, `error`, and all three
   `auth_cache/*` events. `opentelemetry_asobi` mirrors the same stale list.
-  Tracked as a follow-up fix, not addressed here.
+  Tracked in asobi#312, not addressed here.
 - No event exists for world-tick duration or live zone/world count —
   `asobi_world_ticker`, `asobi_zone_manager`, and `asobi_zone_spawner` emit
   nothing today. This is the one genuine instrumentation gap identified
   against the "world/ECS/network/RPC/DB/queue/scheduler" scope proposed
   alongside `asobi_metrics`; ECS and RPC don't exist in asobi, and DB/queue
   are kura's and shigoto's telemetry surfaces respectively, not asobi's.
-  Tracked as a follow-up addition, not addressed here.
+  Tracked in asobi#313, not addressed here.
 
 ## Consequences
 
