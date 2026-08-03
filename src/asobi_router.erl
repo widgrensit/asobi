@@ -64,9 +64,15 @@ api_routes() ->
             {~"/worlds", fun asobi_world_controller:create/1, #{methods => [post, options]}},
 
             %% Matches
+            %% Declaration order matters here. routing_tree prepends on insert and
+            %% lookup returns on the first sibling that matches, and a binding
+            %% matches any segment - so `/matches/live` must be declared AFTER every
+            %% `/matches/:id...` route or `:id` sits ahead of it and swallows "live"
+            %% (asobi #326). Keep the vote route in this group for the same reason.
             {~"/matches", fun asobi_match_controller:index/1, #{methods => [get, options]}},
-            {~"/matches/live", fun asobi_match_controller:live/1, #{methods => [get, options]}},
             {~"/matches/:id", fun asobi_match_controller:show/1, #{methods => [get, options]}},
+            {~"/matches/:id/votes", fun asobi_vote_controller:index/1, #{methods => [get, options]}},
+            {~"/matches/live", fun asobi_match_controller:live/1, #{methods => [get, options]}},
 
             %% Matchmaker
             {~"/matchmaker", fun asobi_matchmaker_controller:add/1, #{methods => [post, options]}},
@@ -149,8 +155,7 @@ api_routes() ->
                 methods => [get, options]
             }},
 
-            %% Votes
-            {~"/matches/:id/votes", fun asobi_vote_controller:index/1, #{methods => [get, options]}},
+            %% Votes (`/matches/:id/votes` lives in the Matches group above)
             {~"/votes/:id", fun asobi_vote_controller:show/1, #{methods => [get, options]}},
 
             %% Tournaments
