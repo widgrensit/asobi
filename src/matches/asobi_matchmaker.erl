@@ -11,7 +11,7 @@ spawns a match, and pushes `match.matched` to each player. A single
 -export([known_mode/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -ifdef(TEST).
--export([next_spawn_attempt/1]).
+-export([next_spawn_attempt/1, join_matched_players/3]).
 -endif.
 
 -define(DEFAULT_TICK, 1000).
@@ -407,21 +407,7 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                         lists:sum([Now - maps:get(submitted_at, T) || T <- Group]) div
                             pos_len(Group),
                     asobi_telemetry:matchmaker_formed(Mode, length(PlayerIds), AvgWait),
-                    MatchInfo = asobi_match_server:get_info(MatchPid),
-                    lists:foreach(
-                        fun(PlayerId) when is_binary(PlayerId) ->
-                            _ = asobi_match_server:join(MatchPid, PlayerId),
-                            asobi_presence:send(PlayerId, {match_joined, MatchPid}),
-                            asobi_presence:send(
-                                PlayerId,
-                                {match_event, matched, #{
-                                    match_id => maps:get(match_id, MatchInfo, undefined),
-                                    players => PlayerIds
-                                }}
-                            )
-                        end,
-                        PlayerIds
-                    ),
+                    spawn(fun() -> join_matched_players(MatchPid, Mode, PlayerIds) end),
                     spawn_matches(Rest, Failed);
                 {error, Reason} ->
                     logger:error(#{
@@ -435,6 +421,41 @@ spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
         {error, _} ->
             notify_no_game_module(Mode, PlayerIds),
             spawn_matches(Rest, Failed)
+    end.
+
+%% The join fan-out runs detached and exception-isolated (asobi#291). A match
+%% server that exits mid-loop - e.g. `{shutdown, empty}' when a joining player's
+%% session is already gone - would otherwise propagate its exit through the
+%% gen_statem call into the matchmaker gen_server, restarting it and dropping
+%% every ticket queued in every mode.
+-spec join_matched_players(pid(), binary(), [binary()]) -> ok.
+join_matched_players(MatchPid, Mode, PlayerIds) ->
+    try
+        MatchInfo = asobi_match_server:get_info(MatchPid),
+        MatchId = maps:get(match_id, MatchInfo, undefined),
+        lists:foreach(
+            fun(PlayerId) when is_binary(PlayerId) ->
+                _ = asobi_match_server:join(MatchPid, PlayerId),
+                asobi_presence:send(PlayerId, {match_joined, MatchPid}),
+                asobi_presence:send(
+                    PlayerId,
+                    {match_event, matched, #{match_id => MatchId, players => PlayerIds}}
+                )
+            end,
+            PlayerIds
+        )
+    catch
+        Class:Reason:Stack ->
+            logger:error(#{
+                msg => ~"match join fan-out crashed",
+                mode => Mode,
+                players => PlayerIds,
+                class => Class,
+                error => Reason,
+                stacktrace => Stack
+            }),
+            asobi_telemetry:matchmaker_failed(Mode, length(PlayerIds)),
+            notify_matchmaker_failed(PlayerIds, ~"match_start_failed")
     end.
 
 %% Unlike spawn_match, world spawn is detached (spawn/1) to avoid blocking the
