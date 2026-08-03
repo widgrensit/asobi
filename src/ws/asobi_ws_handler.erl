@@ -8,6 +8,8 @@
 %% match./world. event stays inside the reserved namespace (#303).
 -export([reserved_event_names/0]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -define(WS_MSG_LIMIT, 60).
 -define(WS_MSG_WINDOW_MS, 1000).
 -define(WS_MAX_PAYLOAD_BYTES, 65536).
@@ -284,8 +286,43 @@ websocket_info(idle_auth_timeout, State) ->
     %% Race: the timer fired but session.connect already succeeded.
     %% Ignore.
     {ok, State};
-websocket_info(_Info, State) ->
+websocket_info(Info, State) ->
+    %% #308: dropping an unrecognised message with no signal is the exact
+    %% failure class #297 was - a producer's frame vanishing between the
+    %% game server and the socket, invisible to the game developer. The
+    %% drop itself stays (an unknown shape has no wire encoding), but it is
+    %% now observable. Rate-limited per tag because a per-tick producer
+    %% would otherwise log once per tick per connection.
+    log_unhandled_info(Info),
     {ok, State}.
+
+-spec log_unhandled_info(term()) -> ok.
+log_unhandled_info(Info) ->
+    Tag = unhandled_tag(Info),
+    case asobi_script_log_limiter:allow({?MODULE, Tag}) of
+        {true, DroppedSinceLastLog} ->
+            ?LOG_WARNING(#{
+                event => ws_unhandled_info,
+                tag => Tag,
+                suppressed_since_last => DroppedSinceLastLog
+            });
+        false ->
+            ok
+    end.
+
+%% Tag only, never the payload: an unhandled message may carry player data
+%% of unbounded size. Non-atom tags collapse to `unknown` so neither the log
+%% field nor the limiter's key space can be grown by a message sender.
+-spec unhandled_tag(term()) -> atom() | {asobi_message, atom()}.
+unhandled_tag({asobi_message, Inner}) -> {asobi_message, plain_tag(Inner)};
+unhandled_tag(Info) -> plain_tag(Info).
+
+-spec plain_tag(term()) -> atom().
+plain_tag(Tag) when is_atom(Tag) -> Tag;
+plain_tag(Tuple) when is_tuple(Tuple), tuple_size(Tuple) > 0, is_atom(element(1, Tuple)) ->
+    element(1, Tuple);
+plain_tag(_) ->
+    unknown.
 
 -spec terminate(term(), term(), map()) -> ok.
 terminate(_Reason, _Req, #{session := undefined}) ->

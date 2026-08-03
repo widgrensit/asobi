@@ -93,6 +93,40 @@ match_event_reserved_name_is_rejected_and_logged_test() ->
     ?assertEqual(#{namespace => ~"match", reason => reserved_event_name}, await_rejection()),
     ok = remove_log_capture().
 
+%% #308: the catch-all clause still drops what it cannot encode, but the
+%% drop must leave a signal - the tag of the unrecognised message - so the
+%% next producer that invents an {asobi_message, _} shape shows up in the
+%% logs instead of needing another bug-hunt.
+unknown_asobi_message_is_logged_test() ->
+    ok = install_log_capture(),
+    Msg = {asobi_message, {brand_new_shape, #{~"a" => 1}}},
+    ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})),
+    ?assertEqual({asobi_message, brand_new_shape}, await_unhandled()),
+    ok = remove_log_capture().
+
+unknown_bare_message_is_logged_test() ->
+    ok = install_log_capture(),
+    ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(some_stray_message, #{})),
+    ?assertEqual(some_stray_message, await_unhandled()),
+    ok = remove_log_capture().
+
+%% A sender-controlled tag must not widen the log field or the rate
+%% limiter's key space.
+non_atom_tag_collapses_to_unknown_test() ->
+    ok = install_log_capture(),
+    Msg = {asobi_message, {~"from_the_wire", 1}},
+    ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})),
+    ?assertEqual({asobi_message, unknown}, await_unhandled()),
+    ok = remove_log_capture().
+
+%% Handled shapes must not start logging as unhandled.
+handled_message_is_not_logged_as_unhandled_test() ->
+    ok = install_log_capture(),
+    Msg = {asobi_message, {world_event, ~"pong", #{}}},
+    ?assertMatch({reply, {text, _}, _}, asobi_ws_handler:websocket_info(Msg, #{})),
+    ?assertEqual(no_log, await_no_unhandled()),
+    ok = remove_log_capture().
+
 %% --- log capture helpers ---
 
 install_log_capture() ->
@@ -107,6 +141,9 @@ remove_log_capture() ->
 log(#{msg := {report, #{msg := ~"game_broadcast_rejected"} = Report}}, #{config := #{pid := Pid}}) ->
     Pid ! {game_broadcast_rejected, maps:with([namespace, reason], Report)},
     ok;
+log(#{msg := {report, #{event := ws_unhandled_info, tag := Tag}}}, #{config := #{pid := Pid}}) ->
+    Pid ! {ws_unhandled_info, Tag},
+    ok;
 log(_Event, _Config) ->
     ok.
 
@@ -115,4 +152,18 @@ await_rejection() ->
         {game_broadcast_rejected, Report} -> Report
     after 1000 ->
         error(timeout_waiting_for_rejection_log)
+    end.
+
+await_unhandled() ->
+    receive
+        {ws_unhandled_info, Tag} -> Tag
+    after 1000 ->
+        error(timeout_waiting_for_unhandled_log)
+    end.
+
+await_no_unhandled() ->
+    receive
+        {ws_unhandled_info, Tag} -> {unexpected, Tag}
+    after 200 ->
+        no_log
     end.
