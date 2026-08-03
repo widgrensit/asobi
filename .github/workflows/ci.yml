@@ -52,4 +52,9 @@ jobs:
       # and fails to compile on OTP 29 (deprecated catch). Drop it so it
       # re-resolves.
       pre-test-command: 'rm -rf _build/default/lib/asobi/ebin _build/test/lib/asobi/ebin _build/default/lib/asobi/test _build/test/lib/asobi/test _build/test/lib/meck'
+      # Non-verbose eunit names a cancelled test as `undefined`, so a timeout
+      # (#279) is indistinguishable from a real regression in the log. Verbose
+      # names each test and prints its wall time, which also surfaces tests
+      # creeping towards the scaled timeout before they start cancelling groups.
+      eunit-args: '--verbose'
     secrets: inherit
