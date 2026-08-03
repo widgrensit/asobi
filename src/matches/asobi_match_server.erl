@@ -233,6 +233,22 @@ waiting(cast, {leave, PlayerId}, State) ->
 waiting(cast, {broadcast_event, Event, Payload}, State) ->
     broadcast_match_event(Event, Payload, State),
     keep_state_and_data;
+%% asobi#285: the match hasn't started yet, so no reconnect_state grace
+%% applies pre-match-start - a session dying while still gathering players
+%% is a leave, same as running's no-reconnect-policy branch. Without this
+%% clause the DOWN message hit no clause here and crashed the match server,
+%% taking every player already in the lobby down with it.
+waiting(info, {'DOWN', _MonRef, process, DownPid, _Reason}, State) when is_pid(DownPid) ->
+    case find_player_by_pid(DownPid, State) of
+        {ok, PlayerId} -> handle_leave(PlayerId, State);
+        none -> keep_state_and_data
+    end;
+%% asobi#285: without this clause a reconnect/2 call while still waiting hit
+%% no clause and crashed the match server (waiting/3 has no catch-all) -
+%% handle_reconnect_call/3 already replies {error, no_reconnect_policy} or
+%% {error, not_in_match} correctly for this state, it was just unreachable.
+waiting({call, From}, {reconnect, PlayerId}, State) when is_binary(PlayerId) ->
+    handle_reconnect_call(From, PlayerId, State);
 waiting(cast, cancel, State) ->
     {stop, {shutdown, cancelled}, State}.
 
@@ -429,6 +445,14 @@ paused({call, From}, resume, State) ->
     {next_state, running, State, [{reply, From, ok}]};
 paused({call, From}, pause, _State) ->
     {keep_state_and_data, [{reply, From, {error, already_paused}}]};
+%% asobi#285: without this clause a reconnect/2 call while paused fell
+%% through to the catch-all below, which never replies - the caller's
+%% gen_statem:call/2 (default timeout infinity) would hang forever. Needed
+%% now that a session DOWN while paused starts real grace (see the 'DOWN'
+%% clauses below): a player in grace during a pause must be able to
+%% reconnect before resume/1 is called.
+paused({call, From}, {reconnect, PlayerId}, State) when is_binary(PlayerId) ->
+    handle_reconnect_call(From, PlayerId, State);
 paused(cast, cancel, State) ->
     {next_state, finished, State#{result => #{status => ~"cancelled"}}};
 paused(cast, {leave, PlayerId}, State) ->
@@ -455,6 +479,30 @@ paused(
 paused(info, {vote_vetoed, VoteId, _Template}, State) ->
     Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
     {keep_state, State#{active_votes => Active}};
+%% asobi#285: mirrors running's pair of 'DOWN' clauses. Without these, a
+%% session dying while paused fell through to the catch-all below and was
+%% silently swallowed - no grace started, no leave, the player stuck in the
+%% roster forever (and, with no reconnect policy, the match could then never
+%% empty and never shut down).
+paused(
+    info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := undefined} = State
+) when is_pid(DownPid) ->
+    case find_player_by_pid(DownPid, State) of
+        {ok, PlayerId} -> handle_leave(PlayerId, State);
+        none -> keep_state_and_data
+    end;
+paused(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := RS} = State) when
+    is_pid(DownPid)
+->
+    case find_player_by_pid(DownPid, State) of
+        {ok, PlayerId} ->
+            Now = erlang:system_time(millisecond),
+            {Events, RS1} = asobi_reconnect:disconnect(PlayerId, Now, RS),
+            State1 = handle_reconnect_events(Events, State#{reconnect_state => RS1}),
+            {keep_state, State1};
+        none ->
+            keep_state_and_data
+    end;
 paused(_EventType, _Event, _State) ->
     keep_state_and_data.
 
