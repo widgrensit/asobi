@@ -74,6 +74,8 @@ world_zone_integration_test_() ->
             fun crossing_into_a_lazily_created_zone_backfills_stationary_neighbours/0},
         {"a script-driven spawn into a lazily-created zone backfills neighbours",
             fun script_spawn_into_a_lazily_created_zone_backfills_neighbours/0},
+        {"an NPC crossing into an unloaded zone creates it and backfills neighbours",
+            fun npc_crossing_into_an_unloaded_zone_creates_it_and_backfills/0},
         {"a position within the boundary margin does not rehome the player",
             fun world_input_within_margin_does_not_rehome/0},
         {"a rate-limited crossing leaves the entity in place instead of destroying it",
@@ -568,6 +570,41 @@ crossing_into_a_lazily_created_zone_backfills_stationary_neighbours() ->
     after
         exit(AdaPid, kill),
         exit(BobPid, kill),
+        stop_world(Ctx)
+    end.
+
+%% Regression for widgrensit/asobi#271: under lazy_zones an unloaded
+%% neighbour is the normal state, and an NPC crossing into one used to be
+%% deleted outright while a player crossing the same boundary got the zone
+%% created for them. The NPC must arrive in a zone created for it, and the
+%% stationary neighbour whose ring already covered those coords must be
+%% backfilled onto it exactly as #275 requires for a player-created zone.
+npc_crossing_into_an_unloaded_zone_creates_it_and_backfills() ->
+    Ctx =
+        #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{
+            lazy_zones => true, grid_size => 5
+        }),
+    Ada = ~"npc271_ada",
+    AdaPid = fake_session(Ada, self()),
+    try
+        %% Ada joins at {100.0,100.0} => zone {1,1}; {2,1} is in her ring but
+        %% not loaded, so her ring-subscribe to it no-ops.
+        ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),
+        timer:sleep(20),
+        ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {2, 1})),
+
+        {ok, Z11} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+        %% x=225 clears zone {1,1}'s margin (edge at 200 + 15% of 100).
+        asobi_zone:add_entity(Z11, ~"npc271", #{type => ~"npc", x => 225.0, y => 100.0}),
+        timer:sleep(150),
+
+        {ok, Z21} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
+        ?assertNot(maps:is_key(~"npc271", asobi_zone:get_entities(Z11))),
+        ?assert(maps:is_key(~"npc271", asobi_zone:get_entities(Z21))),
+        ?assertMatch(#{subscribers := #{Ada := {AdaPid, _}}}, sys:get_state(Z21)),
+        ?assert(received_entity(Ada, ~"npc271"))
+    after
+        exit(AdaPid, kill),
         stop_world(Ctx)
     end.
 

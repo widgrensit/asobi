@@ -26,6 +26,13 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -define(DEFAULT_ZONE_SIZE, 200).
 -define(DEFAULT_GRID_SIZE, 10).
 -define(DEFAULT_REHOME_MARGIN, 0.15).
+%% Bound on the per-tick zone-manager call an NPC crossing into an unloaded
+%% neighbour makes (widgrensit/asobi#271). The manager's own work there is
+%% an ETS lookup plus a supervisor:start_child (the new zone's snapshot load
+%% happens in its handle_continue, off the manager), so exceeding this means
+%% the manager is saturated - in which case the NPC waits in this zone for a
+%% later tick rather than the zone stalling behind a 5s gen_server default.
+-define(ENSURE_ZONE_TIMEOUT, 1_000).
 
 %% --- Public API ---
 
@@ -710,7 +717,6 @@ encode_delta({removed, Id}) ->
 resolve_zone_crossings(
     #{
         entities := Entities,
-        world_id := WorldId,
         coords := Coords,
         zone_size := ZoneSize,
         grid_size := GridSize,
@@ -721,20 +727,9 @@ resolve_zone_crossings(
     {ToRemove, ToTransfer, ToRehome} = find_zone_crossings(
         Entities, Coords, ZoneSize, GridSize, RehomeMargin
     ),
-    %% Transfer each NPC to the target zone
-    lists:foreach(
-        fun({Id, {TX, TY} = TargetCoords, Entity}) when
-            is_binary(Id), is_integer(TX), is_integer(TY)
-        ->
-            case pg:get_members(?PG_SCOPE, {asobi_zone, WorldId, TargetCoords}) of
-                [TargetPid | _] ->
-                    gen_server:cast(TargetPid, {add_entity, Id, Entity});
-                [] ->
-                    log_npc_transfer_unavailable(WorldId, Id, TargetCoords)
-            end
-        end,
-        ToTransfer
-    ),
+    %% Transfer each NPC to the target zone. An NPC whose target zone can't be
+    %% reached is kept here (clamped), never deleted - see transfer_npcs/2.
+    KeptNpcs = transfer_npcs(ToTransfer, State),
     %% Hand each player off to move_player/4 rather than writing them into the
     %% target zone directly - handle_move/4 (via remove_player_from_zones/2)
     %% is what actually removes them from this zone, re-subscribes their
@@ -776,8 +771,10 @@ resolve_zone_crossings(
                 maps:from_list([R || R <- Results, R =/= moved])
         end,
     %% Remove transferred NPCs and rehomed players from this zone; a denied
-    %% player is kept, clamped back inside these bounds.
-    Entities1 = maps:merge(maps:without(ToRemove, Entities), DeniedEntities),
+    %% player and an NPC whose target zone was unreachable are kept, clamped
+    %% back inside these bounds.
+    Kept = maps:merge(DeniedEntities, KeptNpcs),
+    Entities1 = maps:merge(maps:without(ToRemove, Entities), Kept),
     Grid = maps:get(spatial_grid, State, undefined),
     Grid1 = remove_from_grid(ToRemove, Grid),
     %% query_radius/3 and query_rect/3 read positions from this grid, not
@@ -785,8 +782,78 @@ resolve_zone_crossings(
     %% re-indexing here, a denied entity's clamp is invisible to both and
     %% they keep answering with its out-of-zone position: exactly the
     %% divergence clamping exists to close. See widgrensit/asobi#248.
-    Grid2 = reindex_clamped(maps:to_list(DeniedEntities), Grid1),
+    Grid2 = reindex_clamped(maps:to_list(Kept), Grid1),
     State#{entities => Entities1, spatial_grid => Grid2}.
+
+%% A player crossing into an unloaded zone gets it created for them
+%% (asobi_world_server:handle_move/4 calls ensure_zone/2 before it moves
+%% anyone), so under lazy_zones - where an unloaded neighbour is the normal
+%% state - an NPC crossing the same boundary must not simply cease to exist.
+%% Same ordering as asobi#258: resolve the target first, and if it can't be
+%% resolved the crossing is a no-op, with the NPC clamped back inside this
+%% zone exactly as a rate-limited player is. Returns the NPCs to keep here.
+%%
+%% pg is tried first so the common case (target already loaded) stays a
+%% local ETS read; only a real miss pays a call to the zone manager, and
+%% that call is bounded so a busy manager costs this tick's crossing rather
+%% than stalling the whole zone's tick loop.
+-spec transfer_npcs([{binary(), {integer(), integer()}, map()}], map()) -> #{binary() => map()}.
+transfer_npcs(ToTransfer, State) ->
+    Results = [
+        transfer_npc(Id, TargetCoords, Entity, State)
+     || {Id, {TX, TY} = TargetCoords, Entity} <- ToTransfer,
+        is_binary(Id),
+        is_integer(TX),
+        is_integer(TY)
+    ],
+    maps:from_list([R || R <- Results, R =/= transferred]).
+
+-spec transfer_npc(binary(), {integer(), integer()}, map(), map()) ->
+    transferred | {binary(), map()}.
+transfer_npc(Id, TargetCoords, Entity, State) ->
+    #{world_id := WorldId, coords := Coords, zone_size := ZoneSize} = State,
+    case target_zone_pid(TargetCoords, State) of
+        {ok, TargetPid} ->
+            gen_server:cast(TargetPid, {add_entity, Id, Entity}),
+            transferred;
+        {error, Reason} ->
+            log_npc_transfer_unavailable(WorldId, Id, TargetCoords, Reason),
+            {Id, clamp_to_zone(Entity, Coords, ZoneSize)}
+    end.
+
+-spec target_zone_pid({integer(), integer()}, map()) -> {ok, pid()} | {error, term()}.
+target_zone_pid(TargetCoords, #{world_id := WorldId} = State) ->
+    case pg:get_members(?PG_SCOPE, {asobi_zone, WorldId, TargetCoords}) of
+        [TargetPid | _] ->
+            {ok, TargetPid};
+        [] ->
+            ensure_target_zone(TargetCoords, State)
+    end.
+
+-spec ensure_target_zone({integer(), integer()}, map()) -> {ok, pid()} | {error, term()}.
+ensure_target_zone(_TargetCoords, #{zone_manager_pid := undefined}) ->
+    {error, no_zone_manager};
+ensure_target_zone(TargetCoords, #{zone_manager_pid := ZMPid, world_server_pid := WSPid}) ->
+    try asobi_zone_manager:ensure_zone(ZMPid, TargetCoords, ?ENSURE_ZONE_TIMEOUT) of
+        {ok, TargetPid, created} ->
+            notify_zone_created(WSPid, TargetCoords, TargetPid),
+            {ok, TargetPid};
+        {ok, TargetPid, existing} ->
+            {ok, TargetPid};
+        {error, _} = Err ->
+            Err
+    catch
+        %% A manager that is overloaded, restarting or gone must not take the
+        %% zone down with it - the NPC stays here instead.
+        Class:Reason ->
+            {error, {Class, Reason}}
+    end.
+
+-spec notify_zone_created(pid() | undefined, {integer(), integer()}, pid()) -> ok.
+notify_zone_created(undefined, _Coords, _ZonePid) ->
+    ok;
+notify_zone_created(WSPid, Coords, ZonePid) ->
+    asobi_world_server:zone_created(WSPid, Coords, ZonePid).
 
 -spec reindex_clamped([{binary(), map()}], asobi_spatial_grid:grid() | undefined) ->
     asobi_spatial_grid:grid() | undefined.
@@ -1052,15 +1119,14 @@ log_spawn_failed(TemplateId, Reason, #{world_id := WorldId, coords := Coords}) -
         template_id => Id
     }).
 
-%% An NPC crossing into an unloaded target zone is dropped (widgrensit/
-%% asobi#251 gave the analogous spawn failure a signal; this closes the same
-%% gap here - the drop itself, not just its silence, is tracked separately
-%% as widgrensit/asobi#271). This runs from the per-tick crossing check, so
-%% a spawner parked near an unloaded neighbour would otherwise log once per
-%% tick forever (asobi#252) - only the log line is rate-limited, the
-%% telemetry counter stays unconditional.
--spec log_npc_transfer_unavailable(binary(), binary(), {integer(), integer()}) -> ok.
-log_npc_transfer_unavailable(WorldId, Id, TargetCoords) ->
+%% An NPC whose target zone could not be reached or created stays in this
+%% zone (widgrensit/asobi#271); the denied crossing is still reported the way
+%% asobi#251 reports a failed spawn. This runs from the per-tick crossing
+%% check, so an NPC parked against an unreachable neighbour would otherwise
+%% log once per tick forever (asobi#252) - only the log line is rate-limited,
+%% the telemetry counter stays unconditional.
+-spec log_npc_transfer_unavailable(binary(), binary(), {integer(), integer()}, term()) -> ok.
+log_npc_transfer_unavailable(WorldId, Id, TargetCoords, Reason) ->
     case asobi_script_log_limiter:allow({WorldId, TargetCoords}) of
         {true, DroppedSinceLastLog} ->
             ?LOG_WARNING(#{
@@ -1068,13 +1134,14 @@ log_npc_transfer_unavailable(WorldId, Id, TargetCoords) ->
                 world_id => WorldId,
                 entity_id => Id,
                 coords => TargetCoords,
+                reason => Reason,
                 suppressed_since_last => DroppedSinceLastLog
             });
         false ->
             ok
     end,
     asobi_telemetry:game_error(zone_unavailable, #{
-        world_id => WorldId, coords => TargetCoords, entity_id => Id
+        world_id => WorldId, coords => TargetCoords, entity_id => Id, reason => Reason
     }).
 
 %% A byte-length cut alone can land mid-codepoint, and the result is exported

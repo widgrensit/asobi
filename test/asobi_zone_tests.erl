@@ -66,8 +66,12 @@ zone_test_() ->
             fun npc_within_margin_does_not_transfer/0},
         {"an NPC past the boundary margin transfers to the neighbouring zone",
             fun npc_past_margin_transfers/0},
-        {"an NPC transfer to an unloaded target zone is observable, not silent",
-            fun npc_transfer_unavailable_zone_is_observable/0},
+        {"an NPC whose target zone cannot be resolved stays here, clamped",
+            fun npc_transfer_unavailable_zone_keeps_entity/0},
+        {"an NPC stays here when the zone manager refuses to create the target",
+            fun npc_transfer_zone_manager_error_keeps_entity/0},
+        {"an NPC crossing into an unloaded zone has it created for it",
+            fun npc_transfer_creates_unloaded_target_zone/0},
         {"reap stops a zone with no entities", fun reap_stops_empty_zone/0},
         {"reap declines and re-touches a zone that still has entities",
             fun reap_declines_when_occupied/0}
@@ -580,10 +584,11 @@ npc_past_margin_transfers() ->
     gen_server:stop(Pid),
     gen_server:stop(TargetPid).
 
-%% An NPC crossing into a zone that isn't loaded is dropped (asobi_zone_sup
-%% doesn't eagerly spawn every grid cell) - that loss must be observable the
-%% same way #251 made spawn_at_zone_unavailable observable, not silent.
-npc_transfer_unavailable_zone_is_observable() ->
+%% asobi#271: an NPC whose target zone can't be resolved must stay in this
+%% zone (clamped back inside its bounds, as a rate-limited player is), not be
+%% destroyed - and the denied crossing stays observable the same way #251
+%% made spawn_at_zone_unavailable observable.
+npc_transfer_unavailable_zone_keeps_entity() ->
     Self = self(),
     Ref = make_ref(),
     {ok, _} = application:ensure_all_started(telemetry),
@@ -597,21 +602,81 @@ npc_transfer_unavailable_zone_is_observable() ->
         rehome_margin => ?NPC_MARGIN_REHOME_MARGIN
     }),
     try
-        %% x=245 clears the margin; no zone is loaded at {1,0} in this world.
+        %% x=245 clears the margin; no zone is loaded at {1,0} in this world
+        %% and this zone has no zone manager to create one.
         asobi_zone:add_entity(Pid, ~"npc1", #{type => ~"npc", x => 245.0, y => 0.0}),
         timer:sleep(10),
         asobi_zone:tick(Pid, 1),
         timer:sleep(20),
-        ?assertNot(maps:is_key(~"npc1", asobi_zone:get_entities(Pid))),
+        Npc = maps:get(~"npc1", asobi_zone:get_entities(Pid)),
+        ?assert(maps:get(x, Npc) < ?NPC_MARGIN_ZONE_SIZE),
         receive
             {ev, #{kind := zone_unavailable, details := D}} ->
                 ?assertEqual({1, 0}, maps:get(coords, D)),
-                ?assertEqual(~"npc1", maps:get(entity_id, D))
+                ?assertEqual(~"npc1", maps:get(entity_id, D)),
+                ?assertEqual(no_zone_manager, maps:get(reason, D))
         after 1000 -> ?assert(false, timeout_waiting_for_zone_unavailable_event)
         end
     after
         telemetry:detach(Ref),
         gen_server:stop(Pid)
+    end.
+
+%% Same, for a zone manager that refuses to create the target (the world hit
+%% max_active_zones): the crossing is denied, the NPC survives.
+npc_transfer_zone_manager_error_keeps_entity() ->
+    ZMPid = start_mock_zone_manager(#{ensure_zone => {error, max_zones_reached}}),
+    Pid = start_zone(#{
+        world_id => ~"npc_transfer_zm_error",
+        coords => {0, 0},
+        zone_size => ?NPC_MARGIN_ZONE_SIZE,
+        rehome_margin => ?NPC_MARGIN_REHOME_MARGIN,
+        zone_manager_pid => ZMPid
+    }),
+    try
+        asobi_zone:add_entity(Pid, ~"npc1", #{type => ~"npc", x => 245.0, y => 0.0}),
+        timer:sleep(10),
+        asobi_zone:tick(Pid, 1),
+        timer:sleep(20),
+        Npc = maps:get(~"npc1", asobi_zone:get_entities(Pid)),
+        ?assert(maps:get(x, Npc) < ?NPC_MARGIN_ZONE_SIZE)
+    after
+        gen_server:stop(Pid),
+        ZMPid ! stop
+    end.
+
+%% asobi#271: an unloaded neighbour is the normal state under lazy_zones, so
+%% the NPC crossing path asks the zone manager to create it - exactly as
+%% asobi_world_server:handle_move/4 does for a crossing player - and tells
+%% the world server about the creation so it can backfill subscribers (#275).
+npc_transfer_creates_unloaded_target_zone() ->
+    WorldId = ~"npc_transfer_creates_target",
+    Config = #{
+        world_id => WorldId,
+        zone_size => ?NPC_MARGIN_ZONE_SIZE,
+        rehome_margin => ?NPC_MARGIN_REHOME_MARGIN
+    },
+    ZMPid = start_mock_zone_manager(#{spawn_zone_config => Config}),
+    Pid = start_zone(Config#{
+        coords => {0, 0}, zone_manager_pid => ZMPid, world_server_pid => self()
+    }),
+    flush_messages(),
+    try
+        asobi_zone:add_entity(Pid, ~"npc1", #{type => ~"npc", x => 245.0, y => 0.0}),
+        timer:sleep(10),
+        asobi_zone:tick(Pid, 1),
+        timer:sleep(50),
+        ?assertNot(maps:is_key(~"npc1", asobi_zone:get_entities(Pid))),
+        receive
+            {'$gen_cast', {zone_created, Coords, TargetPid}} ->
+                ?assertEqual({1, 0}, Coords),
+                ?assert(maps:is_key(~"npc1", asobi_zone:get_entities(TargetPid))),
+                gen_server:stop(TargetPid)
+        after 1000 -> ?assert(false, timeout_waiting_for_zone_created)
+        end
+    after
+        gen_server:stop(Pid),
+        ZMPid ! stop
     end.
 
 reap_stops_empty_zone() ->
@@ -656,17 +721,35 @@ reap_declines_when_occupied() ->
     ZMPid ! stop.
 
 start_mock_zone_manager() ->
-    spawn(fun() -> mock_zm_loop([]) end).
+    start_mock_zone_manager(#{}).
 
-mock_zm_loop(Touches) ->
+start_mock_zone_manager(Opts) ->
+    spawn(fun() -> mock_zm_loop([], Opts) end).
+
+mock_zm_loop(Touches, Opts) ->
     receive
         {'$gen_cast', {touch_zone, Coords}} ->
-            mock_zm_loop([Coords | Touches]);
+            mock_zm_loop([Coords | Touches], Opts);
         {get_touches, From} ->
             From ! {touches, Touches},
-            mock_zm_loop(Touches);
+            mock_zm_loop(Touches, Opts);
+        {'$gen_call', From, {lookup_zone, _Coords}} ->
+            gen_server:reply(From, not_loaded),
+            mock_zm_loop(Touches, Opts);
+        {'$gen_call', From, {ensure_zone, Coords}} ->
+            gen_server:reply(From, mock_zm_ensure(Coords, Opts)),
+            mock_zm_loop(Touches, Opts);
         stop ->
             ok
+    end.
+
+mock_zm_ensure(Coords, Opts) ->
+    case maps:get(ensure_zone, Opts, undefined) of
+        undefined ->
+            Config = maps:get(spawn_zone_config, Opts, #{}),
+            {ok, start_zone(Config#{coords => Coords}), created};
+        Reply ->
+            Reply
     end.
 
 flush_messages() ->

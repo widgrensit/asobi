@@ -13,7 +13,7 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 """.
 
 -export([start_link/1]).
--export([ensure_zone/2, get_zone/2, touch_zone/2, release_zone/2]).
+-export([ensure_zone/2, ensure_zone/3, get_zone/2, touch_zone/2, release_zone/2]).
 -export([get_active_zones/1, zone_terminated/3, pre_warm/1]).
 -export([register_zone/3, set_zone_config/2, set_initial_zone_states/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -21,6 +21,7 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 -define(REAP_INTERVAL, 10_000).
 -define(DEFAULT_IDLE_TIMEOUT, 30_000).
 -define(DEFAULT_MAX_ACTIVE, 10_000).
+-define(DEFAULT_CALL_TIMEOUT, 5_000).
 
 %% --- Public API ---
 
@@ -41,11 +42,22 @@ to act on `created`.
 -spec ensure_zone(pid() | atom(), {integer(), integer()}) ->
     {ok, pid(), created | existing} | {error, term()}.
 ensure_zone(Ref, Coords) ->
-    case ets_lookup(Ref, Coords) of
+    ensure_zone(Ref, Coords, ?DEFAULT_CALL_TIMEOUT).
+
+-doc """
+As `ensure_zone/2`, with an explicit call timeout. Callers on a hot path
+that must not stall on a busy manager (`asobi_zone`'s per-tick crossing
+check, widgrensit/asobi#271) pass a tighter bound than the gen_server
+default and treat a timeout as "not available this tick".
+""".
+-spec ensure_zone(pid() | atom(), {integer(), integer()}, timeout()) ->
+    {ok, pid(), created | existing} | {error, term()}.
+ensure_zone(Ref, Coords, Timeout) ->
+    case ets_lookup(Ref, Coords, Timeout) of
         {ok, Pid} ->
             {ok, Pid, existing};
         not_loaded ->
-            case gen_server:call(Ref, {ensure_zone, Coords}) of
+            case gen_server:call(Ref, {ensure_zone, Coords}, Timeout) of
                 {ok, P, created} when is_pid(P) -> {ok, P, created};
                 {ok, P, existing} when is_pid(P) -> {ok, P, existing};
                 {error, _} = Err -> Err
@@ -357,13 +369,16 @@ schedule_reap() ->
     erlang:send_after(?REAP_INTERVAL, self(), {reap_idle, Ref}),
     Ref.
 
-ets_lookup(Ref, Coords) when is_atom(Ref) ->
+ets_lookup(Ref, Coords) ->
+    ets_lookup(Ref, Coords, ?DEFAULT_CALL_TIMEOUT).
+
+ets_lookup(Ref, Coords, _Timeout) when is_atom(Ref) ->
     case ets:lookup(Ref, Coords) of
         [{Coords, Pid}] -> {ok, Pid};
         [] -> not_loaded
     end;
-ets_lookup(Ref, Coords) when is_pid(Ref) ->
-    case gen_server:call(Ref, {lookup_zone, Coords}) of
+ets_lookup(Ref, Coords, Timeout) when is_pid(Ref) ->
+    case gen_server:call(Ref, {lookup_zone, Coords}, Timeout) of
         {ok, P} when is_pid(P) -> {ok, P};
         not_loaded -> not_loaded
     end.

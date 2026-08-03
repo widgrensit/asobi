@@ -26,6 +26,7 @@ transient matches use `asobi_match_server` instead.
 -export([listing_info/1]).
 -export_type([listing/0]).
 -export([spawn_at/3, spawn_at/4]).
+-export([zone_created/3]).
 -export([reconnect/2]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
 -export([whereis/1]).
@@ -89,6 +90,17 @@ join(Pid, PlayerId, SessionPid, Ctx) when is_pid(SessionPid), is_map(Ctx) ->
 -spec leave(pid(), binary()) -> ok.
 leave(Pid, PlayerId) ->
     gen_statem:cast(Pid, {leave, PlayerId}).
+
+-doc """
+Tell the world server a zone was just created by something other than a
+player join or crossing - `asobi_zone` creating a neighbour to receive a
+crossing NPC (widgrensit/asobi#271). The world server owns `player_zones`,
+so only it can subscribe the already-connected players whose interest ring
+already covered those coords (widgrensit/asobi#275).
+""".
+-spec zone_created(pid(), {integer(), integer()}, pid()) -> ok.
+zone_created(Pid, Coords, ZonePid) when is_pid(ZonePid) ->
+    gen_statem:cast(Pid, {zone_created, Coords, ZonePid}).
 
 -spec move_player(pid(), binary(), {number(), number()}) -> ok.
 move_player(Pid, PlayerId, NewPos) ->
@@ -279,6 +291,8 @@ loading({call, _From}, {join, _PlayerId}, _State) ->
 %% kills the world instead of just running once we reach running.
 loading(cast, {move_player, _PlayerId, _NewPos, _Entity}, _State) ->
     {keep_state_and_data, [postpone]};
+loading(cast, {zone_created, _Coords, _ZonePid}, _State) ->
+    {keep_state_and_data, [postpone]};
 %% A world script broadcasting during generate_world/init reaches the world
 %% server while it is still loading. Without this clause that is a
 %% function_clause and the world dies before it ever runs.
@@ -310,6 +324,9 @@ running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 running(cast, {move_player, PlayerId, NewPos, Entity}, State) ->
     handle_move(PlayerId, NewPos, Entity, State);
+running(cast, {zone_created, Coords, ZonePid}, #{player_zones := PlayerZones}) ->
+    backfill_zone_subscribers(Coords, ZonePid, undefined, PlayerZones),
+    keep_state_and_data;
 running(
     cast,
     {post_tick, TickN},
