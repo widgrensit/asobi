@@ -1,0 +1,37 @@
+name: Scripts
+
+# ci.yml delegates wholesale to the erlang-ci reusable workflow, which only
+# knows about rebar3. The shell scripts under scripts/ run in release and
+# release-adjacent paths, so their tests need a home of their own.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/scripts.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/scripts.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run script tests
+        run: |
+          status=0
+          for t in scripts/test/*-test.sh; do
+            echo "== $t"
+            bash "$t" || status=1
+          done
+          exit "$status"
