@@ -88,7 +88,9 @@ api_test_() ->
         {"probe ctx: game.notify_many is inert", fun probe_notify_many_inert/0},
         {"probe ctx: game.storage.set is inert", fun probe_storage_set_inert/0},
         {"probe ctx: game.storage.get still runs for real", fun probe_storage_get_live/0},
-        {"probe ctx: game.chat.send is inert", fun probe_chat_send_inert/0}
+        {"probe ctx: game.chat.send is inert", fun probe_chat_send_inert/0},
+        {"install creates exactly the reserved namespaces", fun install_creates_reserved/0},
+        {"probe install creates the same namespaces", fun probe_install_creates_reserved/0}
     ]}.
 
 setup() ->
@@ -798,6 +800,61 @@ probe_chat_send_inert() ->
     Code = "return game.chat.send('match_123', 'p1', 'gg')",
     {ok, [false | _], _} = eval(Code, St),
     ?assertNot(meck:called(asobi_chat_channel, send_message, '_')).
+
+%% --- Reserved namespaces (asobi_lua_surface) ---
+%%
+%% asobi_lua_surface:reserved_namespaces/0 is the single source of truth for
+%% the `game.*` tables the library owns - the list a later game-declared
+%% namespace gets validated against. Both assertions read an installed VM
+%% back rather than trusting the list: the tables install/2 created, and the
+%% namespaces its function surface actually wired something into. A namespace
+%% added to the list but populated by nothing, or a function installed under
+%% a namespace the list never declared, breaks the second one.
+
+install_creates_reserved() ->
+    St = install_api_with_terrain(),
+    Reserved = lists:sort(asobi_lua_surface:reserved_namespaces()),
+    ?assertEqual(Reserved, lists:sort(namespace_tables(St))),
+    ?assertEqual(Reserved, lists:sort(populated_namespaces(St))).
+
+probe_install_creates_reserved() ->
+    St = install_api_probe(),
+    Reserved = lists:sort(asobi_lua_surface:reserved_namespaces()),
+    ?assertEqual(Reserved, lists:sort(namespace_tables(St))),
+    ?assertEqual(Reserved, lists:sort(populated_namespaces(St))).
+
+%% `game` itself plus every table-valued field on it.
+namespace_tables(St) ->
+    Code =
+        "local names = {}\n"
+        "for k, v in pairs(game) do\n"
+        "  if type(v) == 'table' then names[#names + 1] = k end\n"
+        "end\n"
+        "return names",
+    [[~"game"] | [[~"game", Name] || Name <- lua_strings(Code, St)]].
+
+%% Every namespace holding at least one installed function, named the way
+%% Lua sees it (`game`, `game.economy`, ...).
+populated_namespaces(St) ->
+    Code =
+        "local seen = {}\n"
+        "for k, v in pairs(game) do\n"
+        "  if type(v) == 'function' then\n"
+        "    seen['game'] = true\n"
+        "  elseif type(v) == 'table' then\n"
+        "    for _, nested in pairs(v) do\n"
+        "      if type(nested) == 'function' then seen['game.' .. k] = true end\n"
+        "    end\n"
+        "  end\n"
+        "end\n"
+        "local names = {}\n"
+        "for name in pairs(seen) do names[#names + 1] = name end\n"
+        "return names",
+    [binary:split(Name, ~".", [global]) || Name <- lua_strings(Code, St)].
+
+lua_strings(Code, St) ->
+    {ok, [Table | _], St1} = eval(Code, St),
+    [Value || {_Index, Value} <- luerl:decode(Table, St1)].
 
 %% --- Helpers ---
 
