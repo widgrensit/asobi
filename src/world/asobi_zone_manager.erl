@@ -13,7 +13,7 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 """.
 
 -export([start_link/1]).
--export([ensure_zone/2, ensure_zone/3, get_zone/2, touch_zone/2, release_zone/2]).
+-export([ensure_zone/2, ensure_zone/3, get_zone/2, touch_zone/2, release_zone/2, revive_zone/3]).
 -export([get_active_zones/1, zone_terminated/3, pre_warm/1]).
 -export([register_zone/3, set_zone_config/2, set_initial_zone_states/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -68,6 +68,29 @@ ensure_zone(Ref, Coords, Timeout) ->
 -spec get_zone(pid() | atom(), {integer(), integer()}) -> {ok, pid()} | not_loaded.
 get_zone(Ref, Coords) ->
     ets_lookup(Ref, Coords).
+
+-doc """
+Replace a zone that died under a caller holding its pid.
+
+`ensure_zone/2` hands out a pid without a lease on it, so a genuinely-idle
+zone can still be reaped in the gap between the lookup and the caller proving
+it occupied (widgrensit/asobi#283). The caller that notices this cannot just
+retry `ensure_zone/2`: the ETS slot still points at the dead pid until the
+manager has processed its `DOWN`, so the retry would hand back the same
+corpse. This waits for that `DOWN` (the zone's `terminate/2` snapshot has
+already run by then, so the replacement loads current state) and starts a
+fresh zone.
+
+Returns the already-live zone when someone else got there first.
+""".
+-spec revive_zone(pid() | atom(), {integer(), integer()}, pid()) ->
+    {ok, pid(), created | existing} | {error, term()}.
+revive_zone(Ref, Coords, DeadPid) when is_pid(DeadPid) ->
+    case gen_server:call(Ref, {revive_zone, Coords, DeadPid}) of
+        {ok, P, created} when is_pid(P) -> {ok, P, created};
+        {ok, P, existing} when is_pid(P) -> {ok, P, existing};
+        {error, _} = Err -> Err
+    end.
 
 -doc "Reset idle timer for a zone. Fire-and-forget.".
 -spec touch_zone(pid() | atom(), {integer(), integer()}) -> ok.
@@ -171,6 +194,26 @@ handle_call({ensure_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
                     {reply, {ok, Pid, created}, State1};
                 {error, Reason} ->
                     {reply, {error, Reason}, State}
+            end
+    end;
+handle_call({revive_zone, Coords, DeadPid}, _From, #{ets_tab := Tab} = State) ->
+    case ets:lookup(Tab, Coords) of
+        [{Coords, DeadPid}] ->
+            case await_zone_down(Coords, DeadPid, State) of
+                {ok, State1} ->
+                    case start_zone(Coords, State1) of
+                        {ok, Pid, State2} -> {reply, {ok, Pid, created}, State2};
+                        {error, Reason} -> {reply, {error, Reason}, State1}
+                    end;
+                timeout ->
+                    {reply, {error, zone_stopping}, State}
+            end;
+        [{Coords, Pid}] ->
+            {reply, {ok, Pid, existing}, touch(Coords, State)};
+        [] ->
+            case start_zone(Coords, State) of
+                {ok, Pid, State1} -> {reply, {ok, Pid, created}, State1};
+                {error, Reason} -> {reply, {error, Reason}, State}
             end
     end;
 handle_call(pre_warm, _From, #{grid_size := GridSize} = State) ->
@@ -322,6 +365,27 @@ cleanup_zone(
         zone_last_active => maps:remove(Coords, Active),
         zone_monitors => Monitors1
     }.
+
+%% The manager owns a monitor on every zone it has in ETS, so the DOWN for a
+%% zone a caller has just seen die is either already in this mailbox or on its
+%% way. Consuming it here (instead of returning and letting the normal
+%% handle_info clean up later) is what makes revive_zone/3 a single atomic
+%% step from the caller's point of view. The bound is a backstop for a zone
+%% that turns out not to be dying at all - reply an error rather than start a
+%% second zone over a live one.
+-spec await_zone_down({integer(), integer()}, pid(), map()) -> {ok, map()} | timeout.
+await_zone_down(Coords, ZonePid, #{zone_monitors := Monitors} = State) ->
+    case maps:get(Coords, Monitors, undefined) of
+        undefined ->
+            {ok, cleanup_zone(Coords, State)};
+        MonRef ->
+            receive
+                {'DOWN', MonRef, process, ZonePid, _Reason} ->
+                    {ok, cleanup_zone(Coords, State)}
+            after 1_000 ->
+                timeout
+            end
+    end.
 
 reap_idle_zones(
     #{

@@ -871,29 +871,93 @@ place_player(
             {error, Reason, State};
         {ok, ZonePid, ZoneStatus} ->
             PlayerPid = find_player_pid(PlayerId),
-            asobi_zone:add_entity(ZonePid, PlayerId, Entity),
-            asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
             InterestZones = interest_zones(ZoneCoords, ViewRadius, GridSize),
-            subscribe_interest_zones(InterestZones, ZMPid, PlayerId, PlayerPid),
             PlayerZones = maps:get(player_zones, State),
-            case ZoneStatus of
-                created -> backfill_zone_subscribers(ZoneCoords, ZonePid, PlayerId, PlayerZones);
-                existing -> ok
-            end,
-            %% Drain the casts above (add_entity + subscribe) by issuing a sync call to
-            %% the zone. Without this, a world.input cast from the WS handler can race
-            %% past the add_entity cast (different sender = no FIFO) and the zone's
-            %% next tick runs apply_inputs against an entities map missing the player —
-            %% the Lua handle_input's "if not e then return entities end" guard then
-            %% silently drops the input. The sync call forces the zone to process its
-            %% mailbox up to here before we reply {ok, ZonePid} to the WS handler.
-            _ = asobi_zone:get_subscriber_count(ZonePid),
-            State1 = State#{
-                player_zones => PlayerZones#{
-                    PlayerId => #{zone => ZoneCoords, interest => InterestZones}
-                }
+            Bind = #{
+                world_id => maps:get(world_id, State),
+                zone_manager_pid => ZMPid,
+                coords => ZoneCoords,
+                player_id => PlayerId,
+                entity => Entity,
+                player_pid => PlayerPid,
+                player_zones => PlayerZones,
+                subscribe_zones => InterestZones
             },
-            {ok, State1, ZonePid}
+            case bind_player_zone(Bind, ZonePid, ZoneStatus) of
+                {error, Reason} ->
+                    {error, Reason, State};
+                {ok, BoundZonePid} ->
+                    State1 = State#{
+                        player_zones => PlayerZones#{
+                            PlayerId => #{zone => ZoneCoords, interest => InterestZones}
+                        }
+                    },
+                    {ok, State1, BoundZonePid}
+            end
+    end.
+
+%% Puts the player's entity in the zone and makes that stick.
+%%
+%% The drain call is asobi#248: without it a world.input cast from the WS
+%% handler can race past the add_entity cast (different sender = no FIFO) and
+%% the zone's next tick runs apply_inputs against an entities map missing the
+%% player - the Lua handle_input's "if not e then return entities end" guard
+%% then silently drops the input. The call forces the zone to process its
+%% mailbox up to here before the caller replies to the WS handler.
+%%
+%% asobi#283: the zone can also be gone by now. ensure_zone/2 hands out a pid
+%% without a lease, so a zone that is genuinely empty when the manager's reap
+%% sweep fires stops even though this placement is already in flight against
+%% it - dropping add_entity on the floor and, before this, exiting the whole
+%% world gen_statem with `normal` on the drain call. Once the entity is in,
+%% the zone declines further reaps itself, so a single retry against a
+%% replacement zone is enough.
+-spec bind_player_zone(map(), pid(), created | existing) -> {ok, pid()} | {error, term()}.
+bind_player_zone(Bind, ZonePid, ZoneStatus) ->
+    bind_player_zone(Bind, ZonePid, ZoneStatus, 1).
+
+-spec bind_player_zone(map(), pid(), created | existing, pos_integer()) ->
+    {ok, pid()} | {error, term()}.
+bind_player_zone(Bind, ZonePid, ZoneStatus, Attempt) ->
+    #{
+        world_id := WorldId,
+        zone_manager_pid := ZMPid,
+        coords := Coords,
+        player_id := PlayerId,
+        entity := Entity,
+        player_pid := PlayerPid,
+        player_zones := PlayerZones,
+        subscribe_zones := SubscribeZones
+    } = Bind,
+    asobi_zone:add_entity(ZonePid, PlayerId, Entity),
+    asobi_presence:send(PlayerId, {world_joined, self(), ZonePid}),
+    subscribe_interest_zones(SubscribeZones, ZMPid, PlayerId, PlayerPid),
+    case PlayerPid of
+        undefined -> ok;
+        _ -> asobi_zone:subscribe(ZonePid, {PlayerId, PlayerPid})
+    end,
+    case ZoneStatus of
+        created -> backfill_zone_subscribers(Coords, ZonePid, PlayerId, PlayerZones);
+        existing -> ok
+    end,
+    case asobi_zone:sync(ZonePid) of
+        ok ->
+            {ok, ZonePid};
+        zone_gone when Attempt >= 2 ->
+            {error, zone_gone};
+        zone_gone ->
+            ?LOG_WARNING(#{
+                event => zone_reaped_during_placement,
+                world_id => WorldId,
+                player_id => PlayerId,
+                coords => Coords
+            }),
+            case asobi_zone_manager:revive_zone(ZMPid, Coords, ZonePid) of
+                {ok, NewZonePid, NewStatus} ->
+                    bind_player_zone(Bind, NewZonePid, NewStatus, Attempt + 1);
+                {error, _} = Err ->
+                    Err
+            end
     end.
 
 %% asobi#275: a zone coming into existence has to pick up every already-known
@@ -1063,79 +1127,103 @@ handle_move(
                             %% backfill_zone_subscribers/4).
                             ToSubscribe = (NewInterest -- OldInterest) -- [NewZoneCoords],
 
-                            case asobi_zone_manager:get_zone(ZMPid, OldZoneCoords) of
-                                {ok, OldZonePid} -> asobi_zone:remove_entity(OldZonePid, PlayerId);
-                                not_loaded -> ok
-                            end,
-                            PlayerPid = find_player_pid(PlayerId),
-                            asobi_zone:add_entity(NewZonePid, PlayerId, Entity),
-                            asobi_presence:send(PlayerId, {world_joined, self(), NewZonePid}),
-
-                            unsubscribe_interest_zones(ToUnsubscribe, ZMPid, PlayerId),
                             %% asobi#277: PlayerPid is undefined if this
                             %% crossing player somehow has no live session -
                             %% nothing to subscribe or notify in that case.
-                            case PlayerPid of
-                                undefined -> ok;
-                                _ -> asobi_zone:subscribe(NewZonePid, {PlayerId, PlayerPid})
-                            end,
-                            subscribe_interest_zones(ToSubscribe, ZMPid, PlayerId, PlayerPid),
-                            %% asobi#275: this crossing is what brought the zone
-                            %% into existence - any other already-connected
-                            %% player whose interest ring already covers it (a
+                            %%
+                            %% asobi#275 (inside bind_player_zone/3): this
+                            %% crossing may be what brought the zone into
+                            %% existence - any other already-connected player
+                            %% whose interest ring already covers it (a
                             %% stationary neighbour, most commonly) tried to
                             %% subscribe while it was not_loaded and was
                             %% silently skipped, with nothing to retry it since.
-                            case ZoneStatus of
-                                created ->
-                                    backfill_zone_subscribers(
-                                        NewZoneCoords, NewZonePid, PlayerId, PlayerZones
-                                    );
-                                existing ->
-                                    ok
-                            end,
-                            %% Same race place_player/4's join path guards against: a
-                            %% world.input cast can reach the new zone before add_entity
-                            %% lands, since add_entity and the WS handler's cast are
-                            %% different senders (no FIFO guarantee between them).
-                            _ = asobi_zone:get_subscriber_count(NewZonePid),
+                            %%
+                            %% asobi#283: binding runs before the player is
+                            %% taken out of the old zone, for the same reason
+                            %% asobi#258 pre-checks the destination - a
+                            %% destination that turns out to be unusable leaves
+                            %% the crossing a no-op instead of stranding the
+                            %% player zoneless.
+                            PlayerPid = find_player_pid(PlayerId),
+                            Bind = #{
+                                world_id => WorldId,
+                                zone_manager_pid => ZMPid,
+                                coords => NewZoneCoords,
+                                player_id => PlayerId,
+                                entity => Entity,
+                                player_pid => PlayerPid,
+                                player_zones => PlayerZones,
+                                subscribe_zones => ToSubscribe
+                            },
+                            case bind_player_zone(Bind, NewZonePid, ZoneStatus) of
+                                {error, BindReason} ->
+                                    ?LOG_WARNING(#{
+                                        event => move_zone_unavailable,
+                                        world_id => WorldId,
+                                        player_id => PlayerId,
+                                        coords => NewZoneCoords,
+                                        reason => BindReason
+                                    }),
+                                    asobi_telemetry:game_error(zone_unavailable, #{
+                                        world_id => WorldId,
+                                        coords => NewZoneCoords,
+                                        reason => BindReason
+                                    }),
+                                    keep_state_and_data;
+                                {ok, BoundZonePid} ->
+                                    case asobi_zone_manager:get_zone(ZMPid, OldZoneCoords) of
+                                        {ok, OldZonePid} ->
+                                            asobi_zone:remove_entity(OldZonePid, PlayerId);
+                                        not_loaded ->
+                                            ok
+                                    end,
+                                    unsubscribe_interest_zones(ToUnsubscribe, ZMPid, PlayerId),
 
-                            asobi_world_chat:player_zone_changed(
-                                PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
-                            ),
+                                    asobi_world_chat:player_zone_changed(
+                                        PlayerId, OldZoneCoords, NewZoneCoords, GridSize, ChatState
+                                    ),
 
-                            PlayerZones1 = maps:remove(PlayerId, PlayerZones),
-                            %% The old zone is often still in the player's own
-                            %% new ring (see ToUnsubscribe above) -
-                            %% zone_still_occupied/3 only knows about other
-                            %% players, so check that first.
-                            case
-                                lists:member(OldZoneCoords, NewInterest) orelse
-                                    zone_still_occupied(OldZoneCoords, PlayerId, PlayerZones1)
-                            of
-                                true -> ok;
-                                false -> asobi_zone_manager:release_zone(ZMPid, OldZoneCoords)
-                            end,
+                                    PlayerZones1 = maps:remove(PlayerId, PlayerZones),
+                                    %% The old zone is often still in the player's own
+                                    %% new ring (see ToUnsubscribe above) -
+                                    %% zone_still_occupied/3 only knows about other
+                                    %% players, so check that first.
+                                    case
+                                        lists:member(OldZoneCoords, NewInterest) orelse
+                                            zone_still_occupied(
+                                                OldZoneCoords, PlayerId, PlayerZones1
+                                            )
+                                    of
+                                        true ->
+                                            ok;
+                                        false ->
+                                            asobi_zone_manager:release_zone(ZMPid, OldZoneCoords)
+                                    end,
 
-                            _ =
-                                case PlayerPid of
-                                    undefined ->
-                                        ok;
-                                    _ ->
-                                        PlayerPid !
-                                            {asobi_message, {world_zone_changed, NewZonePid}}
-                                end,
-                            Players1 = maps:update_with(
-                                PlayerId,
-                                fun(Meta) -> Meta#{position => NewPos} end,
-                                Players
-                            ),
-                            {keep_state, State#{
-                                players => Players1,
-                                player_zones => PlayerZones1#{
-                                    PlayerId => #{zone => NewZoneCoords, interest => NewInterest}
-                                }
-                            }}
+                                    _ =
+                                        case PlayerPid of
+                                            undefined ->
+                                                ok;
+                                            _ ->
+                                                PlayerPid !
+                                                    {asobi_message,
+                                                        {world_zone_changed, BoundZonePid}}
+                                        end,
+                                    Players1 = maps:update_with(
+                                        PlayerId,
+                                        fun(Meta) -> Meta#{position => NewPos} end,
+                                        Players
+                                    ),
+                                    {keep_state, State#{
+                                        players => Players1,
+                                        player_zones => PlayerZones1#{
+                                            PlayerId => #{
+                                                zone => NewZoneCoords, interest => NewInterest
+                                            }
+                                        }
+                                    }}
+                            end
                     end
             end
     end.

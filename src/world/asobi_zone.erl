@@ -11,7 +11,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -export([tick/2, player_input/3, add_entity/3, remove_entity/2]).
 -export([spawn_entity/3, spawn_entity/4, spawn_entities/2, despawn_entity/2]).
 -export([subscribe/2, unsubscribe/2]).
--export([get_entities/1, get_subscriber_count/1]).
+-export([get_entities/1, get_subscriber_count/1, sync/1]).
 -export([start_entity_timer/2, cancel_entity_timer/3]).
 -export([query_radius/3, query_rect/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
@@ -82,6 +82,32 @@ get_entities(Pid) ->
 get_subscriber_count(Pid) ->
     case gen_server:call(Pid, get_subscriber_count) of
         N when is_integer(N), N >= 0 -> N
+    end.
+
+-doc """
+Drain everything this caller has already cast to the zone, reporting whether
+the zone is still alive rather than exiting the caller if it is not.
+
+Callers that cast to a zone and then need the cast to have landed (the join
+and crossing paths in `asobi_world_server`) must not use a raw
+`get_subscriber_count/1` for that: a zone reaped between the caller resolving
+its pid and the drain exits the caller with `{normal, {gen_server, call, _}}`,
+taking the whole world down over one player's placement
+(widgrensit/asobi#283). `ok` means every earlier cast from this process was
+processed; `zone_gone` means the zone died and those casts were dropped.
+""".
+-spec sync(pid()) -> ok | zone_gone.
+sync(Pid) ->
+    try
+        _ = gen_server:call(Pid, get_subscriber_count),
+        ok
+    catch
+        exit:{Reason, {gen_server, call, _}} when
+            Reason =:= noproc; Reason =:= normal; Reason =:= shutdown; Reason =:= killed
+        ->
+            zone_gone;
+        exit:{{shutdown, _}, {gen_server, call, _}} ->
+            zone_gone
     end.
 
 -spec start_entity_timer(pid(), map()) -> ok.

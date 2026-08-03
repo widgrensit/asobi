@@ -56,6 +56,12 @@ zone_manager_test_() ->
         {"stale zone is reaped on sweep", fun stale_zone_reaped_on_sweep/0},
         {"an occupied zone survives a reap sweep against a stale timestamp",
             fun occupied_zone_survives_reap/0},
+        {"revive_zone replaces a zone reaped under a caller holding its pid",
+            fun revive_zone_replaces_reaped_zone/0},
+        {"revive_zone returns the live zone when the coords were already recreated",
+            fun revive_zone_returns_already_recreated_zone/0},
+        {"revive_zone declines while the named zone is still running",
+            fun revive_zone_declines_live_zone/0},
         {"per-coord initial zone_state reaches zone init", fun initial_zone_states_threaded/0},
         {"missing per-coord state leaves zone_state default", fun initial_zone_states_default/0}
     ]}.
@@ -188,6 +194,57 @@ occupied_zone_survives_reap() ->
     force_reap_sweep(Mgr),
     ?assertEqual({ok, ZonePid}, asobi_zone_manager:get_zone(Mgr, {0, 0})),
     ?assert(is_process_alive(ZonePid)),
+    stop_manager(Ctx).
+
+%% Regression widgrensit/asobi#283 (follow-up to the zone-side fix above):
+%% ensure_zone/2 hands out a pid without a lease on it, so a zone that is
+%% genuinely empty when the sweep fires still stops while a join is already in
+%% flight against it. The joiner cannot recover by calling ensure_zone/2 again
+%% - the ETS slot still points at the corpse until the manager has processed
+%% the DOWN. Suspending the manager here queues the revive_zone call ahead of
+%% that DOWN, which is exactly the ordering the race produces.
+revive_zone_replaces_reaped_zone() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    Self = self(),
+    ok = sys:suspend(Mgr),
+    _ = spawn(fun() -> Self ! {revived, asobi_zone_manager:revive_zone(Mgr, {0, 0}, ZonePid)} end),
+    timer:sleep(20),
+    exit(ZonePid, kill),
+    timer:sleep(20),
+    ok = sys:resume(Mgr),
+    receive
+        {revived, Result} ->
+            ?assertMatch({ok, P, created} when is_pid(P), Result),
+            {ok, NewPid, created} = Result,
+            ?assertNotEqual(ZonePid, NewPid),
+            ?assert(is_process_alive(NewPid)),
+            ?assertEqual({ok, NewPid}, asobi_zone_manager:get_zone(Mgr, {0, 0}))
+    after 2000 ->
+        ?assert(false, timeout_waiting_for_revive)
+    end,
+    stop_manager(Ctx).
+
+revive_zone_returns_already_recreated_zone() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 0}),
+    exit(ZonePid, kill),
+    timer:sleep(50),
+    {ok, NewPid, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 0}),
+    ?assertEqual(
+        {ok, NewPid, existing}, asobi_zone_manager:revive_zone(Mgr, {1, 0}, ZonePid)
+    ),
+    stop_manager(Ctx).
+
+%% Backstop: a caller that reports a zone dead while it is demonstrably still
+%% running must not get a second zone started over the live one.
+revive_zone_declines_live_zone() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {2, 2}),
+    ?assertEqual(
+        {error, zone_stopping}, asobi_zone_manager:revive_zone(Mgr, {2, 2}, ZonePid)
+    ),
+    ?assertEqual({ok, ZonePid}, asobi_zone_manager:get_zone(Mgr, {2, 2})),
     stop_manager(Ctx).
 
 %% Sends the manager's own {reap_idle, Ref} message directly instead of

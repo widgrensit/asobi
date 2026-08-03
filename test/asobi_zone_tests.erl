@@ -78,7 +78,10 @@ zone_test_() ->
             fun tick_no_hibernate_with_binary_keyed_npcs/0},
         {"reap stops a zone with no entities", fun reap_stops_empty_zone/0},
         {"reap declines and re-touches a zone that still has entities",
-            fun reap_declines_when_occupied/0}
+            fun reap_declines_when_occupied/0},
+        {"sync drains earlier casts to a live zone", fun sync_drains_live_zone/0},
+        {"sync reports a stopped zone instead of exiting the caller",
+            fun sync_reports_stopped_zone/0}
     ]}.
 
 starts_empty() ->
@@ -757,6 +760,22 @@ reap_declines_when_occupied() ->
     end,
     gen_server:stop(Pid),
     ZMPid ! stop.
+
+sync_drains_live_zone() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, <<"p1">>, #{type => ~"player", x => 0, y => 0}),
+    ?assertEqual(ok, asobi_zone:sync(Pid)),
+    ?assert(maps:is_key(<<"p1">>, asobi_zone:get_entities(Pid))),
+    gen_server:stop(Pid).
+
+%% asobi#283: a zone reaped between a caller resolving its pid and draining
+%% its casts used to exit that caller with {normal, {gen_server, call, _}} -
+%% for asobi_world_server that meant the whole world gen_statem going down
+%% over one player's placement.
+sync_reports_stopped_zone() ->
+    Pid = start_zone(),
+    gen_server:stop(Pid),
+    ?assertEqual(zone_gone, asobi_zone:sync(Pid)).
 
 start_mock_zone_manager() ->
     start_mock_zone_manager(#{}).

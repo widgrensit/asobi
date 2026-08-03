@@ -85,7 +85,11 @@ world_zone_integration_test_() ->
         {"the global rehome limit denies a crossing even with per-player budget to spare",
             fun rehome_denied_by_global_limit/0},
         {"a crossing that drops a zone from the ring removes its stationary occupants",
-            fun crossing_out_of_ring_removes_stationary_neighbour/0}
+            fun crossing_out_of_ring_removes_stationary_neighbour/0},
+        {"a join whose zone is reaped right after the lookup still lands the player",
+            fun join_survives_zone_reaped_after_lookup/0},
+        {"a crossing whose destination is reaped right after the lookup still lands the player",
+            fun crossing_survives_zone_reaped_after_lookup/0}
     ]}.
 
 %% Default (lazy_zones=false, grid_size=3) pre-spawns all 9 zones
@@ -744,3 +748,68 @@ binary_keyed_player_rehomes_across_boundary() ->
     ?assertEqual(250.0, maps:get(~"x", Entity)),
     ?assertNot(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid1))),
     stop_world(Ctx).
+
+%% Regression widgrensit/asobi#283 (join half): ensure_zone/2 hands out a pid
+%% without a lease on it, so a zone that is genuinely empty when the manager's
+%% reap sweep fires stops while a placement is already in flight against it.
+%% The add_entity cast was dropped on the floor and the drain call that
+%% followed exited the whole world gen_statem with `normal` - every player in
+%% the world lost, over one join. Stopping the zone from inside ensure_zone/2
+%% reproduces exactly that ordering, deterministically.
+join_survives_zone_reaped_after_lookup() ->
+    Ctr = counters:new(1, []),
+    meck:new(asobi_zone_manager, [passthrough, no_link]),
+    meck:expect(asobi_zone_manager, ensure_zone, fun(Ref, Coords) ->
+        Result = meck:passthrough([Ref, Coords]),
+        reap_first_zone_at({1, 1}, Coords, Result, Ctr)
+    end),
+    Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{lazy_zones => true}),
+    try
+        ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
+        ?assert(is_process_alive(Pid)),
+        {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+        ?assert(is_process_alive(ZonePid)),
+        ?assert(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid)))
+    after
+        stop_world(Ctx),
+        meck:unload(asobi_zone_manager)
+    end.
+
+%% Same race on the crossing half: the destination zone a crossing just
+%% resolved can be reaped before the entity reaches it.
+crossing_survives_zone_reaped_after_lookup() ->
+    Ctr = counters:new(1, []),
+    Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{lazy_zones => true}),
+    try
+        ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
+        timer:sleep(20),
+        meck:new(asobi_zone_manager, [passthrough, no_link]),
+        meck:expect(asobi_zone_manager, ensure_zone, fun(Ref, Coords) ->
+            Result = meck:passthrough([Ref, Coords]),
+            reap_first_zone_at({2, 2}, Coords, Result, Ctr)
+        end),
+        %% Player starts at {100.0, 100.0} => zone {1,1}; move into {2,2}.
+        asobi_world_server:move_player(Pid, ~"p1", {250.0, 250.0}),
+        timer:sleep(50),
+        ?assert(is_process_alive(Pid)),
+        {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {2, 2}),
+        ?assert(is_process_alive(ZonePid)),
+        ?assert(maps:is_key(~"p1", asobi_zone:get_entities(ZonePid)))
+    after
+        stop_world(Ctx),
+        meck:unload(asobi_zone_manager)
+    end.
+
+%% Stops the zone the caller just resolved, once, mimicking a reap sweep
+%% landing in the gap between the lookup and the caller using the pid.
+reap_first_zone_at(Target, Coords, {ok, ZonePid, _Status} = Result, Ctr) when Coords =:= Target ->
+    case counters:get(Ctr, 1) of
+        0 ->
+            counters:add(Ctr, 1, 1),
+            ok = gen_server:stop(ZonePid, normal, 1000),
+            Result;
+        _ ->
+            Result
+    end;
+reap_first_zone_at(_Target, _Coords, Result, _Ctr) ->
+    Result.
