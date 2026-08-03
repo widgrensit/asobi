@@ -1,14 +1,219 @@
 # Bots
 
-Bots are AI-controlled players that join matches and worlds alongside real
-players. They are implemented and scripted by
-[asobi_lua](https://github.com/widgrensit/asobi_lua) — asobi itself has no bot
-code, so asobi_lua's documentation is the reference and this page points to it
-rather than keeping a copy that drifts.
+Asobi includes built-in bot support. Bots run as server-side processes that
+join matches as regular players -- no fake clients, no network overhead. The
+AI logic runs in the same tick loop as the game.
 
-- [Lua bots](https://github.com/widgrensit/asobi_lua/blob/main/guides/lua-bots.md)
-  — enabling bots per game mode, the `bots` config map, and writing bot scripts
-- [Lua scripting](https://github.com/widgrensit/asobi_lua/blob/main/guides/lua-scripting.md)
-  — the callbacks a bot script implements
+## When to use bots
 
-See also [Lua Scripting](lua-scripting.md) for the runtime itself.
+- Fill empty slots so matches start immediately instead of waiting for a full lobby.
+- A tutorial or single-player sandbox with scripted opponents.
+- Load-testing your tick loop without spawning real WebSocket sessions.
+- Replay / record-and-replay testing.
+
+## How It Works
+
+1. A player queues for matchmaking
+2. If no match is found within the configured wait time, Asobi adds bots
+3. Bots join the match like regular players
+4. Each tick, the bot calls a `think()` function to decide its input
+5. Bot input goes through the same `handle_input` path as real players
+
+## Configuration
+
+### Lua (Docker)
+
+Enable bots by adding `bots` to your match script globals and a `names`
+list to your bot script:
+
+```lua
+-- match.lua
+match_size = 4
+max_players = 8
+strategy = "fill"
+bots = { script = "bots/chaser.lua", min_players = 4 }
+```
+
+`bots.min_players` is optional and defaults to `match_size`. `bots.enabled`
+is also optional and defaults to `true` (set it to `false` to keep the
+table around, e.g. to declare `min_players`, while disabling bot-fill).
+
+```lua
+-- bots/chaser.lua
+names = {"Spark", "Blitz", "Volt", "Neon", "Pulse"}
+
+function think(bot_id, state)
+    -- AI logic here
+end
+```
+
+The platform reads `names` from your bot script at runtime. Bot names are
+prefixed with `bot_` (e.g., `bot_Spark`).
+
+The spawner checks the queue every 8 seconds (a fixed interval, not tunable) and
+fills a waiting match with bots up to the mode's `min_players`, capped at
+`max_players` so a small `match_size`/`max_players` mode never overshoots into
+a second, bot-only match. Both settings below live in the game mode's `bots`
+map — there are no bot environment variables.
+
+### Erlang (sys.config)
+
+For Erlang OTP projects, configure bots in `sys.config`:
+
+```erlang
+{game_modes, #{
+    ~"arena" => #{
+        module => {lua, "game/match.lua"},
+        match_size => 4,
+        bots => #{
+            enabled => true,
+            min_players => 4,
+            script => <<"game/bots/chaser.lua">>
+        }
+    }
+}}
+```
+
+Bot names are read from the bot script's `names` global. If not defined,
+defaults to `["Spark", "Blitz", "Volt", "Neon", "Pulse"]`.
+
+## Writing a Bot AI Script
+
+A bot script defines a single function: `think(bot_id, state)`. It receives
+the current game state and returns an input table -- the same format a real
+player would send. That is the whole callback surface: a bot script has no
+`on_join` / `on_leave` / `on_message` hooks; it only ever produces the next
+input from the current state (plus an optional `names` list, below).
+
+Since the bot only decides from `state`, difficulty is a property of the
+script, not a config knob: throttle a reaction-time delay or degrade the target
+selection by keying private per-bot state off `bot_id` in a module-level table.
+
+```lua
+-- game/bots/chaser.lua
+
+function think(bot_id, state)
+    local players = state.players or {}
+    local me = players[bot_id]
+    if not me then return {} end
+
+    -- Find nearest enemy
+    local target = find_nearest(bot_id, me, players)
+    if not target then
+        return wander()
+    end
+
+    -- Chase and shoot
+    local dist = distance(me, target)
+    return {
+        right = target.x > me.x,
+        left = target.x < me.x,
+        down = target.y > me.y,
+        up = target.y < me.y,
+        shoot = dist < 200,
+        aim_x = target.x,
+        aim_y = target.y
+    }
+end
+
+function find_nearest(bot_id, me, players)
+    local nearest, min_dist = nil, 99999
+    for id, p in pairs(players) do
+        if id ~= bot_id and p.hp and p.hp > 0 then
+            local d = distance(me, p)
+            if d < min_dist then
+                nearest, min_dist = p, d
+            end
+        end
+    end
+    return nearest
+end
+
+function distance(a, b)
+    local dx = (a.x or 0) - (b.x or 0)
+    local dy = (a.y or 0) - (b.y or 0)
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+function wander()
+    return {
+        right = math.random(2) == 1,
+        left = math.random(2) == 1,
+        down = math.random(2) == 1,
+        up = math.random(2) == 1,
+        shoot = false
+    }
+end
+```
+
+## Multiple Bot Types
+
+Create different AI scripts for different playstyles:
+
+```
+game/bots/
+├── chaser.lua    -- rushes nearest player
+├── sniper.lua    -- stays back, long range
+├── healer.lua    -- supports teammates
+└── camper.lua    -- holds position, ambushes
+```
+
+Currently, all bots in a game mode use the same script. To vary behavior,
+add randomization inside your `think()` function:
+
+```lua
+local STRATEGIES = { "aggressive", "defensive", "random" }
+
+function think(bot_id, state)
+    -- Use bot_id hash to pick consistent strategy per bot
+    local strategy = STRATEGIES[(#bot_id % #STRATEGIES) + 1]
+
+    if strategy == "aggressive" then
+        return chase(bot_id, state)
+    elseif strategy == "defensive" then
+        return defend(bot_id, state)
+    else
+        return wander()
+    end
+end
+```
+
+## Default AI
+
+If no bot script is configured, bots use a built-in default AI that:
+
+- Finds the nearest living enemy
+- Moves toward them
+- Shoots when within range (200 units)
+- Adds slight aim randomization
+- Wanders randomly if no targets are alive
+
+This works for most arena-style games out of the box.
+
+## Auto Boon Pick and Voting
+
+Bots automatically handle game phases:
+
+- **Boon pick**: Bots pick the first available option immediately
+- **Voting**: Bots cast a random vote after a 1-3 second delay
+
+This behavior is built-in and doesn't require any bot script code.
+
+## Bot IDs
+
+Bot player IDs are prefixed with `bot_` followed by their display name
+(e.g., `bot_Spark`, `bot_Blitz`). Your game logic can check for bots:
+
+```lua
+function is_bot(player_id)
+    return string.sub(player_id, 1, 4) == "bot_"
+end
+```
+
+Clients receive bot players in the normal game state. Whether to show them
+differently (e.g., "AI" tag) is up to the client.
+
+## Next steps
+
+- [Lua scripting](lua-scripting.md) - the `game.*` API a bot's `think` shares with match logic.
+- [Trust model](security-trust-model.md) - a bot's `think` runs bounded, like any callback.

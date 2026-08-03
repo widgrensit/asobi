@@ -34,9 +34,48 @@ init([]) ->
         tournament_sup(),
         presence_spec(),
         season_manager_spec(),
-        guest_reaper_spec()
+        guest_reaper_spec(),
+        lua_game_config_spec(),
+        lua_sup()
     ],
     {ok, {SupFlags, Children}}.
+
+%% The asobi_lua merge: asobi_lua used to be its own OTP application, whose
+%% start callback loaded the Lua game config and then started asobi_lua_sup.
+%% That application started AFTER asobi, so the config load landed after every
+%% asobi_sup child was already up - asobi_guest_reaper in particular reads
+%% `guest_auth` in start_link/0, and read it before asobi_lua_config could set
+%% it. Keeping these two entries last preserves that order exactly (core
+%% children -> config load -> Lua children) rather than quietly changing what
+%% the core sees at boot. Moving the load earlier is a real behaviour change
+%% and belongs in its own PR.
+lua_game_config_spec() ->
+    #{
+        id => asobi_lua_config,
+        start => {erlang, apply, [fun load_lua_game_config/0, []]},
+        restart => temporary
+    }.
+
+%% A broken game config aborts the boot, as it did when this raised from
+%% asobi_lua_app:start/2. The failure now arrives as a supervisor
+%% failed_to_start_child rather than a bare application-start error, so it also
+%% takes the already-started core children down with it - still fail-closed,
+%% and a node with an unloadable game config has nothing useful to serve.
+load_lua_game_config() ->
+    case asobi_lua_config:maybe_load_game_config() of
+        ok ->
+            ignore;
+        {error, Reason} ->
+            logger:error(#{msg => ~"game_config_failed", error => Reason}),
+            error({game_config_failed, Reason})
+    end.
+
+lua_sup() ->
+    #{
+        id => asobi_lua_sup,
+        start => {asobi_lua_sup, start_link, []},
+        type => supervisor
+    }.
 
 guest_reaper_spec() ->
     #{

@@ -76,7 +76,9 @@ jobs:
           prop_phase_timer_monotonic,\
           prop_reconnect_lifecycle,\
           prop_chat_zone_routing,\
-          prop_matchmaker_fill_strategy
+          prop_matchmaker_fill_strategy,\
+          prop_lua_bridge_input_threading,\
+          prop_lua_error_containment
 
       - name: Run snapshot round-trip CT
         run: rebar3 ct --suite=test/prop_zone_snapshot_roundtrip_SUITE

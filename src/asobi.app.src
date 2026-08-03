@@ -15,7 +15,8 @@
         nova_auth,
         nova_auth_oidc,
         nova_resilience,
-        shigoto
+        shigoto,
+        luerl
     ]},
     {env, []},
     {modules, []},
