@@ -157,25 +157,22 @@ building an exporter safely - not a step to defer until after one is built.
   - `zone:<WorldId>:<X>,<Y>` and `prox:<WorldId>:<X>,<Y>` - one channel per
     zone or proximity cell, so cardinality is world count times grid size.
   - `room:<GroupUuid>` - one channel per group, keyed by a canonical uuid.
+  - `global:<Name>` - game-wide channels above the world tier. This one
+    scheme IS bounded: `<Name>` must appear in a configured mode's
+    `chat => #{global => [...]}`, enforced via
+    `asobi_game_modes:global_chat_channels/0`, so it is operator-declared
+    like `mode`. It does not make `channel_id` as a whole label-safe - the
+    per-entity schemes above dominate.
 
   A bare unprefixed id is also treated as a group id by `classify/1`, but
   `validate_channel_id/1` rejects it on both the WS and HTTP paths, so it is
   not reachable in practice. `?MAX_CHANNEL_ID_BYTES` caps each value at 256
   bytes; that caps the size of one label value, not how many distinct ones
-  exist. Every scheme above is keyed by a runtime entity - a player pair, a
-  world, a zone coordinate, a group uuid - so the set grows with the running
-  game, not with a fixed catalogue. Count the event and, if a breakdown is
+  exist. Every scheme above except `global:` is keyed by a runtime entity - a
+  player pair, a world, a zone coordinate, a group uuid - so the set grows
+  with the running game, not with a fixed catalogue. Count the event and, if a breakdown is
   needed, derive the bounded prefix (`dm` / `world` / `zone` / `prox` /
-  `room`) in the consumer rather than labelling on the full id.
-
-  Pending: asobi#320 adds a `global:<Name>` tier above `world:`, for
-  game-wide channels that outlive a single world. That one scheme is
-  operator-declared - `<Name>` must appear in a configured mode's
-  `chat => #{global => [...]}` - so it is bounded like `mode` is. It does
-  not change the classification of `channel_id` as a whole, which stays
-  unbounded because the per-entity schemes above dominate it. When #320
-  merges, add `global:<Name>` to the list above and to the derivable prefix
-  set.
+  `room` / `global`) in the consumer rather than labelling on the full id.
 
 #### Vote - `[asobi, vote, started | cast | resolved]`
 
