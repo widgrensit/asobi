@@ -569,7 +569,8 @@ game mode:
             type => world,
             module => my_game,
             chat => #{
-                world => true,       %% global channel for everyone in the world
+                global => [~"general", ~"trade"], %% game-wide, spans every world
+                world => true,       %% one channel for everyone in this world
                 zone => true,        %% auto-join/leave as players move between zones
                 proximity => 2       %% chat with players within N zones of you
             }
@@ -591,6 +592,7 @@ chat_proximity = 2
 
 | Type | Scope | Lifecycle |
 |------|-------|-----------|
+| **Global** | Every player in the game, across all worlds | Join on world join, leave on world leave |
 | **World** | All players in the world instance | Join on world join, leave on world leave |
 | **Zone** | Players in the same zone cell | Auto-swap when crossing zone boundaries |
 | **Proximity** | Players within N zones | Follows your interest radius, updates on zone change |
@@ -611,9 +613,17 @@ No extra client code needed. Chat messages arrive via the same WebSocket
 as `chat.message` events. Clients just need to know the channel IDs,
 which follow a predictable format:
 
+- Global: `global:{name}`
 - World: `world:{world_id}`
 - Zone: `zone:{world_id}:{x},{y}`
 - Proximity: `prox:{world_id}:{x},{y}`
+
+A global channel carries no world id on purpose: every world of every mode
+that declares the same name resolves the same channel process, so one message
+is one broadcast and one row of history, not one per world. Only names
+declared in a mode's `chat.global` are authorised, so a client cannot mint
+new ones; names are up to 64 bytes of `a-z A-Z 0-9 _ - .` and anything else
+is dropped with a warning at join time.
 
 ### No Chat Config
 

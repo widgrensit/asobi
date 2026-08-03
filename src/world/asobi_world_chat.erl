@@ -9,9 +9,10 @@
 %%     ~"galaxy" => #{
 %%         type => world,
 %%         chat => #{
-%%             world => true,       %% global channel for all players in the world
-%%             zone => true,        %% auto-join/leave as players move between zones
-%%             proximity => 2       %% chat with players within N zones (uses interest radius)
+%%             global => [~"general"], %% game-wide, spans every world (#299)
+%%             world => true,          %% one channel for all players in the world
+%%             zone => true,           %% auto-join/leave as players move between zones
+%%             proximity => 2          %% chat with players within N zones (uses interest radius)
 %%         }
 %%     }
 %% }}
@@ -19,9 +20,13 @@
 %%
 %% Federation chat is handled separately by the social system.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([init/2]).
 -export([player_joined/3, player_left/3, player_zone_changed/5]).
--export([channel_id/3]).
+-export([channel_id/3, global_channel_id/1, global_channels/1]).
+
+-define(MAX_GLOBAL_NAME_BYTES, 64).
 
 -spec init(binary(), map()) -> map().
 init(WorldId, Config) ->
@@ -47,6 +52,10 @@ player_joined(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatCo
                 false ->
                     ok
             end,
+            lists:foreach(
+                fun(Name) -> asobi_chat_channel:join(global_channel_id(Name), PlayerPid) end,
+                global_channels(ChatConfig)
+            ),
             join_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
     end.
@@ -67,6 +76,10 @@ player_left(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatConf
                 false ->
                     ok
             end,
+            lists:foreach(
+                fun(Name) -> asobi_chat_channel:leave(global_channel_id(Name), PlayerPid) end,
+                global_channels(ChatConfig)
+            ),
             leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
     end.
@@ -131,6 +144,48 @@ channel_id(WorldId, zone, {X, Y}) when is_integer(X), is_integer(Y) ->
     iolist_to_binary([~"zone:", WorldId, ~":", integer_to_binary(X), ~",", integer_to_binary(Y)]);
 channel_id(WorldId, proximity, {X, Y}) when is_integer(X), is_integer(Y) ->
     iolist_to_binary([~"prox:", WorldId, ~":", integer_to_binary(X), ~",", integer_to_binary(Y)]).
+
+-doc "Channel id of a game-wide chat channel. Deliberately carries no world id.".
+-spec global_channel_id(binary()) -> binary().
+global_channel_id(Name) when is_binary(Name) ->
+    <<"global:", Name/binary>>.
+
+-doc """
+The game-wide channel names a chat config declares, deduplicated.
+
+Shared with `asobi_game_modes:global_chat_channels/0`, which the chat ACL
+consults, so a name is auto-joined here exactly when it is authorised there.
+Malformed names are dropped loudly rather than silently minting a channel
+nothing can join.
+""".
+-spec global_channels(term()) -> [binary()].
+global_channels(#{global := Names}) when is_list(Names) ->
+    lists:usort([Name || Name <- Names, valid_global_name(Name)]);
+global_channels(#{global := Other}) ->
+    ?LOG_WARNING(#{event => invalid_global_chat_config, value => Other}),
+    [];
+global_channels(_) ->
+    [].
+
+-spec valid_global_name(term()) -> boolean().
+valid_global_name(Name) when is_binary(Name), byte_size(Name) > 0 ->
+    case byte_size(Name) =< ?MAX_GLOBAL_NAME_BYTES andalso is_name_chars(Name) of
+        true ->
+            true;
+        false ->
+            ?LOG_WARNING(#{event => invalid_global_chat_channel_name, name => Name}),
+            false
+    end;
+valid_global_name(Name) ->
+    ?LOG_WARNING(#{event => invalid_global_chat_channel_name, name => Name}),
+    false.
+
+is_name_chars(<<>>) -> true;
+is_name_chars(<<C, Rest/binary>>) when C >= $a, C =< $z -> is_name_chars(Rest);
+is_name_chars(<<C, Rest/binary>>) when C >= $A, C =< $Z -> is_name_chars(Rest);
+is_name_chars(<<C, Rest/binary>>) when C >= $0, C =< $9 -> is_name_chars(Rest);
+is_name_chars(<<C, Rest/binary>>) when C =:= $_; C =:= $-; C =:= $. -> is_name_chars(Rest);
+is_name_chars(_) -> false.
 
 %% --- Internal ---
 

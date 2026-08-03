@@ -1,6 +1,6 @@
 -module(asobi_game_modes).
 
--export([mode_config/1, resolve_game_module/1, world_config/1]).
+-export([mode_config/1, resolve_game_module/1, world_config/1, global_chat_channels/0]).
 
 -spec mode_config(binary()) -> map().
 mode_config(Mode) ->
@@ -45,10 +45,28 @@ world_config(Mode) ->
                 listed => maps:get(listed, ModeConfig, true),
                 quick_play => maps:get(quick_play, ModeConfig, true)
             },
-            {ok, forward_optional(ModeConfig, [empty_grace_ms, player_ttl_ms], Base)};
+            {ok, forward_optional(ModeConfig, [empty_grace_ms, player_ttl_ms, chat], Base)};
         {error, _} = Err ->
             Err
     end.
+
+-doc """
+Every game-wide chat channel name declared by any configured game mode.
+
+#299: `global:<Name>` is the one channel scheme that outlives a single world,
+so the set of legal names cannot come from the joining client. It is the union
+of the `chat => #{global => [...]}` declarations across `game_modes`, which is
+what `asobi_chat_acl` authorises against.
+""".
+-spec global_chat_channels() -> [binary()].
+global_chat_channels() ->
+    Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
+    lists:usort([
+        Name
+     || Config <- maps:values(Modes),
+        is_map(Config),
+        Name <- asobi_world_chat:global_channels(maps:get(chat, Config, #{}))
+    ]).
 
 -spec forward_optional(map(), [atom()], map()) -> map().
 forward_optional(_Src, [], Acc) ->

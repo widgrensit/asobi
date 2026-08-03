@@ -53,3 +53,48 @@ dm_unknown_participant_rejected() ->
     meck:expect(asobi_repo, get, fun(asobi_player, _Id) -> {error, not_found} end),
     ?assertNot(asobi_chat_acl:authorized(~"dm:alice:not_a_real_player", ~"alice")),
     ?assertNot(asobi_chat_acl:authorized(~"dm:not_a_real_player:alice", ~"alice")).
+
+%% #299: the one scheme that spans worlds. Any signed-in player may join a
+%% declared name; an undeclared one must not authorise, or `chat.join` would
+%% mint unbounded channel processes.
+global_acl_test_() ->
+    {setup, fun global_setup/0, fun global_cleanup/1, [
+        {"a declared global channel authorises any player", fun global_declared_authorized/0},
+        {"an undeclared global channel authorises nobody", fun global_undeclared_rejected/0},
+        {"names are collected across every configured mode", fun global_union_across_modes/0},
+        {"a bare `global:` prefix is denied", fun global_empty_name_rejected/0},
+        {"the `global:` prefix passes channel-id validation", fun global_prefix_validates/0}
+    ]}.
+
+global_setup() ->
+    Prev = application:get_env(asobi, game_modes),
+    application:set_env(asobi, game_modes, #{
+        ~"galaxy" => #{type => world, chat => #{global => [~"general"], world => true}},
+        ~"arena" => #{chat => #{global => [~"trade", ~"general"]}},
+        ~"quiet" => #{chat => #{world => true}}
+    }),
+    Prev.
+
+global_cleanup({ok, Prev}) ->
+    application:set_env(asobi, game_modes, Prev);
+global_cleanup(undefined) ->
+    application:unset_env(asobi, game_modes).
+
+global_declared_authorized() ->
+    ?assert(asobi_chat_acl:authorized(~"global:general", ~"alice")),
+    ?assert(asobi_chat_acl:authorized(~"global:general", ~"bob")).
+
+global_undeclared_rejected() ->
+    ?assertNot(asobi_chat_acl:authorized(~"global:not-declared", ~"alice")),
+    ?assertNot(asobi_chat_acl:authorized(~"global:general:extra", ~"alice")).
+
+global_union_across_modes() ->
+    ?assert(asobi_chat_acl:authorized(~"global:trade", ~"alice")),
+    ?assertEqual([~"general", ~"trade"], asobi_game_modes:global_chat_channels()).
+
+global_empty_name_rejected() ->
+    ?assertNot(asobi_chat_acl:authorized(~"global:", ~"alice")),
+    ?assertNot(asobi_chat_acl:validate_channel_id(~"global")).
+
+global_prefix_validates() ->
+    ?assert(asobi_chat_acl:validate_channel_id(~"global:general")).

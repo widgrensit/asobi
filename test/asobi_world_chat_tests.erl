@@ -47,6 +47,8 @@ integration_test_() ->
         {"zone change swaps zone chat", fun zone_change_swaps_chat/0},
         {"proximity chat subscribes to nearby zones", fun proximity_chat/0},
         {"no chat config means no channels", fun no_chat_config/0},
+        {"a declared global channel is joined on world join and left on world leave",
+            fun global_chat_joined_and_left/0},
         {"a player with no live session never joins as the calling process",
             fun no_live_session_does_not_join_as_caller/0}
     ]}.
@@ -139,6 +141,50 @@ no_chat_config() ->
     ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, WorldChannel}))),
     ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ZoneChannel}))),
     unregister_player().
+
+%% #299: the global tier carries no world id, so two worlds of the same game
+%% resolve the same channel process.
+global_chat_joined_and_left() ->
+    register_player(),
+    ChatState = asobi_world_chat:init(~"wc8", #{chat => #{global => [~"general"]}}),
+    ChatState2 = asobi_world_chat:init(~"wc9", #{chat => #{global => [~"general"]}}),
+    ChannelId = asobi_world_chat:global_channel_id(~"general"),
+    ?assertEqual(~"global:general", ChannelId),
+    asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState),
+    ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, ChannelId}))),
+    asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState2),
+    asobi_world_chat:player_left(~"p1", {0, 0}, ChatState2),
+    asobi_world_chat:player_left(~"p1", {0, 0}, ChatState),
+    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ChannelId}))),
+    unregister_player().
+
+global_channels_test_() ->
+    [
+        {"names are deduplicated", fun() ->
+            ?assertEqual(
+                [~"general", ~"trade"],
+                asobi_world_chat:global_channels(#{global => [~"trade", ~"general", ~"trade"]})
+            )
+        end},
+        {"malformed names are dropped", fun() ->
+            ?assertEqual(
+                [~"general"],
+                asobi_world_chat:global_channels(#{
+                    global => [~"general", ~"has:colon", ~"", "not-a-binary", 42]
+                })
+            )
+        end},
+        {"an over-long name is dropped", fun() ->
+            Long = binary:copy(~"a", 65),
+            ?assertEqual([], asobi_world_chat:global_channels(#{global => [Long]}))
+        end},
+        {"a non-list global is dropped", fun() ->
+            ?assertEqual([], asobi_world_chat:global_channels(#{global => true}))
+        end},
+        {"no global key means no channels", fun() ->
+            ?assertEqual([], asobi_world_chat:global_channels(#{world => true}))
+        end}
+    ].
 
 %% Regression for widgrensit/asobi#277: find_player_pid/1 in this module used
 %% to fall back to self() (the caller's own pid - asobi_world_server in

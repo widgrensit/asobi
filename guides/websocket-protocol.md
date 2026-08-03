@@ -379,10 +379,20 @@ membership without a per-frame registry lookup.
 | Prefix   | Used for                                  | Membership rule |
 |----------|-------------------------------------------|-----------------|
 | `dm:`    | Direct messages                           | The two named participants only. |
+| `global:`| Game-wide chat, spans every world         | Any signed-in player, for a name the operator declared. |
 | `world:` | World-wide chat                           | Players currently joined to the world. |
 | `zone:`  | A specific zone within a world            | Players currently joined to the world. |
 | `prox:`  | Proximity chat (radius around a position) | Players currently joined to the world. |
 | `room:`  | App-defined group chat                    | Members of the group whose id is the part of the channel id after `room:`. Not open-join. |
+
+`global:<name>` is the only scheme that outlives a single world, so it is the
+one to use for "everyone in the game". A client cannot mint one: the name must
+appear in the `chat => #{global => [...]}` of a configured game mode, otherwise
+the join is rejected like any other unauthorised channel. Names are up to 64
+bytes of `a-z A-Z 0-9 _ - .`. Players in a world whose mode declares a global
+channel are joined to it automatically on `world.join` and left on
+`world.leave`, exactly as with `world:` - see the
+[World Server](world-server.md#chat-channels) guide.
 
 There is no open-join room policy and no `match:` scheme. `room:` is authorised
 as a group membership check: the runtime strips the `room:` prefix and looks up

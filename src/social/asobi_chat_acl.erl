@@ -3,6 +3,10 @@
 Authorisation policy for chat channels.
 
 Channel ID schemes:
+  global:<Name>              - game-wide channel; any signed-in player may
+                                join, but only for a `<Name>` declared in the
+                                `chat => #{global => [...]}` of some configured
+                                game mode (see #299)
   dm:<A>:<B>                 - A and B are the only allowed readers, and B
                                 (the participant that isn't the caller) must
                                 resolve to a real player id (see #305 below)
@@ -14,6 +18,13 @@ Channel ID schemes:
                                 shape `asobi_id:generate/0` always emits) and
                                 the caller must be a member of that group
   <anything else>            - treated as a group_id; must be a group member
+
+#299: every other scheme stops at one world or one pair of players, so a
+game whose locations are separate worlds had no id its whole player base
+could share. `global:<Name>` is that tier. It is operator-declared rather
+than client-minted: the name must appear in a game mode's
+`chat => #{global => [...]}`, so `chat.join` still cannot spawn unbounded
+channel processes, and the per-connection channel cap still applies.
 
 A `room:` channel is closed by default: a group id that isn't a canonical
 uuid is denied outright (rather than falling through to a membership lookup
@@ -63,6 +74,8 @@ authorized(ChannelId, PlayerId) when is_binary(ChannelId), is_binary(PlayerId) -
             dm_authorized(PlayerId, A, B);
         {world, WorldId} ->
             player_in_world(PlayerId, WorldId);
+        {global, Name} ->
+            lists:member(Name, asobi_game_modes:global_chat_channels());
         {group, GroupId} ->
             is_group_member(PlayerId, GroupId)
     end.
@@ -98,6 +111,7 @@ validate_channel_id(ChannelId) when is_binary(ChannelId) ->
         byte_size(ChannelId) =< ?MAX_CHANNEL_ID_BYTES andalso
         valid_channel_prefix(ChannelId).
 
+valid_channel_prefix(<<"global:", _/binary>>) -> true;
 valid_channel_prefix(<<"dm:", _/binary>>) -> true;
 valid_channel_prefix(<<"world:", _/binary>>) -> true;
 valid_channel_prefix(<<"zone:", _/binary>>) -> true;
@@ -106,7 +120,15 @@ valid_channel_prefix(<<"room:", _/binary>>) -> true;
 valid_channel_prefix(_) -> false.
 
 -spec classify(binary()) ->
-    {dm, binary(), binary()} | {world, binary()} | {group, binary()} | deny.
+    {dm, binary(), binary()}
+    | {world, binary()}
+    | {global, binary()}
+    | {group, binary()}
+    | deny.
+classify(<<"global:", Name/binary>>) when byte_size(Name) > 0 ->
+    {global, Name};
+classify(<<"global:">>) ->
+    deny;
 classify(<<"dm:", Rest/binary>>) ->
     case binary:split(Rest, ~":", [global]) of
         [A, B] when byte_size(A) > 0, byte_size(B) > 0 -> {dm, A, B};
