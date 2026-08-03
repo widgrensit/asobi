@@ -127,6 +127,68 @@ handled_message_is_not_logged_as_unhandled_test() ->
     ?assertEqual(no_log, await_no_unhandled()),
     ok = remove_log_capture().
 
+%% S6: `game.message`/`game.error` named one extension (Lua) inside the
+%% client wire, which five of seven SDKs cannot extend at runtime. The
+%% generalised `module.message`/`module.error` frames carry the producing
+%% extension in the payload instead. Both are emitted for one release, so
+%% every one of these asserts the old frame is still on the wire next to
+%% the new one.
+
+game_message_emits_both_frames_test() ->
+    Msg = {asobi_message, {game_message, ~"you are player 3"}},
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(
+        #{~"message" => ~"you are player 3"},
+        payload_of(~"game.message", Frames)
+    ),
+    ?assertEqual(
+        #{~"module" => ~"lua", ~"message" => ~"you are player 3"},
+        payload_of(~"module.message", Frames)
+    ).
+
+game_message_carries_the_producing_extension_test() ->
+    Msg = {asobi_message, {game_message, wasm, #{~"n" => 1}}},
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(
+        #{~"module" => ~"wasm", ~"message" => #{~"n" => 1}},
+        payload_of(~"module.message", Frames)
+    ),
+    ?assertEqual(#{~"message" => #{~"n" => 1}}, payload_of(~"game.message", Frames)).
+
+script_error_emits_both_frames_test() ->
+    Payload = #{
+        ~"callback" => ~"handle_input",
+        ~"script" => ~"match.lua",
+        ~"message" => ~"bad arithmetic + on nil, 1"
+    },
+    Msg = {asobi_message, {script_error, Payload}},
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(Payload, payload_of(~"game.error", Frames)),
+    ?assertEqual(Payload#{~"module" => ~"lua"}, payload_of(~"module.error", Frames)).
+
+script_error_carries_the_producing_extension_test() ->
+    Msg = {asobi_message, {script_error, wasm, #{~"message" => ~"trap"}}},
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(
+        #{~"module" => ~"wasm", ~"message" => ~"trap"},
+        payload_of(~"module.error", Frames)
+    ).
+
+%% The defensive encode path must still degrade to a single `error` frame
+%% rather than crashing the connection process — now covering both frames.
+script_error_unencodable_payload_degrades_test() ->
+    Msg = {asobi_message, {script_error, #{~"message" => {not_json}}}},
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(1, length(Frames)),
+    ?assertEqual(#{~"reason" => ~"internal"}, payload_of(~"error", Frames)).
+
+payload_of(Type, Frames) ->
+    Decoded = [json:decode(iolist_to_binary(F)) || {text, F} <- Frames],
+    case [P || #{~"type" := T, ~"payload" := P} <- Decoded, T =:= Type] of
+        [Payload] -> Payload;
+        Other -> error({no_single_frame_of_type, Type, Other})
+    end.
+
 %% --- log capture helpers ---
 
 install_log_capture() ->

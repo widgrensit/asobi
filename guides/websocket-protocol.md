@@ -213,15 +213,40 @@ the client can tell input is going nowhere:
 {"type": "error", "payload": {"type": "match.input", "reason": "not_in_match"}}
 ```
 
-### `game.error` (server push)
+### `module.error` (server push)
 
-A Lua callback error, sent to the player whose input triggered it. Only
-emitted when the runtime runs with dev errors enabled
-(`ASOBI_DEV_ERRORS=true`); production runtimes keep script errors
-server-side.
+A scripting-extension callback error, sent to the player whose input
+triggered it. Only emitted when the extension runs with dev errors enabled
+(for asobi_lua, `ASOBI_DEV_ERRORS=true`); production runtimes keep script
+errors server-side.
+
+`module` names the extension that produced the error. It is the only field
+asobi owns; the rest of the payload is the extension's.
+
+```json
+{"type": "module.error", "payload": {"module": "lua", "callback": "handle_input", "script": "match.lua", "message": "bad arithmetic + on nil, 1"}}
+```
+
+### `module.message` (server push)
+
+A message addressed to one player by an extension - asobi_lua's
+`game.send(player_id, message)`. The message is wrapped rather than sent
+raw, because it may be any scripting value (string, number, table).
+
+```json
+{"type": "module.message", "payload": {"module": "lua", "message": "you are player 3"}}
+```
+
+### `game.error` / `game.message` (server push, deprecated)
+
+Emitted alongside `module.error` and `module.message`, with the same body
+minus `module`. They name one extension (Lua) in the wire type, which no
+other extension can reuse. They are kept for one release so existing SDK
+builds keep working, and will be removed. Dispatch on the `module.` types.
 
 ```json
 {"type": "game.error", "payload": {"callback": "handle_input", "script": "match.lua", "message": "bad arithmetic + on nil, 1"}}
+{"type": "game.message", "payload": {"message": "you are player 3"}}
 ```
 
 ### `match.state` (server push)
