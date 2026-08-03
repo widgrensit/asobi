@@ -4,13 +4,15 @@
 -export([init/1, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 %% Exported for tests (pure allowlist predicate), mirroring deployable/1.
 -export([origin_allowed/1]).
+%% Exported so asobi_protocol_coverage_tests can assert every emitted
+%% match./world. event stays inside the reserved namespace (#303).
+-export([reserved_event_names/0]).
 
 -define(WS_MSG_LIMIT, 60).
 -define(WS_MSG_WINDOW_MS, 1000).
 -define(WS_MAX_PAYLOAD_BYTES, 65536).
 %% F-16: per-connection cap on simultaneously joined chat channels.
 -define(MAX_JOINED_CHANNELS_PER_CONN, 32).
--define(MAX_CHANNEL_ID_BYTES, 256).
 %% #236: at most one `not_in_match` hint per connection per this window.
 -define(NOT_IN_MATCH_HINT_WINDOW_MS, 5000).
 
@@ -19,6 +21,34 @@
 %% several seconds; 10s gives margin without leaving idle sockets
 %% holding cowboy acceptors. Override via `asobi.ws_idle_auth_timeout_ms`.
 -define(DEFAULT_IDLE_AUTH_TIMEOUT_MS, 10000).
+
+%% #303: script-controlled `game.broadcast` event names share the wire
+%% namespace with asobi's own `match.*`/`world.*` events, so they must be
+%% bounded and validated before ever reaching event_name_binary/1's caller.
+-define(MAX_EVENT_NAME_BYTES, 64).
+%% Every bare event-name suffix asobi itself ever emits under `match.`/
+%% `world.` (per asobi_protocol_coverage_tests:enumerate_emitted_events/0,
+%% restricted to those two namespaces). A script-supplied name equal to one
+%% of these would forge a byte-identical frame to a genuine library event
+%% (fake entity positions via `world.tick`, a false match-end via
+%% `match.finished`, etc), so these stay off-limits to game.broadcast.
+-define(RESERVED_EVENT_NAMES, [
+    ~"state",
+    ~"tick",
+    ~"terrain",
+    ~"list",
+    ~"left",
+    ~"joined",
+    ~"finished",
+    ~"phase_changed",
+    ~"matched",
+    ~"matchmaker_failed",
+    ~"matchmaker_expired",
+    ~"vote_start",
+    ~"vote_tally",
+    ~"vote_result",
+    ~"vote_vetoed"
+]).
 
 -spec init(map()) -> {ok, map()}.
 init(#{req := Req} = State) ->
@@ -152,10 +182,28 @@ websocket_info({asobi_message, {match_state, MatchState}}, State) ->
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {match_state_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
     {reply, {text, PreEncoded}, State};
-websocket_info({asobi_message, {match_event, Event, Payload}}, State) when is_atom(Event) ->
-    Type = iolist_to_binary([~"match.", atom_to_binary(Event)]),
-    Reply = encode_reply(undefined, Type, Payload),
-    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {match_event, Event, Payload}}, State) when
+    is_atom(Event); is_binary(Event)
+->
+    %% #297: asobi_match_server:broadcast_event/3 accepts a binary event
+    %% name (Lua's game.broadcast never turns client/script-influenced
+    %% names into atoms — atom_to_binary here, never binary_to_atom).
+    %% #303: a script-controlled binary name must be validated first — an
+    %% invalid/non-ASCII name would crash json:encode/1 for every
+    %% subscriber, and a reserved name would forge a genuine match.* frame.
+    case event_name_binary(Event) of
+        {ok, Name} ->
+            Type = iolist_to_binary([~"match.", Name]),
+            Reply = encode_reply(undefined, Type, Payload),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            logger:warning(#{
+                msg => ~"game_broadcast_rejected",
+                namespace => ~"match",
+                reason => Reason
+            }),
+            {ok, State}
+    end;
 websocket_info({asobi_message, {zone_delta_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
     {reply, {text, PreEncoded}, State};
 websocket_info({asobi_message, {zone_delta, TickN, Deltas}}, State) ->
@@ -167,10 +215,31 @@ websocket_info({asobi_message, {terrain_chunk, {CX, CY}, Data}}, State) when is_
         data => base64:encode(Data)
     }),
     {reply, {text, Reply}, State};
-websocket_info({asobi_message, {world_event, Event, Payload}}, State) when is_atom(Event) ->
-    Type = iolist_to_binary([~"world.", atom_to_binary(Event)]),
-    Reply = encode_reply(undefined, Type, Payload),
-    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {world_event, Event, Payload}}, State) when
+    is_atom(Event); is_binary(Event)
+->
+    %% #297: a Lua world script's game.broadcast(event, payload) sends Event
+    %% as a binary via asobi_lua_api:fun_broadcast/1 ->
+    %% asobi_match_server:broadcast_event/3 -> asobi_world_server -> here.
+    %% The old is_atom-only guard silently dropped every such frame. Convert
+    %% atom->binary here at the socket only; never binary_to_atom on a
+    %% client/Lua-influenced name (atom-table exhaustion risk).
+    %% #303: a script-controlled binary name must be validated first — an
+    %% invalid/non-ASCII name would crash json:encode/1 for every
+    %% subscriber, and a reserved name would forge a genuine world.* frame.
+    case event_name_binary(Event) of
+        {ok, Name} ->
+            Type = iolist_to_binary([~"world.", Name]),
+            Reply = encode_reply(undefined, Type, Payload),
+            {reply, {text, Reply}, State};
+        {error, Reason} ->
+            logger:warning(#{
+                msg => ~"game_broadcast_rejected",
+                namespace => ~"world",
+                reason => Reason
+            }),
+            {ok, State}
+    end;
 websocket_info({chat_message, ChannelId, Msg}, State) when is_map(Msg) ->
     Reply = encode_reply(undefined, ~"chat.message", Msg#{channel_id => ChannelId}),
     {reply, {text, Reply}, State};
@@ -803,22 +872,52 @@ encode_reply(Cid, Type, Payload) ->
 
 to_reason_binary(R) when is_atom(R) -> atom_to_binary(R, utf8).
 
+-spec reserved_event_names() -> [binary()].
+reserved_event_names() -> ?RESERVED_EVENT_NAMES.
+
+%% #297/#303: normalizes a match/world event name to a binary for the wire
+%% `Type` field, validating any script-controlled binary name first.
+%% Atoms only ever originate in asobi's own source (never binary_to_atom on
+%% a client/Lua-influenced name — atom-table exhaustion risk), so they are
+%% trusted unconditionally; binaries come straight from Lua's
+%% game.broadcast and must be bounded, ASCII-only, and outside the
+%% library-reserved namespace before they may reach the wire:
+%%  - unbounded/non-ASCII bytes (including invalid UTF-8) would crash
+%%    json:encode/1 inside every subscriber's socket process during the
+%%    zone/match broadcast fan-out, disconnecting the whole world/match;
+%%  - a name equal to a reserved suffix would forge a frame byte-identical
+%%    to a genuine authoritative event (e.g. `world.tick`, `match.state`).
+-spec event_name_binary(atom() | binary()) -> {ok, binary()} | {error, atom()}.
+event_name_binary(Event) when is_atom(Event) ->
+    {ok, atom_to_binary(Event)};
+event_name_binary(Event) when is_binary(Event) ->
+    case lists:member(Event, ?RESERVED_EVENT_NAMES) of
+        true ->
+            {error, reserved_event_name};
+        false ->
+            case
+                byte_size(Event) > 0 andalso
+                    byte_size(Event) =< ?MAX_EVENT_NAME_BYTES andalso
+                    lists:all(fun is_event_name_char/1, binary_to_list(Event))
+            of
+                true -> {ok, Event};
+                false -> {error, invalid_event_name}
+            end
+    end.
+
+%% Deliberately excludes `.` — a script must not be able to mint a deeper
+%% `world.foo.bar` sub-namespace.
+is_event_name_char(C) when C >= $a, C =< $z -> true;
+is_event_name_char(C) when C >= $A, C =< $Z -> true;
+is_event_name_char(C) when C >= $0, C =< $9 -> true;
+is_event_name_char(C) when C =:= $_; C =:= $- -> true;
+is_event_name_char(_) -> false.
+
 %% F-16: chat.join must require a small, namespaced channel id so an
 %% attacker can't spawn unbounded chat channel gen_servers via WS.
-%% Allowed prefixes mirror the channel id schemes documented in
-%% asobi_chat_controller's classify/1 (`dm:`, `world:`, `zone:`,
-%% `prox:`, plus a `room:` namespace for app-defined group chats).
-validate_channel_id(ChannelId) when is_binary(ChannelId) ->
-    byte_size(ChannelId) > 0 andalso
-        byte_size(ChannelId) =< ?MAX_CHANNEL_ID_BYTES andalso
-        valid_channel_prefix(ChannelId).
-
-valid_channel_prefix(<<"dm:", _/binary>>) -> true;
-valid_channel_prefix(<<"world:", _/binary>>) -> true;
-valid_channel_prefix(<<"zone:", _/binary>>) -> true;
-valid_channel_prefix(<<"prox:", _/binary>>) -> true;
-valid_channel_prefix(<<"room:", _/binary>>) -> true;
-valid_channel_prefix(_) -> false.
+%% Delegates to asobi_chat_acl, the single source of truth for channel id
+%% shape shared with the HTTP chat-history path.
+validate_channel_id(ChannelId) -> asobi_chat_acl:validate_channel_id(ChannelId).
 
 %% F-29: world.list/match.list filter values must be the right type or we
 %% reject the request rather than silently returning unfiltered results.

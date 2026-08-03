@@ -88,9 +88,9 @@ There is no `match:` chat channel scheme. `world:<WorldId>` exists and is
 gated on world membership; matches have no equivalent. Use `game.broadcast`
 with your own message shape.
 
-The `room:` scheme is documented as open-join but is not - it resolves to a
-group membership check. See
-[asobi#209](https://github.com/widgrensit/asobi/issues/209).
+The `room:` scheme is not open-join - it resolves to a group membership check.
+`room:<group_id>` now correctly authorises the members of `<group_id>`
+([asobi#209](https://github.com/widgrensit/asobi/issues/209), resolved).
 
 ### The 60-second timeout
 

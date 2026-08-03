@@ -18,7 +18,8 @@
     list_storage_filters_owner_perm/1,
     delete_storage/1,
     storage_owner_permission/1,
-    put_storage_per_player_keys_dont_collide/1
+    put_storage_per_player_keys_dont_collide/1,
+    global_and_player_row_coexist_at_same_key/1
 ]).
 
 all() -> [{group, cloud_saves}, {group, generic_storage}].
@@ -36,7 +37,8 @@ groups() ->
             list_storage_filters_owner_perm,
             delete_storage,
             storage_owner_permission,
-            put_storage_per_player_keys_dont_collide
+            put_storage_per_player_keys_dont_collide,
+            global_and_player_row_coexist_at_same_key
         ]}
     ].
 
@@ -320,4 +322,84 @@ put_storage_per_player_keys_dont_collide(Config) ->
     end,
     ?assertEqual(#{~"n" => 1}, Read(P1)),
     ?assertEqual(#{~"n" => 2}, Read(P2)),
+    Config.
+
+%% Regression for https://github.com/widgrensit/asobi/issues/307:
+%% get_storage/1, put_storage_checked/6, and delete_storage/1 used to
+%% query `WHERE collection = $1 AND key = $2` with no player_id
+%% predicate at all. Now that widgrensit/asobi_lua#124 correctly scopes
+%% `game.storage.set`'s global writes to `player_id IS NULL`, a global
+%% Lua row and a player's own HTTP row can coexist at the same
+%% (collection, key) - the unscoped query then returned 2 rows, which
+%% none of the case clauses handled (`case_clause` crash, 500, for every
+%% subsequent GET/PUT/DELETE of that key by anyone).
+%%
+%% This seeds a global row directly (mirroring what `asobi_lua_api`'s
+%% storage_insert/4 writes when PlayerId =:= undefined) alongside a
+%% player-created row via the real HTTP path, then exercises GET/PUT/
+%% DELETE through the controller and confirms each operates on
+%% player1's own row without crashing, leaving the global row alone.
+global_and_player_row_coexist_at_same_key(Config) ->
+    Suffix = integer_to_binary(erlang:unique_integer([positive])),
+    Col = <<"coexist_", Suffix/binary>>,
+    Key = <<"flag_", Suffix/binary>>,
+    Path = binary_to_list(<<"/api/v1/storage/", Col/binary, "/", Key/binary>>),
+
+    GlobalParams = #{
+        collection => Col,
+        key => Key,
+        value => #{~"owner" => ~"global"},
+        version => 1,
+        read_perm => ~"public",
+        write_perm => ~"owner",
+        updated_at => calendar:universal_time()
+    },
+    GlobalCS = kura_changeset:cast(asobi_storage, #{}, GlobalParams, maps:keys(GlobalParams)),
+    ?assertMatch({ok, _}, asobi_repo:insert(GlobalCS)),
+
+    {ok, PutResp} = nova_test:put(
+        Path,
+        #{headers => auth(Config, player1), json => #{~"value" => #{~"owner" => ~"player1"}}},
+        Config
+    ),
+    ?assertStatus(200, PutResp),
+    ?assertMatch(#{~"collection" := Col, ~"version" := 1}, nova_test:json(PutResp)),
+
+    {ok, GetResp} = nova_test:get(
+        Path,
+        #{headers => auth(Config, player1)},
+        Config
+    ),
+    ?assertStatus(200, GetResp),
+    ?assertMatch(#{~"value" := #{~"owner" := ~"player1"}}, nova_test:json(GetResp)),
+
+    {ok, PutResp2} = nova_test:put(
+        Path,
+        #{
+            headers => auth(Config, player1),
+            json => #{~"value" => #{~"owner" => ~"player1", ~"n" => 2}}
+        },
+        Config
+    ),
+    ?assertStatus(200, PutResp2),
+    ?assertMatch(#{~"version" := 2}, nova_test:json(PutResp2)),
+
+    {ok, DelResp} = nova_test:delete(
+        Path,
+        #{headers => auth(Config, player1)},
+        Config
+    ),
+    ?assertStatus(200, DelResp),
+    {ok, GetAfterDelete} = nova_test:get(
+        Path,
+        #{headers => auth(Config, player1)},
+        Config
+    ),
+    ?assertStatus(404, GetAfterDelete),
+
+    GlobalQ0 = kura_query:from(asobi_storage),
+    GlobalQ1 = kura_query:where(GlobalQ0, {collection, Col}),
+    GlobalQ2 = kura_query:where(GlobalQ1, {key, Key}),
+    GlobalQ3 = kura_query:where(GlobalQ2, {player_id, is_nil}),
+    ?assertMatch({ok, [#{value := #{~"owner" := ~"global"}}]}, asobi_repo:all(GlobalQ3)),
     Config.

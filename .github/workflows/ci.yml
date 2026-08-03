@@ -28,13 +28,28 @@ jobs:
       extra-services-compose: 'docker-compose.yml'
       enable-dependency-submission: true
       enable-summary: true
-      # erlang-ci restores _build from cache keyed on rebar.lock, then runs
-      # `rebar3 clean` which only wipes ebin. Stale test artifacts copied in
-      # by previous runs survive and get executed by rebar3 eunit/ct. That's
-      # how asobi_lua_SUITE.beam (removed in #59) keeps reappearing in CT
-      # and crashing on `luerl:init/0` undef. Force-fresh project test tree.
-      # meck is a test-only dep (not in rebar.lock) so the cache key never
-      # reflects its version; a stale OTP-28-era meck gets restored and fails
-      # to compile on OTP 29 (deprecated catch). Drop it so it re-resolves.
-      pre-test-command: 'rm -rf _build/default/lib/asobi/test _build/test/lib/asobi/test _build/test/lib/meck'
+      # erlang-ci restores _build from cache keyed on rebar.lock (with a
+      # restore-keys prefix fallback that can resurrect ANY older cache under
+      # the same prefix, matching rebar.lock or not), then runs `rebar3 clean`
+      # with no `-a` flag - which only wipes the DEFAULT profile's ebin
+      # (_build/default/lib/asobi/ebin), never _build/test/lib/asobi/ebin,
+      # which is what `rebar3 eunit`/`rebar3 ct` actually compile into and run
+      # from. A stale project .beam restored into the test profile survives
+      # that clean step untouched, and rebar3's mtime-based incremental
+      # compile can decide it's already up to date post-extraction (asobi
+      # #287 - two consecutive CI runs crashed on `undefined function
+      # asobi_match_server:finished/3` though that export was present in
+      # source both times; only a manual cache delete + full rebuild fixed
+      # it). Force-fresh both ebin dirs so this can't happen again regardless
+      # of what the cache restores.
+      #
+      # Stale test artifacts copied in by previous runs survive the same
+      # default-profile-only clean and get executed by rebar3 eunit/ct.
+      # That's how asobi_lua_SUITE.beam (removed in #59) kept reappearing in
+      # CT and crashing on `luerl:init/0` undef. Force-fresh project test
+      # tree too. meck is a test-only dep (not in rebar.lock) so the cache
+      # key never reflects its version; a stale OTP-28-era meck gets restored
+      # and fails to compile on OTP 29 (deprecated catch). Drop it so it
+      # re-resolves.
+      pre-test-command: 'rm -rf _build/default/lib/asobi/ebin _build/test/lib/asobi/ebin _build/default/lib/asobi/test _build/test/lib/asobi/test _build/test/lib/meck'
     secrets: inherit

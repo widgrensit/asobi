@@ -35,6 +35,10 @@ zone_test_() ->
         {"starts empty", fun starts_empty/0},
         {"add and remove entities", fun add_remove_entities/0},
         {"subscribe and unsubscribe", fun subscribe_unsubscribe/0},
+        {"unsubscribe sends a removal for every entity the zone holds",
+            fun unsubscribe_sends_removals_for_entities/0},
+        {"unsubscribe of an unknown player sends nothing",
+            fun unsubscribe_unknown_player_is_noop/0},
         {"resubscribing the same pid is idempotent", fun resubscribe_same_pid_is_idempotent/0},
         {"resubscribing a new pid replaces and demonitors the old one",
             fun resubscribe_new_pid_replaces_and_demonitors_old/0},
@@ -63,7 +67,10 @@ zone_test_() ->
         {"an NPC past the boundary margin transfers to the neighbouring zone",
             fun npc_past_margin_transfers/0},
         {"an NPC transfer to an unloaded target zone is observable, not silent",
-            fun npc_transfer_unavailable_zone_is_observable/0}
+            fun npc_transfer_unavailable_zone_is_observable/0},
+        {"reap stops a zone with no entities", fun reap_stops_empty_zone/0},
+        {"reap declines and re-touches a zone that still has entities",
+            fun reap_declines_when_occupied/0}
     ]}.
 
 starts_empty() ->
@@ -178,6 +185,50 @@ subscribe_unsubscribe() ->
     asobi_zone:unsubscribe(Pid, <<"p1">>),
     timer:sleep(10),
     ?assertEqual(0, asobi_zone:get_subscriber_count(Pid)),
+    gen_server:stop(Pid).
+
+%% widgrensit/asobi#293: leaving a zone's interest ring must mirror joining
+%% it - subscribe_new/3 sends an `a` for every entity, so unsubscribe must
+%% send an `r` for every entity still held, or the departing client's copy
+%% of this zone freezes at its last known state forever (the zone never
+%% sends it another update once the subscription is gone).
+unsubscribe_sends_removals_for_entities() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    asobi_zone:add_entity(Pid, ~"e2", #{x => 2, y => 2, type => ~"npc"}),
+    timer:sleep(10),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+
+    asobi_zone:unsubscribe(Pid, ~"p1"),
+    Removals =
+        receive
+            {asobi_message, {zone_delta, 0, Deltas}} -> Deltas
+        after 200 -> []
+        end,
+    ?assertEqual(
+        lists:sort([~"e1", ~"e2"]),
+        lists:sort([Id || #{~"op" := ~"r", ~"id" := Id} <- Removals])
+    ),
+    timer:sleep(10),
+    ?assertEqual(0, asobi_zone:get_subscriber_count(Pid)),
+    gen_server:stop(Pid).
+
+%% Unsubscribing a player who was never subscribed (or already removed) must
+%% stay a pure no-op - no message to a pid that never subscribed.
+unsubscribe_unknown_player_is_noop() ->
+    Pid = start_zone(),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    asobi_zone:unsubscribe(Pid, ~"nobody"),
+    ?assertEqual(
+        timeout,
+        receive
+            {asobi_message, {zone_delta, 0, _}} -> resent
+        after 100 -> timeout
+        end
+    ),
     gen_server:stop(Pid).
 
 %% asobi#275: callers now (re-)subscribe a crossing/backfilled player to a
@@ -562,6 +613,47 @@ npc_transfer_unavailable_zone_is_observable() ->
         telemetry:detach(Ref),
         gen_server:stop(Pid)
     end.
+
+reap_stops_empty_zone() ->
+    Pid = start_zone(),
+    Ref = monitor(process, Pid),
+    asobi_zone:reap(Pid),
+    receive
+        {'DOWN', Ref, process, Pid, normal} -> ok
+    after 1000 -> ?assert(false, timeout_waiting_for_reap_stop)
+    end.
+
+%% asobi#283, found via the nightly prop_input_never_dropped flake (#282):
+%% asobi_zone_manager:release_zone/2 backdates a zone's zone_last_active the
+%% moment it empties out, so it becomes reap-eligible on the next sweep. But
+%% nothing un-stales that timestamp on re-occupation for a zone with no live
+%% subscribers - this zone's own tick only touches the manager on the
+%% map_size(Subs) > 0 branch, and neither does asobi_zone_manager:ensure_zone
+%% for an existing zone. A zone could empty, get re-occupied (players joined
+%% with no live session, exactly as prop_input_never_dropped's harness does),
+%% and still get torn down by a sweep the manager scheduled while it was
+%% briefly empty. The zone is the one source of truth for its own occupancy
+%% at the moment it actually receives the cast, so it must decline instead
+%% of trusting the manager's bookkeeping - and re-touch so the manager's
+%% timestamp catches up instead of retrying every sweep.
+reap_declines_when_occupied() ->
+    ZMPid = start_mock_zone_manager(),
+    Pid = start_zone(#{zone_manager_pid => ZMPid}),
+    asobi_zone:add_entity(Pid, <<"p1">>, #{type => ~"player", x => 0, y => 0}),
+    timer:sleep(10),
+    asobi_zone:reap(Pid),
+    timer:sleep(20),
+    ?assert(is_process_alive(Pid)),
+    ZMPid ! {get_touches, self()},
+    receive
+        {touches, Touches} ->
+            ?assert(length(Touches) > 0),
+            ?assertEqual({0, 0}, hd(Touches))
+    after 1000 ->
+        ?assert(false, timeout_waiting_for_touch)
+    end,
+    gen_server:stop(Pid),
+    ZMPid ! stop.
 
 start_mock_zone_manager() ->
     spawn(fun() -> mock_zm_loop([]) end).

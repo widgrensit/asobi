@@ -53,6 +53,9 @@ zone_manager_test_() ->
         {"pre_warm spawns all zones", fun pre_warm_all/0},
         {"touch_zone resets timer", fun touch_zone_resets/0},
         {"release_zone marks stale", fun release_zone_marks_stale/0},
+        {"stale zone is reaped on sweep", fun stale_zone_reaped_on_sweep/0},
+        {"an occupied zone survives a reap sweep against a stale timestamp",
+            fun occupied_zone_survives_reap/0},
         {"per-coord initial zone_state reaches zone init", fun initial_zone_states_threaded/0},
         {"missing per-coord state leaves zone_state default", fun initial_zone_states_default/0}
     ]}.
@@ -150,6 +153,49 @@ release_zone_marks_stale() ->
     timer:sleep(10),
     ?assertMatch({ok, _}, asobi_zone_manager:get_zone(Mgr, {0, 0})),
     stop_manager(Ctx).
+
+%% Sanity check for the forced-sweep technique the next test relies on: a
+%% genuinely-idle (released, never re-touched) zone is torn down once a reap
+%% sweep runs past its idle_timeout. Triggers the sweep directly via the
+%% manager's own reap_ref instead of waiting out ?REAP_INTERVAL.
+stale_zone_reaped_on_sweep() ->
+    Ctx = #{mgr := Mgr} = start_manager(#{idle_timeout => 20}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    ok = asobi_zone_manager:release_zone(Mgr, {0, 0}),
+    force_reap_sweep(Mgr),
+    ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {0, 0})),
+    ?assert(not is_process_alive(ZonePid)),
+    stop_manager(Ctx).
+
+%% Regression widgrensit/asobi#283, found via the prop_input_never_dropped
+%% nightly flake (asobi#282): release_zone/2 backdates zone_last_active as
+%% soon as a zone empties out, and nothing un-stales it on re-occupation - a
+%% zone's own tick only touches the manager when it has live subscribers
+%% (asobi_zone.erl, map_size(Subs) > 0), which this test's raw add_entity
+%% deliberately has none of, mirroring how prop_input_never_dropped joins
+%% players with no live session. Without asobi_zone declining `reap` while
+%% it still holds entities (the actual fix, in asobi_zone.erl's
+%% handle_cast(reap, ...)), a zone that empties and is then re-occupied
+%% before the next reap sweep gets torn down out from under its occupant.
+%% This is the integration-level proof: a real manager, a real zone, and a
+%% forced sweep that would have reaped it under the old unconditional stop.
+occupied_zone_survives_reap() ->
+    Ctx = #{mgr := Mgr} = start_manager(#{idle_timeout => 20}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    ok = asobi_zone:add_entity(ZonePid, <<"p1">>, #{type => ~"player", x => 0, y => 0}),
+    timer:sleep(5),
+    ok = asobi_zone_manager:release_zone(Mgr, {0, 0}),
+    force_reap_sweep(Mgr),
+    ?assertEqual({ok, ZonePid}, asobi_zone_manager:get_zone(Mgr, {0, 0})),
+    ?assert(is_process_alive(ZonePid)),
+    stop_manager(Ctx).
+
+%% Sends the manager's own {reap_idle, Ref} message directly instead of
+%% waiting out the real ?REAP_INTERVAL (10s), so the sweep runs immediately.
+force_reap_sweep(Mgr) ->
+    #{reap_ref := ReapRef} = sys:get_state(Mgr),
+    Mgr ! {reap_idle, ReapRef},
+    timer:sleep(20).
 
 %% Regression: per-coord state from generate_world/2 must reach the zone's
 %% init. Before this fix, the world server discarded ZoneStates entirely so

@@ -536,6 +536,11 @@ broadcast_in_finished_is_not_swallowed_test() ->
     asobi_match_server:broadcast_event(Pid, game_over, #{winner => ~"p1"}),
     timer:sleep(20),
     ?assert(is_process_alive(Pid)),
+    %% Still in `finished`, with its 5s state_timeout `cleanup` pending -
+    %% stop the process before tearing down mecks, or the timer fires after
+    %% unload and crashes the runner (undef in finished/3), aborting the
+    %% rest of the eunit suite (asobi#300/#301 review).
+    gen_statem:stop(Pid),
     meck:unload(asobi_test_game),
     cleanup(ok).
 

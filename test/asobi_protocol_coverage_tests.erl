@@ -200,6 +200,34 @@ listing_fixtures_match_the_projection_test() ->
         "match.list fixture must match asobi_match_server:listing_info/1"
     ).
 
+%% #303: game.broadcast's binary event-name path (asobi_ws_handler's
+%% ?RESERVED_EVENT_NAMES) closes the match./world. wire namespace to
+%% scripts by rejecting any name asobi itself would otherwise emit — a
+%% script-supplied "tick" must never produce a frame indistinguishable
+%% from a genuine `world.tick` broadcast. This asserts that guarantee
+%% stays honest: every match./world. event this module discovers is
+%% emitted must have its bare suffix reserved, so a future library event
+%% that's added can't silently reopen the forgery hole.
+every_emitted_match_or_world_event_is_reserved_test() ->
+    Emitted = enumerate_emitted_events(),
+    Suffixes = lists:usort(lists:filtermap(fun match_or_world_suffix/1, Emitted)),
+    Reserved = asobi_ws_handler:reserved_event_names(),
+    Missing = Suffixes -- Reserved,
+    ?assertEqual(
+        [],
+        Missing,
+        lists:flatten(
+            io_lib:format(
+                "match./world. event suffixes not in asobi_ws_handler:?RESERVED_EVENT_NAMES: ~p",
+                [Missing]
+            )
+        )
+    ).
+
+match_or_world_suffix(<<"match.", Suffix/binary>>) -> {true, Suffix};
+match_or_world_suffix(<<"world.", Suffix/binary>>) -> {true, Suffix};
+match_or_world_suffix(_) -> false.
+
 projection_keys(Fun, Sample) ->
     lists:sort([atom_to_binary(K) || K <- maps:keys(Fun(Sample))]).
 

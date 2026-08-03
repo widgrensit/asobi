@@ -327,10 +327,24 @@ handle_call(_Request, _From, State) ->
 
 -spec handle_cast(term(), map()) ->
     {noreply, map()} | {noreply, map(), hibernate} | {stop, normal, map()}.
-handle_cast(reap, State) ->
+handle_cast(reap, #{entities := Entities} = State) when map_size(Entities) =:= 0 ->
     %% Graceful stop so terminate/2 writes a final snapshot. Transient restart
     %% means a normal stop is not respawned.
     {stop, normal, State};
+handle_cast(reap, #{zone_manager_pid := ZMPid, coords := Coords} = State) ->
+    %% asobi#283: the manager decides to reap from its own zone_last_active
+    %% bookkeeping, which can lag real occupancy - release_zone backdates it
+    %% the moment a zone empties, and nothing re-touches it for an occupied
+    %% zone with no live subscribers (this zone's own tick only touches on
+    %% the map_size(Subs) > 0 branch). Trusting the cast here would tear down
+    %% an occupied zone out from under its entities. This zone is the one
+    %% source of truth for its own occupancy at the moment it actually
+    %% receives the cast, so decline and re-touch instead of stopping.
+    case ZMPid of
+        undefined -> ok;
+        _ -> asobi_zone_manager:touch_zone(ZMPid, Coords)
+    end,
+    {noreply, State};
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
     State2 = resolve_zone_crossings(State1),
@@ -380,12 +394,15 @@ handle_cast(
     State
 ) when is_binary(PlayerId), is_pid(PlayerPid) ->
     subscribe_new(PlayerId, PlayerPid, State);
-handle_cast({unsubscribe, PlayerId}, #{subscribers := Subs} = State) ->
+handle_cast(
+    {unsubscribe, PlayerId}, #{subscribers := Subs, entities := Entities} = State
+) ->
     case maps:get(PlayerId, Subs, undefined) of
         undefined ->
             {noreply, State};
-        {_Pid, MonRef} ->
+        {Pid, MonRef} ->
             demonitor(MonRef, [flush]),
+            send_leave_removals(Pid, Entities),
             {noreply, State#{subscribers => maps:remove(PlayerId, Subs)}}
     end;
 handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) when is_map(Config) ->
@@ -492,6 +509,15 @@ subscribe_new(
                 end
         end,
     {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}}.
+
+%% Mirror of subscribe_new/3's snapshot, in reverse. See widgrensit/asobi#293.
+-spec send_leave_removals(pid(), map()) -> ok.
+send_leave_removals(_Pid, Entities) when map_size(Entities) =:= 0 ->
+    ok;
+send_leave_removals(Pid, Entities) ->
+    Removals = encode_deltas([{removed, Id} || Id <- maps:keys(Entities)]),
+    Pid ! {asobi_message, {zone_delta, 0, Removals}},
+    ok.
 
 do_tick(
     TickN,

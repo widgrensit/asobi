@@ -382,13 +382,22 @@ membership without a per-frame registry lookup.
 | `world:` | World-wide chat                           | Players currently joined to the world. |
 | `zone:`  | A specific zone within a world            | Players currently joined to the world. |
 | `prox:`  | Proximity chat (radius around a position) | Players currently joined to the world. |
-| `room:`  | App-defined group chat                    | Members of the group whose id equals the channel id. Not open-join. |
+| `room:`  | App-defined group chat                    | Members of the group whose id is the part of the channel id after `room:`. Not open-join. |
 
 There is no open-join room policy and no `match:` scheme. `room:` is authorised
-as a group membership check: the runtime treats the full channel id as the group
-id, so a player must already belong to a group with that exact id. For pre-game
-lobby chat, gate on world membership with `world:<world_id>`, or use
+as a group membership check: the runtime strips the `room:` prefix and looks up
+the remainder as a group id, so `room:<group_id>` authorises exactly the members
+of `<group_id>`, not members of a group literally named `"room:<group_id>"`. For
+pre-game lobby chat, gate on world membership with `world:<world_id>`, or use
 `game.broadcast`; see the [Lobbies](lobbies.md) guide.
+
+For a group created with `open=true`, anyone can join without an invite
+(`POST /api/v1/groups/:id/join` never rejects with `group_closed`). Membership
+is still required to read `room:<group_id>` - joining is what's unrestricted,
+not reading. Once joined, a member sees the group's full retained history (up
+to the last 200 messages, per the `history` limit below), including messages
+sent before they joined. This is intentional and matches how public channels
+work in Slack/Discord: it is not a bug or a cutoff to add later.
 
 The worked examples below use a `world:` channel, which authorises on world
 membership you already hold after `world.join`.

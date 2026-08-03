@@ -45,6 +45,11 @@ transient matches use `asobi_match_server` instead.
 %% should scale with whatever zone_size a world picks; games wanting a
 %% tighter or looser boundary can override rehome_margin per world.
 -define(DEFAULT_REHOME_MARGIN, 0.15).
+%% #304: mirrors asobi_ws_handler's ?WS_MAX_PAYLOAD_BYTES. game.broadcast's
+%% payload is fanned out to every player in the world, so an unbounded
+%% payload multiplies egress bandwidth and per-socket buffer memory by
+%% player count; bound it the same way the inbound frame is bounded.
+-define(MAX_BROADCAST_PAYLOAD_BYTES, 65536).
 
 %% --- Public API ---
 
@@ -1402,13 +1407,36 @@ the general path a Lua `game.broadcast` reaches. asobi_lua binds the world
 server pid as `match_pid` in world and zone contexts, so `game.broadcast`
 from a world script casts `{broadcast_event, ...}` here.
 """.
-broadcast_world_event(Event, Payload, #{players := Players}) ->
-    maps:foreach(
-        fun(PlayerId, _Meta) ->
-            asobi_presence:send(PlayerId, {world_event, Event, Payload})
-        end,
-        Players
-    ).
+broadcast_world_event(Event, Payload, #{players := Players, world_id := WorldId}) ->
+    case payload_within_limit(Payload) of
+        true ->
+            maps:foreach(
+                fun(PlayerId, _Meta) ->
+                    asobi_presence:send(PlayerId, {world_event, Event, Payload})
+                end,
+                Players
+            );
+        false ->
+            ?LOG_WARNING(#{
+                msg => ~"game_broadcast_rejected",
+                namespace => ~"world",
+                reason => ~"payload_too_large",
+                world_id => WorldId
+            })
+    end.
+
+%% #304: measured on the encoded wire form (same unit ?WS_MAX_PAYLOAD_BYTES
+%% bounds inbound), not the raw Erlang term — a small term can still encode
+%% to an oversized JSON payload. An unencodable payload is rejected too,
+%% same as an oversized one, rather than crashing every subscriber's
+%% json:encode/1 downstream in asobi_ws_handler.
+-spec payload_within_limit(map()) -> boolean().
+payload_within_limit(Payload) ->
+    try iolist_size(json:encode(Payload)) of
+        Size -> Size =< ?MAX_BROADCAST_PAYLOAD_BYTES
+    catch
+        _:_ -> false
+    end.
 
 notify_players(Event, #{players := Players, world_id := WorldId} = State) ->
     Payload =
