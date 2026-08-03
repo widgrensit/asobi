@@ -786,7 +786,13 @@ notify_players(Event, #{players := Players, match_id := MatchId} = State) ->
         Players
     ).
 
+%% asobi#329: the match record row and the participants' stats counters are
+%% one write. `match_records.id` is the match id, so a second pass over a
+%% match that already finished (a recovered server re-entering `finished`)
+%% loses the insert on the primary key and rolls the counters back with it -
+%% that primary key is what makes games_played move exactly once per match.
 persist_result(#{match_id := MatchId, players := Players} = State) ->
+    Result = maps:get(result, State, #{}),
     CS = kura_changeset:cast(
         asobi_match_record,
         #{},
@@ -795,13 +801,22 @@ persist_result(#{match_id := MatchId, players := Players} = State) ->
             mode => maps:get(mode, State, undefined),
             status => ~"finished",
             players => maps:keys(Players),
-            result => maps:get(result, State, #{}),
-            started_at => maps:get(started_at, State, undefined),
-            finished_at => erlang:system_time(millisecond)
+            result => Result,
+            started_at => asobi_match_record:to_timestamp(maps:get(started_at, State, undefined)),
+            finished_at => asobi_match_record:to_timestamp(erlang:system_time(millisecond))
         },
         [id, mode, status, players, result, started_at, finished_at]
     ),
-    _ = asobi_repo:insert(CS),
+    _ = asobi_repo:transaction(fun() ->
+        case asobi_repo:insert(CS) of
+            {ok, _} ->
+                asobi_player_stats:record_match(maps:keys(Players), Result);
+            {error, Reason} ->
+                ?LOG_WARNING(#{
+                    event => match_record_persist_failed, match_id => MatchId, reason => Reason
+                })
+        end
+    end),
     ok.
 
 match_info(Status, State) ->

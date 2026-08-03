@@ -1486,6 +1486,11 @@ update_frustration(_Result, Frustration) ->
 
 %% --- Internal: Persistence ---
 
+%% asobi#329: the millisecond stamps used to go in raw and every insert
+%% failed the `utc_datetime` cast, silently - no world ever reached
+%% match_records. Player stats stay out of this path on purpose: a world is
+%% a persistent space, not a scored game, so "one world visit is one game
+%% played" is a product call rather than a bug fix.
 persist_result(#{world_id := WorldId, players := Players} = State) ->
     CS = kura_changeset:cast(
         asobi_match_record,
@@ -1496,13 +1501,20 @@ persist_result(#{world_id := WorldId, players := Players} = State) ->
             status => ~"finished",
             players => maps:keys(Players),
             result => maps:get(result, State, #{}),
-            started_at => maps:get(started_at, State, undefined),
-            finished_at => erlang:system_time(millisecond)
+            started_at => asobi_match_record:to_timestamp(maps:get(started_at, State, undefined)),
+            finished_at => asobi_match_record:to_timestamp(erlang:system_time(millisecond))
         },
         [id, mode, status, players, result, started_at, finished_at]
     ),
-    _ = asobi_repo:insert(CS),
-    ok.
+    case asobi_repo:insert(CS) of
+        {ok, _} ->
+            ok;
+        {error, Reason} ->
+            ?LOG_WARNING(#{
+                event => world_record_persist_failed, world_id => WorldId, reason => Reason
+            }),
+            ok
+    end.
 
 -doc """
 Fan a game-authored event out to every player in the world.

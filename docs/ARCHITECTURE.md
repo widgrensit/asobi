@@ -507,7 +507,10 @@ depends on Arizona.
 | `iap_reconcile` | Every 1h | Reconcile IAP receipts with store APIs |
 | `presence_cleanup` | Every 5m | Safety net for stale presence (pg handles most) |
 | `analytics_flush` | Every 1m | Flush telemetry events to analytics pipeline |
-| `player_stats_sync` | Every 5m | Aggregate match results into player stats |
+
+Player stats are not a background job: `asobi_match_server` folds a finished
+match into `player_stats` in the same transaction that writes the match
+record, so the counters and the match history can never disagree.
 
 ## Security
 

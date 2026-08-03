@@ -3,6 +3,8 @@
 
 -define(GAME, asobi_test_game).
 -define(BASE_CONFIG, #{game_module => ?GAME, min_players => 2, max_players => 4, tick_rate => 50}).
+%% One {PlayerId, WinDelta, LossDelta} per stats UPDATE the match server issued.
+-define(STATS_TAB, asobi_match_server_tests_stats).
 
 %% --- Setup / Teardown ---
 
@@ -11,6 +13,10 @@ setup() ->
         undefined -> ets:new(asobi_match_state, [named_table, public, set]);
         _ -> ok
     end,
+    case ets:whereis(?STATS_TAB) of
+        undefined -> ets:new(?STATS_TAB, [named_table, public, duplicate_bag]);
+        _ -> ets:delete_all_objects(?STATS_TAB)
+    end,
     case whereis(nova_scope) of
         undefined -> pg:start_link(nova_scope);
         _ -> ok
@@ -18,12 +24,19 @@ setup() ->
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     meck:expect(asobi_repo, insert, fun(_CS, _Opts) -> {ok, #{}} end),
+    meck:expect(asobi_repo, transaction, fun(Fun) -> Fun() end),
+    meck:new(kura_db, [passthrough, no_link]),
+    meck:expect(kura_db, query, fun(_Repo, _SQL, [PlayerId, Win, Loss]) ->
+        ets:insert(?STATS_TAB, {PlayerId, Win, Loss}),
+        #{num_rows => 1}
+    end),
     meck:new(asobi_presence, [non_strict, no_link]),
     meck:expect(asobi_presence, send, fun(_PlayerId, _Msg) -> ok end),
     ok.
 
 cleanup(_) ->
     meck:unload(asobi_presence),
+    meck:unload(kura_db),
     meck:unload(asobi_repo),
     ok.
 
@@ -862,6 +875,57 @@ empty_phases_does_not_finish_test() ->
     ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
     gen_statem:stop(Pid),
     meck:unload(asobi_test_game),
+    cleanup(ok).
+
+%% --- player stats on match completion (asobi#329) ---
+
+%% player_stats had an insert on signup, a delete on guest reap, and nothing
+%% in between: every account's games_played sat at 0 forever because no code
+%% path ever issued an UPDATE.
+
+finished_match_counts_each_participant_once_test() ->
+    setup(),
+    Pid = start_match(#{min_players => 2, max_players => 4, tick_rate => 10}),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    ok = asobi_match_server:join(Pid, ~"p2"),
+    wait_for_status(Pid, running, 60),
+    asobi_match_server:cancel(Pid),
+    wait_for_status(Pid, finished, 60),
+    gen_statem:stop(Pid),
+    %% One row per participant, no more: entering `finished` is the only
+    %% place that counts, and it happens once per match.
+    ?assertEqual([{~"p1", 0, 0}], ets:lookup(?STATS_TAB, ~"p1")),
+    ?assertEqual([{~"p2", 0, 0}], ets:lookup(?STATS_TAB, ~"p2")),
+    ?assertEqual(2, ets:info(?STATS_TAB, size)),
+    cleanup(ok).
+
+finished_match_records_winner_and_loser_test() ->
+    setup(),
+    meck:new(asobi_test_game, [passthrough, no_link]),
+    meck:expect(asobi_test_game, tick, fun(GS) -> {finished, #{winner => ~"p1"}, GS} end),
+    Pid = start_match(#{min_players => 2, max_players => 2, tick_rate => 10}),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    ok = asobi_match_server:join(Pid, ~"p2"),
+    wait_for_status(Pid, finished, 60),
+    gen_statem:stop(Pid),
+    meck:unload(asobi_test_game),
+    ?assertEqual([{~"p1", 1, 0}], ets:lookup(?STATS_TAB, ~"p1")),
+    ?assertEqual([{~"p2", 0, 1}], ets:lookup(?STATS_TAB, ~"p2")),
+    cleanup(ok).
+
+%% The match record's primary key is the match id, so a match that already
+%% finished loses the insert and must not move the counters a second time.
+duplicate_match_record_leaves_stats_alone_test() ->
+    setup(),
+    meck:expect(asobi_repo, insert, fun(_CS) -> {error, duplicate_key} end),
+    Pid = start_match(#{min_players => 2, max_players => 4, tick_rate => 10}),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    ok = asobi_match_server:join(Pid, ~"p2"),
+    wait_for_status(Pid, running, 60),
+    asobi_match_server:cancel(Pid),
+    wait_for_status(Pid, finished, 60),
+    gen_statem:stop(Pid),
+    ?assertEqual(0, ets:info(?STATS_TAB, size)),
     cleanup(ok).
 
 wait_for_status(_Pid, _Status, 0) ->

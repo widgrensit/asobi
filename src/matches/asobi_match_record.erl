@@ -4,6 +4,22 @@
 -include_lib("kura/include/kura.hrl").
 
 -export([table/0, fields/0, associations/0, indexes/0, generate_id/0]).
+-export([to_timestamp/1]).
+
+-doc """
+Convert a match server's monotonic-ish millisecond stamp into the
+`utc_datetime` the `started_at` / `finished_at` columns hold.
+
+Both servers keep their timers in `erlang:system_time(millisecond)`, and
+`kura_changeset:cast/4` rejects an integer for a `utc_datetime` field with
+`cannot cast to utc_datetime` - which is why every finished match failed to
+persist until asobi#329.
+""".
+-spec to_timestamp(integer() | undefined) -> calendar:datetime() | undefined.
+to_timestamp(undefined) ->
+    undefined;
+to_timestamp(Millis) when is_integer(Millis) ->
+    calendar:system_time_to_universal_time(Millis, millisecond).
 
 -spec table() -> binary().
 table() -> ~"match_records".

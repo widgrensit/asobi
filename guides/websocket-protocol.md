@@ -248,6 +248,15 @@ Notification that a match has ended with results.
 {"type": "match.finished", "payload": {"match_id": "...", "result": {...}}}
 ```
 
+`result` is whatever your game returned with `{finished, Result, State}`;
+asobi does not interpret it, with one exception. It reads `winners` (a list
+of player ids) or `winner` (one id), and `losers` / `loser`, to move the
+`wins` and `losses` columns in `player_stats`. `games_played` moves for
+every player in the match either way. Declare winners without losers and
+every other player in the match takes the loss; declare `losers: []` to
+score a co-op run where nobody loses. `rating` and `rating_deviation` are
+not maintained by asobi.
+
 ### `match.leave`
 
 Leave the current match.

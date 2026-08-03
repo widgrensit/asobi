@@ -81,6 +81,11 @@ races.
 Called on a fixed interval (default 10 Hz, configurable per mode). Advance
 time, run AI, and check win conditions. Return `{finished, Result, State}`
 to end the match. Optional: omit it if your game has no fixed time step.
+
+`Result` is yours - asobi stores it verbatim on the match record and pushes
+it to every player. It reads only the `winners`/`winner` and
+`losers`/`loser` keys, to move `wins` and `losses` in `player_stats`; see
+`asobi_player_stats:record_match/2`.
 """.
 -callback tick(GameState :: term()) ->
     {ok, GameState1 :: term()}
