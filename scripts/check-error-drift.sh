@@ -17,13 +17,36 @@ set -uo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 
-# Every "<status> <atom>" pair a module returns. Newlines are flattened and runs
+# The code -> status table, read out of asobi_error's ?CODES macro. Since the
+# shared error object landed (plan item 1b) a controller names a code and never
+# a status, so the status a client sees is asobi_error's business, not the call
+# site's - and this guard has to resolve it the same way.
+code_status() {
+	grep -oE '^\s*\{~"[a-z_.]+", ?[0-9]{3},' "$repo_root/src/asobi_error.erl" |
+		sed -E 's/^\s*\{~"([a-z_.]+)", ?([0-9]{3}),/\1 \2/'
+}
+
+# Every "<status> <code>" pair a module returns. Newlines are flattened and runs
 # of spaces squeezed first, so erlfmt reflowing a return across lines can never
-# hide it from the regex.
+# hide it from the regex. Both {asobi_error, Code} and {asobi_error, Code,
+# Details} are matched; the status comes from the table above.
 src_pairs() {
-	tr '\n' ' ' <"$1" | tr -s ' ' |
-		grep -oE '\{json, ?[0-9]+, ?#\{\}, ?#\{ ?error => ~"[a-z_]+"' |
-		sed -E 's/.*\{json, ?([0-9]+).*error => ~"([a-z_]+)"/\1 \2/'
+	local codes
+	codes=$(
+		tr '\n' ' ' <"$1" | tr -s ' ' |
+			grep -oE '\{asobi_error, ?~"[a-z_.]+"' |
+			sed -E 's/.*~"([a-z_.]+)"/\1/' | sort -u
+	)
+	[ -z "$codes" ] && return 0
+	# Join code -> status. A code with no ?CODES entry is a server bug that
+	# asobi_error answers 500 for, so report it as 500 rather than dropping it -
+	# dropping it would let an undefined code hide from this guard entirely.
+	local c st
+	while IFS= read -r c; do
+		[ -z "$c" ] && continue
+		st=$(code_status | awk -v k="$c" '$1 == k {print $2; exit}')
+		printf '%s %s\n' "${st:-500}" "$c"
+	done <<<"$codes"
 }
 
 # Every "<status> <atom>" row of the markdown error table inside one guide
@@ -34,8 +57,8 @@ doc_pairs() {
 	# single quotes are what keeps them literal.
 	# shellcheck disable=SC2016
 	awk -v heading="$2" '$0 == heading {f=1; next} /^## /{f=0} f' "$1" |
-		grep -oE '^\| `[0-9]{3}` *\| `[a-z_]+`' |
-		sed -E 's/^\| `([0-9]{3})` *\| `([a-z_]+)`/\1 \2/'
+		grep -oE '^\| `[0-9]{3}` *\| `[a-z_.]+`' |
+		sed -E 's/^\| `([0-9]{3})` *\| `([a-z_.]+)`/\1 \2/'
 }
 
 indent() {
@@ -109,4 +132,4 @@ if [ "$fail" -ne 0 ]; then
 	echo "DRIFT: a guide's error table no longer matches the controller it describes."
 	exit 1
 fi
-echo "OK: every documented error atom matches source."
+echo "OK: every documented error code matches source."

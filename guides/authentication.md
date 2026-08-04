@@ -287,23 +287,24 @@ Player id, progress, wallets, and inventory are preserved.
 
 ### Errors
 
-| Status | `error` | Meaning |
-|--------|---------|---------|
-| `400`  | `missing_required_fields` | `device_id` / `device_secret` (or `username` / `password` on upgrade) absent |
-| `400`  | `weak_device_secret`      | Secret decodes to fewer than 32 bytes (or exceeds the size cap) |
-| `400`  | `invalid_device_id`       | `device_id` empty or over 255 bytes |
-| `401`  | `invalid_device_secret`   | Wrong secret for a known device |
-| `401`  | `guest_revoked`           | The device verifier was revoked |
-| `401`  | `guest_upgraded`          | The account was already claimed; log in with its real credentials |
-| `403`  | `guest_auth_disabled`     | Guest auth is off - the game did not declare `guest_auth`, or no pepper is present |
-| `404`  | `player_not_found`        | The upgrade token resolves to no player |
-| `409`  | `device_already_registered` | Two creates for the same device raced; retry - the retry resumes the existing guest |
-| `409`  | `not_an_unclaimed_guest`  | Upgrade target is not an unclaimed guest |
-| `409`  | `username_taken`          | Upgrade username is already in use |
-| `422`  | `validation_failed`       | Upgrade fields invalid (see `fields`) |
-| `500`  | `guest_create_failed`     | The player row could not be created |
-| `500`  | `guest_player_missing`    | The device resolves to an identity whose player no longer exists |
-| `503`  | `guest_capacity_reached`  | Global create limit or the unlinked-guest cap was hit |
+| Status | `error.code` | Meaning |
+|--------|--------------|---------|
+| `400`  | `missing_field`                    | `device_id` / `device_secret` (or `username` / `password` on upgrade) absent |
+| `400`  | `guest.weak_device_secret`         | Secret decodes to fewer than 32 bytes (or exceeds the size cap) |
+| `400`  | `guest.invalid_device_id`          | `device_id` empty or over 255 bytes |
+| `401`  | `guest.invalid_device_secret`      | Wrong secret for a known device |
+| `401`  | `guest.revoked`                    | The device verifier was revoked |
+| `401`  | `guest.already_upgraded`           | The account was already claimed; log in with its real credentials |
+| `403`  | `guest.disabled`                   | Guest auth is off - the game did not declare `guest_auth`, or no pepper is present |
+| `403`  | `auth.registration_closed`         | The deployment's registration posture refuses new accounts |
+| `404`  | `player.not_found`                 | The upgrade token resolves to no player |
+| `409`  | `guest.device_already_registered`  | Two creates for the same device raced; retry - the retry resumes the existing guest |
+| `409`  | `guest.not_unclaimed`              | Upgrade target is not an unclaimed guest |
+| `409`  | `auth.username_taken`              | Upgrade username is already in use |
+| `500`  | `auth.password_registration_disabled` | Upgrade needs the password path, which this deployment disabled |
+| `500`  | `guest.create_failed`              | The player row could not be created |
+| `500`  | `internal`                         | The device resolves to an identity whose player no longer exists, or another server-side failure |
+| `503`  | `guest.capacity_reached`           | Global create limit or the unlinked-guest cap was hit |
 
 ### Configuration
 
