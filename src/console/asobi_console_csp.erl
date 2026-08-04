@@ -112,7 +112,7 @@ authority(Rest, Base) ->
         false -> none
     end.
 
--spec is_authority_char(byte()) -> boolean().
+-spec is_authority_char(term()) -> boolean().
 is_authority_char(Char) when Char >= $a, Char =< $z -> true;
 is_authority_char(Char) when Char >= $A, Char =< $Z -> true;
 is_authority_char(Char) when Char >= $0, Char =< $9 -> true;
@@ -121,6 +121,6 @@ is_authority_char($-) -> true;
 is_authority_char($:) -> true;
 is_authority_char(_Char) -> false.
 
--spec join([binary()]) -> binary().
-join(Directives) ->
-    iolist_to_binary(lists:join(~"; ", Directives)).
+-spec join([binary(), ...]) -> binary().
+join([First | Rest]) ->
+    iolist_to_binary([First | [[~"; ", Directive] || Directive <- Rest]]).

@@ -40,7 +40,6 @@ stat-ing an absent directory on every request.
 -define(KEY, {?MODULE, bundle}).
 -define(DIR, "console").
 -define(MANIFEST, "manifest.json").
--define(ASSET_PREFIX, ~"assets/").
 
 -type asset() :: #{body := binary(), mime := binary(), etag := binary()}.
 -type bundle() :: #{
@@ -229,7 +228,7 @@ safe_name(Name) when byte_size(Name) > 0, byte_size(Name) =< 128 ->
 safe_name(_Name) ->
     false.
 
--spec is_name_char(byte()) -> boolean().
+-spec is_name_char(term()) -> boolean().
 is_name_char(Char) when Char >= $a, Char =< $z -> true;
 is_name_char(Char) when Char >= $A, Char =< $Z -> true;
 is_name_char(Char) when Char >= $0, Char =< $9 -> true;
