@@ -7,7 +7,9 @@
 %% 405 from the router before the CORS plugin's OPTIONS short-circuit ever
 %% runs. asobi_router adds `options` to every route's methods list so the
 %% CORS plugin's `pre_request` sees the request and replies 200; these tests
-%% lock in that behaviour across auth, IAP, and authed API routes.
+%% lock in that behaviour on every route group the router declares. The
+%% router-level precondition (every route lists `options`) is checked without
+%% a running server in asobi_router_tests.
 
 -include_lib("nova_test/include/nova_test.hrl").
 
@@ -17,11 +19,7 @@
     end_per_suite/1
 ]).
 -export([
-    options_on_auth_register_returns_2xx/1,
-    options_on_auth_login_returns_2xx/1,
-    options_on_iap_apple_returns_2xx/1,
-    options_on_api_matches_returns_2xx/1,
-    options_on_api_wallets_returns_2xx/1,
+    options_on_every_route_group_returns_2xx/1,
     options_on_authed_route_skips_auth/1,
     options_preflight_includes_cors_headers/1,
     post_register_still_works/1
@@ -29,11 +27,7 @@
 
 all() ->
     [
-        options_on_auth_register_returns_2xx,
-        options_on_auth_login_returns_2xx,
-        options_on_iap_apple_returns_2xx,
-        options_on_api_matches_returns_2xx,
-        options_on_api_wallets_returns_2xx,
+        options_on_every_route_group_returns_2xx,
         options_on_authed_route_skips_auth,
         options_preflight_includes_cors_headers,
         post_register_still_works
@@ -47,27 +41,20 @@ end_per_suite(Config) ->
 
 %% --- OPTIONS preflight returns 2xx on every route group ---
 
-options_on_auth_register_returns_2xx(Config) ->
-    {ok, Resp} = nova_test:request(options, "/api/v1/auth/register", #{}, Config),
-    assert_preflight_ok(Resp).
-
-options_on_auth_login_returns_2xx(Config) ->
-    {ok, Resp} = nova_test:request(options, "/api/v1/auth/login", #{}, Config),
-    assert_preflight_ok(Resp).
-
-options_on_iap_apple_returns_2xx(Config) ->
-    %% IAP routes are auth-gated; preflight must still succeed without a token.
-    {ok, Resp} = nova_test:request(options, "/api/v1/iap/apple", #{}, Config),
-    assert_preflight_ok(Resp).
-
-options_on_api_matches_returns_2xx(Config) ->
-    %% Authed API route — preflight short-circuits before auth runs.
-    {ok, Resp} = nova_test:request(options, "/api/v1/matches", #{}, Config),
-    assert_preflight_ok(Resp).
-
-options_on_api_wallets_returns_2xx(Config) ->
-    {ok, Resp} = nova_test:request(options, "/api/v1/wallets", #{}, Config),
-    assert_preflight_ok(Resp).
+%% Derived from asobi_router:routes/1, not from a hand-kept list: a route
+%% group added later gets its preflight checked without touching this suite.
+%% Auth-gated groups (IAP, the authed API) are included and must answer 2xx
+%% without a token, because the CORS plugin short-circuits before auth runs.
+options_on_every_route_group_returns_2xx(Config) ->
+    Targets = asobi_test_helpers:preflight_targets(asobi_router:routes(dev)),
+    ?assert(length(Targets) >= 3),
+    [
+        begin
+            {ok, Resp} = nova_test:request(options, binary_to_list(Path), #{}, Config),
+            assert_preflight_ok(Path, Resp)
+        end
+     || {_Prefix, Path} <- Targets
+    ].
 
 %% --- Preflight explicitly bypasses auth (no Bearer token) ---
 
@@ -111,13 +98,17 @@ post_register_still_works(Config) ->
 %% --- Helpers ---
 
 -spec assert_preflight_ok(nova_test:response()) -> ok.
-assert_preflight_ok(#{status := Status} = Resp) ->
+assert_preflight_ok(Resp) ->
+    assert_preflight_ok(~"", Resp).
+
+-spec assert_preflight_ok(binary(), nova_test:response()) -> ok.
+assert_preflight_ok(Path, #{status := Status} = Resp) ->
     %% nova_cors_plugin replies 200 on OPTIONS short-circuit.
     case Status =:= 200 orelse Status =:= 204 of
         true ->
             ok;
         false ->
-            ct:fail({preflight_status_unexpected, Status, Resp})
+            ct:fail({preflight_status_unexpected, Path, Status, Resp})
     end.
 
 -spec header(binary(), nova_test:response()) -> binary() | undefined.
