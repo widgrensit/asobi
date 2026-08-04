@@ -21,6 +21,14 @@ The code set is closed on purpose: script- and client-supplied strings never
 become codes. An unrecognised reason is reported under a known code with the
 raw string in `details`.
 
+An installed extension widens the set by declaring `codes/0` in its manifest
+(see `m:asobi_extension`). That set is read once, at
+`asobi_extensions:resolve/0`, from validated manifests, so the set is still
+closed per deployment: nothing reachable from a request can add to it. Core's
+own codes are `core_codes/0`, which is what `m:asobi_extension_reserved`
+derives core's reserved namespaces from - an extension may only mint codes in
+a domain it owns.
+
 Codes carry their HTTP status (`status/1`), so a REST controller states the
 failure and never the number:
 
@@ -42,7 +50,7 @@ working and a new one reads one place: see `legacy/2`.
 
 -export([object/1, object/2, object/3]).
 -export([legacy/2, legacy_body/2]).
--export([status/1, message/1, codes/0]).
+-export([status/1, message/1, codes/0, core_codes/0]).
 -export([from_ws_reason/1, ws_reasons/0]).
 -export([handle/3, register_handler/0]).
 
@@ -272,9 +280,25 @@ message(Code) when is_binary(Code) ->
         false -> ?UNKNOWN_MESSAGE
     end.
 
--doc "Every defined code. The client-facing contract, enumerated.".
+-doc """
+Every defined code: core's, plus every installed extension's.
+
+The client-facing contract, enumerated. Use `core_codes/0` when the question
+is what asobi itself defines.
+""".
 -spec codes() -> [code()].
 codes() ->
+    core_codes() ++ lists:sort(maps:keys(asobi_extensions:error_codes())).
+
+-doc """
+The codes asobi itself defines.
+
+`m:asobi_extension_reserved` derives core's reserved RPC prefixes from these
+domains, and must not see extension codes: an extension would then be told it
+claims a namespace it owns.
+""".
+-spec core_codes() -> [code()].
+core_codes() ->
     [Code || {Code, _, _} <- ?CODES].
 
 -doc """
@@ -331,7 +355,16 @@ register_handler() ->
 
 -spec entry(code()) -> {code(), pos_integer(), binary()} | false.
 entry(Code) ->
-    lists:keyfind(Code, 1, ?CODES).
+    case lists:keyfind(Code, 1, ?CODES) of
+        false -> extension_entry(Code);
+        Entry -> Entry
+    end.
+
+extension_entry(Code) ->
+    case maps:find(Code, asobi_extensions:error_codes()) of
+        {ok, {Status, Message}} -> {Code, Status, Message};
+        error -> false
+    end.
 
 %% A code outside ?CODES reached a client: the contract says clients may
 %% branch on `code`, so an undefined one is a defect that must not stay

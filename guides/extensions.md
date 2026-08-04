@@ -62,7 +62,7 @@ cannot be triggered by a player action from the client.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
 
 info() -> #{name => quests, extension_version => 1}.
 
@@ -74,7 +74,7 @@ lua()  -> #{~"quests" =>
                                  args    => [binary, integer],
                                  effects => write,
                                  vms     => [match, world]},
-                ~"status"   => #{mfa     => {asobi_quests_lua, status, 2},
+                ~"status"   => #{mfa     => {asobi_quests_lua, status, 1},
                                  args    => [binary],
                                  effects => none,
                                  vms     => [match, world, bot]}}}.
@@ -86,6 +86,9 @@ owns() -> #{tables => [~"quests", ~"quest_progress"],
             rpc    => [~"quests"],
             lua    => [~"quests"],
             queues => [~"quests"]}.
+
+codes() -> #{~"quests.already_claimed" =>
+               #{status => 409, message => ~"This quest was already claimed."}}.
 ```
 
 Only `info/0` is required. The rest default to empty.
@@ -98,6 +101,8 @@ Only `info/0` is required. The rest default to empty.
 - `sup/0` - child specs, if you want asobi supervising them.
 - `owns/0` - the tokens this extension claims. It earns nothing with one
   extension installed; it is the N >= 2 key.
+- `codes/0` - the error codes this extension mints. Core's set is closed, so
+  an undeclared code answers 500 and logs as a core defect.
 - `info/0` - the contract version, distinct from the package version, because a
   minor release can change an experimental contract.
 
@@ -167,9 +172,31 @@ either extension has bothered with `owns/0`.
 
 Core's reserved names are derived from core itself: Lua namespaces from
 `asobi_lua_surface`, tables from core's schemas, queues from core's shigoto
-workers, and RPC prefixes from the domains of `asobi_error:codes/0` - an RPC
-prefix and an error-code domain are the same token, so owning `storage` would
-mint codes inside core's closed code set.
+workers, and RPC prefixes from the domains of `asobi_error:core_codes/0` - an
+RPC prefix and an error-code domain are the same token, so owning `storage`
+would mint codes inside core's closed code set.
+
+## Error codes
+
+`asobi_error`'s set is closed, so a code you have not declared answers 500 and
+logs as a core defect. Declare yours:
+
+```erlang
+codes() -> #{~"quests.already_claimed" =>
+               #{status => 409, message => ~"This quest was already claimed."},
+             ~"quests.not_found" =>
+               #{status => 404, message => ~"No quest exists with this id."}}.
+```
+
+`{asobi_error, ~"quests.already_claimed"}` then answers 409 with the shared
+object and logs nothing.
+
+Every code must be `<domain>.<name>`, and the domain is an RPC prefix you own:
+a code domain and an RPC prefix are the same token, so `rebar3 asobi check`
+refuses a code in core's namespace or in another extension's, and refuses a
+bare one. The set is read once at boot, from the manifest, so it stays closed
+per deployment - a string arriving in a request or a Lua script still cannot
+become a code.
 
 ## Tables
 
@@ -191,18 +218,32 @@ Rules:
   blanket cascade was rejected: cascading `wallets` would erase the financial
   ledger through `transactions.wallet_id`.
 
-### Two gaps you hit today
+Your migrations run from your own application: kura discovers them through
+`asobi_repo:migration_apps/0`, inside core's transaction and under one
+advisory lock. Declare `on_delete = cascade` on the `#kura_assoc` into
+`players.id` and the generated migration carries it.
 
-**Your migration will not run.** On the pinned kura, `kura_migrator` discovers
-migrations from exactly one OTP application. `asobi_repo:migration_apps/0` is
-the seam kura 2.20 calls; asobi pins `{kura, "~> 2.17"}`, so until the pin
-moves the host writes one delegating migration file.
+## Counters
 
-**Your foreign key will not cascade.** `#kura_assoc` has no `on_delete` field
-and rebar3_kura hardcodes `no_action`, so the generated migration gives you
-`NO ACTION` and the cascade rule cannot be satisfied by the documented
-workflow. With `no_action` the first `quest_progress` row makes that player
-undeletable, and the guest reaper swallows the violation as `skipped`.
+`update_all/2` SETs literals and kura's `on_conflict` overwrites, so neither
+accumulates. `asobi_repo:increment/3` is the primitive for the counter every
+progress-shaped extension needs:
+
+```erlang
+{ok, Row} = asobi_repo:increment(
+    asobi_quest_progress,
+    #{player_id => PlayerId, quest_id => QuestId},
+    #{counter => 1}
+).
+```
+
+One `INSERT ... ON CONFLICT ... DO UPDATE SET counter = t.counter + EXCLUDED.counter`,
+so two concurrent callers both land and the row is created if it is missing.
+The conflict target must be a primary key or covered by a unique index.
+
+There is no general `query/2`. Every identifier `increment/3` interpolates is
+a field of the schema you pass and every value is a bound parameter, which is
+a promise raw SQL through the seam could not make.
 
 ## Readiness
 

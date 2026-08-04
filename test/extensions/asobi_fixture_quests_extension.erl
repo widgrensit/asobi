@@ -2,7 +2,7 @@
 -moduledoc "A complete extension manifest, shaped exactly like the design's worked example.".
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
 
 -spec info() -> asobi_extension:info().
 info() ->
@@ -26,7 +26,7 @@ lua() ->
                 vms => [match, world]
             },
             ~"status" => #{
-                mfa => {asobi_fixture_quests_lua, status, 2},
+                mfa => {asobi_fixture_quests_lua, status, 1},
                 args => [binary],
                 effects => none,
                 vms => [match, world, bot]
@@ -42,6 +42,15 @@ sup() ->
             start => {asobi_fixture_worker, start_link, [asobi_fixture_quests_worker]}
         }
     ].
+
+-spec codes() -> asobi_extension:codes().
+codes() ->
+    #{
+        ~"quests.already_claimed" => #{
+            status => 409, message => ~"This quest was already claimed."
+        },
+        ~"quests.not_found" => #{status => 404, message => ~"No quest exists with this id."}
+    }.
 
 -spec owns() -> asobi_extension:owns().
 owns() ->

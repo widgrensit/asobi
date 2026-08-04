@@ -19,7 +19,7 @@ Its callers, in boot order:
 
 1. `asobi_router:routes/1`, inside Nova's boot.
 2. `asobi_app:start/2`, before migrations.
-3. `asobi_repo:migration_apps/0`, once the kura pin reaches 2.20.0.
+3. `asobi_repo:migration_apps/0`, when kura discovers migrations.
 
 Discovery walks the **OTP application graph**, not Nova's `nova_apps`.
 `nova_apps` only sees Nova apps, so a Lua-only or jobs-only extension would be
@@ -43,12 +43,13 @@ surfaces with Nova's crash context rather than a legible asobi error.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([resolve/0, check/0, validate/1, describe/1, sup_specs/1]).
+-export([resolve/0, check/0, validate/1, describe/1, sup_specs/1, error_codes/0]).
 -ifdef(TEST).
 -export([reset/0]).
 -endif.
 
 -define(KEY, {?MODULE, resolved}).
+-define(CODES_KEY, {?MODULE, error_codes}).
 
 -doc "One resolved extension. `sup/0` is deliberately absent; see `sup_specs/1`.".
 -type extension() :: #{
@@ -58,7 +59,8 @@ surfaces with Nova's crash context rather than a legible asobi error.
     extension_version := pos_integer(),
     rpc := asobi_extension:rpc(),
     lua := asobi_extension:lua(),
-    owns := asobi_extension:owns()
+    owns := asobi_extension:owns(),
+    codes := asobi_extension:codes()
 }.
 
 -type problem() ::
@@ -82,11 +84,33 @@ resolve() ->
     case persistent_term:get(?KEY, undefined) of
         undefined ->
             Extensions = resolve_now(),
+            persistent_term:put(?CODES_KEY, error_code_table(Extensions)),
             persistent_term:put(?KEY, Extensions),
             Extensions;
         Extensions ->
             Extensions
     end.
+
+-doc """
+Every error code the installed extensions mint, as `Code => {Status, Message}`.
+
+`asobi_error` reads this rather than resolving, so building an error object
+never triggers discovery and never raises: before `resolve/0` has run there
+are no extension codes, and `resolve/0` runs inside Nova's boot, long before
+any request can fail.
+""".
+-spec error_codes() -> #{asobi_error:code() => {pos_integer(), binary()}}.
+error_codes() ->
+    persistent_term:get(?CODES_KEY, #{}).
+
+%% The codes term is written before the resolved term, so a concurrent second
+%% caller that sees ?KEY populated also sees the codes it implies.
+error_code_table(Extensions) ->
+    maps:from_list([
+        {Code, {Status, Message}}
+     || #{codes := Codes} <- Extensions,
+        Code := #{status := Status, message := Message} <- Codes
+    ]).
 
 %% Two concurrent first callers both compute and both write. The computation
 %% is a pure function of the loaded application set, so they write the same
@@ -140,6 +164,7 @@ sup_specs(Module) ->
 -spec reset() -> ok.
 reset() ->
     _ = persistent_term:erase(?KEY),
+    _ = persistent_term:erase(?CODES_KEY),
     ok.
 -endif.
 
@@ -232,6 +257,7 @@ read_manifest(App, Module) ->
         {rpc, call(Module, rpc, #{})},
         {lua, call(Module, lua, #{})},
         {owns, call(Module, owns, #{})},
+        {codes, call(Module, codes, #{})},
         {sup, call(Module, sup, [])}
     ],
     case [{Key, Detail} || {Key, {error, Detail}} <- Reads] of
@@ -254,8 +280,9 @@ call(Module, Function, Default) ->
             end
     end.
 
-build(App, Module, #{info := Info, rpc := Rpc, lua := Lua, owns := Owns, sup := Sup}) ->
-    case shape_problems(Info, Rpc, Lua, Owns, Sup) of
+build(App, Module, Values) ->
+    #{info := Info, rpc := Rpc, lua := Lua, owns := Owns, codes := Codes, sup := Sup} = Values,
+    case shape_problems(Info, Rpc, Lua, Owns, Codes, Sup) of
         [] ->
             #{name := Name, extension_version := Version} = Info,
             {ok, #{
@@ -265,17 +292,19 @@ build(App, Module, #{info := Info, rpc := Rpc, lua := Lua, owns := Owns, sup := 
                 extension_version => Version,
                 rpc => Rpc,
                 lua => Lua,
-                owns => Owns
+                owns => Owns,
+                codes => Codes
             }};
         Details ->
             {error, [{bad_manifest, App, Module, Detail} || Detail <- Details]}
     end.
 
-shape_problems(Info, Rpc, Lua, Owns, Sup) ->
+shape_problems(Info, Rpc, Lua, Owns, Codes, Sup) ->
     info_problems(Info) ++
         rpc_problems(Rpc) ++
         lua_problems(Lua) ++
         owns_problems(Owns) ++
+        codes_problems(Codes) ++
         sup_problems(Sup).
 
 info_problems(#{name := Name, extension_version := Version}) when
@@ -319,20 +348,30 @@ lua_problems(Lua) ->
 
 lua_namespace_problems(Namespace, Functions) when is_binary(Namespace), is_map(Functions) ->
     [
-        {lua, ~"binding must be #{mfa, args, effects, vms}", {Namespace, Name}}
+        {lua, binding_problem(Binding), {Namespace, Name}}
      || Name := Binding <- Functions, not is_lua_binding(Name, Binding)
     ];
 lua_namespace_problems(Namespace, _Functions) ->
     [{lua, ~"namespace must be a binary mapped to a map of functions", Namespace}].
 
+%% `args` is what the injector decodes off the Lua stack and `mfa` is what it
+%% then applies, so a binding whose lengths disagree cannot be called at all.
 is_lua_binding(Name, #{mfa := {M, F, A}, args := Args, effects := Effects, vms := Vms}) when
     is_binary(Name), is_atom(M), is_atom(F), is_integer(A), A >= 0, is_list(Args), is_list(Vms)
 ->
-    lists:member(Effects, asobi_lua_surface:effects()) andalso
+    length(Args) =:= A andalso
+        lists:member(Effects, asobi_lua_surface:effects()) andalso
         Vms =/= [] andalso
         lists:all(fun(Vm) -> lists:member(Vm, asobi_lua_surface:vm_kinds()) end, Vms);
 is_lua_binding(_Name, _Binding) ->
     false.
+
+binding_problem(#{mfa := {_, _, A}, args := Args}) when
+    is_integer(A), is_list(Args), length(Args) =/= A
+->
+    ~"args must declare one type per mfa argument";
+binding_problem(_Binding) ->
+    ~"binding must be #{mfa, args, effects, vms}".
 
 owns_problems(Owns) when is_map(Owns) ->
     Kinds = asobi_extension_reserved:kinds(),
@@ -350,6 +389,24 @@ owns_problems(Owns) ->
 is_token_list(Tokens) when is_list(Tokens) ->
     lists:all(fun(T) -> is_binary(T) andalso T =/= ~"" end, Tokens);
 is_token_list(_) ->
+    false.
+
+%% A bare code would sit in core's cross-cutting namespace (`internal`,
+%% `forbidden`), which no extension owns and the reserved set cannot protect.
+%% Requiring a domain is what makes an extension code checkable at all.
+codes_problems(Codes) when is_map(Codes) ->
+    [
+        {codes, ~"code must be <domain>.<name> mapped to #{status, message}", Code}
+     || Code := Spec <- Codes, not is_code_spec(Code, Spec)
+    ];
+codes_problems(Codes) ->
+    [{codes, ~"must be a map", Codes}].
+
+is_code_spec(Code, #{status := Status, message := Message}) when
+    is_integer(Status), Status >= 100, Status =< 599, is_binary(Message), Message =/= ~""
+->
+    is_dotted(Code);
+is_code_spec(_Code, _Spec) ->
     false.
 
 %% OTP already knows what a valid child spec is. Running its check here turns
@@ -373,10 +430,10 @@ Namespace disjointness across the declared set, and against core's reserved
 names.
 
 The claim set per namespace is `owns/0` **plus** what the manifest already
-implies: the prefixes in `rpc/0` and the namespaces in `lua/0`. So two
-extensions installing the same `game.quests` collide even before either has
-bothered with `owns/0`, which earns nothing until there is a second
-extension.
+implies: the prefixes in `rpc/0`, the domains in `codes/0` and the namespaces
+in `lua/0`. So two extensions installing the same `game.quests` collide even
+before either has bothered with `owns/0`, which earns nothing until there is a
+second extension.
 """.
 -spec validate([extension()]) -> ok | {error, [problem(), ...]}.
 validate([]) ->
@@ -426,8 +483,15 @@ claims(Extension, Kind) ->
     #{owns := Owns} = Extension,
     lists:usort(maps:get(Kind, Owns, []) ++ derived(Extension, Kind)).
 
-derived(#{rpc := Rpc}, rpc) ->
-    lists:usort([Prefix || Method := _ <- Rpc, Prefix <- prefix(Method)]);
+%% An error-code domain and an RPC prefix are the same token by construction,
+%% so `codes/0` claims the rpc namespace exactly as `rpc/0` does. That is what
+%% keeps an extension from minting codes inside core's set, or another
+%% extension's, without a second reservation mechanism.
+derived(#{rpc := Rpc, codes := Codes}, rpc) ->
+    lists:usort(
+        [Prefix || Method := _ <- Rpc, Prefix <- prefix(Method)] ++
+            [Domain || Code := _ <- Codes, Domain <- prefix(Code)]
+    );
 derived(#{lua := Lua}, lua) ->
     lists:usort(maps:keys(Lua));
 derived(_Extension, _Kind) ->

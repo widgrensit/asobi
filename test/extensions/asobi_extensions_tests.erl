@@ -32,7 +32,16 @@ extensions_test_() ->
         fun a_raising_manifest_is_reported_not_propagated/0,
         fun invalid_child_specs_caught_before_boot/0,
         fun unknown_owns_key_refused/0,
-        fun resolve_raises_on_an_invalid_set/0
+        fun resolve_raises_on_an_invalid_set/0,
+        fun lua_args_must_match_the_mfa_arity/0,
+        fun a_declared_code_carries_its_status_and_message/0,
+        fun an_undeclared_code_is_still_a_server_bug/0,
+        fun core_codes_stay_core_only/0,
+        fun a_code_in_a_reserved_domain_refused/0,
+        fun a_code_outside_the_owned_set_refused/0,
+        fun one_code_domain_two_claimants/0,
+        fun a_bare_code_refused/0,
+        fun a_malformed_code_spec_refused/0
     ]}.
 
 setup() ->
@@ -109,9 +118,8 @@ resolve_is_memoised() ->
     asobi_extensions:reset(),
     ?assertEqual(2, length(asobi_extensions:resolve())).
 
-%% kura 2.20 calls this optional kura_repo callback; the pinned 2.17 does not,
-%% so it is a seam. It names the extensions only: kura adds the repo's own
-%% application and sorts the result itself.
+%% kura calls this optional kura_repo callback. It names the extensions only:
+%% kura adds the repo's own application and sorts the result itself.
 the_migration_seam_lists_the_extensions() ->
     ?assertEqual([], asobi_repo:migration_apps()),
     install(?QUESTS),
@@ -220,6 +228,113 @@ resolve_raises_on_an_invalid_set() ->
     tunable(#{lua => #{~"quests" => #{}}}),
     ?assertError({asobi_extensions, _}, asobi_extensions:resolve()).
 
+%% --- Lua bindings ---
+
+%% asobi#361. `args` is what the injector decodes and `mfa` is what it applies,
+%% so a binding whose lengths disagree cannot be called at all. Core's own
+%% quests fixture shipped one of these.
+lua_args_must_match_the_mfa_arity() ->
+    tunable(#{
+        lua => #{
+            ~"tunable" => #{
+                ~"status" => #{
+                    mfa => {tunable_lua, status, 2},
+                    args => [binary],
+                    effects => none,
+                    vms => [match]
+                }
+            }
+        }
+    }),
+    ?assertMatch(
+        [{bad_manifest, ?TUNABLE, _, {lua, ~"args must declare one type per mfa argument", _}}],
+        check_problems()
+    ),
+    retune(#{
+        lua => #{
+            ~"tunable" => #{
+                ~"status" => #{
+                    mfa => {tunable_lua, status, 1},
+                    args => [binary],
+                    effects => none,
+                    vms => [match]
+                }
+            }
+        }
+    }),
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
+
+%% --- Error codes ---
+
+%% asobi#360. An extension reporting an ordinary domain condition must not
+%% answer 500 and page somebody.
+a_declared_code_carries_its_status_and_message() ->
+    install(?QUESTS),
+    _ = asobi_extensions:resolve(),
+    ?assertEqual(409, asobi_error:status(~"quests.already_claimed")),
+    ?assertEqual(404, asobi_error:status(~"quests.not_found")),
+    ?assertEqual(
+        ~"This quest was already claimed.", asobi_error:message(~"quests.already_claimed")
+    ),
+    ?assertMatch(
+        #{error := #{code := ~"quests.already_claimed", details := #{}}},
+        asobi_error:object(~"quests.already_claimed")
+    ),
+    ?assert(lists:member(~"quests.already_claimed", asobi_error:codes())).
+
+%% The set stays closed. Owning the domain does not mint every code inside it.
+an_undeclared_code_is_still_a_server_bug() ->
+    install(?QUESTS),
+    _ = asobi_extensions:resolve(),
+    ?assertEqual(500, asobi_error:status(~"quests.invented_at_runtime")),
+    ?assertNotEqual(
+        asobi_error:message(~"quests.already_claimed"),
+        asobi_error:message(~"quests.invented_at_runtime")
+    ).
+
+%% asobi_extension_reserved derives core's reserved RPC prefixes from
+%% core_codes/0. If it saw the extension's own codes it would tell the
+%% extension it may not claim the namespace it just claimed.
+core_codes_stay_core_only() ->
+    install(?QUESTS),
+    _ = asobi_extensions:resolve(),
+    ?assertNot(lists:member(~"quests.already_claimed", asobi_error:core_codes())),
+    %% Re-validating a node whose extension codes are already installed - what
+    %% `rebar3 asobi check` does against a booted release - must not now tell
+    %% quests it claims a namespace core reserves.
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
+
+a_code_in_a_reserved_domain_refused() ->
+    tunable(#{codes => #{~"storage.wedged" => #{status => 409, message => ~"No."}}}),
+    ?assert(lists:member({reserved_namespace, rpc, ~"storage", ?TUNABLE}, check_problems())).
+
+a_code_outside_the_owned_set_refused() ->
+    tunable(#{
+        owns => #{rpc => [~"tunable"]},
+        codes => #{~"gold.spent" => #{status => 402, message => ~"No gold."}}
+    }),
+    ?assert(lists:member({undeclared_claim, rpc, ~"gold", ?TUNABLE}, check_problems())).
+
+one_code_domain_two_claimants() ->
+    install(?QUESTS),
+    tunable(#{codes => #{~"quests.stalled" => #{status => 409, message => ~"Stalled."}}}),
+    assert_conflict(rpc, ~"quests").
+
+%% A bare code sits in core's cross-cutting namespace, which no extension owns
+%% and the reserved set cannot protect.
+a_bare_code_refused() ->
+    tunable(#{codes => #{~"already_claimed" => #{status => 409, message => ~"No."}}}),
+    ?assertMatch(
+        [{bad_manifest, ?TUNABLE, _, {codes, _, ~"already_claimed"}}],
+        check_problems()
+    ).
+
+a_malformed_code_spec_refused() ->
+    tunable(#{codes => #{~"tunable.nope" => #{status => 4090, message => ~"No."}}}),
+    ?assertMatch([{bad_manifest, ?TUNABLE, _, {codes, _, ~"tunable.nope"}}], check_problems()),
+    retune(#{codes => #{~"tunable.nope" => #{status => 409}}}),
+    ?assertMatch([{bad_manifest, ?TUNABLE, _, {codes, _, ~"tunable.nope"}}], check_problems()).
+
 %% --- Helpers ---
 
 install(?QUESTS) ->
@@ -230,6 +345,10 @@ install(?MINIMAL) ->
 tunable(Manifest) ->
     ok = asobi_fixture_tunable_extension:set(Manifest),
     ok = asobi_fixture_app:install(?TUNABLE, asobi_fixture_tunable_extension, []).
+
+%% The application is already loaded; only the manifest changes.
+retune(Manifest) ->
+    ok = asobi_fixture_tunable_extension:set(Manifest).
 
 check_problems() ->
     case asobi_extensions:check() of

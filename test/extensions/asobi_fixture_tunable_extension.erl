@@ -5,7 +5,7 @@ and colliding shape instead of a file per case.
 """.
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
 -export([set/1, clear/0]).
 
 -define(KEY, {?MODULE, manifest}).
@@ -38,6 +38,10 @@ sup() ->
 -spec owns() -> asobi_extension:owns().
 owns() ->
     value(owns, #{}).
+
+-spec codes() -> asobi_extension:codes().
+codes() ->
+    value(codes, #{}).
 
 value(Key, Default) ->
     case maps:get(Key, persistent_term:get(?KEY, #{}), Default) of

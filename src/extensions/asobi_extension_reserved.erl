@@ -14,10 +14,14 @@ cannot drift:
 - **tables** from every core `kura_schema` module's `table/0`, found the same
   way asobi finds an extension's schemas.
 - **queues** from every core `shigoto_worker` module's `queue/0`.
-- **rpc** from the domains of `asobi_error:codes/0`, plus the Lua namespaces.
-  An RPC prefix and an error domain are the same token by construction
-  (`{"code": "quests.name_taken"}`), so an extension owning the `storage`
-  prefix would mint codes inside core's closed code set.
+- **rpc** from the domains of `asobi_error:core_codes/0`, plus the Lua
+  namespaces. An RPC prefix and an error domain are the same token by
+  construction (`{"code": "quests.name_taken"}`), so an extension owning the
+  `storage` prefix would mint codes inside core's closed code set.
+
+  `core_codes/0` rather than `codes/0` on purpose: `codes/0` includes the codes
+  the installed extensions declare, and reserving those would tell an extension
+  it may not claim the namespace it just claimed.
 
 Deriving from modules costs one `code:ensure_loaded/1` sweep over core's
 module list. `asobi_extensions` only asks for it when at least one extension
@@ -60,7 +64,7 @@ lua_namespace([~"game", Namespace]) -> [Namespace];
 lua_namespace(_) -> [].
 
 error_domains() ->
-    lists:usort([Domain || Code <- asobi_error:codes(), Domain <- domain(Code)]).
+    lists:usort([Domain || Code <- asobi_error:core_codes(), Domain <- domain(Code)]).
 
 domain(Code) ->
     case binary:split(Code, ~".") of

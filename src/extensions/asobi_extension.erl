@@ -16,11 +16,14 @@ behaviour covers only what core cannot infer.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
 
 info() -> #{name => quests, extension_version => 1}.
 
 rpc()  -> #{~"quests.claim" => {asobi_quests_rpc, claim, 2}}.
+
+codes() -> #{~"quests.already_claimed" =>
+               #{status => 409, message => ~"This quest was already claimed."}}.
 
 lua()  -> #{~"quests" =>
               #{~"progress" => #{mfa     => {asobi_quests_lua, progress, 2},
@@ -35,10 +38,10 @@ owns() -> #{tables => [~"quests"], rpc => [~"quests"],
             lua => [~"quests"], queues => [~"quests"]}.
 ```
 
-Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0` and `owns/0` default to
-empty, because several are frequently empty: an extension with no processes
-has no `sup/0`, and `owns/0` earns nothing until a second extension exists to
-collide with.
+Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0`, `owns/0` and `codes/0`
+default to empty, because several are frequently empty: an extension with no
+processes has no `sup/0`, and `owns/0` earns nothing until a second extension
+exists to collide with.
 
 An extension declaring neither `rpc/0` nor `lua/0` is reachable by nobody:
 game logic calls `game.<ns>.*` from Lua, and clients call
@@ -65,7 +68,9 @@ second consumer has said what it is missing.
     lua_function/0,
     lua_arg/0,
     owns/0,
-    token/0
+    token/0,
+    code_spec/0,
+    codes/0
 ]).
 
 -doc "The extension's short name, and the root of everything it owns.".
@@ -117,10 +122,28 @@ takes effect without waiting for every live match VM to end.
     queues => [token()]
 }.
 
+-doc "The HTTP status and human-readable message one code carries.".
+-type code_spec() :: #{status := 100..599, message := binary()}.
+
+-doc """
+The error codes this extension mints.
+
+`asobi_error`'s own set is closed, so without this an ordinary domain failure
+answers 500 and logs as a core defect. Every code must be
+`<domain>.<name>` and every domain must be an RPC prefix this extension owns:
+a code domain and an RPC prefix are the same token, so `rebar3 asobi check`
+refuses a code in core's namespace or in another extension's.
+
+The set is read once, at resolve time, from this manifest - so it is closed
+per deployment and nothing reachable from a request can widen it.
+""".
+-type codes() :: #{asobi_error:code() => code_spec()}.
+
 -callback info() -> info().
 -callback rpc() -> rpc().
 -callback lua() -> lua().
 -callback sup() -> [supervisor:child_spec()].
 -callback owns() -> owns().
+-callback codes() -> codes().
 
--optional_callbacks([rpc/0, lua/0, sup/0, owns/0]).
+-optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0]).
