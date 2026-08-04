@@ -10,7 +10,7 @@
     ws_idle_auth_timeout_closes/1,
     ws_match_input_not_in_match_hint/1,
     ws_match_input_hint_rate_limited/1,
-    ws_script_error_rendered_as_game_error/1,
+    ws_script_error_rendered_as_extension_error/1,
     ws_matchmaker_add_omitted_mode_rejected/1
 ]).
 
@@ -22,7 +22,7 @@ all() ->
         ws_idle_auth_timeout_closes,
         ws_match_input_not_in_match_hint,
         ws_match_input_hint_rate_limited,
-        ws_script_error_rendered_as_game_error,
+        ws_script_error_rendered_as_extension_error,
         ws_matchmaker_add_omitted_mode_rejected
     ].
 
@@ -111,9 +111,12 @@ ws_match_input_hint_rate_limited(Config) ->
     Config.
 
 %% asobi_lua#98: a {script_error, Payload} presence message (sent by the
-%% Lua runtime in dev-errors mode) must reach the client as a game.error
-%% wire event carrying the payload unchanged.
-ws_script_error_rendered_as_game_error(Config) ->
+%% Lua runtime in dev-errors mode) must reach the client as a
+%% module.error wire event carrying the payload unchanged. S6: the pre-S6
+%% game.error frame rides alongside it until the 1.0 wire break, and both
+%% must survive the socket as two separate frames - which is the part
+%% unit tests cannot prove, because the splice happens inside nova.
+ws_script_error_rendered_as_extension_error(Config) ->
     {PlayerId, Token} = register_player(~"scripterr", Config),
     Conn = ws_connect_authed(Token, Config),
     asobi_presence:send(
@@ -124,21 +127,23 @@ ws_script_error_rendered_as_game_error(Config) ->
             ~"message" => ~"bad arithmetic + on nil, 1"
         }}
     ),
-    {ok, Reply} = recv_until(
+    {ok, Legacy} = recv_until(
         fun(M) -> maps:get(~"type", M, undefined) =:= ~"game.error" end, Conn
     ),
-    nova_test_ws:close(Conn),
-    ?assertMatch(
-        #{
-            ~"payload" := #{
-                ~"module" := ~"lua",
-                ~"callback" := ~"handle_input",
-                ~"script" := ~"match.lua",
-                ~"message" := ~"bad arithmetic + on nil, 1"
-            }
-        },
-        Reply
+    {ok, Current} = recv_until(
+        fun(M) -> maps:get(~"type", M, undefined) =:= ~"module.error" end, Conn
     ),
+    nova_test_ws:close(Conn),
+    Expected = #{
+        ~"payload" => #{
+            ~"module" => ~"lua",
+            ~"callback" => ~"handle_input",
+            ~"script" => ~"match.lua",
+            ~"message" => ~"bad arithmetic + on nil, 1"
+        }
+    },
+    ?assertEqual(Expected, maps:with([~"payload"], Legacy)),
+    ?assertEqual(Expected, maps:with([~"payload"], Current)),
     Config.
 
 %% asobi#243: matchmaker.add with no `mode' defaults to "default"; the WS edge

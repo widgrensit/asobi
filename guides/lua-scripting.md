@@ -611,16 +611,21 @@ like the callback silently doing nothing. A common first-hour trap is
 fails every call with "bad arithmetic on nil".
 
 During development, set `ASOBI_DEV_ERRORS=true` on the container to have
-each failing `handle_input` also send a `game.error` event to the player
+each failing `handle_input` also send a `module.error` event to the player
 whose input triggered it:
 
 ```json
-{"type": "game.error", "payload": {
+{"type": "module.error", "payload": {
+    "module": "lua",
     "callback": "handle_input",
     "script": "match.lua",
     "message": "bad arithmetic + on nil, 1"
 }}
 ```
+
+The deprecated `game.error` name carries the same payload and is sent
+alongside it until the 1.0 wire break. See
+[WebSocket Protocol](websocket-protocol.md).
 
 Events are rate-limited to one per second per match. Leave the flag off in
 production (it is off by default): error messages can reveal script

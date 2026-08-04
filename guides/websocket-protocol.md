@@ -240,7 +240,7 @@ string in `details`, so script-supplied text can never mint a code:
 {"type": "error", "payload": {"reason": "party_is_full", "error": {"code": "ws.request_failed", "message": "The request failed. See `details.reason`.", "details": {"reason": "party_is_full"}}}}
 ```
 
-### `game.error` (server push)
+### `module.error` (server push)
 
 An extension callback error, sent to the player whose input triggered it.
 Only emitted when the extension runs with dev errors enabled (for
@@ -251,25 +251,54 @@ errors server-side.
 asobi owns; the rest of the payload is the extension's.
 
 ```json
-{"type": "game.error", "payload": {"module": "lua", "callback": "handle_input", "script": "match.lua", "message": "bad arithmetic + on nil, 1"}}
+{"type": "module.error", "payload": {"module": "lua", "callback": "handle_input", "script": "match.lua", "message": "bad arithmetic + on nil, 1"}}
 ```
 
-### `game.message` (server push)
+### `module.message` (server push)
 
 A message addressed to one player by an extension - asobi_lua's
 `game.send(player_id, message)`. The message is wrapped rather than sent
 raw, because it may be any scripting value (string, number, table).
 
 ```json
-{"type": "game.message", "payload": {"module": "lua", "message": "you are player 3"}}
+{"type": "module.message", "payload": {"module": "lua", "message": "you are player 3"}}
 ```
 
-Both frames are produced by extensions, not only by Lua, which is why the
-producer is a payload key rather than part of the wire type. `module` was
-added without a type change so existing SDK builds keep working; clients
-that care which extension spoke should read `payload.module` and treat a
-missing value as `"lua"`. Renaming the types to `module.error` and
-`module.message` is reserved for the 1.0 wire break.
+### `game.error` / `game.message` (server push, deprecated)
+
+The pre-rename names for the two frames above. Deprecated. **New SDK code
+dispatches on `module.error` and `module.message`.** The pair is removed
+at the 1.0 wire break and will not be replaced.
+
+They are still emitted, byte-identical payload and same reply as their
+`module.*` twin, so every SDK built before the rename keeps working with
+no change. Each message therefore produces two frames today: the legacy
+frame first, then the `module.*` frame.
+
+Do not dispatch on both - a client that handles `game.message` and
+`module.message` processes every message twice.
+
+Neither name was ever Lua-specific: both frames are produced by
+extensions in general, which is why the producer travels in the payload's
+`module` key. Clients that care which extension spoke read
+`payload.module` and treat a missing value as `"lua"`. `game.*` put one
+extension in the wire type, where no second extension could reuse it -
+that is what the rename fixes.
+
+**Wire history.** asobi v0.53.0 and earlier emit `game.error` /
+`game.message` only; `module.*` does not exist on the wire there, despite
+what the message on commit `a6bc2eb` says (its own follow-up commit in
+the same PR removed the dual-emit it describes, because Nova could not
+send two frames from one reply at the time - novaframework/nova#400).
+From this release both pairs are emitted.
+
+**Turning the legacy pair off.** Set `asobi.ws_legacy_game_frames` to
+`false` to emit only `module.*`. `game.message` is `game.send/2`, which a
+script may call per player per tick, so on a chatty game the compat frame
+doubles asobi's hottest extension-produced egress. Any client still
+dispatching on `game.*` goes silent when you do this, so flip it only
+once every client on the deployment reads `module.*`. It defaults to
+`true` and becomes a no-op at 1.0.
 
 ### `match.state` (server push)
 

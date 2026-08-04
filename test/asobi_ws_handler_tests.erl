@@ -129,25 +129,24 @@ handled_message_is_not_logged_as_unhandled_test() ->
 
 %% S6: `game.message`/`game.error` named one extension (Lua) inside the
 %% client wire, which five of seven SDKs cannot extend at runtime. The
-%% producing extension now travels in the payload's `module` key, so any
-%% extension can emit these frames without a type per extension. The wire
-%% type is unchanged, so no shipped SDK breaks.
+%% producing extension travels in the payload's `module` key, and the wire
+%% type is now `module.message`/`module.error`. The pre-S6 pair is emitted
+%% alongside it so no shipped SDK breaks, and is removed at the 1.0 wire
+%% break.
 
 game_message_names_lua_by_default_test() ->
     Msg = {asobi_message, {game_message, ~"you are player 3"}},
-    {reply, Frame, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
-    ?assertEqual(
-        #{~"module" => ~"lua", ~"message" => ~"you are player 3"},
-        payload_of(~"game.message", Frame)
-    ).
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    Expected = #{~"module" => ~"lua", ~"message" => ~"you are player 3"},
+    ?assertEqual(Expected, payload_of(~"module.message", Frames)),
+    ?assertEqual(Expected, payload_of(~"game.message", Frames)).
 
 game_message_carries_the_producing_extension_test() ->
     Msg = {asobi_message, {game_message, wasm, #{~"n" => 1}}},
-    {reply, Frame, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
-    ?assertEqual(
-        #{~"module" => ~"wasm", ~"message" => #{~"n" => 1}},
-        payload_of(~"game.message", Frame)
-    ).
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    Expected = #{~"module" => ~"wasm", ~"message" => #{~"n" => 1}},
+    ?assertEqual(Expected, payload_of(~"module.message", Frames)),
+    ?assertEqual(Expected, payload_of(~"game.message", Frames)).
 
 script_error_names_lua_by_default_test() ->
     Payload = #{
@@ -156,16 +155,54 @@ script_error_names_lua_by_default_test() ->
         ~"message" => ~"bad arithmetic + on nil, 1"
     },
     Msg = {asobi_message, {script_error, Payload}},
-    {reply, Frame, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
-    ?assertEqual(Payload#{~"module" => ~"lua"}, payload_of(~"game.error", Frame)).
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(Payload#{~"module" => ~"lua"}, payload_of(~"module.error", Frames)),
+    ?assertEqual(Payload#{~"module" => ~"lua"}, payload_of(~"game.error", Frames)).
 
 script_error_carries_the_producing_extension_test() ->
     Msg = {asobi_message, {script_error, wasm, #{~"message" => ~"trap"}}},
-    {reply, Frame, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    Expected = #{~"module" => ~"wasm", ~"message" => ~"trap"},
+    ?assertEqual(Expected, payload_of(~"module.error", Frames)),
+    ?assertEqual(Expected, payload_of(~"game.error", Frames)).
+
+%% asobi#347: the dual-emit only works because novaframework/nova#400
+%% splices a list-valued reply into cowboy's command list. A nova without
+%% that fix turns both frames into one malformed cowboy command and kills
+%% the connection process - a failure no other asobi test would see,
+%% because it happens below websocket_info/2's return value.
+nova_splices_a_list_reply_into_separate_commands_test() ->
     ?assertEqual(
-        #{~"module" => ~"wasm", ~"message" => ~"trap"},
-        payload_of(~"game.error", Frame)
+        #{commands => [{text, ~"a"}, {text, ~"b"}], controller_data => st},
+        nova_basic_handler:handle_ws({reply, [{text, ~"a"}, {text, ~"b"}], st}, #{commands => []})
     ).
+
+%% The dual-emit is what asobi#347's nova pin bought: nova 0.15.1 consed a
+%% list-valued reply onto the command list as one cowboy command, so both
+%% frames arrived at cow_ws:frame/2 as a single frame and took the
+%% connection process down. Pin the frame count, not just the payloads —
+%% a regression to a single frame is exactly what shipped in #330.
+extension_frames_are_two_separate_frames_test() ->
+    Msg = {asobi_message, {game_message, ~"hi"}},
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(2, length(Frames)),
+    ?assertEqual([~"game.message", ~"module.message"], [type_of(F) || F <- Frames]).
+
+%% The legacy pair is the compat cost, and `game.message` is `game.send/2`
+%% - potentially one frame per player per tick. An operator whose clients
+%% all dispatch `module.*` must be able to stop paying for it before 1.0.
+legacy_game_frames_can_be_disabled_test() ->
+    ok = application:set_env(asobi, ws_legacy_game_frames, false),
+    try
+        MsgOk = {asobi_message, {game_message, ~"hi"}},
+        {reply, [Frame], _} = asobi_ws_handler:websocket_info(MsgOk, #{}),
+        ?assertEqual(~"module.message", type_of(Frame)),
+        MsgErr = {asobi_message, {script_error, #{~"message" => ~"boom"}}},
+        {reply, [ErrFrame], _} = asobi_ws_handler:websocket_info(MsgErr, #{}),
+        ?assertEqual(~"module.error", type_of(ErrFrame))
+    after
+        ok = application:unset_env(asobi, ws_legacy_game_frames)
+    end.
 
 %% The defensive encode path must still degrade to an `error` frame rather
 %% than crashing the connection process. Asserted on `reason` rather than the
@@ -174,14 +211,20 @@ script_error_carries_the_producing_extension_test() ->
 %% Nothing of the unencodable payload may reach the client either way.
 script_error_unencodable_payload_degrades_test() ->
     Msg = {asobi_message, {script_error, #{~"message" => {not_json}}}},
-    {reply, Frame, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
-    Payload = payload_of(~"error", Frame),
+    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(1, length(Frames)),
+    Payload = payload_of(~"error", Frames),
     ?assertEqual(~"internal", maps:get(~"reason", Payload)),
     ?assertEqual(~"internal", maps:get(~"code", maps:get(~"error", Payload))),
     ?assertEqual([~"error", ~"reason"], lists:sort(maps:keys(Payload))).
 
-payload_of(Type, {text, Raw}) ->
-    #{~"type" := Type, ~"payload" := Payload} = json:decode(iolist_to_binary(Raw)),
+type_of({text, Raw}) ->
+    #{~"type" := Type} = decode(Raw),
+    Type.
+
+payload_of(Type, Frames) when is_list(Frames) ->
+    [{text, Raw}] = [F || F <- Frames, type_of(F) =:= Type],
+    #{~"payload" := Payload} = decode(Raw),
     Payload.
 
 %% --- error frames carry both dialects ---

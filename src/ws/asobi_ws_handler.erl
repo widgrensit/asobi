@@ -26,17 +26,23 @@
 %% holding cowboy acceptors. Override via `asobi.ws_idle_auth_timeout_ms`.
 -define(DEFAULT_IDLE_AUTH_TIMEOUT_MS, 10000).
 
-%% `game.message` and `game.error` name their producer in the payload's
-%% `module` key, not in the wire type, so an extension can emit them
-%% without a new frame type per extension. A producer that sends the
-%% legacy two-element shape (`{game_message, Payload}`,
-%% `{script_error, Payload}`) predates that and can only be asobi_lua.
-%%
-%% The `module.`-prefixed type rename is deliberately deferred to the 1.0
-%% wire break: the payload key is the part SDKs dispatch on, and renaming
-%% the type now would either break every shipped SDK or double every
-%% frame on the hot path.
+%% Extension-produced frames name their producer in the payload's `module`
+%% key, not in the wire type, so an extension can emit them without a new
+%% frame type per extension. A producer that sends the legacy two-element
+%% shape (`{game_message, Payload}`, `{script_error, Payload}`) predates
+%% that and can only be asobi_lua.
 -define(DEFAULT_EXTENSION, lua).
+
+%% S6: the wire types are `module.message`/`module.error`. `game.message`/
+%% `game.error` are the pre-S6 names and are emitted alongside them so no
+%% shipped SDK build breaks; they are removed at the 1.0 wire break.
+%%
+%% Off drops the legacy pair. `game.message` is asobi_lua's `game.send/2`,
+%% which a script may call per player per tick, so the compat frame is the
+%% one doubling asobi's hottest extension-produced egress path. An operator
+%% whose clients all dispatch `module.*` sets `asobi.ws_legacy_game_frames`
+%% to `false` and gets that back without waiting for 1.0.
+-define(DEFAULT_LEGACY_GAME_FRAMES, true).
 
 %% #303: script-controlled `game.broadcast` event names share the wire
 %% namespace with asobi's own `match.*`/`world.*` events, so they must be
@@ -189,6 +195,7 @@ websocket_handle(_Frame, State) ->
 -spec websocket_info(term(), map()) ->
     {ok, map()}
     | {reply, {text, binary()}, map()}
+    | {reply, [{text, binary()}], map()}
     | {reply, {close, non_neg_integer(), binary()}, map()}
     | {stop, map()}.
 websocket_info({asobi_message, {match_state, MatchState}}, State) ->
@@ -275,7 +282,7 @@ websocket_info({asobi_message, {game_message, Extension, Payload}}, State) when
     %% convention and couldn't carry more fields later without a
     %% breaking change.
     Body = #{~"module" => atom_to_binary(Extension), ~"message" => Payload},
-    {reply, {text, encode_reply(undefined, ~"game.message", Body)}, State};
+    {reply, extension_frames(~"module.message", ~"game.message", Body), State};
 websocket_info({asobi_message, {script_error, Payload}}, State) when is_map(Payload) ->
     websocket_info({asobi_message, {script_error, ?DEFAULT_EXTENSION, Payload}}, State);
 websocket_info({asobi_message, {script_error, Extension, Payload}}, State) when
@@ -289,11 +296,11 @@ websocket_info({asobi_message, {script_error, Extension, Payload}}, State) when
     Body = Payload#{~"module" => atom_to_binary(Extension)},
     Reply =
         try
-            encode_reply(undefined, ~"game.error", Body)
+            extension_frames(~"module.error", ~"game.error", Body)
         catch
-            _:_ -> encode_error(undefined, ~"internal")
+            _:_ -> [{text, encode_error(undefined, ~"internal")}]
         end,
-    {reply, {text, Reply}, State};
+    {reply, Reply, State};
 websocket_info({session_revoked, Reason}, State) ->
     logger:notice(#{msg => ~"session_revoked", reason => Reason}),
     {stop, State#{session => undefined}};
@@ -919,6 +926,22 @@ encode_reply(Cid, Type, Payload) ->
             _ -> Msg0#{~"cid" => Cid}
         end,
     json:encode(Msg).
+
+%% The legacy frame goes first so a shipped client sees byte-identical
+%% ordering to before S6; the new type is purely additive behind it.
+-spec extension_frames(binary(), binary(), map()) -> [{text, binary()}].
+extension_frames(Type, LegacyType, Body) ->
+    New = {text, encode_reply(undefined, Type, Body)},
+    case legacy_game_frames() of
+        true -> [{text, encode_reply(undefined, LegacyType, Body)}, New];
+        false -> [New]
+    end.
+
+legacy_game_frames() ->
+    case application:get_env(asobi, ws_legacy_game_frames) of
+        {ok, Enabled} when is_boolean(Enabled) -> Enabled;
+        _ -> ?DEFAULT_LEGACY_GAME_FRAMES
+    end.
 
 %% Every error frame now carries both dialects. `reason` is the original
 %% WebSocket string and is unchanged, byte for byte, so existing clients keep

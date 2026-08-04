@@ -4,8 +4,9 @@ Dev-mode surfacing of Lua callback errors to the triggering client.
 
 By default a failing callback is log + telemetry only, so script internals
 never reach arbitrary players in production. With dev errors enabled the
-player whose input triggered the failure also receives a `game.error`
-event carrying the callback name, script basename and Lua error message -
+player whose input triggered the failure also receives a `module.error`
+event (and its deprecated `game.error` twin, until the 1.0 wire break)
+carrying the callback name, script basename and Lua error message -
 without it a broken `handle_input` is indistinguishable client-side from
 one that never ran.
 

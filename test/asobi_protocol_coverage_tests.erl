@@ -85,7 +85,8 @@ list_fixture_event_names() ->
     [unicode:characters_to_binary(filename:basename(F, ".json")) || F <- Files].
 
 enumerate_emitted_events() ->
-    Static = scan_encode_reply_types(read_file(?WS_HANDLER)),
+    WsHandler = read_file(?WS_HANDLER),
+    Static = scan_encode_reply_types(WsHandler) ++ scan_extension_frame_types(WsHandler),
     MatchAtoms = collect_match_emit_atoms(),
     WorldAtoms = collect_world_emit_atoms(),
     lists:usort(
@@ -133,6 +134,18 @@ scan_encode_reply_types(Bin) ->
     Re = "encode_reply\\([^,]+,\\s*~\"([a-z][a-z._]*)\"",
     case re:run(Bin, Re, [global, {capture, all_but_first, binary}]) of
         {match, Matches} -> [B || [B] <- Matches];
+        nomatch -> []
+    end.
+
+%% S6: extension-produced frames go out through extension_frames/3, which
+%% names two wire types - the current one and the deprecated pre-rename
+%% one it is emitted alongside. Both reach clients, so both need a
+%% fixture, and neither is visible to scan_encode_reply_types/1 because
+%% the encode inside the helper takes a variable type.
+scan_extension_frame_types(Bin) ->
+    Re = "extension_frames\\(\\s*~\"([a-z][a-z._]*)\",\\s*~\"([a-z][a-z._]*)\"",
+    case re:run(Bin, Re, [global, {capture, all_but_first, binary}]) of
+        {match, Matches} -> lists:append(Matches);
         nomatch -> []
     end.
 

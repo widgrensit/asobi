@@ -207,6 +207,25 @@ cannot be a CSWSH vector. The socket also does nothing until it presents a
 valid token in the first `session.connect` frame, so this is defence in depth,
 not the primary auth gate.
 
+## Deprecated `game.*` extension frames
+
+Extension-produced pushes go out as `module.message` and `module.error`. The
+pre-rename names `game.message` and `game.error` are emitted alongside them,
+with identical payloads, so SDK builds from before the rename keep working.
+They are removed at the 1.0 wire break.
+
+```erlang
+{ws_legacy_game_frames, false}
+```
+
+Set this once every client on the deployment dispatches on `module.*`, and
+each extension message drops from two frames to one. `game.message` is
+asobi_lua's `game.send/2`, which a script may call per player per tick, so on
+a chatty game the compat frame is a real doubling of that path. Any client
+still listening for `game.*` goes silent the moment you set it. Default
+`true`. See
+[the protocol guide](https://asobi.dev/docs/protocols/websocket).
+
 ## CORS
 
 CORS is handled by `nova_cors_plugin` in the Nova plugin chain — configure
