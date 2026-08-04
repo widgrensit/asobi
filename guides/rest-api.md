@@ -235,9 +235,12 @@ These routes return the [error object](#errors) below on failure.
 ## Ops
 
 ```
-GET /api/v1/ops/players     Paginated player list
-GET /api/v1/ops/matches     Paginated match-record list
-GET /api/v1/ops/features    Installed feature set
+GET /api/v1/ops/players                      Paginated player list
+GET /api/v1/ops/matches                      Paginated match-record list
+GET /api/v1/ops/features                     Installed feature set
+GET /api/v1/ops/leaderboards                 Paginated board list
+GET /api/v1/ops/leaderboards/:id/entries     Paginated, ranked board entries
+GET /api/v1/ops/matchmaker                   Matchmaking queue, by mode
 ```
 
 The game-operations read plane, for a console rather than a game client. The
@@ -256,7 +259,7 @@ Every list returns the same envelope:
 }
 ```
 
-Parameters shared by `ops/players` and `ops/matches`:
+Parameters shared by every ops list:
 
 | Parameter | Meaning |
 | --- | --- |
@@ -271,14 +274,86 @@ A malformed number is never an error: `?limit=abc` uses the default. A
 malformed *sort* always is, because ordering the wrong rows silently is worse
 than a 400.
 
-Sorts always end on `id`, so paging by offset cannot repeat or skip a row when
-the sort key has duplicates.
+Sorts always end on a unique column, so paging by offset cannot repeat or skip
+a row when the sort key has duplicates. That column is `id` on most lists,
+`board_id` for the board list, `player_id` within a board and `mode` for the
+queue.
 
 `ops/players` sorts on `id`, `username`, `display_name`, `inserted_at`,
 `updated_at`, and searches username and display name. `ops/matches` sorts on
 `id`, `mode`, `status`, `started_at`, `finished_at`, `inserted_at`, filters on
 `mode` and `status`, and searches mode. Both return the same fields as their
 public counterparts - no roster, no credentials.
+
+### Leaderboards
+
+`GET /api/v1/ops/leaderboards` lists boards rather than scores. Sorts on
+`board_id`, `entries`, `top_score`, `updated_at`, defaults to the largest
+board first, and searches `board_id`.
+
+```json
+{
+  "data": [
+    { "board_id": "arena_eu", "entries": 4120, "top_score": 98210,
+      "updated_at": "2026-08-03T12:00:00Z", "live": true }
+  ],
+  "page": { "limit": 50, "offset": 0, "total": 1 }
+}
+```
+
+`live` says whether the board currently has a process. A board is live without
+rows for its first 30 seconds - scores are flushed on an interval - and has
+rows without being live when nothing has written to it since the node started.
+Both cases are listed.
+
+`GET /api/v1/ops/leaderboards/:id/entries` pages one board. Sorts on `id`,
+`player_id`, `score`, `sub_score`, `updated_at`, and defaults to `score`
+descending, which is the board's own order.
+
+```json
+{
+  "data": [
+    { "id": "0198...", "leaderboard_id": "arena_eu", "player_id": "0197...",
+      "score": 98210, "sub_score": 0, "rank": 1,
+      "updated_at": "2026-08-03T12:00:00Z" }
+  ],
+  "page": { "limit": 50, "offset": 0, "total": 4120 }
+}
+```
+
+`rank` is the position on the whole board, not within the page: row 501 is
+rank 501. It stays the board's rank whatever you sort the page by, and it is
+computed over the same order the public `GET /api/v1/leaderboards/:id` uses,
+so the two agree on any flushed score.
+
+The read is of persisted scores. A score submitted seconds ago is on the
+public top-N endpoint before it is here.
+
+### Matchmaker
+
+`GET /api/v1/ops/matchmaker` reports the queue, one row per mode. Sorts on
+`mode`, `waiting`, `oldest_wait_ms`, `average_wait_ms`, deepest queue first.
+
+```json
+{
+  "data": [
+    { "mode": "ranked", "waiting": 14, "oldest_wait_ms": 21400, "average_wait_ms": 8300 }
+  ],
+  "page": { "limit": 50, "offset": 0, "total": 1 },
+  "queue": { "waiting": 14, "modes": 1, "sampled_at": 1785312000000, "age_ms": 420 }
+}
+```
+
+Counts come from a sample the matchmaker publishes on each tick, so they are
+up to one tick old - 1s by default - and `age_ms` says how old. Waits are
+measured from the reading, so they keep growing between ticks. The read never
+touches the matchmaker process itself; it cannot slow matchmaking down however
+often it is polled.
+
+No ticket, player id or ticket property appears here. Who is queued is player
+data and waits on the capability model.
+
+### Features
 
 `GET /api/v1/ops/features` reports what this deployment has installed:
 

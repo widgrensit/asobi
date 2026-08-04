@@ -14,20 +14,22 @@ Three rules, each of them load-bearing:
   default would hide the mistake from the caller.
 * Every sort ends on a unique column. Offset pagination over a non-unique key
   can return one row twice and skip another between pages, so `sort/3` appends
-  the primary key as a tie-breaker.
+  the primary key as a tie-breaker, and `sort/4` takes the unique column for
+  a row set that is not keyed on `id`.
 
 `?page=N` and `?offset=N` both select a window. `page` wins when both are
 given. The offset returned is the one the query actually used - see `page/1`.
 """.
 
--export([page/1, sort/3, like_pattern/2, cursor/1, encode_cursor/1]).
+-export([page/1, sort/3, sort/4, search/2, like_pattern/2, cursor/1, encode_cursor/1]).
 
--export_type([params/0, page_spec/0, sort_spec/0, sort_allowlist/0]).
+-export_type([params/0, page_spec/0, sort_spec/0, sort_allowlist/0, tie_break/0]).
 
 -type params() :: #{binary() => binary() | true}.
 -type page_spec() :: #{limit := pos_integer(), offset := non_neg_integer()}.
 -type sort_spec() :: [{atom(), asc | desc}].
 -type sort_allowlist() :: [{binary(), atom()}].
+-type tie_break() :: {atom(), asc | desc}.
 
 -define(DEFAULT_LIMIT, 50).
 -define(MIN_LIMIT, 1).
@@ -77,20 +79,34 @@ completed with `{id, desc}` so the ordering is total.
 -spec sort(params(), sort_allowlist(), sort_spec()) ->
     {ok, sort_spec()} | {error, {unknown_sort, binary()} | {unknown_order, binary()}}.
 sort(Params, Allowed, Default) ->
+    sort(Params, Allowed, Default, {id, desc}).
+
+-doc """
+`sort/3` for a row set whose unique key is not `id`.
+
+A board's entries are unique on `player_id` within the board, a queue has one
+row per `mode`: those are the columns the order has to end on there. Passing
+the wrong one is not a syntax error, it is a page that can repeat a row, so
+the tie-breaker is named by the endpoint rather than assumed.
+""".
+-spec sort(params(), sort_allowlist(), sort_spec(), tie_break()) ->
+    {ok, sort_spec()} | {error, {unknown_sort, binary()} | {unknown_order, binary()}}.
+sort(Params, Allowed, Default, TieBreak) ->
     case maps:get(~"sort", Params, undefined) of
         Field when is_binary(Field), Field =/= ~"" ->
             case lists:keyfind(Field, 1, Allowed) of
-                {_, Column} -> sorted_by(Column, Params);
+                {_, Column} -> sorted_by(Column, Params, TieBreak);
                 false -> {error, {unknown_sort, Field}}
             end;
         _ ->
-            {ok, deterministic(Default)}
+            {ok, deterministic(Default, TieBreak)}
     end.
 
--spec sorted_by(atom(), params()) -> {ok, sort_spec()} | {error, {unknown_order, binary()}}.
-sorted_by(Column, Params) ->
+-spec sorted_by(atom(), params(), tie_break()) ->
+    {ok, sort_spec()} | {error, {unknown_order, binary()}}.
+sorted_by(Column, Params, TieBreak) ->
     case order(Params) of
-        {ok, Direction} -> {ok, deterministic([{Column, Direction}])};
+        {ok, Direction} -> {ok, deterministic([{Column, Direction}], TieBreak)};
         {error, _} = Error -> Error
     end.
 
@@ -107,25 +123,33 @@ order(Params) ->
             {ok, asc}
     end.
 
--spec deterministic(sort_spec()) -> sort_spec().
-deterministic(Orders) ->
-    case lists:keymember(id, 1, Orders) of
+-spec deterministic(sort_spec(), tie_break()) -> sort_spec().
+deterministic(Orders, {Column, _Direction} = TieBreak) ->
+    case lists:keymember(Column, 1, Orders) of
         true -> Orders;
-        false -> Orders ++ [{id, desc}]
+        false -> Orders ++ [TieBreak]
     end.
 
 -doc """
-Build an `ILIKE` pattern for a free-text search parameter.
+Read a free-text search parameter.
 
-Returns `none` when the parameter is absent, empty, or longer than 64 bytes.
+Returns `none` when the parameter is absent, empty, valueless, or longer than
+64 bytes. The one place the length rule lives, so a search that reaches the
+database and a search matched in memory accept the same input.
 """.
+-spec search(params(), binary()) -> {ok, binary()} | none.
+search(Params, Key) ->
+    case maps:get(Key, Params, undefined) of
+        Term when is_binary(Term), Term =/= ~"", byte_size(Term) =< ?MAX_SEARCH_BYTES -> {ok, Term};
+        _ -> none
+    end.
+
+-doc "Build an `ILIKE` pattern from the search parameter `search/2` accepts.".
 -spec like_pattern(params(), binary()) -> {ok, binary()} | none.
 like_pattern(Params, Key) ->
-    case maps:get(Key, Params, undefined) of
-        Term when is_binary(Term), Term =/= ~"", byte_size(Term) =< ?MAX_SEARCH_BYTES ->
-            {ok, iolist_to_binary([~"%", escape_like(Term), ~"%"])};
-        _ ->
-            none
+    case search(Params, Key) of
+        {ok, Term} -> {ok, iolist_to_binary([~"%", escape_like(Term), ~"%"])};
+        none -> none
     end.
 
 %% `%` and `_` are ILIKE wildcards and `\` is its escape character, so an

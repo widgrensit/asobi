@@ -3,7 +3,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/1, submit/3, top/2, rank/2, around/3]).
+-export([start_link/1, submit/3, top/2, rank/2, around/3, live_boards/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(PG_SCOPE, nova_scope).
@@ -63,6 +63,19 @@ around(BoardId, PlayerId, N) ->
             end;
         not_found ->
             []
+    end.
+
+%% The board ids that currently have a process, which is not the same set as
+%% the boards that have scores: a board is live before its first flush and
+%% stops being live when the node restarts. Enumerating the pg groups is the
+%% only mapping from board id to process that costs no message - the
+%% supervisor is simple_one_for_one, so its children carry no id.
+-spec live_boards() -> [binary()].
+live_boards() ->
+    try pg:which_groups(?PG_SCOPE) of
+        Groups -> [BoardId || {?MODULE, BoardId} <- Groups, is_binary(BoardId)]
+    catch
+        error:badarg -> []
     end.
 
 -spec validate_entries([term()]) -> [{binary(), number(), pos_integer()}].

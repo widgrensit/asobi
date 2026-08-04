@@ -17,7 +17,9 @@
     remove_then_readd_new_ticket/1,
     selfmatch_group_rejected/1,
     add_reply_reports_players_needed/1,
-    spawn_retry_bounded_then_gives_up/1
+    spawn_retry_bounded_then_gives_up/1,
+    queue_snapshot_reports_waiting_by_mode/1,
+    queue_snapshot_never_waits_on_the_matchmaker/1
 ]).
 
 all() ->
@@ -35,7 +37,9 @@ all() ->
         remove_then_readd_new_ticket,
         selfmatch_group_rejected,
         add_reply_reports_players_needed,
-        spawn_retry_bounded_then_gives_up
+        spawn_retry_bounded_then_gives_up,
+        queue_snapshot_reports_waiting_by_mode,
+        queue_snapshot_never_waits_on_the_matchmaker
     ].
 
 init_per_suite(Config) ->
@@ -194,3 +198,52 @@ spawn_retry_bounded_then_gives_up(Config) ->
     %% a missing/garbage attempts field defaults to 0
     ?assertEqual({retry, 1}, asobi_matchmaker:next_spawn_attempt([#{}])),
     Config.
+
+%% The ops read, end to end through a real tick: a queued ticket shows up as a
+%% waiting count against its mode, with a wait that is at least as old as the
+%% ticket. A mode of its own so the shared queue in this suite cannot flatter
+%% or spoil the count.
+queue_snapshot_reports_waiting_by_mode(Config) ->
+    {ok, TicketId, _} = asobi_matchmaker:add(~"player_snap", #{mode => ~"snapmode"}),
+    try
+        Row = await_mode(~"snapmode", 20),
+        ?assertEqual(1, maps:get(waiting, Row)),
+        ?assert(maps:get(oldest_wait_ms, Row) >= 0),
+        ?assertEqual(maps:get(oldest_wait_ms, Row), maps:get(average_wait_ms, Row)),
+        #{sampled_at := SampledAt, age_ms := AgeMs, waiting := Waiting} =
+            asobi_matchmaker:snapshot(),
+        ?assert(is_integer(SampledAt)),
+        ?assert(is_integer(AgeMs)),
+        ?assert(Waiting >= 1)
+    after
+        asobi_matchmaker:remove(~"player_snap", TicketId)
+    end,
+    Config.
+
+%% The reason the snapshot is an ETS read and not a call. With the matchmaker
+%% suspended - which is what a deep queue mid-tick looks like to a caller - the
+%% read still answers immediately. A `gen_server:call` here would block until
+%% the default 5s timeout and then exit.
+queue_snapshot_never_waits_on_the_matchmaker(Config) ->
+    ok = sys:suspend(asobi_matchmaker),
+    {Elapsed, Snapshot} =
+        try
+            timer:tc(fun() -> asobi_matchmaker:snapshot() end)
+        after
+            ok = sys:resume(asobi_matchmaker)
+        end,
+    ?assert(is_map(Snapshot)),
+    ?assert(Elapsed < 1000000),
+    Config.
+
+await_mode(_Mode, 0) ->
+    ct:fail(mode_never_appeared_in_snapshot);
+await_mode(Mode, Attempts) ->
+    #{modes := Modes} = asobi_matchmaker:snapshot(),
+    case [Row || #{mode := M} = Row <- Modes, M =:= Mode] of
+        [Row] ->
+            Row;
+        [] ->
+            timer:sleep(200),
+            await_mode(Mode, Attempts - 1)
+    end.

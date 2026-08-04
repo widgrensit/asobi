@@ -8,15 +8,36 @@ spawns a match, and pushes `match.matched` to each player. A single
 -behaviour(gen_server).
 
 -export([start_link/0, add/2, remove/2, get_ticket/1, get_ticket/2, get_queue_stats/0]).
--export([known_mode/1]).
+-export([known_mode/1, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -ifdef(TEST).
--export([next_spawn_attempt/1, join_matched_players/3]).
+-export([next_spawn_attempt/1, join_matched_players/3, tally/1, render/3]).
 -endif.
+
+-export_type([snapshot/0, mode_queue/0]).
 
 -define(DEFAULT_TICK, 1000).
 -define(DEFAULT_MAX_QUEUE, 10000).
 -define(MAX_SPAWN_ATTEMPTS, 3).
+-define(SNAPSHOT_TABLE, asobi_matchmaker_snapshot).
+
+-type snapshot() :: #{
+    sampled_at := integer() | null,
+    age_ms := non_neg_integer() | null,
+    waiting := non_neg_integer(),
+    modes := [mode_queue()]
+}.
+
+-type mode_queue() :: #{
+    mode := binary(),
+    waiting := pos_integer(),
+    oldest_wait_ms := non_neg_integer(),
+    average_wait_ms := non_neg_integer()
+}.
+
+-type mode_tally() :: #{
+    waiting := pos_integer(), oldest := integer(), submitted_sum := integer()
+}.
 
 -spec start_link() -> gen_server:start_ret().
 start_link() ->
@@ -94,8 +115,99 @@ get_queue_stats() ->
         {ok, Stats} when is_map(Stats) -> {ok, Stats}
     end.
 
+-doc """
+The queue as an operator sees it: how many tickets are waiting, split by
+mode, and how long they have been waiting.
+
+Read from an ETS table this process publishes to on each tick, **not** by
+calling this process. The matchmaker is a single gen_server that runs every
+strategy and spawns every match inside its own tick, so a `gen_server:call`
+from an HTTP handler queues behind that work: the read would be slowest
+exactly when the queue is deepest and an operator most needs to look at it.
+The other direction is worse - HTTP concurrency is unbounded, so a console
+polling once a second, times however many operators, lands in the mailbox of
+the hottest process in the system. A read plane must not be able to slow the
+game path down, at any request rate.
+
+Publishing costs one `ets:insert/2` per tick over a fold the tick has already
+paid for. A reader pays one `ets:lookup/2` and sends no message at all.
+
+Waits are derived at read time from the sampled `submitted_at` values, so
+they keep ageing correctly between ticks; only the *counts* are as old as
+`age_ms`, at most one `tick_interval` (1s by default). Before the first tick,
+or with no matchmaker running, the result is an empty queue rather than an
+error - `null` timestamps say which.
+""".
+-spec snapshot() -> snapshot().
+snapshot() ->
+    Now = erlang:system_time(millisecond),
+    try ets:lookup(?SNAPSHOT_TABLE, queue) of
+        [{queue, SampledAt, Modes}] when is_integer(SampledAt), is_map(Modes) ->
+            render(SampledAt, Modes, Now);
+        _ ->
+            empty_snapshot()
+    catch
+        error:badarg -> empty_snapshot()
+    end.
+
+-spec empty_snapshot() -> snapshot().
+empty_snapshot() ->
+    #{sampled_at => null, age_ms => null, waiting => 0, modes => []}.
+
+-spec render(integer(), #{binary() => mode_tally()}, integer()) -> snapshot().
+render(SampledAt, Modes, Now) ->
+    Rows = [mode_queue(Mode, Tally, Now) || {Mode, Tally} <- maps:to_list(Modes)],
+    #{
+        sampled_at => SampledAt,
+        age_ms => waited(SampledAt, Now),
+        waiting => lists:sum([Waiting || #{waiting := Waiting} <- Rows]),
+        modes => Rows
+    }.
+
+-spec mode_queue(binary(), mode_tally(), integer()) -> mode_queue().
+mode_queue(Mode, #{waiting := Waiting, oldest := Oldest, submitted_sum := Sum}, Now) ->
+    #{
+        mode => Mode,
+        waiting => Waiting,
+        oldest_wait_ms => waited(Oldest, Now),
+        average_wait_ms => waited(Sum div Waiting, Now)
+    }.
+
+%% Clamped because system_time can step backwards; a negative wait would be
+%% read as a clock bug in the console rather than on the node.
+-spec waited(integer(), integer()) -> non_neg_integer().
+waited(At, Now) -> max(0, Now - At).
+
+-spec publish(map()) -> ok.
+publish(Tickets) ->
+    true = ets:insert(?SNAPSHOT_TABLE, {queue, erlang:system_time(millisecond), tally(Tickets)}),
+    ok.
+
+-spec tally(map()) -> #{binary() => mode_tally()}.
+tally(Tickets) ->
+    maps:fold(fun(_Id, Ticket, Acc) -> tally_ticket(Ticket, Acc) end, #{}, Tickets).
+
+-spec tally_ticket(term(), #{binary() => mode_tally()}) -> #{binary() => mode_tally()}.
+tally_ticket(#{mode := Mode, submitted_at := At}, Acc) when is_binary(Mode), is_integer(At) ->
+    case Acc of
+        #{Mode := #{waiting := Waiting, oldest := Oldest, submitted_sum := Sum}} ->
+            Acc#{
+                Mode => #{
+                    waiting => Waiting + 1,
+                    oldest => min(Oldest, At),
+                    submitted_sum => Sum + At
+                }
+            };
+        _ ->
+            Acc#{Mode => #{waiting => 1, oldest => At, submitted_sum => At}}
+    end;
+tally_ticket(_Ticket, Acc) ->
+    Acc.
+
 -spec init([]) -> {ok, map()}.
 init([]) ->
+    ?SNAPSHOT_TABLE = ets:new(?SNAPSHOT_TABLE, [named_table, protected, {read_concurrency, true}]),
+    ok = publish(#{}),
     Cfg = ensure_map(application:get_env(asobi, matchmaker, #{})),
     TickInterval =
         case maps:get(tick_interval, Cfg, ?DEFAULT_TICK) of
@@ -228,6 +340,7 @@ handle_info(tick, #{tickets := Tickets, tick_interval := Interval, max_wait := M
         lists:flatten(FailedGroups)
     ),
     erlang:send_after(Interval, self(), tick),
+    ok = publish(Remaining1),
     {noreply, State#{tickets => Remaining1}};
 handle_info(_Info, State) ->
     {noreply, State}.

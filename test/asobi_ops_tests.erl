@@ -85,6 +85,77 @@ query() ->
 identity(Row) -> Row.
 
 %%--------------------------------------------------------------------
+%% In-memory envelope
+%%--------------------------------------------------------------------
+
+slice_rows() ->
+    [
+        #{mode => ~"duel", waiting => 2},
+        #{mode => ~"arena", waiting => 9},
+        #{mode => ~"coop", waiting => 2}
+    ].
+
+%% A console must not be able to tell a process-backed list from a
+%% table-backed one.
+slice_envelope_matches_the_query_envelope_test() ->
+    Envelope = asobi_ops_page:slice(
+        slice_rows(), [{waiting, desc}, {mode, asc}], #{limit => 50, offset => 0}, fun identity/1
+    ),
+    ?assertEqual([data, page], lists:sort(maps:keys(Envelope))),
+    ?assertEqual(#{limit => 50, offset => 0, total => 3}, maps:get(page, Envelope)).
+
+slice_orders_before_it_windows_test() ->
+    #{data := Data} = asobi_ops_page:slice(
+        slice_rows(), [{waiting, desc}, {mode, asc}], #{limit => 2, offset => 0}, fun identity/1
+    ),
+    ?assertEqual([~"arena", ~"coop"], [Mode || #{mode := Mode} <- Data]).
+
+%% The tie-breaker earning its place: `coop` and `duel` are both waiting 2, and
+%% the second page must continue where the first stopped rather than repeat a
+%% row the map happened to yield first.
+slice_offset_does_not_repeat_a_tied_row_test() ->
+    Orders = [{waiting, desc}, {mode, asc}],
+    #{data := First} = asobi_ops_page:slice(
+        slice_rows(), Orders, #{limit => 2, offset => 0}, fun identity/1
+    ),
+    #{data := Second} = asobi_ops_page:slice(
+        slice_rows(), Orders, #{limit => 2, offset => 2}, fun identity/1
+    ),
+    ?assertEqual([~"arena", ~"coop", ~"duel"], [Mode || #{mode := Mode} <- First ++ Second]).
+
+slice_total_counts_every_row_not_the_page_test() ->
+    #{page := Page} = asobi_ops_page:slice(
+        slice_rows(), [{mode, asc}], #{limit => 1, offset => 0}, fun identity/1
+    ),
+    ?assertEqual(3, maps:get(total, Page)).
+
+slice_offset_past_the_end_is_an_empty_page_test() ->
+    Envelope = asobi_ops_page:slice(
+        slice_rows(), [{mode, asc}], #{limit => 10, offset => 100}, fun identity/1
+    ),
+    ?assertEqual(#{data => [], page => #{limit => 10, offset => 100, total => 3}}, Envelope).
+
+slice_applies_projection_test() ->
+    #{data := [Row | _]} = asobi_ops_page:slice(
+        [#{mode => ~"arena", waiting => 1, player_id => ~"p1"}],
+        [{mode, asc}],
+        #{limit => 10, offset => 0},
+        fun asobi_ops_matchmaker:project/1
+    ),
+    ?assertNot(maps:is_key(player_id, Row)).
+
+%% Sorting a row set that has gained a field must not drop the rows that
+%% predate it.
+slice_treats_a_missing_key_as_undefined_test() ->
+    #{data := Data} = asobi_ops_page:slice(
+        [#{mode => ~"arena"}, #{mode => ~"duel", waiting => 1}],
+        [{waiting, asc}, {mode, asc}],
+        #{limit => 10, offset => 0},
+        fun identity/1
+    ),
+    ?assertEqual(2, length(Data)).
+
+%%--------------------------------------------------------------------
 %% Player query
 %%--------------------------------------------------------------------
 
@@ -223,7 +294,14 @@ ops_routes_are_mounted_behind_the_operator_check_test() ->
             {fun asobi_ops_auth:verify/1, [get, options]},
             route(Groups, ~"/api/v1/ops", Path)
         )
-     || Path <- [~"/players", ~"/matches", ~"/features"]
+     || Path <- [
+            ~"/players",
+            ~"/matches",
+            ~"/features",
+            ~"/leaderboards",
+            ~"/leaderboards/:id/entries",
+            ~"/matchmaker"
+        ]
     ].
 
 no_ops_route_sits_in_the_player_scoped_group_test() ->

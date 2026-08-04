@@ -150,6 +150,69 @@ sort_does_not_duplicate_id_test() ->
     ).
 
 %%--------------------------------------------------------------------
+%% Sort with an explicit tie-breaker
+%%--------------------------------------------------------------------
+
+%% A row set that is not keyed on `id` - a queue keyed on `mode`, a board's
+%% entries keyed on `player_id` - must end on *its* unique column. Appending
+%% `id` there orders by a field the rows do not have, which is the
+%% repeat-a-row bug the tie-breaker exists to prevent.
+sort_ends_on_the_given_tie_break_test() ->
+    ?assertEqual(
+        {ok, [{waiting, desc}, {mode, asc}]},
+        asobi_ops_params:sort(
+            #{~"sort" => ~"waiting", ~"order" => ~"desc"},
+            [{~"waiting", waiting}],
+            [{waiting, desc}],
+            {mode, asc}
+        )
+    ).
+
+sort_default_also_ends_on_the_tie_break_test() ->
+    ?assertEqual(
+        {ok, [{entries, desc}, {board_id, asc}]},
+        asobi_ops_params:sort(#{}, [{~"entries", entries}], [{entries, desc}], {board_id, asc})
+    ).
+
+sort_does_not_duplicate_the_tie_break_test() ->
+    ?assertEqual(
+        {ok, [{score, desc}, {player_id, asc}]},
+        asobi_ops_params:sort(
+            #{},
+            [{~"score", score}],
+            [{score, desc}, {player_id, asc}],
+            {player_id, asc}
+        )
+    ).
+
+sort_with_tie_break_still_rejects_unknown_field_test() ->
+    ?assertEqual(
+        {error, {unknown_sort, ~"properties"}},
+        asobi_ops_params:sort(
+            #{~"sort" => ~"properties"}, [{~"mode", mode}], [{mode, asc}], {mode, asc}
+        )
+    ).
+
+%%--------------------------------------------------------------------
+%% Search terms
+%%--------------------------------------------------------------------
+
+search_absent_test() ->
+    ?assertEqual(none, asobi_ops_params:search(#{}, ~"q")).
+
+search_valueless_test() ->
+    ?assertEqual(none, asobi_ops_params:search(#{~"q" => true}, ~"q")).
+
+search_too_long_test() ->
+    ?assertEqual(none, asobi_ops_params:search(#{~"q" => binary:copy(~"a", 65)}, ~"q")).
+
+%% The in-memory search and the `ilike` search take the same input, so the
+%% length rule is checked once for both.
+search_returns_the_raw_term_test() ->
+    ?assertEqual({ok, ~"kai%to"}, asobi_ops_params:search(#{~"q" => ~"kai%to"}, ~"q")),
+    ?assertEqual({ok, ~"%kai\\%to%"}, asobi_ops_params:like_pattern(#{~"q" => ~"kai%to"}, ~"q")).
+
+%%--------------------------------------------------------------------
 %% Search patterns
 %%--------------------------------------------------------------------
 

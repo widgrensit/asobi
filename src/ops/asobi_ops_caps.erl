@@ -20,7 +20,8 @@ it, so an untagged or mis-mounted route is closed rather than open.
 -export([classes/0, class/2, authorised/2]).
 
 -type class() :: read | player_data | config.
--type route() :: {atom(), [binary()], class()}.
+-type segment() :: binary() | '_'.
+-type route() :: {atom(), [segment()], class()}.
 
 -export_type([class/0, route/0]).
 
@@ -35,7 +36,10 @@ classes() ->
     [
         {get, [~"players"], read},
         {get, [~"matches"], read},
-        {get, [~"features"], read}
+        {get, [~"features"], read},
+        {get, [~"leaderboards"], read},
+        {get, [~"leaderboards", '_', ~"entries"], read},
+        {get, [~"matchmaker"], read}
     ].
 
 -doc """
@@ -62,10 +66,19 @@ authorised(Class, Caps) -> lists:member(Class, Caps).
 lookup(undefined, _Segments) ->
     undefined;
 lookup(Method, Segments) ->
-    case [Class || {M, S, Class} <- classes(), M =:= Method, S =:= Segments] of
+    case [Class || {M, S, Class} <- classes(), M =:= Method, matches(S, Segments)] of
         [Class] -> Class;
         _ -> undefined
     end.
+
+%% `'_'` stands for a bound segment (`:id`). It matches one segment and never
+%% zero or many, so a tag cannot widen to cover a path the router would not
+%% route to the same handler.
+-spec matches([segment()], [binary()]) -> boolean().
+matches([], []) -> true;
+matches(['_' | Pattern], [_ | Segments]) -> matches(Pattern, Segments);
+matches([Same | Pattern], [Same | Segments]) -> matches(Pattern, Segments);
+matches(_, _) -> false.
 
 -spec method(binary()) -> atom().
 method(~"GET") -> get;

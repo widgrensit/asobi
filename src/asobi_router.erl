@@ -210,7 +210,14 @@ ops_routes() ->
         routes => [
             {~"/players", fun asobi_ops_controller:players/1, #{methods => [get, options]}},
             {~"/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
-            {~"/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}}
+            {~"/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}},
+            {~"/leaderboards", fun asobi_ops_controller:leaderboards/1, #{
+                methods => [get, options]
+            }},
+            {~"/leaderboards/:id/entries", fun asobi_ops_controller:leaderboard_entries/1, #{
+                methods => [get, options]
+            }},
+            {~"/matchmaker", fun asobi_ops_controller:matchmaker/1, #{methods => [get, options]}}
         ]
     }.
 
