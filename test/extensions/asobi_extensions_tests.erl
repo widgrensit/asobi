@@ -34,6 +34,7 @@ extensions_test_() ->
         fun unknown_owns_key_refused/0,
         fun resolve_raises_on_an_invalid_set/0,
         fun lua_args_must_match_the_mfa_arity/0,
+        fun an_rpc_handler_must_have_arity_two/0,
         fun a_declared_code_carries_its_status_and_message/0,
         fun an_undeclared_code_is_still_a_server_bug/0,
         fun core_codes_stay_core_only/0,
@@ -262,6 +263,21 @@ lua_args_must_match_the_mfa_arity() ->
             }
         }
     }),
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
+
+%% asobi_rpc applies every target as `Module:Function(Params, Ctx)`, so a
+%% handler declared at any other arity cannot be called. Refusing it here is
+%% what turns a 500 on the first client call into a build failure.
+an_rpc_handler_must_have_arity_two() ->
+    tunable(#{rpc => #{~"tunable.thing" => {tunable_rpc, thing, 3}}}),
+    ?assertMatch(
+        [
+            {bad_manifest, ?TUNABLE, _,
+                {rpc, ~"method must be <prefix>.<method> mapped to {Module, Function, 2}", _}}
+        ],
+        check_problems()
+    ),
+    retune(#{rpc => #{~"tunable.thing" => {tunable_rpc, thing, 2}}}),
     ?assertMatch({ok, [_]}, asobi_extensions:check()).
 
 %% --- Error codes ---

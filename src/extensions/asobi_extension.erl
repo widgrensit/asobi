@@ -48,6 +48,46 @@ game logic calls `game.<ns>.*` from Lua, and clients call
 `asobi.rpc("<ns>.<method>")` over the wire. `rebar3 asobi check` warns about
 it rather than failing, because it is a legal state mid-development.
 
+## The two calling conventions
+
+Both are fixed, and they are written down here because the alternative is a
+second extension inventing a third shape. `m:asobi_rpc` and `m:asobi_lua_api`
+are what call them.
+
+**An RPC handler** is `(Params, Ctx)`, so the arity in `rpc/0` is always 2:
+
+```erlang
+-spec claim(asobi_rpc:params(), asobi_rpc:ctx()) -> asobi_rpc:reply().
+claim(#{~"quest_id" := QuestId}, #{player_id := PlayerId}) ->
+    case asobi_quests:claim(PlayerId, QuestId) of
+        {ok, Reward}          -> {ok, #{reward => Reward}};
+        {error, already_done} -> {error, ~"quests.already_claimed"}
+    end.
+```
+
+`{ok, map()} | {error, Code} | {error, Code, Details}`. The failure half is a
+**code**, never a status: the status and the whole error object are derived
+from it (`asobi_error:status/1`, `asobi_error:object/2`), and a code you
+declared in `codes/0` surfaces as itself rather than as `internal`. `Ctx` is
+`#{player_id, session, method}` and may gain keys; match what you need.
+
+**A Lua binding** takes the declared arguments positionally, already decoded
+to the types `args` names, and returns the same envelope every
+persistence-style `game.*` call returns:
+
+```erlang
+-spec progress(binary(), integer()) -> {ok, term()} | {error, binary()}.
+progress(PlayerId, Amount) ->
+    case asobi_quests:progress(PlayerId, Amount) of
+        {ok, Count} -> {ok, Count};
+        {error, _}  -> {error, ~"progress failed"}
+    end.
+```
+
+Lua reads `result.ok` or `result.error`. A binding that raises, or returns
+anything else, becomes `{ error = "..." }` and one logged line naming the
+function - a game developer must never see a silent nil.
+
 `sup/0` exists so an extension can be a **library** application, with no `mod`
 in its `.app.src`. Applications in a release are permanent by default and a
 permanent application terminating takes the whole runtime with it, so an
@@ -85,6 +125,13 @@ change an experimental contract.
 -doc "An RPC method, `<prefix>.<method>`.".
 -type method() :: binary().
 
+-doc """
+The RPC methods this extension serves.
+
+Every target is applied as `Module:Function(Params, Ctx)`, so the arity is
+always 2. `m:asobi_rpc` refuses any other arity as a defect rather than
+letting it reach a client as a mystery.
+""".
 -type rpc() :: #{method() => mfa()}.
 
 -doc "A `game.<ns>` table, without the `game.` root.".

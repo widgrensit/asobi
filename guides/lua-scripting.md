@@ -469,6 +469,10 @@ Your Lua scripts have access to:
   on hot-reload so changes to required files pick up.
 - **`game.log(level, message[, meta])`**: structured logging - see
   [Logging](#logging) below. `print` is removed; use this instead.
+- **`game.<extension>.*`**: any namespace an installed
+  [extension](extensions.md) declares, e.g. `game.quests.progress(...)`.
+  It reads like a core function and returns the same `{ ok = ... }` /
+  `{ error = "..." }` envelope.
 
 The following are removed from the Lua environment:
 

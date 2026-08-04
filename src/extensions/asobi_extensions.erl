@@ -44,12 +44,15 @@ surfaces with Nova's crash context rather than a legible asobi error.
 -include_lib("kernel/include/logger.hrl").
 
 -export([resolve/0, check/0, validate/1, describe/1, sup_specs/1, error_codes/0]).
+-export([rpc_methods/0, lua_bindings/0]).
 -ifdef(TEST).
 -export([reset/0]).
 -endif.
 
 -define(KEY, {?MODULE, resolved}).
 -define(CODES_KEY, {?MODULE, error_codes}).
+-define(RPC_KEY, {?MODULE, rpc_methods}).
+-define(LUA_KEY, {?MODULE, lua_bindings}).
 
 -doc "One resolved extension. `sup/0` is deliberately absent; see `sup_specs/1`.".
 -type extension() :: #{
@@ -70,7 +73,17 @@ surfaces with Nova's crash context rather than a legible asobi error.
     | {reserved_namespace, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}
     | {undeclared_claim, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}.
 
--export_type([extension/0, problem/0]).
+-doc "One `lua/0` binding with the namespace and function name it was declared under.".
+-type binding() :: #{
+    namespace := asobi_extension:lua_namespace(),
+    function := binary(),
+    mfa := mfa(),
+    args := [asobi_extension:lua_arg()],
+    effects := asobi_lua_surface:effect(),
+    vms := [asobi_lua_surface:vm_kind()]
+}.
+
+-export_type([extension/0, problem/0, binding/0]).
 
 -doc """
 The installed extensions, in dependency order. Memoised.
@@ -85,6 +98,8 @@ resolve() ->
         undefined ->
             Extensions = resolve_now(),
             persistent_term:put(?CODES_KEY, error_code_table(Extensions)),
+            persistent_term:put(?RPC_KEY, rpc_table(Extensions)),
+            persistent_term:put(?LUA_KEY, lua_table(Extensions)),
             persistent_term:put(?KEY, Extensions),
             Extensions;
         Extensions ->
@@ -103,6 +118,33 @@ any request can fail.
 error_codes() ->
     persistent_term:get(?CODES_KEY, #{}).
 
+-doc """
+Every RPC method the installed extensions declare, as `Method => {M, F, A}`.
+
+`m:asobi_rpc` reads this rather than resolving, for the same reason
+`error_codes/0` exists: dispatch is on a request path and must never trigger
+discovery. Before `resolve/0` has run the table is empty, and `resolve/0` runs
+inside Nova's boot, long before a socket exists.
+
+Methods cannot collide across extensions. A method's prefix is a derived `rpc`
+claim, and `validate/1` refuses two extensions claiming one prefix, so
+flattening the declared maps together cannot lose an entry.
+""".
+-spec rpc_methods() -> #{asobi_extension:method() => mfa()}.
+rpc_methods() ->
+    persistent_term:get(?RPC_KEY, #{}).
+
+-doc """
+Every `game.<ns>.<fn>` binding the installed extensions declare, flattened.
+
+`m:asobi_lua_api` filters this by the VM kind it is installing into and
+installs what remains. Flat rather than nested because every consumer wants
+one pass over bindings, not a walk over namespaces.
+""".
+-spec lua_bindings() -> [binding()].
+lua_bindings() ->
+    persistent_term:get(?LUA_KEY, []).
+
 %% The codes term is written before the resolved term, so a concurrent second
 %% caller that sees ?KEY populated also sees the codes it implies.
 error_code_table(Extensions) ->
@@ -111,6 +153,17 @@ error_code_table(Extensions) ->
      || #{codes := Codes} <- Extensions,
         Code := #{status := Status, message := Message} <- Codes
     ]).
+
+rpc_table(Extensions) ->
+    maps:from_list([{Method, Target} || #{rpc := Rpc} <- Extensions, Method := Target <- Rpc]).
+
+lua_table(Extensions) ->
+    [
+        Binding#{namespace => Namespace, function => Function}
+     || #{lua := Lua} <- Extensions,
+        Namespace := Functions <- Lua,
+        Function := Binding <- Functions
+    ].
 
 %% Two concurrent first callers both compute and both write. The computation
 %% is a pure function of the loaded application set, so they write the same
@@ -165,6 +218,8 @@ sup_specs(Module) ->
 reset() ->
     _ = persistent_term:erase(?KEY),
     _ = persistent_term:erase(?CODES_KEY),
+    _ = persistent_term:erase(?RPC_KEY),
+    _ = persistent_term:erase(?LUA_KEY),
     ok.
 -endif.
 
@@ -316,13 +371,17 @@ info_problems(Info) ->
 
 rpc_problems(Rpc) when is_map(Rpc) ->
     [
-        {rpc, ~"method must be <prefix>.<method> mapped to {Module, Function, Arity}", Method}
+        {rpc, ~"method must be <prefix>.<method> mapped to {Module, Function, 2}", Method}
      || Method := Target <- Rpc, not is_rpc_entry(Method, Target)
     ];
 rpc_problems(Rpc) ->
     [{rpc, ~"must be a map", Rpc}].
 
-is_rpc_entry(Method, {M, F, A}) when is_atom(M), is_atom(F), is_integer(A), A >= 0 ->
+%% Arity 2 and nothing else: `m:asobi_rpc` applies every target as
+%% `Module:Function(Params, Ctx)`, so a handler declared at any other arity
+%% cannot be called at all. Refusing it here makes that a build failure rather
+%% than a 500 the first time a client tries the method.
+is_rpc_entry(Method, {M, F, 2}) when is_atom(M), is_atom(F) ->
     is_dotted(Method);
 is_rpc_entry(_Method, _Target) ->
     false.

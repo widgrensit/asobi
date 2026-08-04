@@ -94,10 +94,12 @@ codes() -> #{~"quests.already_claimed" =>
 Only `info/0` is required. The rest default to empty.
 
 - `rpc/0` - core cannot guess that `quests.claim` is `{asobi_quests_rpc, claim, 2}`.
+  The arity is always 2; see [Writing an RPC handler](#writing-an-rpc-handler).
 - `lua/0` - the `game.<ns>.*` surface a Lua game calls. `effects` is not
   decoration: probe VMs re-run the whole script body to ask `phases()` and swap
   every `write` function for an inert stub, so a `write` declared `none` fires
-  twice on every match creation.
+  twice on every match creation. See
+  [Writing a Lua binding](#writing-a-lua-binding).
 - `sup/0` - child specs, if you want asobi supervising them.
 - `owns/0` - the tokens this extension claims. It earns nothing with one
   extension installed; it is the N >= 2 key.
@@ -105,6 +107,117 @@ Only `info/0` is required. The rest default to empty.
   an undeclared code answers 500 and logs as a core defect.
 - `info/0` - the contract version, distinct from the package version, because a
   minor release can change an experimental contract.
+
+## Writing an RPC handler
+
+A client calls a declared method over the WebSocket:
+
+```json
+{"type": "rpc.call", "cid": "c-1",
+ "payload": {"protocol": 1, "method": "quests.claim", "params": {"quest_id": "q-1"}}}
+```
+
+and gets back one of:
+
+```json
+{"type": "rpc.ok",    "cid": "c-1", "payload": {"result": {"reward": 100}}}
+{"type": "rpc.error", "cid": "c-1", "payload": {"error": {"code": "quests.already_claimed", "message": "...", "details": {}}}}
+```
+
+`cid` is required here and validated server-side (1-64 printable ASCII bytes),
+unlike the optional echo the rest of the socket takes: it is the only way a
+client pairs a reply with the call it made. `params` and `result` are always
+objects, so either can grow a field without breaking a shipped client.
+
+The handler is `(Params, Ctx)`, which is why the arity in `rpc/0` is always 2:
+
+```erlang
+-spec claim(asobi_rpc:params(), asobi_rpc:ctx()) -> asobi_rpc:reply().
+claim(#{~"quest_id" := QuestId}, #{player_id := PlayerId}) ->
+    case asobi_quests:claim(PlayerId, QuestId) of
+        {ok, Reward}               -> {ok, #{reward => Reward}};
+        {error, already_claimed}   -> {error, ~"quests.already_claimed"};
+        {error, {no_such, Id}}     -> {error, ~"quests.not_found", #{quest_id => Id}}
+    end.
+```
+
+`{ok, map()} | {error, Code} | {error, Code, Details}`.
+
+The failure half is a **code**, never a status and never an object you build
+yourself. Both are derived from the code - `asobi_error:status/1` and
+`asobi_error:object/2` - so two call sites cannot answer the same code
+differently, and a code you declared in `codes/0` reaches the client as
+itself. It is the same dialect core's own controllers speak
+(`{asobi_error, Code, Details}`), so there is one shape to learn.
+
+`Ctx` is `#{player_id, session, method}`. It may gain keys: match the ones you
+need with `:=` and never match it exhaustively.
+
+Everything else is a defect and answers `internal` with one logged line naming
+the method: a handler that raises, one that returns outside the contract, one
+declared at an arity other than 2, a result that cannot be JSON-encoded, and a
+code you did not declare in `codes/0`. The last one is how the closed code set
+survives this surface - every other call site's code is a binary literal
+checked at build time, and a handler's is a runtime term it could have built
+out of `params`.
+
+**Every declared method is player-scoped.** The caller is the authenticated
+player on that socket; an unauthenticated socket is refused before the method
+is looked up. There is deliberately no per-method capability class:
+`read | player_data | config` (ADR 0007) is an operator vocabulary that a
+player never holds, so tagging a socket method with one would make it deniable
+for every caller the dispatcher has. An operator-only extension method needs
+the ops plane, which is read-only today.
+
+### Readiness
+
+The route table compiles during Nova's boot; migrations run afterwards, from
+`asobi_app:start/2`. An extension endpoint is therefore reachable before its
+tables exist, so the dispatcher fails closed until migrations finish: every
+call answers `not_ready` (503) until then. You get this for free - there is
+nothing to call.
+
+## Writing a Lua binding
+
+A game script calls the namespace as an ordinary part of `game`:
+
+```lua
+function on_player_kill(player_id, state)
+    local result = game.quests.progress(player_id, 1)
+    if result.error then
+        game.log("warning", "quest progress failed: " .. result.error)
+    end
+end
+```
+
+The binding takes the declared arguments positionally, already decoded to the
+types `args` names, and returns the same envelope every persistence-style
+`game.*` call returns:
+
+```erlang
+-spec progress(binary(), integer()) -> {ok, term()} | {error, binary()}.
+progress(PlayerId, Amount) ->
+    case asobi_quests:progress(PlayerId, Amount) of
+        {ok, Count} -> {ok, Count};
+        {error, _}  -> {error, ~"progress failed"}
+    end.
+```
+
+Lua reads `result.ok` or `result.error`. Nothing is ever silently nil: a wrong
+or missing argument is `{ error = "argument 2 must be a integer" }` at the
+script's own call site, and a binding that raises or returns outside the
+contract is an error result plus one logged line naming the function.
+
+`args` types are `binary`, `integer`, `number`, `boolean`, `table` and `any`.
+Lua has a single number type, so a script writing `1` may hand over `1.0`; a
+whole float satisfies `integer`.
+
+`vms` decides which VM kinds see the binding. A `match` binding is absent from
+a world's zone VMs, and its namespace table is not even created there. Bot VMs
+get no `game.*` surface at all today, so `vms => [bot]` installs nothing.
+
+Core calls `{M, F, A}` fully qualified rather than holding a fun, so a code
+upgrade takes effect without waiting for every live match VM to end.
 
 ## Most of it is discovered
 
@@ -244,21 +357,6 @@ The conflict target must be a primary key or covered by a unique index.
 There is no general `query/2`. Every identifier `increment/3` interpolates is
 a field of the schema you pass and every value is a bound parameter, which is
 a promise raw SQL through the seam could not make.
-
-## Readiness
-
-The route table compiles during Nova's boot; migrations run afterwards, from
-`asobi_app:start/2`. An extension endpoint is therefore reachable before its
-tables exist, so core fails closed until migrations finish:
-
-```erlang
-case asobi_readiness:guard() of
-    ok -> dispatch(Method, Params);
-    {error, Object} -> {asobi_error, 503, Object}
-end.
-```
-
-The `not_ready` code is 503, because retrying works.
 
 ## Where the logic goes
 
