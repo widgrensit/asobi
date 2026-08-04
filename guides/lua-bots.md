@@ -97,6 +97,10 @@ only for match and world scripts; inside a bot's `think`, `game` is `nil`.
 There is no `game.economy`, `game.log`, `game.storage` or `game.leaderboard`
 for a bot.
 
+An installed [extension](extensions.md) cannot add one either. `bot` is not a
+VM kind an extension's `lua/0` may name, and declaring it is a build failure
+rather than a binding that quietly installs nothing.
+
 What is available:
 
 - The Lua standard library, minus what the sandbox clears. `io`, `package`,

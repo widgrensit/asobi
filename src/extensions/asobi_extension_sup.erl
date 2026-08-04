@@ -39,9 +39,30 @@ Three deliberate choices:
 
 Per-extension intensity defaults to 5 in 60 and is settable with
 `{extension_restart, #{intensity => I, period => P}}` in asobi's app env.
+
+## Readiness is a precondition, not a race
+
+An extension child that queries at `init/1` needs the pool up and its own
+tables created, and must not crash if they are not - a crash loop here ends
+with the extension dark and staying dark, which is exactly the outcome the
+transient sub-supervisor is for. Rather than making every extension carry a
+retry path, a loaded-marker and a fallback, core makes the precondition hold.
+
+`asobi_app:start/2` runs `kura_migrator:migrate/1` and then
+`asobi_readiness:mark_ready/0` **before** `asobi_sup:start_link/0`, so by the
+time this supervisor initialises the answer is already final and cannot flip
+later. If it is `false`, migrations did not complete: no extension starts and
+one line says which ones. `asobi_readiness:guard/0` is the other half of the
+same marker, and answers 503 on the dispatch path for the same reason.
+
+The extension is dark either way. The difference is that it is dark for a
+stated reason instead of after burning its restart budget, and that `init/1`
+gets to assume a working database.
 """.
 
 -behaviour(supervisor).
+
+-include_lib("kernel/include/logger.hrl").
 
 -export([start_link/0, running/0]).
 -export([init/1]).
@@ -70,7 +91,20 @@ init([]) ->
 children([]) ->
     [];
 children(Extensions) ->
-    [sub_sup(Extension) || Extension <- Extensions] ++ [watch(Extensions)].
+    case asobi_readiness:ready() of
+        true -> [sub_sup(Extension) || Extension <- Extensions] ++ [watch(Extensions)];
+        false -> none_started(Extensions)
+    end.
+
+%% No watch child either: it exists to say which extension went dark, and
+%% saying it twice about the same set is noise.
+none_started(Extensions) ->
+    ?LOG_ERROR(#{
+        msg => ~"extensions_not_started",
+        extensions => [Name || #{name := Name} <- Extensions],
+        detail => ~"migrations did not complete; extensions answer 503, core is unaffected"
+    }),
+    [].
 
 sub_sup(#{name := Name, module := Module}) ->
     #{

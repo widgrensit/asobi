@@ -9,11 +9,16 @@ extension_sup_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         fun no_extensions_means_no_children/0,
         fun each_extension_gets_its_own_sub_supervisor/0,
-        fun a_spent_extension_goes_dark_alone/0
+        fun a_spent_extension_goes_dark_alone/0,
+        fun nothing_starts_when_migrations_did_not_complete/0
     ]}.
 
+%% Extension children start after migrations, so the ready marker is the
+%% precondition every case here but the last one runs under.
 setup() ->
     asobi_extensions:reset(),
+    asobi_readiness:reset(),
+    ok = asobi_readiness:mark_ready(),
     ok.
 
 cleanup(_) ->
@@ -21,6 +26,7 @@ cleanup(_) ->
     _ = [asobi_fixture_app:uninstall(A) || A <- [?QUESTS, ?CLANS]],
     application:unset_env(asobi, extension_restart),
     _ = logger:remove_handler(asobi_fixture_log),
+    asobi_readiness:reset(),
     asobi_extensions:reset(),
     ok.
 
@@ -64,6 +70,24 @@ a_spent_extension_goes_dark_alone() ->
     ?assertEqual([clans], asobi_extension_sup:running()),
     ?assert(is_pid(whereis(asobi_fixture_clans_worker))).
 
+%% asobi#369. An extension child that queries at init/1 must not have to carry a
+%% retry path around a database that is not there. Migrations run to completion
+%% before asobi_sup starts, so if the marker is false they failed: start nothing,
+%% say which extensions did not start, and leave a crash loop unwritten. The
+%% answer cannot flip afterwards - mark_ready/0 is called once, before this
+%% supervisor exists - so there is nothing to retry.
+nothing_starts_when_migrations_did_not_complete() ->
+    install_both(),
+    asobi_readiness:reset(),
+    ok = logger:add_handler(asobi_fixture_log, asobi_fixture_log_handler, #{
+        level => all, config => #{pid => self()}
+    }),
+    {ok, Pid} = asobi_extension_sup:start_link(),
+    ?assertEqual([], supervisor:which_children(Pid)),
+    ?assertEqual([], asobi_extension_sup:running()),
+    ?assertEqual(undefined, whereis(asobi_fixture_quests_worker)),
+    ?assertEqual([quests, clans], await_not_started_log()).
+
 %% --- Helpers ---
 
 install_both() ->
@@ -82,6 +106,15 @@ await_down_log() ->
             [Name];
         {log_event, _Other} ->
             await_down_log()
+    after 5000 -> []
+    end.
+
+await_not_started_log() ->
+    receive
+        {log_event, #{msg := {report, #{msg := ~"extensions_not_started", extensions := Names}}}} ->
+            Names;
+        {log_event, _Other} ->
+            await_not_started_log()
     after 5000 -> []
     end.
 

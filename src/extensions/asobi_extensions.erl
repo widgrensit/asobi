@@ -421,7 +421,7 @@ is_lua_binding(Name, #{mfa := {M, F, A}, args := Args, effects := Effects, vms :
     length(Args) =:= A andalso
         lists:member(Effects, asobi_lua_surface:effects()) andalso
         Vms =/= [] andalso
-        lists:all(fun(Vm) -> lists:member(Vm, asobi_lua_surface:vm_kinds()) end, Vms);
+        lists:all(fun(Vm) -> lists:member(Vm, asobi_lua_surface:extension_vm_kinds()) end, Vms);
 is_lua_binding(_Name, _Binding) ->
     false.
 
@@ -429,6 +429,14 @@ binding_problem(#{mfa := {_, _, A}, args := Args}) when
     is_integer(A), is_list(Args), length(Args) =/= A
 ->
     ~"args must declare one type per mfa argument";
+%% `bot` is a VM kind core has and not one an extension may bind into: a bot
+%% script is loaded with no `game` table at all, so the binding would install
+%% nothing. See `asobi_lua_surface:extension_vm_kinds/0`.
+binding_problem(#{vms := Vms}) when is_list(Vms) ->
+    case lists:member(bot, Vms) of
+        true -> ~"vms cannot include bot: a bot VM has no game.* table to install into";
+        false -> ~"binding must be #{mfa, args, effects, vms}"
+    end;
 binding_problem(_Binding) ->
     ~"binding must be #{mfa, args, effects, vms}".
 
@@ -488,11 +496,29 @@ sup_problems(Specs) ->
 Namespace disjointness across the declared set, and against core's reserved
 names.
 
-The claim set per namespace is `owns/0` **plus** what the manifest already
-implies: the prefixes in `rpc/0`, the domains in `codes/0` and the namespaces
-in `lua/0`. So two extensions installing the same `game.quests` collide even
-before either has bothered with `owns/0`, which earns nothing until there is a
-second extension.
+The claim set per namespace is `owns/0` **plus** what the extension's own code
+already implies, and every kind derives:
+
+| Kind | Derived from |
+|---|---|
+| `rpc` | the prefixes in `rpc/0` and the domains in `codes/0` |
+| `lua` | the namespaces in `lua/0` |
+| `tables` | `table/0` on the extension's `kura_schema` modules |
+| `queues` | `queue/0` on the extension's `shigoto_worker` modules |
+
+So two extensions installing the same `game.quests`, or the same job queue,
+collide before either has bothered with `owns/0`.
+
+The last two derive through `asobi_extension_reserved`, the same rule that
+finds core's own tables and queues, so a name core reserves and a name an
+extension claims can never be found two different ways.
+
+That leaves `owns/0` doing one job, and it is worth stating because it is no
+longer the source of anything: it is the **closed-set assertion** over what was
+derived. Naming a kind at all says "this is the complete set", and anything
+derived outside it is `undeclared_claim` - which is what turns a typo in
+`owns.queues` from an invisible no-op into a build failure. Nothing in
+`owns/0` is load-bearing for collision detection any more.
 """.
 -spec validate([extension()]) -> ok | {error, [problem(), ...]}.
 validate([]) ->
@@ -553,8 +579,13 @@ derived(#{rpc := Rpc, codes := Codes}, rpc) ->
     );
 derived(#{lua := Lua}, lua) ->
     lists:usort(maps:keys(Lua));
-derived(_Extension, _Kind) ->
-    [].
+%% A shigoto queue is only ever what the worker's own `queue/0` returns -
+%% nothing reads `owns.queues` at runtime - so deriving it here is what makes
+%% the claim enforceable at all. Same for a table and its schema.
+derived(#{app := App}, tables) ->
+    asobi_extension_reserved:schema_tables(modules(App));
+derived(#{app := App}, queues) ->
+    asobi_extension_reserved:worker_queues(modules(App)).
 
 prefix(Method) when is_binary(Method) ->
     case binary:split(Method, ~".") of

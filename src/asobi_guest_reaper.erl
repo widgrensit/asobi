@@ -183,6 +183,12 @@ reap_one(Identity) ->
 %% Delete the player and its FK children (which are ON DELETE NO ACTION, so the
 %% player row can't go first) atomically, children before the player. Only count
 %% a genuine deletion; a rolled-back/failed sweep reports skipped, not reaped.
+%%
+%% Installed extensions erase first, in the same transaction: an extension row
+%% that does not cascade holds the player row down exactly as core's own
+%% children do, so without this every such extension makes guests unreapable.
+%% Extensions before core so an erase path can still read the player's core
+%% rows.
 -spec delete_guest_cascade(binary()) -> reaped | skipped.
 delete_guest_cascade(PlayerId) ->
     Fun = fun() ->
@@ -197,7 +203,9 @@ delete_guest_cascade(PlayerId) ->
                 %% Assert each delete: a bare `{error,_}` return (not a raise)
                 %% would otherwise let pgo commit a partial cascade (children
                 %% gone, player left). Matching {ok,_} turns that into a badmatch
-                %% that raises, rolling the whole transaction back.
+                %% that raises, rolling the whole transaction back. Same reason
+                %% the extension erase path is asserted rather than inspected.
+                ok = asobi_extension_erase:run(PlayerId),
                 {ok, _} = asobi_repo:delete_all(by_player(asobi_player_stats, PlayerId)),
                 %% player_tokens keys players by `user_id`, not `player_id`.
                 {ok, _} = asobi_repo:delete_all(by_user(asobi_player_token, PlayerId)),

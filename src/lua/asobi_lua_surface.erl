@@ -15,12 +15,13 @@ Three things live here, and only here:
   means it mutates durable state, fans an event out to players, or moves
   a resource; `none` means it only reads or computes. Probe VMs
   (`asobi_lua_api:install/2`) suppress every `write`.
-- `t:vm_kind/0` - the kinds of VM a Lua chunk runs in.
+- `t:vm_kind/0` - the kinds of VM a Lua chunk runs in, and
+  `extension_vm_kinds/0`, the subset an extension may bind into.
 """.
 
 -export([reserved_namespaces/0, is_reserved/1, name/1]).
 -export([effects/0]).
--export([vm_kinds/0]).
+-export([vm_kinds/0, extension_vm_kinds/0]).
 
 -export_type([namespace/0, effect/0, vm_kind/0]).
 
@@ -61,3 +62,26 @@ effects() ->
 -spec vm_kinds() -> [vm_kind(), ...].
 vm_kinds() ->
     [match, world, zone, bot].
+
+-doc """
+The VM kinds an extension's `lua/0` binding may name.
+
+`bot` is absent, and its absence is enforced rather than documented. A bot
+script is loaded by `asobi_lua_loader:new/1`, whose PreInstall is the identity,
+so it never reaches `asobi_lua_api:install/2` and has no `game` table at all -
+see `guides/lua-bots.md`. A binding declaring `bot` would therefore install
+nothing, and a declaration that silently does nothing is the failure mode this
+list exists to prevent: `asobi_extensions` refuses it at
+`rebar3 asobi check`.
+
+Making it work instead was the alternative, and it was rejected. A bot decides
+from the state the match broadcasts and nothing more, so `game.<ns>` in a bot
+VM would be one extension namespace floating in a `game` table with no
+`game.log`, no `game.economy` and no `game.storage` under it. A bot also has no
+`players.id` - `bot_Spark` is not a player row - so the one argument every
+extension binding takes cannot be supplied. The documented route stands: put
+the value in the state the match broadcasts.
+""".
+-spec extension_vm_kinds() -> [vm_kind(), ...].
+extension_vm_kinds() ->
+    [match, world, zone].

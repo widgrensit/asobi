@@ -62,7 +62,7 @@ cannot be triggered by a player action from the client.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
 
@@ -77,7 +77,7 @@ lua()  -> #{~"quests" =>
                 ~"status"   => #{mfa     => {asobi_quests_lua, status, 1},
                                  args    => [binary],
                                  effects => none,
-                                 vms     => [match, world, bot]}}}.
+                                 vms     => [match, world, zone]}}}.
 
 sup()  -> [#{id    => asobi_quests_tracker,
              start => {asobi_quests_tracker, start_link, []}}].
@@ -89,22 +89,28 @@ owns() -> #{tables => [~"quests", ~"quest_progress"],
 
 codes() -> #{~"quests.already_claimed" =>
                #{status => 409, message => ~"This quest was already claimed."}}.
+
+erase_player(PlayerId) ->
+    {ok, _} = asobi_repo:delete_all(by_player(asobi_quest_progress, PlayerId)),
+    ok.
 ```
 
-Only `info/0` is required. The rest default to empty.
+Only `info/0` is required. The rest default to nothing.
 
 - `rpc/0` - core cannot guess that `quests.claim` is `{asobi_quests_rpc, claim, 2}`.
   The arity is always 2; see [Writing an RPC handler](#writing-an-rpc-handler).
 - `lua/0` - the `game.<ns>.*` surface a Lua game calls. `effects` is not
   decoration: probe VMs re-run the whole script body to ask `phases()` and swap
   every `write` function for an inert stub, so a `write` declared `none` fires
-  twice on every match creation. See
-  [Writing a Lua binding](#writing-a-lua-binding).
+  twice on every match creation. `vms` may name `match`, `world` or `zone`;
+  `bot` is refused. See [Writing a Lua binding](#writing-a-lua-binding).
 - `sup/0` - child specs, if you want asobi supervising them.
-- `owns/0` - the tokens this extension claims. It earns nothing with one
-  extension installed; it is the N >= 2 key.
+- `owns/0` - the closed statement of what this extension claims. Every kind is
+  derived from your own code as well, so `owns/0` is an assertion over the
+  derivation rather than its source.
 - `codes/0` - the error codes this extension mints. Core's set is closed, so
   an undeclared code answers 500 and logs as a core defect.
+- `erase_player/1` - how to erase one player, when your rows do not cascade.
 - `info/0` - the contract version, distinct from the package version, because a
   minor release can change an experimental contract.
 
@@ -279,15 +285,48 @@ Per-extension restart limits default to 5 in 60 and are settable:
 Lua namespace or job queue is a build failure naming both claimants, and so is
 claiming a name core reserves.
 
-The claim set is `owns/0` plus what the manifest already implies: the prefixes
-in `rpc/0` and the namespaces in `lua/0`. So a collision is caught even before
-either extension has bothered with `owns/0`.
+The claim set is `owns/0` plus what your own code already implies, and every
+kind derives:
 
-Core's reserved names are derived from core itself: Lua namespaces from
+| Kind | Derived from |
+|---|---|
+| `rpc` | the prefixes in `rpc/0` and the domains in `codes/0` |
+| `lua` | the namespaces in `lua/0` |
+| `tables` | `table/0` on your `kura_schema` modules |
+| `queues` | `queue/0` on your `shigoto_worker` modules |
+
+So a collision is caught even before either extension has bothered with
+`owns/0`, and a queue you actually run is claimed whether or not you remembered
+to say so.
+
+That leaves `owns/0` one job: it is the **closed-set assertion**. Naming a kind
+at all says "this is the whole set", so anything derived outside it is a build
+failure. That is what catches the typo - a worker on `quests`, an `owns/0`
+saying `quest` - which used to be invisible, because nothing read `owns.queues`
+at runtime.
+
+Core's reserved names are derived from core itself, by the same two rules: Lua
+namespaces from
 `asobi_lua_surface`, tables from core's schemas, queues from core's shigoto
 workers, and RPC prefixes from the domains of `asobi_error:core_codes/0` - an
 RPC prefix and an error-code domain are the same token, so owning `storage`
 would mint codes inside core's closed code set.
+
+## Bots are not a target
+
+`vms` may name `match`, `world` or `zone`. `bot` is **refused at
+`rebar3 asobi check`**, not ignored.
+
+A bot script is loaded without any `game` table at all - see
+[Bots](lua-bots.md) - so a binding declaring `bot` would install nothing, and a
+declaration that silently does nothing is a defect. Making it work was the
+alternative and was rejected: `game.quests` in a bot VM would be one extension
+namespace floating in a `game` table with no `game.log`, `game.economy` or
+`game.storage` under it, and a bot has no `players.id` - `bot_Spark` is not a
+player row - so the argument every extension binding takes cannot be supplied.
+
+A bot decides from the state the match broadcasts and nothing more. Put what it
+needs in that state.
 
 ## Error codes
 
@@ -333,8 +372,62 @@ Rules:
 
 Your migrations run from your own application: kura discovers them through
 `asobi_repo:migration_apps/0`, inside core's transaction and under one
-advisory lock. Declare `on_delete = cascade` on the `#kura_assoc` into
-`players.id` and the generated migration carries it.
+advisory lock.
+
+## Deleting a player
+
+Cascade or declare an erase path - and an undeclared `on_delete` lowers to
+`no_action`, so the foreign key `rebar3 kura compile` generates refuses the
+delete until you have picked one. The first row your extension writes for a
+player makes that player undeletable otherwise.
+
+Cascade is one line on the association:
+
+```erlang
+#kura_assoc{
+    name = player, type = belongs_to, schema = asobi_player,
+    foreign_key = player_id, on_delete = cascade
+}
+```
+
+`rebar3 kura compile` carries that into the generated migration as
+`ON DELETE CASCADE`, and there is nothing else to write. The symptom of
+declaring neither is guests quietly ceasing to be reaped.
+
+Cascade is right for progress rows and wrong for a financial or audit row -
+the case that rejected a blanket cascade in the first place. Implement
+`erase_player/1` instead:
+
+```erlang
+-spec erase_player(binary()) -> ok | {error, term()}.
+erase_player(PlayerId) ->
+    {ok, _} = asobi_repo:delete_all(by_player(asobi_quest_progress, PlayerId)),
+    ok.
+```
+
+Core calls it inside its own transaction, before deleting any of its own rows,
+once per installed extension in dependency order. Do not open a transaction of
+your own. Extensions run before core so an erase path can still read the
+player's core rows.
+
+**Erasure is atomic across every extension.** Returning `{error, Reason}` or
+raising aborts the whole deletion - no extension's rows go, core's rows stay,
+the player survives, and one logged line names the extension and the reason.
+Best-effort was rejected: an erasure that half-succeeds and reports success
+leaves an account gone with some extension's rows orphaned and nothing durable
+saying which, which is a worse answer to a data-subject request than one that
+fails loudly and can be retried.
+
+The corollary: an erase path doing work the transaction cannot undo - deleting
+a remote object, calling a third party - must be idempotent, because a later
+extension's failure rolls back everything around it and the deletion is retried.
+
+Omit `erase_player/1` when your rows cascade: it is the alternative to that
+declaration, not a second copy of it. Cascade lives on the column because the
+database is what enforces it, and a manifest key saying the same thing could
+disagree with the schema that actually decides - which is why this is a
+callback and not an `owns/0` key. Delete the rows or null the player reference
+and keep the ledger; core only needs the player row to be able to go.
 
 ## Counters
 
@@ -357,6 +450,36 @@ The conflict target must be a primary key or covered by a unique index.
 There is no general `query/2`. Every identifier `increment/3` interpolates is
 a field of the schema you pass and every value is a bound parameter, which is
 a promise raw SQL through the seam could not make.
+
+## Readiness
+
+The route table compiles during Nova's boot; migrations run afterwards, from
+`asobi_app:start/2`. An extension endpoint is therefore reachable before its
+tables exist, so core fails closed until migrations finish:
+
+```erlang
+case asobi_readiness:guard() of
+    ok -> dispatch(Method, Params);
+    {error, Object} -> {asobi_error, 503, Object}
+end.
+```
+
+The `not_ready` code is 503, because retrying works.
+
+Your `sup/0` children are on the other side of that seam and get two guarantees,
+so none of them needs a retry path:
+
+- **They start in the order `sup/0` returns them**, and after the children of
+  every extension your application depends on. That is OTP's own child order and
+  `asobi_extensions:resolve/0`'s dependency order; nothing sorts either.
+- **`init/1` may query.** Extension children start after migrations have run to
+  completion, so the pool is up and every table - core's and yours - exists.
+
+If migrations did not complete, `asobi_extension_sup` starts **no extension at
+all** and logs which ones it did not start. The alternative is every extension
+crash-looping into its own restart budget and going dark anyway, with an OTP
+crash report as the only explanation. The marker is written once, before this
+supervisor exists, so it cannot flip later and there is nothing to retry.
 
 ## Where the logic goes
 

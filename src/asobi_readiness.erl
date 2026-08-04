@@ -27,6 +27,13 @@ readiness contract rather than inventing one.
 
 `persistent_term` rather than a process: the read is on the dispatch path,
 it happens once per call, and the value is written exactly once at boot.
+
+## The other reader
+
+`asobi_extension_sup` reads `ready/0` at `init/1`. Migrations run before
+`asobi_sup:start_link/0`, so the answer is already final by then, which is what
+lets an extension's own `sup/0` children query at `init/1` without a retry
+path: either the database is there, or no extension started at all.
 """.
 
 -export([guard/0, ready/0, mark_ready/0]).

@@ -2,7 +2,7 @@
 -moduledoc "A complete extension manifest, shaped exactly like the design's worked example.".
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1]).
 
 -spec info() -> asobi_extension:info().
 info() ->
@@ -29,7 +29,7 @@ lua() ->
                 mfa => {asobi_fixture_quests_lua, status, 1},
                 args => [binary],
                 effects => none,
-                vms => [match, world, bot]
+                vms => [match, world]
             }
         }
     }.
@@ -60,3 +60,7 @@ owns() ->
         lua => [~"quests"],
         queues => [~"quests"]
     }.
+
+-spec erase_player(binary()) -> ok | {error, term()}.
+erase_player(PlayerId) ->
+    asobi_fixture_erase:run(quests, PlayerId).

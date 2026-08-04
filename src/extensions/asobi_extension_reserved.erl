@@ -26,9 +26,15 @@ cannot drift:
 Deriving from modules costs one `code:ensure_loaded/1` sweep over core's
 module list. `asobi_extensions` only asks for it when at least one extension
 is installed, so a node with none pays nothing.
+
+`schema_tables/1` and `worker_queues/1` are the two derivation rules
+themselves, exported over an arbitrary module list. `asobi_extensions` runs
+them over an **extension's** modules to derive that extension's table and queue
+claims, so core's names and an extension's names are found by the same rule
+rather than by two that can disagree.
 """.
 
--export([namespaces/0, kinds/0]).
+-export([namespaces/0, kinds/0, schema_tables/1, worker_queues/1]).
 
 -type kind() :: tables | rpc | lua | queues.
 -export_type([kind/0]).
@@ -44,11 +50,21 @@ namespaces() ->
     Modules = core_modules(),
     Lua = lua(),
     #{
-        tables => exported_values(Modules, table, {fields, 0}),
-        queues => exported_values(Modules, queue, {perform, 1}),
+        tables => schema_tables(Modules),
+        queues => worker_queues(Modules),
         lua => Lua,
         rpc => lists:usort(error_domains() ++ Lua)
     }.
+
+-doc "Every table declared by a `kura_schema` module in this list.".
+-spec schema_tables([module()]) -> [asobi_extension:token()].
+schema_tables(Modules) ->
+    exported_values(Modules, table, {fields, 0}).
+
+-doc "Every queue declared by a `shigoto_worker` module in this list.".
+-spec worker_queues([module()]) -> [asobi_extension:token()].
+worker_queues(Modules) ->
+    exported_values(Modules, queue, {perform, 1}).
 
 lua() ->
     lists:usort([

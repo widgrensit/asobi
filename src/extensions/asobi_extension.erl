@@ -16,7 +16,7 @@ behaviour covers only what core cannot infer.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
 
@@ -36,12 +36,16 @@ sup()  -> [#{id => asobi_quests_tracker,
 
 owns() -> #{tables => [~"quests"], rpc => [~"quests"],
             lua => [~"quests"], queues => [~"quests"]}.
+
+erase_player(PlayerId) ->
+    {ok, _} = asobi_repo:delete_all(by_player(asobi_quest_progress, PlayerId)),
+    ok.
 ```
 
-Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0`, `owns/0` and `codes/0`
-default to empty, because several are frequently empty: an extension with no
-processes has no `sup/0`, and `owns/0` earns nothing until a second extension
-exists to collide with.
+Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0`, `owns/0`, `codes/0` and
+`erase_player/1` default to nothing, because several are frequently empty: an
+extension with no processes has no `sup/0`, and one whose rows cascade needs no
+`erase_player/1`.
 
 An extension declaring neither `rpc/0` nor `lua/0` is reachable by nobody:
 game logic calls `game.<ns>.*` from Lua, and clients call
@@ -92,6 +96,20 @@ function - a game developer must never see a silent nil.
 in its `.app.src`. Applications in a release are permanent by default and a
 permanent application terminating takes the whole runtime with it, so an
 extension supervising itself can kill the node. See `m:asobi_extension_sup`.
+
+Two guarantees a `sup/0` child may rely on, so no extension has to reinvent a
+retry path around them:
+
+- **Children start in the order `sup/0` returns them**, and one extension's
+  children start after every extension its application depends on. That is
+  OTP's own child order and `asobi_extensions:resolve/0`'s dependency order;
+  nothing sorts either.
+- **`init/1` may query.** Extension children start after
+  `kura_migrator:migrate/1` has run to completion, so the pool is up and every
+  table - core's and the extension's own - exists. If migrations did not
+  complete, `asobi_extension_sup` starts no extension at all rather than
+  letting each one crash-loop into its restart budget and go dark with an OTP
+  crash report as the only explanation.
 
 This contract is experimental and deliberately unfrozen. The wire freezes,
 because SDK users vendor by copying source; this module freezes when a real
@@ -149,6 +167,10 @@ creation.
 
 `mfa` is called fully qualified rather than stored as a fun, so a code upgrade
 takes effect without waiting for every live match VM to end.
+
+`vms` may name any of `asobi_lua_surface:extension_vm_kinds/0`. `bot` is not
+one of them and is refused rather than ignored: a bot script has no `game`
+table at all, so the binding would install nothing.
 """.
 -type lua_function() :: #{
     mfa := mfa(),
@@ -186,6 +208,63 @@ per deployment and nothing reachable from a request can widen it.
 """.
 -type codes() :: #{asobi_error:code() => code_spec()}.
 
+-doc """
+Erase everything this extension holds about one player.
+
+An extension foreign-keying into `players.id` must **cascade or declare an
+erase path**, and this is the erase path. Declare neither and installing the
+extension makes players undeletable: an undeclared `on_delete` lowers to
+`no_action`, so the first extension row for a player turns core's delete into a
+constraint violation.
+
+Cascade is right for progress rows and wrong for a financial or audit row - the
+case that rejected a blanket cascade in the first place. An extension holding
+one exports this instead, and answers erasure in whatever way its own law
+requires: delete the rows, or null the player reference and keep the ledger.
+Core does not care which, only that the player row can then go.
+
+Not an `owns/0` key. `owns/0` is a set of names, validated at build time and
+read by nothing at runtime; it reserves, it does not execute. Cascade is
+already declared where the database can enforce it - `on_delete = cascade` on
+the `#kura_assoc`, carried into the generated migration - and a second
+declaration of the same fact in the manifest could disagree with the schema
+that actually decides. So the two alternatives stay in the two places that
+enforce them: cascade on the column, erase here.
+
+## When it runs, and what a failure does
+
+Core calls it **inside its own transaction**, before deleting any of its own
+rows, once per installed extension in dependency order. Do not open a
+transaction of your own.
+
+Extensions before core, because an erase path may want to read what core still
+has (a player's stats, its identities) while writing its own summary row. Order
+*between* extensions is not load-bearing and is not promised beyond dependency
+order: extensions never foreign-key each other, only core.
+
+**Erasure is atomic across every extension, not best-effort with a report.**
+Returning `{error, Reason}` or raising aborts the whole deletion: no extension's
+rows go, core's rows stay, the player survives, and one logged line names the
+extension and the reason. The alternative was considered and rejected. A
+best-effort erasure ends with the account gone and some extension's rows
+orphaned, or the reverse, and nothing durable saying which - a half-finished
+erasure that reports success is a worse answer to a data-subject request than
+one that fails loudly and can be retried. Every extension shares `asobi_repo`,
+so the single transaction that makes this true costs nothing to arrange.
+
+The corollary is that an erase path doing work the transaction cannot undo -
+deleting a remote object, calling a third party - must be idempotent, because a
+later extension's failure will roll back everything around it and the whole
+deletion will be retried.
+
+Core deletes a player in one place today, `asobi_guest_reaper`, so that is
+where this runs. (`asobi_guest_controller` also deletes, but only a player row
+it inserted microseconds earlier and lost a race on, which no extension has
+been told about yet.) `m:asobi_extension_erase` is the seam, and a future
+operator-facing erasure calls the same function.
+""".
+-callback erase_player(PlayerId :: binary()) -> ok | {error, term()}.
+
 -callback info() -> info().
 -callback rpc() -> rpc().
 -callback lua() -> lua().
@@ -193,4 +272,4 @@ per deployment and nothing reachable from a request can widen it.
 -callback owns() -> owns().
 -callback codes() -> codes().
 
--optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0]).
+-optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1]).

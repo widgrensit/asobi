@@ -10,11 +10,15 @@ exactly how it works for a real dependency.
 
 -export([install/3, uninstall/1]).
 
--spec install(atom(), module() | none, [atom()]) -> ok | {error, term()}.
+%% A list, not just the manifest module, because table and queue claims are
+%% derived from the application's own schema and worker modules - the same rule
+%% core's reserved set uses - so a fixture needs to be able to carry them.
+-spec install(atom(), module() | [module()] | none, [atom()]) -> ok | {error, term()}.
 install(App, Module, ExtraDeps) ->
     Modules =
         case Module of
             none -> [];
+            List when is_list(List) -> List;
             _ -> [Module]
         end,
     application:load(

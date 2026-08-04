@@ -27,6 +27,10 @@ extensions_test_() ->
         fun reserved_core_queue_refused/0,
         fun reserved_rpc_prefix_refused/0,
         fun claiming_outside_the_owned_set_refused/0,
+        fun a_queue_is_derived_from_the_worker_that_declares_it/0,
+        fun a_table_is_derived_from_the_schema_that_declares_it/0,
+        fun a_typo_in_owns_queues_is_caught/0,
+        fun a_derived_queue_matches_its_own_owns/0,
         fun duplicate_extension_names_refused/0,
         fun malformed_info_refused/0,
         fun a_raising_manifest_is_reported_not_propagated/0,
@@ -35,6 +39,7 @@ extensions_test_() ->
         fun resolve_raises_on_an_invalid_set/0,
         fun lua_args_must_match_the_mfa_arity/0,
         fun an_rpc_handler_must_have_arity_two/0,
+        fun a_bot_binding_is_refused_not_ignored/0,
         fun a_declared_code_carries_its_status_and_message/0,
         fun an_undeclared_code_is_still_a_server_bug/0,
         fun core_codes_stay_core_only/0,
@@ -185,6 +190,47 @@ claiming_outside_the_owned_set_refused() ->
     }),
     ?assert(lists:member({undeclared_claim, rpc, ~"gold", ?TUNABLE}, check_problems())).
 
+%% asobi#369. `rpc` and `lua` claims are derived from the manifest, so a
+%% collision is caught even with no `owns/0` at all. A queue was only ever what
+%% `owns/0` said, which made the claim unenforceable: nothing read it, so a typo
+%% was invisible. It now derives from `queue/0` + `perform/1` on the extension's
+%% own modules - core's own rule, applied to an extension's module list. The
+%% minimal fixture declares no `owns/0` whatsoever, so only the derivation can
+%% produce this collision.
+a_queue_is_derived_from_the_worker_that_declares_it() ->
+    ok = asobi_fixture_app:install(
+        ?MINIMAL, [asobi_fixture_minimal_extension, asobi_fixture_quests_job], []
+    ),
+    tunable(#{owns => #{queues => [~"quests"]}}),
+    ?assert(
+        lists:member({namespace_conflict, queues, ~"quests", ?MINIMAL, ?TUNABLE}, check_problems())
+    ).
+
+a_table_is_derived_from_the_schema_that_declares_it() ->
+    ok = asobi_fixture_app:install(
+        ?MINIMAL, [asobi_fixture_minimal_extension, asobi_fixture_quests_schema], []
+    ),
+    tunable(#{owns => #{tables => [~"quest_progress"]}}),
+    ?assert(
+        lists:member(
+            {namespace_conflict, tables, ~"quest_progress", ?MINIMAL, ?TUNABLE}, check_problems()
+        )
+    ).
+
+%% The typo that used to be invisible. The worker says `quests`; `owns/0` says
+%% `quest`. Deriving the real queue is what turns that into a build failure -
+%% `owns/0` is now the closed-set assertion over what was derived, not its
+%% source.
+a_typo_in_owns_queues_is_caught() ->
+    tunable(#{owns => #{queues => [~"quest"]}}, [asobi_fixture_quests_job]),
+    ?assert(lists:member({undeclared_claim, queues, ~"quests", ?TUNABLE}, check_problems())).
+
+%% An extension does not collide with itself: the queue it derives is the queue
+%% it owns.
+a_derived_queue_matches_its_own_owns() ->
+    tunable(#{owns => #{queues => [~"quests"]}}, [asobi_fixture_quests_job]),
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
+
 duplicate_extension_names_refused() ->
     install(?QUESTS),
     tunable(#{info => #{name => quests, extension_version => 1}}),
@@ -280,6 +326,25 @@ an_rpc_handler_must_have_arity_two() ->
     retune(#{rpc => #{~"tunable.thing" => {tunable_rpc, thing, 2}}}),
     ?assertMatch({ok, [_]}, asobi_extensions:check()).
 
+%% asobi#369. A bot script is loaded through asobi_lua_loader:new/1, whose
+%% PreInstall is the identity, so it never reaches asobi_lua_api:install/2 and
+%% has no `game` table at all - `vms => [bot]` used to be a declaration that
+%% silently installed nothing. Refused at build time instead.
+a_bot_binding_is_refused_not_ignored() ->
+    tunable(#{lua => #{~"tunable" => #{~"status" => binding([match, bot])}}}),
+    ?assertMatch(
+        [
+            {bad_manifest, ?TUNABLE, _,
+                {lua, ~"vms cannot include bot: a bot VM has no game.* table to install into", _}}
+        ],
+        check_problems()
+    ),
+    retune(#{lua => #{~"tunable" => #{~"status" => binding([match, world, zone])}}}),
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
+
+binding(Vms) ->
+    #{mfa => {tunable_lua, status, 1}, args => [binary], effects => none, vms => Vms}.
+
 %% --- Error codes ---
 
 %% asobi#360. An extension reporting an ordinary domain condition must not
@@ -353,14 +418,25 @@ a_malformed_code_spec_refused() ->
 
 %% --- Helpers ---
 
+%% The schema and the worker are part of the fixture because table and queue
+%% claims are derived from them, exactly as a real extension's are.
 install(?QUESTS) ->
-    ok = asobi_fixture_app:install(?QUESTS, asobi_fixture_quests_extension, []);
+    ok = asobi_fixture_app:install(
+        ?QUESTS,
+        [asobi_fixture_quests_extension, asobi_fixture_quests_schema, asobi_fixture_quests_job],
+        []
+    );
 install(?MINIMAL) ->
     ok = asobi_fixture_app:install(?MINIMAL, asobi_fixture_minimal_extension, []).
 
 tunable(Manifest) ->
+    tunable(Manifest, []).
+
+tunable(Manifest, ExtraModules) ->
     ok = asobi_fixture_tunable_extension:set(Manifest),
-    ok = asobi_fixture_app:install(?TUNABLE, asobi_fixture_tunable_extension, []).
+    ok = asobi_fixture_app:install(
+        ?TUNABLE, [asobi_fixture_tunable_extension | ExtraModules], []
+    ).
 
 %% The application is already loaded; only the manifest changes.
 retune(Manifest) ->
