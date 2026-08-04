@@ -9,3 +9,4 @@ log/
 rebar3.crashdump
 erl_crash.dump
 doc/
+*.coverdata
