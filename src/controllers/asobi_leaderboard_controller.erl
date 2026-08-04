@@ -21,13 +21,14 @@ around(#{bindings := #{~"id" := BoardId, ~"player_id" := PlayerId}, qs := Qs} = 
     Entries = asobi_leaderboard_server:around(BoardId, PlayerId, Range),
     {json, #{entries => format_entries(BoardId, Entries)}}.
 
--spec submit(cowboy_req:req()) -> {json, integer(), map(), map()}.
+-spec submit(cowboy_req:req()) ->
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 submit(
     #{bindings := #{~"id" := BoardId}, json := Params, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(BoardId), is_binary(PlayerId), is_map(Params) ->
     case client_submit_allowed(BoardId) of
         false ->
-            {json, 403, #{}, #{error => ~"client_submit_disabled"}};
+            {asobi_error, ~"leaderboard.client_submit_disabled"};
         true ->
             Score =
                 case maps:get(~"score", Params) of
@@ -37,7 +38,7 @@ submit(
             SubScore = maps:get(~"sub_score", Params, 0),
             case asobi_leaderboard_server:submit(BoardId, PlayerId, Score) of
                 {error, capacity_reached} ->
-                    {json, 503, #{}, #{error => ~"leaderboard_capacity_reached"}};
+                    {asobi_error, ~"leaderboard.capacity_reached"};
                 _ ->
                     Rank =
                         case asobi_leaderboard_server:rank(BoardId, PlayerId) of

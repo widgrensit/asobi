@@ -125,7 +125,9 @@ add_ticket_omitted_mode_rejected(Config) ->
         Config
     ),
     ?assertStatus(400, Resp),
-    ?assertMatch(#{~"error" := ~"unknown_mode"}, nova_test:json(Resp)),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"matchmaker.unknown_mode"}}, nova_test:json(Resp)
+    ),
     Config.
 
 get_ticket(Config) ->

@@ -2,7 +2,8 @@
 
 -export([send/1, history/1]).
 
--spec send(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec send(cowboy_req:req()) ->
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 send(#{
     json := #{~"recipient_id" := RecipientId, ~"content" := Content},
     auth_data := #{player_id := PlayerId}
@@ -13,16 +14,16 @@ send(#{
                 success => true, channel_id => asobi_dm:channel_id(PlayerId, RecipientId)
             }};
         {error, blocked} ->
-            {json, 403, #{}, #{error => ~"blocked"}};
+            {asobi_error, ~"dm.blocked"};
         {error, content_empty} ->
-            {json, 400, #{}, #{error => ~"content_empty"}};
+            {asobi_error, ~"dm.content_empty"};
         {error, content_too_large} ->
-            {json, 413, #{}, #{error => ~"content_too_large"}};
+            {asobi_error, ~"dm.content_too_large"};
         {error, _} ->
-            {json, 400, #{}, #{error => ~"invalid_input"}}
+            {asobi_error, ~"invalid_payload"}
     end;
 send(_Req) ->
-    {json, 400, #{}, #{error => ~"invalid_request"}}.
+    {asobi_error, ~"invalid_payload"}.
 
 -spec history(cowboy_req:req()) -> {json, map()}.
 history(#{

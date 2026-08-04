@@ -55,11 +55,11 @@ needs_check(Req) ->
 check_size(Req, Max, RequireCL, State) ->
     case cowboy_req:body_length(Req) of
         undefined when RequireCL ->
-            reject(411, ~"length_required", Req, State);
+            reject(411, asobi_error:object(~"length_required"), Req, State);
         undefined ->
             {ok, Req, State};
         N when is_integer(N), N > Max ->
-            reject(413, ~"payload_too_large", Req, State);
+            reject(413, asobi_error:object(~"payload_too_large"), Req, State);
         _ ->
             {ok, Req, State}
     end.
@@ -69,14 +69,13 @@ check_size(Req, Max, RequireCL, State) ->
 %% has no clause for (case_clause -> request-process crash + crash report on
 %% every rejection - log/CPU amplification on the path meant to reduce DoS).
 %% {stop, ...} maps to {stop, Req}, which cowboy handles cleanly.
--spec reject(integer(), binary(), cowboy_req:req(), term()) ->
+-spec reject(pos_integer(), asobi_error:object(), cowboy_req:req(), term()) ->
     {stop, cowboy_req:req(), term()}.
-reject(Status, Reason, Req, State) ->
-    Body = json:encode(#{~"error" => Reason}),
+reject(Status, Object, Req, State) ->
     Req1 = cowboy_req:reply(
         Status,
         #{~"content-type" => ~"application/json"},
-        Body,
+        json:encode(Object),
         Req
     ),
     {stop, Req1, State}.

@@ -83,7 +83,7 @@ authenticate_disabled_returns_403_test() ->
         }
     }),
     ?assertMatch(
-        {json, 403, _, #{error := ~"guest_auth_disabled", message := _}},
+        {asobi_error, ~"guest.disabled"},
         asobi_guest_controller:authenticate(Req)
     ).
 

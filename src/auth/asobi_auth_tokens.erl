@@ -10,12 +10,14 @@ kills the presented access token on logout so it can't outlive the cache TTL.
 -export([issue/2, issue/3, revoke_access/1]).
 
 -doc "Issue an access + refresh pair for `Player` and build the JSON response.".
--spec issue(map(), integer()) -> {json, integer(), map(), map()}.
+-spec issue(map(), integer()) ->
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 issue(Player, Status) ->
     issue(Player, Status, #{}).
 
 -doc "Like `issue/2` but merges `Extra` (e.g. username) into the response body.".
--spec issue(map(), integer(), map()) -> {json, integer(), map(), map()}.
+-spec issue(map(), integer(), map()) ->
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 issue(Player, Status, Extra) ->
     case nova_auth_refresh:generate_pair(asobi_auth, Player) of
         {ok, #{access_token := Access, refresh_token := Refresh}} ->
@@ -30,7 +32,7 @@ issue(Player, Status, Extra) ->
             {json, Status, #{}, Body};
         {error, Reason} ->
             logger:error(#{msg => ~"token_issue_failed", reason => Reason}),
-            {json, 500, #{}, #{error => ~"token_issue_failed"}}
+            {asobi_error, ~"auth.token_issue_failed"}
     end.
 
 -doc "Revoke the Bearer access token on the request (logout of this device).".

@@ -2,23 +2,23 @@
 
 -export([show/1, update/1]).
 
--spec show(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec show(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 show(#{bindings := #{~"id" := PlayerId}} = _Req) ->
     case asobi_repo:get(asobi_player, PlayerId) of
         {ok, Player} ->
             {json, sanitize(Player)};
         {error, not_found} ->
-            {status, 404}
+            {asobi_error, ~"player.not_found"}
     end.
 
 -spec update(cowboy_req:req()) ->
-    {json, map()} | {json, integer(), map(), map()} | {status, integer()}.
+    {json, map()} | {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 update(
     #{bindings := #{~"id" := PlayerId}, json := Params, auth_data := #{player_id := AuthId}} = _Req
 ) when is_map(Params) ->
     case PlayerId =:= AuthId of
         false ->
-            {status, 403};
+            {asobi_error, ~"forbidden"};
         true ->
             case asobi_repo:get(asobi_player, PlayerId) of
                 {ok, Player} ->
@@ -27,10 +27,14 @@ update(
                         {ok, Updated} ->
                             {json, sanitize(Updated)};
                         {error, CS1} ->
-                            {json, 422, #{}, #{errors => format_errors(CS1)}}
+                            %% `errors` keeps its top-level place for form UIs
+                            %% and doubles as the object's `details`.
+                            asobi_error:legacy(~"validation_failed", #{
+                                errors => format_errors(CS1)
+                            })
                     end;
                 {error, not_found} ->
-                    {status, 404}
+                    {asobi_error, ~"player.not_found"}
             end
     end.
 

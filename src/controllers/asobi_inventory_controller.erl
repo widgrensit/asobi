@@ -19,7 +19,7 @@ index(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) when
 -define(MAX_CONSUME_QTY, 1000000).
 
 -spec consume(cowboy_req:req()) ->
-    {json, integer(), map(), map()} | {status, integer()}.
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 consume(
     #{json := #{~"item_id" := ItemId, ~"quantity" := Qty}, auth_data := #{player_id := PlayerId}} =
         _Req
@@ -39,12 +39,12 @@ consume(
                         success => true, remaining_quantity => maps:get(quantity, Updated)
                     }};
                 false ->
-                    {json, 400, #{}, #{error => ~"insufficient_quantity"}}
+                    {asobi_error, ~"inventory.insufficient_quantity"}
             end;
         {ok, _} ->
-            {status, 403};
+            {asobi_error, ~"forbidden"};
         {error, not_found} ->
-            {status, 404}
+            {asobi_error, ~"inventory.item_not_found"}
     end;
 consume(_) ->
-    {json, 400, #{}, #{error => ~"invalid_quantity"}}.
+    {asobi_error, ~"inventory.invalid_quantity"}.

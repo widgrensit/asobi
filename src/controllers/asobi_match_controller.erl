@@ -38,11 +38,11 @@ live(#{qs := Qs} = _Req) when is_binary(Qs) ->
 live(_Req) ->
     {json, #{matches => asobi_match_lobby:list_matches_cached(#{})}}.
 
--spec show(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec show(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 show(#{bindings := #{~"id" := MatchId}} = _Req) ->
     case asobi_repo:get(asobi_match_record, MatchId) of
         {ok, Record} -> {json, public_record(Record)};
-        {error, not_found} -> {status, 404}
+        {error, not_found} -> {asobi_error, ~"match.not_found"}
     end.
 
 -spec index(cowboy_req:req()) -> {json, map()}.

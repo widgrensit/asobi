@@ -4,25 +4,30 @@
 
 -include_lib("kura/include/kura.hrl").
 
+-type response() ::
+    {json, map()}
+    | {json, integer(), map(), map()}
+    | {asobi_error, asobi_error:code()}
+    | {asobi_error, asobi_error:code(), asobi_error:details()}.
+
 %% kura's default message for a unique-index violation (asobi_player:indexes/0).
 %% The 409 contract keys off it; pin it here so the coupling is visible.
 -define(UNIQUE_MSG, ~"has already been taken").
 
--spec register(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec register(cowboy_req:req()) -> response().
 register(
     #{json := #{~"username" := Username, ~"password" := Password} = Params} = _Req
 ) when is_binary(Username), is_binary(Password) ->
     case asobi_registration:check(password) of
         {deny, Reason} ->
-            {json, 403, #{}, #{error => Reason}};
+            asobi_auth_error:registration_denied(Reason);
         ok ->
             register_player(Username, Password, Params)
     end;
 register(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
--spec register_player(binary(), binary(), map()) ->
-    {json, map()} | {json, integer(), map(), map()}.
+-spec register_player(binary(), binary(), map()) -> response().
 register_player(Username, Password, Params) ->
     RegParams = #{
         username => Username,
@@ -48,16 +53,13 @@ register_player(Username, Password, Params) ->
 %% is malformed input: 422 with per-field detail for form UIs.
 registration_error(#{username := Msgs} = Fields) when is_list(Msgs) ->
     case lists:member(?UNIQUE_MSG, Msgs) of
-        true -> {json, 409, #{}, #{error => ~"username_taken"}};
-        false -> validation_failed(Fields)
+        true -> {asobi_error, ~"auth.username_taken"};
+        false -> asobi_auth_error:validation_failed(Fields)
     end;
 registration_error(Fields) ->
-    validation_failed(Fields).
+    asobi_auth_error:validation_failed(Fields).
 
-validation_failed(Fields) ->
-    {json, 422, #{}, #{error => ~"validation_failed", fields => Fields}}.
-
--spec login(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec login(cowboy_req:req()) -> response().
 login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) when
     is_binary(Username), is_binary(Password)
 ->
@@ -65,21 +67,21 @@ login(#{json := #{~"username" := Username, ~"password" := Password}} = _Req) whe
         {ok, Player} ->
             asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
         {error, invalid_credentials} ->
-            {json, 401, #{}, #{error => ~"invalid_credentials"}}
+            {asobi_error, ~"auth.invalid_credentials"}
     end;
 login(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
--spec refresh(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec refresh(cowboy_req:req()) -> response().
 refresh(#{json := #{~"refresh_token" := RefreshToken}} = _Req) when is_binary(RefreshToken) ->
     case nova_auth_refresh:refresh(asobi_auth, RefreshToken) of
         {ok, #{access_token := Access, refresh_token := Refresh}} ->
             {json, 200, #{}, #{access_token => Access, refresh_token => Refresh}};
         {error, _} ->
-            {json, 401, #{}, #{error => ~"invalid_token"}}
+            {asobi_error, ~"unauthenticated"}
     end;
 refresh(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
 -spec logout(cowboy_req:req()) -> {json, integer(), map(), map()}.
 logout(#{json := #{~"refresh_token" := RefreshToken}} = Req) when is_binary(RefreshToken) ->

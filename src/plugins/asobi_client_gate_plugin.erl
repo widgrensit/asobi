@@ -22,7 +22,14 @@ pre_request(Req, _Env, _Options, State) ->
         pass ->
             {ok, Req, State};
         {deny, Reason} ->
-            Body = json:encode(#{~"error" => ~"registration_gate_denied", ~"reason" => Reason}),
+            %% `Reason` comes from the configured gate module - a third party
+            %% as far as this plugin is concerned - so it stays data: the
+            %% top-level key it always had, and the object's `details`.
+            Body = json:encode(
+                asobi_error:legacy_body(~"client_gate_denied", #{
+                    ~"reason" => Reason
+                })
+            ),
             Req1 = cowboy_req:reply(
                 403, #{~"content-type" => ~"application/json"}, Body, Req
             ),

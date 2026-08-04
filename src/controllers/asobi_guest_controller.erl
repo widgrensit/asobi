@@ -22,6 +22,11 @@
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kura/include/kura.hrl").
 
+-type response() ::
+    {json, integer(), map(), map()}
+    | {asobi_error, asobi_error:code()}
+    | {asobi_error, asobi_error:code(), asobi_error:details()}.
+
 -define(PROVIDER, ~"guest").
 -define(MIN_SECRET_BYTES, 32).
 %% Upper bounds on unauthenticated input: cap the HMAC work per request and keep
@@ -32,35 +37,32 @@
 -define(MAX_DEVICE_ID_BYTES, 255).
 -define(MAX_USERNAME_ATTEMPTS, 3).
 
--spec authenticate(cowboy_req:req()) -> {json, integer(), map(), map()}.
+-spec authenticate(cowboy_req:req()) -> response().
 authenticate(#{json := #{~"device_id" := DeviceId, ~"device_secret" := Secret}} = _Req) when
     is_binary(DeviceId), is_binary(Secret)
 ->
     case guest_enabled() of
         false ->
-            {json, 403, #{}, #{
-                error => ~"guest_auth_disabled",
-                message => ~"Guest authentication is not enabled for this deployment."
-            }};
+            {asobi_error, ~"guest.disabled"};
         true ->
             case decode_secret(Secret) of
                 {ok, SecretBin} ->
                     case valid_device_id(DeviceId) of
                         true -> resolve(DeviceId, SecretBin);
-                        false -> {json, 400, #{}, #{error => ~"invalid_device_id"}}
+                        false -> {asobi_error, ~"guest.invalid_device_id"}
                     end;
                 error ->
-                    {json, 400, #{}, #{error => ~"weak_device_secret"}}
+                    {asobi_error, ~"guest.weak_device_secret"}
             end
     end;
 authenticate(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
 %% POST /api/v1/auth/guest/upgrade - claim a guest account with real
 %% credentials. Authenticated as the guest (auth_data from the resumed token,
 %% so it can only upgrade the caller's own player); revokes the device verifier
 %% so the device secret can no longer log into the now-claimed account.
--spec upgrade(cowboy_req:req()) -> {json, integer(), map(), map()}.
+-spec upgrade(cowboy_req:req()) -> response().
 upgrade(
     #{
         json := #{~"username" := Username, ~"password" := Password},
@@ -77,15 +79,15 @@ upgrade(
             %% password and rename itself - a side door around update_changeset.
             case is_unclaimed_guest(Player, PlayerId) of
                 true -> do_upgrade(Player, PlayerId, Username, Password);
-                false -> {json, 409, #{}, #{error => ~"not_an_unclaimed_guest"}}
+                false -> {asobi_error, ~"guest.not_unclaimed"}
             end;
         {error, _} ->
-            {json, 404, #{}, #{error => ~"player_not_found"}}
+            {asobi_error, ~"player.not_found"}
     end;
 upgrade(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
--spec do_upgrade(map(), binary(), binary(), binary()) -> {json, integer(), map(), map()}.
+-spec do_upgrade(map(), binary(), binary(), binary()) -> response().
 do_upgrade(Player, PlayerId, Username, Password) ->
     CS = asobi_player:registration_changeset(Player, #{
         username => Username,
@@ -158,7 +160,7 @@ has_guest_identity(PlayerId) ->
 
 %% --- Create-or-resume (fail closed) ---
 
--spec resolve(binary(), binary()) -> {json, integer(), map(), map()}.
+-spec resolve(binary(), binary()) -> response().
 resolve(DeviceId, SecretBin) ->
     case find_identity(DeviceId) of
         {ok, Identity} ->
@@ -167,12 +169,12 @@ resolve(DeviceId, SecretBin) ->
             create(DeviceId, SecretBin)
     end.
 
--spec resume(map(), binary()) -> {json, integer(), map(), map()}.
+-spec resume(map(), binary()) -> response().
 resume(Identity, SecretBin) ->
     Meta = maps:get(provider_metadata, Identity, #{}),
     case maps:get(~"revoked", Meta, false) of
         true ->
-            {json, 401, #{}, #{error => ~"guest_revoked"}};
+            {asobi_error, ~"guest.revoked"};
         _ ->
             case verify(SecretBin, Meta) of
                 true ->
@@ -180,11 +182,11 @@ resume(Identity, SecretBin) ->
                 false ->
                     %% Wrong secret for a known device: reject. Never create a
                     %% second player, never overwrite the stored verifier.
-                    {json, 401, #{}, #{error => ~"invalid_device_secret"}}
+                    {asobi_error, ~"guest.invalid_device_secret"}
             end
     end.
 
--spec create(binary(), binary()) -> {json, integer(), map(), map()}.
+-spec create(binary(), binary()) -> response().
 create(DeviceId, SecretBin) ->
     %% Row-spam defence (asobi#157): a global throughput bound (caps total
     %% guest-creates regardless of source IP - the per-IP auth limiter can't),
@@ -196,23 +198,22 @@ create(DeviceId, SecretBin) ->
     %% sustained stream is the signal to distinguish an attack from real growth.
     case asobi_registration:check(guest) of
         {deny, Reason} ->
-            {json, 403, #{}, #{error => Reason}};
+            asobi_auth_error:registration_denied(Reason);
         ok ->
             case global_create_allowed() andalso within_unlinked_cap() of
                 false ->
                     ?LOG_WARNING(#{event => guest_capacity_reached}),
-                    {json, 503, #{}, #{error => ~"guest_capacity_reached"}};
+                    {asobi_error, ~"guest.capacity_reached"};
                 true ->
                     insert_player_and_identity(DeviceId, SecretBin)
             end
     end.
 
--spec insert_player_and_identity(binary(), binary()) -> {json, integer(), map(), map()}.
+-spec insert_player_and_identity(binary(), binary()) -> response().
 insert_player_and_identity(DeviceId, SecretBin) ->
     insert_player_and_identity(DeviceId, SecretBin, 1).
 
--spec insert_player_and_identity(binary(), binary(), pos_integer()) ->
-    {json, integer(), map(), map()}.
+-spec insert_player_and_identity(binary(), binary(), pos_integer()) -> response().
 insert_player_and_identity(DeviceId, SecretBin, Attempt) ->
     Username = generate_username(),
     PlayerCS = kura_changeset:validate_required(
@@ -233,7 +234,7 @@ insert_player_and_identity(DeviceId, SecretBin, Attempt) ->
                     %% just-created player so a concurrent create can't leave an
                     %% orphan row.
                     _ = asobi_repo:delete(asobi_player, Player),
-                    {json, 409, #{}, #{error => ~"device_already_registered"}}
+                    {asobi_error, ~"guest.device_already_registered"}
             end;
         {error, #kura_changeset{errors = Errors}} when Attempt < ?MAX_USERNAME_ATTEMPTS ->
             case asobi_auth_error:username_taken(Errors) of
@@ -243,13 +244,13 @@ insert_player_and_identity(DeviceId, SecretBin, Attempt) ->
                     }),
                     insert_player_and_identity(DeviceId, SecretBin, Attempt + 1);
                 false ->
-                    {json, 500, #{}, #{error => ~"guest_create_failed"}}
+                    {asobi_error, ~"guest.create_failed"}
             end;
         {error, _} ->
-            {json, 500, #{}, #{error => ~"guest_create_failed"}}
+            {asobi_error, ~"guest.create_failed"}
     end.
 
--spec issue_for_player(binary()) -> {json, integer(), map(), map()}.
+-spec issue_for_player(binary()) -> response().
 issue_for_player(PlayerId) ->
     case asobi_repo:get(asobi_player, PlayerId) of
         {ok, Player} ->
@@ -262,10 +263,10 @@ issue_for_player(PlayerId) ->
                         username => maps:get(username, Player), guest => true
                     });
                 _ ->
-                    {json, 401, #{}, #{error => ~"guest_upgraded"}}
+                    {asobi_error, ~"guest.already_upgraded"}
             end;
         {error, _} ->
-            {json, 500, #{}, #{error => ~"guest_player_missing"}}
+            {asobi_error, ~"internal"}
     end.
 
 %% --- Verifier (salted + peppered keyed HMAC; secret never stored) ---

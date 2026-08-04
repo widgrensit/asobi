@@ -19,7 +19,7 @@ index(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) when
     {ok, Notifications} = asobi_repo:all(Q2),
     {json, #{notifications => Notifications}}.
 
--spec mark_read(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec mark_read(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 mark_read(#{bindings := #{~"id" := NotifId}, auth_data := #{player_id := PlayerId}} = _Req) ->
     case asobi_repo:get(asobi_notification, NotifId) of
         {ok, #{player_id := PlayerId} = Notif} ->
@@ -27,19 +27,19 @@ mark_read(#{bindings := #{~"id" := NotifId}, auth_data := #{player_id := PlayerI
             {ok, Updated} = asobi_repo:update(CS),
             {json, Updated};
         {ok, _} ->
-            {status, 403};
+            {asobi_error, ~"forbidden"};
         {error, not_found} ->
-            {status, 404}
+            {asobi_error, ~"notification.not_found"}
     end.
 
--spec delete(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec delete(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 delete(#{bindings := #{~"id" := NotifId}, auth_data := #{player_id := PlayerId}} = _Req) ->
     case asobi_repo:get(asobi_notification, NotifId) of
         {ok, #{player_id := PlayerId} = Notif} ->
             _ = asobi_repo:delete(asobi_notification, Notif),
             {json, #{success => true}};
         {ok, _} ->
-            {status, 403};
+            {asobi_error, ~"forbidden"};
         {error, not_found} ->
-            {status, 404}
+            {asobi_error, ~"notification.not_found"}
     end.

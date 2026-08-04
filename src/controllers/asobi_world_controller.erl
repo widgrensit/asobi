@@ -13,18 +13,20 @@ index(_Req) ->
     Worlds = asobi_world_lobby:list_worlds_cached(),
     {json, #{worlds => Worlds}}.
 
--spec show(map()) -> {json, map()} | {status, 404}.
+-spec show(map()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 show(#{bindings := #{~"id" := WorldId}}) ->
     case asobi_world_server:whereis(WorldId) of
         {ok, Pid} ->
             Info = asobi_world_server:get_info(Pid),
             {json, asobi_world_server:listing_info(Info)};
         error ->
-            {status, 404}
+            {asobi_error, ~"world.not_found"}
     end.
 
 -spec create(map()) ->
-    {json, map(), integer()} | {json, integer(), map(), map()} | {status, 400}.
+    {json, map(), integer()}
+    | {asobi_error, asobi_error:code()}
+    | {asobi_error, asobi_error:code(), asobi_error:details()}.
 create(#{json := #{~"mode" := Mode}, auth_data := #{player_id := PlayerId}}) when
     is_binary(PlayerId)
 ->
@@ -32,18 +34,26 @@ create(#{json := #{~"mode" := Mode}, auth_data := #{player_id := PlayerId}}) whe
         {ok, _Pid, Info} ->
             {json, Info, 201};
         {error, player_world_limit_reached} ->
-            {json, 429, #{}, #{error => ~"player_world_limit_reached"}};
+            {asobi_error, ~"world.player_limit_reached"};
         {error, world_capacity_reached} ->
-            {json, 503, #{}, #{error => ~"world_capacity_reached"}};
+            {asobi_error, ~"world.capacity_reached"};
         {error, Reason} ->
-            {json, #{error => Reason}, 400}
+            %% Anything else - including a refusal the loaded game's own mode
+            %% config produced - is reported under one code with the raw reason
+            %% in `details`. A script must not be able to mint a code.
+            {asobi_error, ~"world.create_failed", #{reason => reason(Reason)}}
     end;
 create(_Req) ->
-    {status, 400}.
+    {asobi_error, ~"invalid_payload"}.
 
 %%--------------------------------------------------------------------
 %% Internal
 %%--------------------------------------------------------------------
+
+-spec reason(term()) -> binary().
+reason(Reason) when is_atom(Reason) -> atom_to_binary(Reason, utf8);
+reason(Reason) when is_binary(Reason) -> Reason;
+reason(Reason) -> iolist_to_binary(io_lib:format(~"~p", [Reason])).
 
 -spec build_filters(map()) -> map().
 build_filters(QS) ->

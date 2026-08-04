@@ -10,12 +10,12 @@ built on top of them - is describable as:
 ```
 
 `code` is the contract. It is machine-readable, namespaced by domain
-(`storage.`, `match.`, `world.`, `chat.`, `matchmaker.`) or bare when it is
-cross-cutting (`rate_limited`, `internal`), and drawn from the closed set in
-`codes/0` - a client may branch on it. `message` is prose for a human reading
-a log; it may be reworded at any time and must not be parsed. `details` is
-**always** a map, `#{}` when there is nothing to add, so no client needs a
-null branch.
+(`storage.`, `save.`, `auth.`, `social.`, `match.`, `world.`, `chat.`,
+`matchmaker.` and the rest) or bare when it is cross-cutting (`rate_limited`,
+`internal`), and drawn from the closed set in `codes/0` - a client may branch
+on it. `message` is prose for a human reading a log; it may be reworded at any
+time and must not be parsed. `details` is **always** a map, `#{}` when there is
+nothing to add, so no client needs a null branch.
 
 The code set is closed on purpose: script- and client-supplied strings never
 become codes. An unrecognised reason is reported under a known code with the
@@ -31,11 +31,17 @@ failure and never the number:
 
 `register_handler/0` installs `handle/3` as the Nova return handler for those
 tuples.
+
+A handful of routes answered with more than `error` before the object existed
+(`fields`, `errors`, `retry_after`, `field`). Those keys stay exactly where
+they were and are also the object's `details`, so an existing client keeps
+working and a new one reads one place: see `legacy/2`.
 """.
 
 -include_lib("kernel/include/logger.hrl").
 
 -export([object/1, object/2, object/3]).
+-export([legacy/2, legacy_body/2]).
 -export([status/1, message/1, codes/0]).
 -export([from_ws_reason/1, ws_reasons/0]).
 -export([handle/3, register_handler/0]).
@@ -62,6 +68,87 @@ tuples.
     {~"unknown_type", 400, ~"No handler is registered for this message type."},
     {~"unauthenticated", 401, ~"The credentials are missing, expired, or invalid."},
     {~"forbidden", 403, ~"The caller may not perform this action."},
+    {~"validation_failed", 422, ~"One or more fields are invalid. See `details`."},
+    {~"length_required", 411, ~"The request must declare a Content-Length."},
+    {~"client_gate_denied", 403, ~"The registration gate rejected this request."},
+
+    %% Accounts, providers, guests.
+    {~"auth.registration_closed", 403, ~"This deployment is not accepting new players."},
+    {
+        ~"auth.password_registration_disabled",
+        403,
+        ~"This deployment accepts provider sign-in only."
+    },
+    {~"auth.username_taken", 409, ~"That username already belongs to another player."},
+    {~"auth.invalid_credentials", 401, ~"The username or password is wrong."},
+    {~"auth.unsupported_provider", 401, ~"No identity provider is configured under this name."},
+    {~"auth.provider_rejected", 401, ~"The identity provider rejected the token."},
+    {~"auth.provider_already_linked", 409, ~"That provider account is linked to another player."},
+    {~"auth.already_registering", 409, ~"A concurrent sign-in is already creating this player."},
+    {~"auth.identity_not_found", 404, ~"No linked identity exists for this provider."},
+    {~"auth.last_auth_method", 422, ~"Unlinking this provider would leave no way to sign in."},
+    {~"auth.registration_failed", 500, ~"The player could not be created."},
+    {~"auth.link_failed", 500, ~"The provider identity could not be linked."},
+    {~"auth.token_issue_failed", 500, ~"The session tokens could not be issued."},
+    {~"guest.disabled", 403, ~"Guest authentication is not enabled for this deployment."},
+    {~"guest.invalid_device_id", 400, ~"The device id is missing or too long."},
+    {~"guest.weak_device_secret", 400, ~"The device secret is not 32-128 base64-encoded bytes."},
+    {~"guest.invalid_device_secret", 401, ~"The device secret does not match this device."},
+    {~"guest.revoked", 401, ~"This device's guest credential has been revoked."},
+    {~"guest.already_upgraded", 401, ~"This account was claimed. Sign in with its credentials."},
+    {~"guest.capacity_reached", 503, ~"The deployment is not creating more guests right now."},
+    {~"guest.device_already_registered", 409, ~"Another guest already registered this device."},
+    {~"guest.not_unclaimed", 409, ~"Only an unclaimed guest account can be upgraded."},
+    {~"guest.create_failed", 500, ~"The guest player could not be created."},
+    {~"player.not_found", 404, ~"No player exists with this id."},
+
+    %% Sessions, worlds, matches, tickets.
+    {~"world.player_limit_reached", 429, ~"This player already owns as many worlds as allowed."},
+    {~"world.capacity_reached", 503, ~"The deployment is running as many worlds as allowed."},
+    {~"world.create_failed", 400, ~"The world could not be created. See `details.reason`."},
+    {~"matchmaker.ticket_not_found", 404, ~"No matchmaking ticket exists with this id."},
+    {~"vote.not_found", 404, ~"No vote exists with this id."},
+
+    %% Leaderboards, economy, inventory, purchases.
+    {~"leaderboard.client_submit_disabled", 403, ~"This board does not accept client submissions."},
+    {~"leaderboard.capacity_reached", 503, ~"This leaderboard holds as many entries as allowed."},
+    {~"economy.insufficient_funds", 402, ~"The wallet does not hold enough of this currency."},
+    {~"economy.listing_inactive", 400, ~"This store listing is not on sale."},
+    {~"economy.purchase_failed", 500, ~"The purchase could not be completed."},
+    {~"inventory.item_not_found", 404, ~"No inventory item exists with this id."},
+    {~"inventory.insufficient_quantity", 400, ~"The item stack holds fewer than the amount asked."},
+    {~"inventory.invalid_quantity", 400, ~"`quantity` must be a positive integer within the cap."},
+    {~"iap.verification_failed", 422, ~"The store rejected the receipt. See `details.reason`."},
+    {~"iap.missing_transaction_id", 422, ~"The verified receipt carries no transaction id."},
+    {~"iap.transaction_already_claimed", 409, ~"Another player already claimed this transaction."},
+    {~"iap.record_failed", 500, ~"The verified transaction could not be recorded."},
+
+    %% Friends, groups, direct messages.
+    {~"social.cannot_friend_self", 400, ~"A player cannot befriend themselves."},
+    {~"social.friend_not_found", 404, ~"No player exists with this friend id."},
+    {~"social.already_friend", 409, ~"This friendship already exists."},
+    {~"social.friendship_not_found", 404, ~"No friendship exists between these players."},
+    {~"social.group_not_found", 404, ~"No group exists with this id."},
+    {~"social.group_closed", 403, ~"This group is closed and needs an invite."},
+    {~"social.group_full", 409, ~"This group already holds as many members as allowed."},
+    {~"social.already_member", 409, ~"This player is already a member of the group."},
+    {~"social.invalid_role", 400, ~"That is not a role this group defines."},
+    {~"social.member_not_found", 404, ~"No such member in this group."},
+    {~"dm.blocked", 403, ~"The recipient blocked this sender."},
+    {~"dm.content_empty", 400, ~"A direct message needs content."},
+    {~"dm.content_too_large", 413, ~"The message is longer than the server accepts."},
+
+    %% Tournaments and notifications.
+    {~"tournament.not_found", 404, ~"No tournament exists with this id."},
+    {~"tournament.full", 409, ~"This tournament holds as many entrants as allowed."},
+    {~"tournament.already_joined", 409, ~"This player already entered the tournament."},
+    {~"notification.not_found", 404, ~"No notification exists with this id."},
+
+    %% Ops read plane.
+    {~"ops.invalid_board_id", 400, ~"The leaderboard id is missing or too long."},
+    {~"ops.unknown_sort_field", 400, ~"That is not a field this endpoint sorts on."},
+    {~"ops.unknown_sort_order", 400, ~"`order` must be \"asc\" or \"desc\"."},
+    {~"ops.query_failed", 500, ~"The ops query failed."},
 
     %% Cloud saves.
     {~"save.not_found", 404, ~"No cloud save exists in this slot."},
@@ -116,7 +203,11 @@ tuples.
     {~"invalid_channel_id", ~"chat.invalid_channel_id"},
     {~"too_many_channels", ~"chat.too_many_channels"},
     {~"unknown_mode", ~"matchmaker.unknown_mode"},
-    {~"queue_full", ~"matchmaker.queue_full"}
+    {~"queue_full", ~"matchmaker.queue_full"},
+    {~"not_owner", ~"forbidden"},
+    {~"blocked", ~"dm.blocked"},
+    {~"content_empty", ~"dm.content_empty"},
+    {~"content_too_large", ~"dm.content_too_large"}
 ]).
 
 -doc "The error object for `Code`, with no details.".
@@ -139,6 +230,27 @@ contract and cannot be translated or reused.
 -spec object(code(), binary(), details()) -> object().
 object(Code, Message, Details) when is_binary(Code), is_binary(Message), is_map(Details) ->
     #{error => #{code => Code, message => Message, details => Details}}.
+
+-doc """
+A Nova `{json, ...}` result carrying the object for `Code` plus `Extra`.
+
+For the routes that answered with more than an `error` string before the
+object existed. `Extra` is those top-level keys, unchanged, so a client reading
+`fields` or `retry_after` keeps working; the same map is the object's
+`details`. The status still comes from the code.
+""".
+-spec legacy(code(), details()) -> {json, pos_integer(), #{}, map()}.
+legacy(Code, Extra) ->
+    {json, status(Code), #{}, legacy_body(Code, Extra)}.
+
+-doc """
+`legacy/2`'s body, for a caller that writes the response itself.
+
+The plugins reply through `cowboy_req` rather than returning to Nova.
+""".
+-spec legacy_body(code(), details()) -> map().
+legacy_body(Code, Extra) when is_map(Extra) ->
+    maps:merge(Extra, object(Code, Extra)).
 
 -doc "The HTTP status for `Code`. An undefined code is a server bug: 500.".
 -spec status(code()) -> pos_integer().

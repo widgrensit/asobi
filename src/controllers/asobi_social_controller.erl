@@ -35,7 +35,12 @@ friends(#{auth_data := #{player_id := PlayerId}, qs := Qs} = _Req) when
     {ok, Friendships} = asobi_repo:all(Q2),
     {json, #{friends => Friendships}}.
 
--spec add_friend(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-type response() ::
+    {json, map()}
+    | {json, integer(), map(), map()}
+    | {asobi_error, asobi_error:code()}.
+
+-spec add_friend(cowboy_req:req()) -> response().
 add_friend(
     #{json := #{~"friend_id" := FriendId}, auth_data := #{player_id := PlayerId}} = _Req
 ) when
@@ -44,21 +49,21 @@ add_friend(
     %% F-23: reject self-add and verify the target player actually exists.
     case FriendId =:= PlayerId of
         true ->
-            {json, 400, #{}, #{error => ~"cannot_friend_self"}};
+            {asobi_error, ~"social.cannot_friend_self"};
         false ->
             case asobi_repo:get(asobi_player, FriendId) of
                 {error, not_found} ->
-                    {json, 404, #{}, #{error => ~"friend_not_found"}};
+                    {asobi_error, ~"social.friend_not_found"};
                 {ok, _} ->
                     insert_friendship(PlayerId, FriendId)
             end
     end;
 add_friend(_Req) ->
-    {json, 400, #{}, #{error => ~"invalid_request"}}.
+    {asobi_error, ~"invalid_payload"}.
 
 %% F-23: idempotent — re-adding an existing friendship returns the row
 %% rather than producing an opaque insert error.
--spec insert_friendship(binary(), binary()) -> {json, integer(), map(), map()}.
+-spec insert_friendship(binary(), binary()) -> response().
 insert_friendship(PlayerId, FriendId) ->
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_friendship), {player_id, PlayerId}),
@@ -77,15 +82,13 @@ insert_friendship(PlayerId, FriendId) ->
                 {ok, Friendship} ->
                     {json, 200, #{}, Friendship};
                 {error, CS1} when is_record(CS1, kura_changeset) ->
-                    {json, 422, #{}, #{
-                        errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)
-                    }};
+                    changeset_errors(CS1);
                 {error, _Other} ->
-                    {json, 409, #{}, #{error => ~"already_friend"}}
+                    {asobi_error, ~"social.already_friend"}
             end
     end.
 
--spec update_friend(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec update_friend(cowboy_req:req()) -> response().
 update_friend(
     #{
         bindings := #{~"friend_id" := FriendId},
@@ -103,10 +106,10 @@ update_friend(
             {ok, Updated} = asobi_repo:update(CS),
             {json, Updated};
         _ ->
-            {status, 404}
+            {asobi_error, ~"social.friendship_not_found"}
     end.
 
--spec remove_friend(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec remove_friend(cowboy_req:req()) -> response().
 remove_friend(
     #{bindings := #{~"friend_id" := FriendId}, auth_data := #{player_id := PlayerId}} = _Req
 ) ->
@@ -119,12 +122,12 @@ remove_friend(
             _ = asobi_repo:delete(asobi_friendship, Friendship),
             {json, #{success => true}};
         _ ->
-            {status, 404}
+            {asobi_error, ~"social.friendship_not_found"}
     end.
 
 %% --- Groups ---
 
--spec create_group(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec create_group(cowboy_req:req()) -> response().
 create_group(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) when
     is_map(Params), is_binary(PlayerId)
 ->
@@ -152,17 +155,17 @@ create_group(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) wh
             _ = asobi_repo:insert(MemberCS),
             {json, 200, #{}, Group};
         {error, CS1} when is_record(CS1, kura_changeset) ->
-            {json, 422, #{}, #{errors => kura_changeset:traverse_errors(CS1, fun(_F, M) -> M end)}}
+            changeset_errors(CS1)
     end.
 
--spec show_group(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec show_group(cowboy_req:req()) -> response().
 show_group(#{bindings := #{~"id" := GroupId}} = _Req) ->
     case asobi_repo:get(asobi_group, GroupId) of
         {ok, Group} -> {json, Group};
-        {error, not_found} -> {status, 404}
+        {error, not_found} -> {asobi_error, ~"social.group_not_found"}
     end.
 
--spec join_group(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec join_group(cowboy_req:req()) -> response().
 join_group(
     #{bindings := #{~"id" := GroupId}, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(GroupId), is_binary(PlayerId) ->
@@ -170,23 +173,23 @@ join_group(
     %% — for now reject with 403); enforce `max_members` via a count query.
     case asobi_repo:get(asobi_group, GroupId) of
         {error, not_found} ->
-            {json, 404, #{}, #{error => ~"group_not_found"}};
+            {asobi_error, ~"social.group_not_found"};
         {ok, Group} ->
             case maps:get(open, Group, false) of
                 false ->
-                    {json, 403, #{}, #{error => ~"group_closed"}};
+                    {asobi_error, ~"social.group_closed"};
                 true ->
                     Max = maps:get(max_members, Group, 50),
                     case current_member_count(GroupId) >= Max of
                         true ->
-                            {json, 409, #{}, #{error => ~"group_full"}};
+                            {asobi_error, ~"social.group_full"};
                         false ->
                             insert_group_member(GroupId, PlayerId)
                     end
             end
     end.
 
--spec insert_group_member(binary(), binary()) -> {json, integer(), map(), map()}.
+-spec insert_group_member(binary(), binary()) -> response().
 insert_group_member(GroupId, PlayerId) ->
     CS = kura_changeset:cast(
         asobi_group_member,
@@ -203,7 +206,7 @@ insert_group_member(GroupId, PlayerId) ->
         {ok, _Member} ->
             {json, 200, #{}, #{success => true, group_id => GroupId}};
         {error, _} ->
-            {json, 409, #{}, #{error => ~"already_member"}}
+            {asobi_error, ~"social.already_member"}
     end.
 
 -spec current_member_count(binary()) -> non_neg_integer().
@@ -230,15 +233,15 @@ leave_group(#{bindings := #{~"id" := GroupId}, auth_data := #{player_id := Playe
 
 %% --- Group Management ---
 
--spec list_members(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec list_members(cowboy_req:req()) -> response().
 list_members(#{bindings := #{~"id" := GroupId}} = _Req) ->
     Q = kura_query:where(kura_query:from(asobi_group_member), {group_id, GroupId}),
     case asobi_repo:all(Q) of
         {ok, Members} -> {json, #{members => Members}};
-        _ -> {status, 404}
+        _ -> {asobi_error, ~"social.group_not_found"}
     end.
 
--spec update_member_role(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec update_member_role(cowboy_req:req()) -> response().
 update_member_role(#{
     bindings := #{~"id" := GroupId, ~"player_id" := TargetPlayerId},
     json := #{~"role" := NewRole},
@@ -246,7 +249,7 @@ update_member_role(#{
 }) when is_binary(NewRole) ->
     case asobi_group_roles:valid_role(NewRole) of
         false ->
-            {json, 400, #{}, #{error => ~"invalid_role"}};
+            {asobi_error, ~"social.invalid_role"};
         true ->
             case {get_member(GroupId, ActorId), get_member(GroupId, TargetPlayerId)} of
                 {{ok, #{role := ActorRole}}, {ok, #{role := TargetRole} = Target}} ->
@@ -258,14 +261,14 @@ update_member_role(#{
                             {ok, Updated} = asobi_repo:update(CS),
                             {json, 200, #{}, Updated};
                         false ->
-                            {json, 403, #{}, #{error => ~"insufficient_permissions"}}
+                            {asobi_error, ~"forbidden"}
                     end;
                 _ ->
-                    {json, 404, #{}, #{error => ~"member_not_found"}}
+                    {asobi_error, ~"social.member_not_found"}
             end
     end.
 
--spec kick_member(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec kick_member(cowboy_req:req()) -> response().
 kick_member(#{
     bindings := #{~"id" := GroupId, ~"player_id" := TargetPlayerId},
     auth_data := #{player_id := ActorId}
@@ -277,13 +280,13 @@ kick_member(#{
                     _ = asobi_repo:delete(asobi_group_member, Target),
                     {json, 200, #{}, #{success => true}};
                 false ->
-                    {json, 403, #{}, #{error => ~"insufficient_permissions"}}
+                    {asobi_error, ~"forbidden"}
             end;
         _ ->
-            {json, 404, #{}, #{error => ~"member_not_found"}}
+            {asobi_error, ~"social.member_not_found"}
     end.
 
--spec update_group(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec update_group(cowboy_req:req()) -> response().
 update_group(#{
     bindings := #{~"id" := GroupId},
     json := Params,
@@ -303,16 +306,23 @@ update_group(#{
                             {ok, Updated} = asobi_repo:update(CS),
                             {json, 200, #{}, Updated};
                         _ ->
-                            {json, 404, #{}, #{error => ~"group_not_found"}}
+                            {asobi_error, ~"social.group_not_found"}
                     end;
                 false ->
-                    {json, 403, #{}, #{error => ~"insufficient_permissions"}}
+                    {asobi_error, ~"forbidden"}
             end;
         _ ->
-            {json, 403, #{}, #{error => ~"not_a_member"}}
+            {asobi_error, ~"forbidden"}
     end.
 
 %% --- Internal ---
+
+%% `errors` was the whole body before the shared object existed and stays a
+%% top-level key; it is the object's `details` too (asobi_error:legacy/2).
+-spec changeset_errors(#kura_changeset{}) -> {json, integer(), map(), map()}.
+changeset_errors(CS) ->
+    Errors = kura_changeset:traverse_errors(CS, fun(_F, M) -> M end),
+    asobi_error:legacy(~"validation_failed", #{errors => Errors}).
 
 get_member(GroupId, PlayerId) ->
     Q = kura_query:where(

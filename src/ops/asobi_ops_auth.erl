@@ -161,5 +161,5 @@ presented(Req) ->
 
 -spec deny() -> {false, 403, #{binary() => binary()}, binary()}.
 deny() ->
-    Body = iolist_to_binary(json:encode(#{error => ~"forbidden"})),
+    Body = iolist_to_binary(json:encode(asobi_error:object(~"forbidden"))),
     {false, 403, #{~"content-type" => ~"application/json"}, Body}.

@@ -31,6 +31,34 @@ explicit_message_overrides_the_registered_one_test() ->
         asobi_error:object(~"internal", ~"Bespoke.", #{}),
     ?assertEqual(~"Bespoke.", Message).
 
+%% --- Keys a route already sent stay where they were ---
+
+%% The one compatibility rule of the rollout: converting a route replaces
+%% `error` and touches nothing else. A client reading `fields` keeps reading
+%% `fields`, and the same map is the object's `details` for new code.
+legacy_keeps_the_top_level_keys_test() ->
+    Body = asobi_error:legacy_body(~"validation_failed", #{fields => #{username => [~"taken"]}}),
+    ?assertEqual(#{username => [~"taken"]}, maps:get(fields, Body)),
+    ?assertMatch(
+        #{error := #{code := ~"validation_failed", details := #{fields := _}}},
+        Body
+    ),
+    ?assertEqual([error, fields], lists:sort(maps:keys(Body))).
+
+legacy_takes_its_status_from_the_code_test() ->
+    ?assertMatch(
+        {json, 429, #{}, #{error := #{code := ~"rate_limited"}, retry_after := 30}},
+        asobi_error:legacy(~"rate_limited", #{retry_after => 30})
+    ).
+
+%% A legacy body with nothing to add is still the plain object, `details` and
+%% all - no empty extra keys, no missing ones.
+legacy_with_no_extra_keys_is_the_object_test() ->
+    ?assertEqual(
+        asobi_error:object(~"forbidden"),
+        asobi_error:legacy_body(~"forbidden", #{})
+    ).
+
 %% --- The code table ---
 
 status_comes_from_the_code_test() ->
@@ -81,6 +109,20 @@ known_ws_reason_maps_to_its_code_test() ->
         #{error := #{code := ~"world.not_found"}},
         asobi_error:from_ws_reason(~"world_not_found")
     ).
+
+%% The guide promises one code set across both surfaces: the same failure must
+%% not be `dm.blocked` over REST and `ws.request_failed` on the socket.
+ws_reason_and_rest_agree_on_the_code_test() ->
+    Shared = [
+        {~"blocked", ~"dm.blocked"},
+        {~"content_empty", ~"dm.content_empty"},
+        {~"content_too_large", ~"dm.content_too_large"},
+        {~"not_owner", ~"forbidden"}
+    ],
+    [
+        ?assertMatch(#{error := #{code := Code}}, asobi_error:from_ws_reason(Reason))
+     || {Reason, Code} <- Shared
+    ].
 
 ws_reason_accepts_an_atom_test() ->
     ?assertEqual(

@@ -5,7 +5,7 @@
 -define(MAX_HISTORY_LIMIT, 200).
 -define(DEFAULT_HISTORY_LIMIT, 50).
 
--spec history(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()} | {status, 403}.
+-spec history(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 history(
     #{
         bindings := #{~"channel_id" := ChannelId},
@@ -34,7 +34,7 @@ history(
             {ok, Messages} = asobi_repo:all(Q),
             {json, #{messages => lists:reverse(Messages)}};
         false ->
-            {status, 403}
+            {asobi_error, ~"forbidden"}
     end;
 history(_Req) ->
-    {json, 400, #{}, #{error => ~"invalid_request"}}.
+    {asobi_error, ~"invalid_payload"}.

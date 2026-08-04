@@ -11,9 +11,14 @@
 
 -define(MAX_USERNAME_ATTEMPTS, 3).
 
+-type response() ::
+    {json, integer(), map(), map()}
+    | {asobi_error, asobi_error:code()}
+    | {asobi_error, asobi_error:code(), asobi_error:details()}.
+
 %% POST /api/v1/auth/oauth
 %% Body: {"provider": "google", "token": "<id_token>"}
--spec authenticate(cowboy_req:req()) -> {json, integer(), map(), map()}.
+-spec authenticate(cowboy_req:req()) -> response().
 authenticate(#{json := #{~"provider" := Provider, ~"token" := Token}} = _Req) when
     is_binary(Provider), is_binary(Token)
 ->
@@ -25,19 +30,19 @@ authenticate(#{json := #{~"provider" := Provider, ~"token" := Token}} = _Req) wh
                     login_existing_player(Identity);
                 {error, not_found} ->
                     case asobi_registration:check(oauth) of
-                        {deny, Reason} -> {json, 403, #{}, #{error => Reason}};
+                        {deny, Reason} -> asobi_auth_error:registration_denied(Reason);
                         ok -> create_player_with_identity(Provider, Claims)
                     end
             end;
         {error, Reason} ->
-            {json, 401, #{}, #{error => Reason}}
+            provider_rejected(Reason)
     end;
 authenticate(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
 %% POST /api/v1/auth/link
 %% Body: {"provider": "discord", "token": "<id_token>"}
--spec link(cowboy_req:req()) -> {json, integer(), map(), map()}.
+-spec link(cowboy_req:req()) -> response().
 link(
     #{json := #{~"provider" := Provider, ~"token" := Token}, auth_data := #{player_id := PlayerId}} =
         _Req
@@ -47,18 +52,18 @@ link(
             ProviderUid = maps:get(provider_uid, Claims),
             case find_identity(Provider, ProviderUid) of
                 {ok, _} ->
-                    {json, 409, #{}, #{error => ~"provider_already_linked"}};
+                    {asobi_error, ~"auth.provider_already_linked"};
                 {error, not_found} ->
                     create_identity(PlayerId, Provider, Claims)
             end;
         {error, Reason} ->
-            {json, 401, #{}, #{error => Reason}}
+            provider_rejected(Reason)
     end;
 link(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
 %% DELETE /api/v1/auth/unlink?provider=discord
--spec unlink(cowboy_req:req()) -> {json, integer(), map(), map()}.
+-spec unlink(cowboy_req:req()) -> response().
 unlink(
     #{parsed_qs := #{~"provider" := Provider}, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(Provider), is_binary(PlayerId) ->
@@ -69,15 +74,26 @@ unlink(
                     _ = asobi_repo:delete(asobi_player_identity, Identity),
                     {json, 200, #{}, #{success => true}};
                 false ->
-                    {json, 422, #{}, #{error => ~"cannot_remove_last_auth_method"}}
+                    {asobi_error, ~"auth.last_auth_method"}
             end;
         {error, not_found} ->
-            {json, 404, #{}, #{error => ~"identity_not_found"}}
+            {asobi_error, ~"auth.identity_not_found"}
     end;
 unlink(_Req) ->
-    {json, 400, #{}, #{error => ~"missing_required_fields"}}.
+    {asobi_error, ~"missing_field"}.
 
 %% --- Internal ---
+
+%% `Reason` here is not ours to publish as a code: for Steam it is lifted
+%% straight out of the provider's own error response, so a third party would
+%% be minting asobi codes. It goes in `details` under one code the client can
+%% branch on, and `unsupported_provider` keeps its own code because that one
+%% is a deployment-configuration answer, not the provider talking.
+-spec provider_rejected(binary()) -> {asobi_error, asobi_error:code(), asobi_error:details()}.
+provider_rejected(~"unsupported_provider") ->
+    {asobi_error, ~"auth.unsupported_provider", #{}};
+provider_rejected(Reason) when is_binary(Reason) ->
+    {asobi_error, ~"auth.provider_rejected", #{reason => Reason}}.
 
 -spec validate_provider_token(binary(), binary()) -> {ok, map()} | {error, binary()}.
 validate_provider_token(~"steam", Ticket) ->
@@ -169,22 +185,23 @@ find_player_identity(PlayerId, Provider) ->
         _ -> {error, not_found}
     end.
 
--spec login_existing_player(map()) -> {json, integer(), map(), map()}.
+-spec login_existing_player(map()) -> response().
 login_existing_player(Identity) ->
     PlayerId = maps:get(player_id, Identity),
     case asobi_repo:get(asobi_player, PlayerId) of
         {ok, Player} ->
             asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
         {error, _} ->
-            {json, 500, #{}, #{error => ~"player_not_found"}}
+            %% The identity outlived its player row: an internal inconsistency,
+            %% not something the caller can act on.
+            {asobi_error, ~"internal"}
     end.
 
--spec create_player_with_identity(binary(), map()) -> {json, integer(), map(), map()}.
+-spec create_player_with_identity(binary(), map()) -> response().
 create_player_with_identity(Provider, Claims) ->
     create_player_with_identity(Provider, Claims, 1).
 
--spec create_player_with_identity(binary(), map(), pos_integer()) ->
-    {json, integer(), map(), map()}.
+-spec create_player_with_identity(binary(), map(), pos_integer()) -> response().
 create_player_with_identity(Provider, Claims, Attempt) ->
     ProviderUid = maps:get(provider_uid, Claims),
     DisplayName = maps:get(provider_display_name, Claims, undefined),
@@ -228,7 +245,7 @@ create_player_with_identity(Provider, Claims, Attempt) ->
         {error, identity, {error, #kura_changeset{errors = IErrors}}} ->
             case asobi_auth_error:provider_uid_taken(IErrors) of
                 true ->
-                    {json, 409, #{}, #{error => ~"already_registering"}};
+                    {asobi_error, ~"auth.already_registering"};
                 false ->
                     %% A real failure (e.g. a provider claim over a column
                     %% limit), not the identity race - do not log Claims,
@@ -238,13 +255,13 @@ create_player_with_identity(Provider, Claims, Attempt) ->
                         provider => Provider,
                         errors => IErrors
                     }),
-                    {json, 500, #{}, #{error => ~"registration_failed"}}
+                    {asobi_error, ~"auth.registration_failed"}
             end;
         {error, identity, IErr} ->
             ?LOG_ERROR(#{
                 event => oauth_identity_insert_failed, provider => Provider, reason => IErr
             }),
-            {json, 500, #{}, #{error => ~"registration_failed"}};
+            {asobi_error, ~"auth.registration_failed"};
         {error, player, {error, #kura_changeset{errors = Errors}}} when
             Attempt < ?MAX_USERNAME_ATTEMPTS
         ->
@@ -255,13 +272,13 @@ create_player_with_identity(Provider, Claims, Attempt) ->
                     }),
                     create_player_with_identity(Provider, Claims, Attempt + 1);
                 false ->
-                    {json, 500, #{}, #{error => ~"registration_failed"}}
+                    {asobi_error, ~"auth.registration_failed"}
             end;
         {error, player, _} ->
-            {json, 500, #{}, #{error => ~"registration_failed"}}
+            {asobi_error, ~"auth.registration_failed"}
     end.
 
--spec create_identity(binary(), binary(), map()) -> {json, integer(), map(), map()}.
+-spec create_identity(binary(), binary(), map()) -> response().
 create_identity(PlayerId, Provider, Claims) ->
     case insert_identity(PlayerId, Provider, Claims) of
         {ok, Identity} ->
@@ -271,7 +288,7 @@ create_identity(PlayerId, Provider, Claims) ->
                 linked => true
             }};
         {error, _} ->
-            {json, 500, #{}, #{error => ~"link_failed"}}
+            {asobi_error, ~"auth.link_failed"}
     end.
 
 -spec insert_identity(binary(), binary(), map()) -> {ok, map()} | {error, term()}.

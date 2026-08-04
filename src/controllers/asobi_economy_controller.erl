@@ -29,7 +29,8 @@ store(#{qs := Qs} = _Req) ->
     {ok, Listings} = asobi_repo:all(Q1),
     {json, #{listings => Listings}}.
 
--spec purchase(cowboy_req:req()) -> {json, map()} | {json, integer(), map(), map()}.
+-spec purchase(cowboy_req:req()) ->
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 purchase(
     #{json := #{~"listing_id" := ListingId}, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(PlayerId), is_binary(ListingId) ->
@@ -37,9 +38,9 @@ purchase(
         {ok, Item} ->
             {json, 200, #{}, #{success => true, item => Item}};
         {error, insufficient_funds} ->
-            {json, 402, #{}, #{error => ~"insufficient_funds"}};
+            {asobi_error, ~"economy.insufficient_funds"};
         {error, listing_inactive} ->
-            {json, 400, #{}, #{error => ~"listing_inactive"}};
+            {asobi_error, ~"economy.listing_inactive"};
         {error, _Reason} ->
-            {json, 500, #{}, #{error => ~"purchase_failed"}}
+            {asobi_error, ~"economy.purchase_failed"}
     end.

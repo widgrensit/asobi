@@ -230,8 +230,6 @@ PUT    /api/v1/storage/:collection/:key        Write object
 DELETE /api/v1/storage/:collection/:key        Delete object
 ```
 
-These routes return the [error object](#errors) below on failure.
-
 ## Ops
 
 ```
@@ -450,8 +448,11 @@ A failing request returns its HTTP status and one object:
 ```
 
 - `code` is the contract. It is stable, machine-readable, and namespaced by
-  domain (`storage.`, `save.`, `match.`, `world.`, `chat.`, `matchmaker.`) or
-  bare when it is cross-cutting (`rate_limited`, `internal`). Branch on this.
+  domain (`storage.`, `save.`, `auth.`, `guest.`, `player.`, `match.`,
+  `world.`, `matchmaker.`, `leaderboard.`, `economy.`, `inventory.`, `iap.`,
+  `social.`, `chat.`, `dm.`, `tournament.`, `notification.`, `vote.`, `ops.`)
+  or bare when it is cross-cutting (`rate_limited`, `forbidden`,
+  `validation_failed`, `internal`). Branch on this.
 - `message` is prose for a human reading a log. It may be reworded at any
   time. Do not parse it.
 - `details` is **always** an object, `{}` when there is nothing to add, so no
@@ -462,15 +463,31 @@ A failing request returns its HTTP status and one object:
 {"error": {"code": "save.version_conflict", "message": "The slot was written by another client.", "details": {"current_version": 4}}}
 ```
 
-Codes are a closed set. A string supplied by a client or by a Lua game script
-never becomes a code; it arrives inside `details` instead.
+Codes are a closed set. A string supplied by a client, by an identity
+provider, by a store's receipt verifier, or by a Lua game script never becomes
+a code; it arrives inside `details` instead. So a rejected sign-in reads:
+
+```json
+{"error": {"code": "auth.provider_rejected", "message": "The identity provider rejected the token.", "details": {"reason": "publisher_banned"}}}
+```
 
 > #### Rollout {: .info}
 >
-> The storage and cloud-save routes above return this shape today. Every other
-> route still returns its older, flat body (`{"error": "some_string"}`) or an
-> empty body with only a status. Those are converted in a follow-up; until
-> then, branch on the HTTP status outside `/saves` and `/storage`.
+> Every route returns this shape, as does every WebSocket `error` frame. There
+> is no route left on the older, flat body (`{"error": "some_string"}`) and
+> none that answers a failure with an empty body.
+>
+> The change is additive except for `error` itself, which went from a string
+> to the object. A route that already sent more than `error` still sends it,
+> unchanged and in the same place: `fields` and `errors` on a 422, `retry_after`
+> on a 429, `field` and `order` on an ops sort rejection, `reason` on a
+> registration-gate 403. Each of those is repeated inside `details`, so new
+> code can read one place. The one key that moved is the bespoke top-level
+> `message` on `POST /auth/guest` when guest auth is disabled; the same prose
+> is now `error.message`.
+>
+> Statuses did not change. Routes that used to answer 403 or 404 with no body
+> answer the same status, now with the object in it.
 
 ## Next steps
 

@@ -297,7 +297,7 @@ create_player_no_retry_on_non_unique_username_error(Config) ->
     end),
     try
         Claims = #{provider_uid => ~"reserved_uid", provider_display_name => undefined},
-        {json, 500, _, #{error := ~"registration_failed"}} =
+        {asobi_error, ~"auth.registration_failed"} =
             asobi_oauth_controller:create_player_with_identity(~"discord", Claims),
         ?assertEqual(1, meck:num_calls(asobi_repo, insert, '_'))
     after
@@ -334,7 +334,7 @@ create_player_deletes_orphan_on_identity_race_loss(Config) ->
         ]),
         Claims = #{provider_uid => ProviderUid, provider_display_name => undefined},
         ?assertEqual(
-            {json, 409, #{}, #{error => ~"already_registering"}},
+            {asobi_error, ~"auth.already_registering"},
             asobi_oauth_controller:create_player_with_identity(~"discord", Claims)
         ),
         PlayerId =
@@ -369,7 +369,7 @@ create_player_identity_insert_real_failure_returns_500(Config) ->
             provider_email => ~"not-an-email"
         },
         ?assertEqual(
-            {json, 500, #{}, #{error => ~"registration_failed"}},
+            {asobi_error, ~"auth.registration_failed"},
             asobi_oauth_controller:create_player_with_identity(~"discord", Claims)
         )
     after

@@ -16,15 +16,15 @@ index(#{qs := Qs} = _Req) when is_binary(Qs) ->
     {ok, Tournaments} = asobi_repo:all(Q2),
     {json, #{tournaments => Tournaments}}.
 
--spec show(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec show(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 show(#{bindings := #{~"id" := TournamentId}} = _Req) ->
     case asobi_repo:get(asobi_tournament, TournamentId) of
         {ok, Tournament} -> {json, Tournament};
-        {error, not_found} -> {status, 404}
+        {error, not_found} -> {asobi_error, ~"tournament.not_found"}
     end.
 
 -spec join(cowboy_req:req()) ->
-    {json, integer(), map(), map()} | {status, integer()}.
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 join(#{bindings := #{~"id" := TournamentId}, auth_data := #{player_id := PlayerId}} = _Req) when
     is_binary(TournamentId), is_binary(PlayerId)
 ->
@@ -32,9 +32,9 @@ join(#{bindings := #{~"id" := TournamentId}, auth_data := #{player_id := PlayerI
         ok ->
             {json, 200, #{}, #{success => true, tournament_id => TournamentId}};
         {error, tournament_full} ->
-            {json, 409, #{}, #{error => ~"tournament_full"}};
+            {asobi_error, ~"tournament.full"};
         {error, already_joined} ->
-            {json, 409, #{}, #{error => ~"already_joined"}};
+            {asobi_error, ~"tournament.already_joined"};
         {error, not_found} ->
-            {status, 404}
+            {asobi_error, ~"tournament.not_found"}
     end.

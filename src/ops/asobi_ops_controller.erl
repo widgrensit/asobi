@@ -18,7 +18,10 @@ the equivalent public endpoint already exposes.
 
 -export([players/1, matches/1, features/1, leaderboards/1, leaderboard_entries/1, matchmaker/1]).
 
--type response() :: {json, map()} | {json, integer(), map(), map()}.
+-type response() ::
+    {json, map()}
+    | {json, integer(), map(), map()}
+    | {asobi_error, asobi_error:code()}.
 
 %% `leaderboard_id` is a VARCHAR(255); a longer binding matches no board, so
 %% it is answered as a bad request rather than paid for as a query.
@@ -50,7 +53,7 @@ leaderboard_entries(#{bindings := #{~"id" := BoardId}} = Req) when
         fun asobi_ops_leaderboards:project_entry/1
     );
 leaderboard_entries(_Req) ->
-    {json, 400, #{}, #{error => ~"invalid_board_id"}}.
+    {asobi_error, ~"ops.invalid_board_id"}.
 
 %% The snapshot is read once and used for both halves of the response, so the
 %% totals and the rows can never describe two different samples.
@@ -115,13 +118,17 @@ params(_Req) -> #{}.
 
 %% A rejected parameter is the caller's fault and says which one; a failed
 %% read is ours and says nothing beyond that, with the reason in the log.
+%%
+%% `field` and `order` were top-level keys before the shared object existed
+%% and stay there; they are the object's `details` too. Both are echoed back
+%% from the caller's own query string, so neither can become a code.
 -spec error_response(term()) -> response().
 error_response({unknown_sort, Field}) ->
-    {json, 400, #{}, #{error => ~"unknown_sort_field", field => Field}};
+    asobi_error:legacy(~"ops.unknown_sort_field", #{field => Field});
 error_response({unknown_order, Order}) ->
-    {json, 400, #{}, #{error => ~"unknown_sort_order", order => Order}};
+    asobi_error:legacy(~"ops.unknown_sort_order", #{order => Order});
 error_response({query_failed, Reason}) ->
     ?LOG_ERROR(#{msg => ~"ops list query failed", reason => Reason}),
-    {json, 500, #{}, #{error => ~"query_failed"}};
+    {asobi_error, ~"ops.query_failed"};
 error_response(_) ->
-    {json, 400, #{}, #{error => ~"bad_request"}}.
+    {asobi_error, ~"invalid_payload"}.

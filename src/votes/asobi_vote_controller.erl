@@ -3,7 +3,7 @@
 
 -export([index/1, show/1]).
 
--spec index(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec index(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 index(#{bindings := #{~"id" := MatchId}, auth_data := #{player_id := PlayerId}} = _Req) when
     is_binary(MatchId), is_binary(PlayerId)
 ->
@@ -11,7 +11,7 @@ index(#{bindings := #{~"id" := MatchId}, auth_data := #{player_id := PlayerId}} 
     %% up the match record (or live match server) and reject non-players.
     case is_match_participant(MatchId, PlayerId) of
         false ->
-            {status, 403};
+            {asobi_error, ~"forbidden"};
         true ->
             Q0 = kura_query:from(asobi_vote),
             Q1 = kura_query:where(Q0, {match_id, MatchId}),
@@ -21,7 +21,7 @@ index(#{bindings := #{~"id" := MatchId}, auth_data := #{player_id := PlayerId}} 
                 {ok, Votes} ->
                     {json, #{votes => [strip_hidden(V) || V <- Votes]}};
                 {error, _} ->
-                    {status, 500}
+                    {asobi_error, ~"internal"}
             end
     end.
 
@@ -56,11 +56,11 @@ strip_hidden(#{visibility := ~"hidden", status := S} = Vote) when S =/= ~"resolv
 strip_hidden(Vote) ->
     Vote.
 
--spec show(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec show(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 show(#{bindings := #{~"id" := VoteId}, auth_data := #{player_id := _PlayerId}} = _Req) ->
     case asobi_repo:get(asobi_vote, VoteId) of
         {ok, Vote} ->
             {json, Vote};
         {error, not_found} ->
-            {status, 404}
+            {asobi_error, ~"vote.not_found"}
     end.

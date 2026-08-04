@@ -2,14 +2,15 @@
 
 -export([add/1, remove/1, status/1]).
 
--spec add(cowboy_req:req()) -> {json, integer(), map(), map()}.
+-spec add(cowboy_req:req()) ->
+    {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
 add(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) when
     is_map(Params), is_binary(PlayerId)
 ->
     Mode = maps:get(~"mode", Params, ~"default"),
     case asobi_matchmaker:known_mode(Mode) of
         false ->
-            {json, 400, #{}, #{error => ~"unknown_mode"}};
+            {asobi_error, ~"matchmaker.unknown_mode"};
         true ->
             MatchParams = #{
                 mode => Mode,
@@ -19,21 +20,21 @@ add(#{json := Params, auth_data := #{player_id := PlayerId}} = _Req) when
                 {ok, TicketId, Meta} ->
                     {json, 200, #{}, Meta#{ticket_id => TicketId, status => ~"pending"}};
                 {error, queue_full} ->
-                    {json, 503, #{}, #{error => ~"queue_full"}}
+                    {asobi_error, ~"matchmaker.queue_full"}
             end
     end.
 
--spec remove(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec remove(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 remove(
     #{bindings := #{~"ticket_id" := TicketId}, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(PlayerId), is_binary(TicketId) ->
     case asobi_matchmaker:remove(PlayerId, TicketId) of
         ok -> {json, #{success => true}};
-        {error, not_owner} -> {status, 403};
-        {error, not_found} -> {status, 404}
+        {error, not_owner} -> {asobi_error, ~"forbidden"};
+        {error, not_found} -> {asobi_error, ~"matchmaker.ticket_not_found"}
     end.
 
--spec status(cowboy_req:req()) -> {json, map()} | {status, integer()}.
+-spec status(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
 status(
     #{bindings := #{~"ticket_id" := TicketId}, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(PlayerId), is_binary(TicketId) ->
@@ -50,7 +51,7 @@ status(
                 submitted_at => maps:get(submitted_at, Ticket)
             }};
         {error, not_owner} ->
-            {status, 403};
+            {asobi_error, ~"forbidden"};
         {error, not_found} ->
-            {status, 404}
+            {asobi_error, ~"matchmaker.ticket_not_found"}
     end.

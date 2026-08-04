@@ -59,7 +59,8 @@ issue_lets_extra_override_the_base_body() ->
 issue_degrades_to_500_on_generate_failure() ->
     meck:expect(nova_auth_refresh, generate_pair, fun(_, _) -> {error, redis_down} end),
     Result = asobi_auth_tokens:issue(#{id => ~"p1"}, 200),
-    ?assertEqual({json, 500, #{}, #{error => ~"token_issue_failed"}}, Result).
+    ?assertEqual({asobi_error, ~"auth.token_issue_failed"}, Result),
+    ?assertEqual(500, asobi_error:status(~"auth.token_issue_failed")).
 
 revoke_test_() ->
     {setup, fun setup_revoke/0, fun cleanup/1, [

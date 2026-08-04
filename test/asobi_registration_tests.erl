@@ -59,7 +59,7 @@ register_controller_denies_before_db() ->
     application:set_env(asobi, registration, closed),
     Req = fake_req(#{json => #{~"username" => ~"validname", ~"password" => ~"longenough1"}}),
     ?assertEqual(
-        {json, 403, #{}, #{error => ~"registration_closed"}},
+        {asobi_error, ~"auth.registration_closed"},
         asobi_auth_controller:register(Req)
     ).
 
@@ -68,7 +68,7 @@ register_controller_denies_before_db() ->
 guest_controller_denies_before_capacity() ->
     application:set_env(asobi, registration, closed),
     ?assertEqual(
-        {json, 403, #{}, #{error => ~"registration_closed"}},
+        {asobi_error, ~"auth.registration_closed"},
         asobi_guest_controller:create(~"device-abc", ~"secret-abc")
     ).
 

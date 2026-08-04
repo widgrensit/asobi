@@ -25,6 +25,7 @@
     get_player/1,
     update_player/1,
     update_player_unauthorized/1,
+    get_missing_player/1,
     health_check/1,
     readiness_check/1,
     liveness_check/1,
@@ -52,7 +53,8 @@ groups() ->
         {players, [sequence], [
             get_player,
             update_player,
-            update_player_unauthorized
+            update_player_unauthorized,
+            get_missing_player
         ]},
         {health, [], [
             health_check,
@@ -154,7 +156,7 @@ register_duplicate_username(Config) ->
         Config
     ),
     ?assertStatus(409, Resp),
-    ?assertMatch(#{~"error" := ~"username_taken"}, nova_test:json(Resp)),
+    ?assertMatch(#{~"error" := #{~"code" := ~"auth.username_taken"}}, nova_test:json(Resp)),
     Config.
 
 register_short_username(Config) ->
@@ -169,8 +171,15 @@ register_short_username(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
+    %% `fields` keeps its top-level place and is repeated in `details`.
     ?assertMatch(
-        #{~"error" := ~"validation_failed", ~"fields" := #{~"username" := _}},
+        #{
+            ~"error" := #{
+                ~"code" := ~"validation_failed",
+                ~"details" := #{~"fields" := #{~"username" := _}}
+            },
+            ~"fields" := #{~"username" := _}
+        },
         nova_test:json(Resp)
     ),
     Config.
@@ -188,7 +197,10 @@ register_short_password(Config) ->
     ),
     ?assertStatus(422, Resp),
     ?assertMatch(
-        #{~"error" := ~"validation_failed", ~"fields" := #{~"password" := _}},
+        #{
+            ~"error" := #{~"code" := ~"validation_failed"},
+            ~"fields" := #{~"password" := _}
+        },
         nova_test:json(Resp)
     ),
     Config.
@@ -223,6 +235,10 @@ login_invalid_credentials(Config) ->
         Config
     ),
     ?assertStatus(401, Resp),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"auth.invalid_credentials", ~"details" := #{}}},
+        nova_test:json(Resp)
+    ),
     Config.
 
 refresh_token(Config) ->
@@ -339,6 +355,25 @@ update_player_unauthorized(Config) ->
         Config
     ),
     ?assertStatus(403, Resp),
+    %% A 403 used to be an empty body with nothing to branch on.
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"forbidden", ~"details" := #{}}}, nova_test:json(Resp)
+    ),
+    Config.
+
+%% A 404 used to be an empty body too.
+get_missing_player(Config) ->
+    {session_token, Token} = lists:keyfind(session_token, 1, Config),
+    {ok, Resp} = nova_test:get(
+        "/api/v1/players/00000000-0000-0000-0000-000000000000",
+        #{headers => [{~"authorization", <<"Bearer ", Token/binary>>}]},
+        Config
+    ),
+    ?assertStatus(404, Resp),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"player.not_found", ~"message" := _, ~"details" := #{}}},
+        nova_test:json(Resp)
+    ),
     Config.
 
 %% --- Health Tests ---
@@ -388,7 +423,9 @@ ops_rejects_a_player_token(Config) ->
 ops_rejects_an_anonymous_request(Config) ->
     {ok, Resp} = nova_test:get("/api/v1/ops/players", Config),
     ?assertStatus(403, Resp),
-    ?assertMatch(#{~"error" := ~"forbidden"}, nova_test:json(Resp)),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"forbidden", ~"details" := #{}}}, nova_test:json(Resp)
+    ),
     Config.
 
 ops_accepts_the_operator_secret(Config) ->

@@ -23,8 +23,8 @@ body_cap_test_() ->
 
 setup() ->
     meck:new(cowboy_req, [no_link, passthrough]),
-    meck:expect(cowboy_req, reply, fun(Status, _Hdrs, _Body, Req) ->
-        Req#{reply_status => Status}
+    meck:expect(cowboy_req, reply, fun(Status, _Hdrs, Body, Req) ->
+        Req#{reply_status => Status, reply_body => Body}
     end),
     ok.
 
@@ -56,7 +56,11 @@ oversized_body_rejected_413() ->
     {stop, ReplyReq, undefined} = asobi_body_cap_plugin:pre_request(
         Req, #{}, #{max_body => 1048576}, undefined
     ),
-    ?assertEqual(413, maps:get(reply_status, ReplyReq)).
+    ?assertEqual(413, maps:get(reply_status, ReplyReq)),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"payload_too_large", ~"details" := #{}}},
+        reply_body(ReplyReq)
+    ).
 
 chunked_without_length_rejected_411() ->
     meck:expect(cowboy_req, has_body, fun(_) -> true end),
@@ -65,7 +69,16 @@ chunked_without_length_rejected_411() ->
     {stop, ReplyReq, undefined} = asobi_body_cap_plugin:pre_request(
         Req, #{}, #{require_content_length => true}, undefined
     ),
-    ?assertEqual(411, maps:get(reply_status, ReplyReq)).
+    ?assertEqual(411, maps:get(reply_status, ReplyReq)),
+    %% This rejection never reaches a controller, so the plugin has to speak
+    %% the shared dialect itself or the 411 is the one status with no code.
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"length_required", ~"message" := _}},
+        reply_body(ReplyReq)
+    ).
+
+reply_body(#{reply_body := Body}) ->
+    json:decode(iolist_to_binary(Body)).
 
 chunked_allowed_when_opt_off() ->
     meck:expect(cowboy_req, has_body, fun(_) -> true end),

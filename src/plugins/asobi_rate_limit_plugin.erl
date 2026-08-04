@@ -25,10 +25,13 @@ pre_request(Req, _Env, Options, State) ->
             Req2 = cowboy_req:set_resp_header(~"x-ratelimit-reset", integer_to_binary(Reset), Req1),
             {ok, Req2, State};
         {deny, #{retry_after := RetryAfter}} ->
-            Body = json:encode(#{
-                ~"error" => ~"rate_limited",
-                ~"retry_after" => RetryAfter div 1000
-            }),
+            %% `retry_after` stays a top-level key and is the object's
+            %% `details` too - see asobi_error:legacy_body/2.
+            Body = json:encode(
+                asobi_error:legacy_body(~"rate_limited", #{
+                    ~"retry_after" => RetryAfter div 1000
+                })
+            ),
             Req1 = cowboy_req:set_resp_header(
                 ~"retry-after", integer_to_binary(RetryAfter div 1000), Req
             ),

@@ -46,18 +46,20 @@ cross_account_replay_rejected() ->
     stub_apple(#{transaction_id => ~"t1", product_id => ~"coins"}),
     meck:expect(asobi_repo, all, fun(_Q) -> {ok, [#{player_id => ~"someone-else"}]} end),
     ?assertMatch(
-        {json, 409, _, #{error := ~"transaction_already_claimed"}},
+        {asobi_error, ~"iap.transaction_already_claimed"},
         asobi_iap_controller:verify_apple(apple_req(~"p1"))
     ).
 
 unauthenticated_rejected() ->
     Req = fake_req(#{json => #{~"signed_transaction" => ~"jws"}}),
-    ?assertMatch({json, 400, _, _}, asobi_iap_controller:verify_apple(Req)).
+    ?assertMatch({asobi_error, ~"missing_field"}, asobi_iap_controller:verify_apple(Req)).
 
 verify_failure_surfaced() ->
     meck:expect(asobi_iap, verify_apple, fun(_) -> {error, ~"bundle_id_mismatch"} end),
+    %% The verifier's own string is a diagnostic, so it lands in `details`
+    %% rather than becoming a code a client could branch on.
     ?assertMatch(
-        {json, 422, _, #{error := ~"bundle_id_mismatch"}},
+        {asobi_error, ~"iap.verification_failed", #{reason := ~"bundle_id_mismatch"}},
         asobi_iap_controller:verify_apple(apple_req(~"p1"))
     ).
 

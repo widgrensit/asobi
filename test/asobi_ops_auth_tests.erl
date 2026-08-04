@@ -188,7 +188,10 @@ denial_is_403_and_says_nothing_about_the_cause() ->
     [{false, Status, Headers, Body} | _] = Denials,
     ?assertEqual(403, Status),
     ?assertEqual(#{~"content-type" => ~"application/json"}, Headers),
-    ?assertEqual(#{~"error" => ~"forbidden"}, json:decode(Body)).
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"forbidden", ~"message" := _, ~"details" := #{}}},
+        json:decode(Body)
+    ).
 
 %%--------------------------------------------------------------------
 %% Failing closed with no secret configured

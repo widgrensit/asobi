@@ -223,9 +223,10 @@ request that caused it when there was one:
 ```
 
 - `error.code` is the contract - stable, machine-readable, and namespaced by
-  domain (`match.`, `world.`, `chat.`, `matchmaker.`) or bare when it is
-  cross-cutting (`rate_limited`, `unauthenticated`). Branch on this. It is the
-  same code set the [REST API](rest-api.md#errors) returns.
+  domain (`match.`, `world.`, `chat.`, `dm.`, `matchmaker.`) or bare when it is
+  cross-cutting (`rate_limited`, `unauthenticated`, `forbidden`). Branch on
+  this. It is the same code set the [REST API](rest-api.md#errors) returns, so
+  the same failure carries the same code on both surfaces.
 - `error.message` is prose for a human reading a log. Do not parse it.
 - `error.details` is **always** an object, `{}` when there is nothing to add.
 - `reason` is the original, flatter dialect. It is unchanged and still sent, so

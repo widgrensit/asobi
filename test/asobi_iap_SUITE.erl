@@ -97,7 +97,13 @@ apple_root_not_configured(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
-    #{~"error" := ~"apple_root_cert_not_configured"} = nova_test:json(Resp),
+    #{
+        ~"error" := #{
+            ~"code" := ~"iap.verification_failed",
+            ~"details" := #{~"reason" := ~"apple_root_cert_not_configured"}
+        }
+    } =
+        nova_test:json(Resp),
     cleanup_apple_env(),
     Config.
 
@@ -130,7 +136,12 @@ apple_unsupported_alg(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
-    #{~"error" := ~"unsupported_alg"} = nova_test:json(Resp),
+    #{
+        ~"error" := #{
+            ~"code" := ~"iap.verification_failed", ~"details" := #{~"reason" := ~"unsupported_alg"}
+        }
+    } =
+        nova_test:json(Resp),
     cleanup_apple_env(),
     Config.
 
@@ -148,7 +159,12 @@ apple_missing_x5c(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
-    #{~"error" := ~"invalid_x5c"} = nova_test:json(Resp),
+    #{
+        ~"error" := #{
+            ~"code" := ~"iap.verification_failed", ~"details" := #{~"reason" := ~"invalid_x5c"}
+        }
+    } =
+        nova_test:json(Resp),
     cleanup_apple_env(),
     Config.
 
@@ -170,7 +186,13 @@ apple_signature_invalid(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
-    #{~"error" := ~"signature_invalid"} = nova_test:json(Resp),
+    #{
+        ~"error" := #{
+            ~"code" := ~"iap.verification_failed",
+            ~"details" := #{~"reason" := ~"signature_invalid"}
+        }
+    } =
+        nova_test:json(Resp),
     cleanup_apple_env(),
     Config.
 
@@ -191,7 +213,13 @@ apple_chain_validation_failed(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
-    #{~"error" := ~"chain_validation_failed"} = nova_test:json(Resp),
+    #{
+        ~"error" := #{
+            ~"code" := ~"iap.verification_failed",
+            ~"details" := #{~"reason" := ~"chain_validation_failed"}
+        }
+    } =
+        nova_test:json(Resp),
     cleanup_apple_env(),
     Config.
 
@@ -209,7 +237,13 @@ apple_valid_jws_wrong_bundle(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
-    #{~"error" := ~"bundle_id_mismatch"} = nova_test:json(Resp),
+    #{
+        ~"error" := #{
+            ~"code" := ~"iap.verification_failed",
+            ~"details" := #{~"reason" := ~"bundle_id_mismatch"}
+        }
+    } =
+        nova_test:json(Resp),
     cleanup_apple_env(),
     Config.
 
@@ -259,7 +293,13 @@ google_not_configured(Config) ->
         Config
     ),
     ?assertStatus(422, Resp),
-    #{~"error" := ~"google_iap_not_configured"} = nova_test:json(Resp),
+    #{
+        ~"error" := #{
+            ~"code" := ~"iap.verification_failed",
+            ~"details" := #{~"reason" := ~"google_iap_not_configured"}
+        }
+    } =
+        nova_test:json(Resp),
     Config.
 
 %% --- Helpers ---

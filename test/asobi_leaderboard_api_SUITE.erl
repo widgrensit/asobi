@@ -143,7 +143,7 @@ submit_score_disabled(Config) ->
         Config
     ),
     ?assertStatus(403, Resp),
-    ?assertJson(#{~"error" := ~"client_submit_disabled"}, Resp),
+    ?assertJson(#{~"error" := #{~"code" := ~"leaderboard.client_submit_disabled"}}, Resp),
     Config.
 
 submit_score(Config) ->
@@ -283,5 +283,15 @@ ops_board_entries_reject_unknown_sort(Config) ->
         Config
     ),
     ?assertStatus(400, Resp),
-    ?assertJson(#{~"error" := ~"unknown_sort_field"}, Resp),
+    %% `field` keeps its top-level place and is repeated in `details`.
+    ?assertJson(
+        #{
+            ~"error" := #{
+                ~"code" := ~"ops.unknown_sort_field",
+                ~"details" := #{~"field" := ~"metadata"}
+            },
+            ~"field" := ~"metadata"
+        },
+        Resp
+    ),
     Config.
