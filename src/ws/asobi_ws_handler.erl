@@ -5,8 +5,10 @@
 %% Exported for tests (pure allowlist predicate), mirroring deployable/1.
 -export([origin_allowed/1]).
 %% Exported so asobi_protocol_coverage_tests can assert every emitted
-%% match./world. event stays inside the reserved namespace (#303).
--export([reserved_event_names/0]).
+%% match./world. event stays inside the reserved namespace (#303), and so
+%% asobi_lua_api can reject a bad game.broadcast name against these same
+%% rules at the script's call site instead of re-stating them.
+-export([reserved_event_names/0, event_name_binary/1]).
 
 -include_lib("kernel/include/logger.hrl").
 

@@ -22,6 +22,14 @@ api_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         {"game.id returns binary", fun game_id/0},
         {"game.broadcast forwards to match server", fun game_broadcast/0},
+        {"game.broadcast accepts an underscore/hyphen/digit name",
+            fun game_broadcast_name_charset_ok/0},
+        {"game.broadcast rejects a reserved event name", fun game_broadcast_reserved_name/0},
+        {"game.broadcast rejects a dotted event name", fun game_broadcast_dotted_name/0},
+        {"game.broadcast rejects an empty event name", fun game_broadcast_empty_name/0},
+        {"game.broadcast rejects an over-long event name", fun game_broadcast_long_name/0},
+        {"game.broadcast rejects every core-reserved name",
+            fun game_broadcast_rejects_all_reserved/0},
         {"game.send forwards to presence", fun game_send/0},
         {"game.send preserves a plain string message", fun game_send_string/0},
         {"game.economy.grant calls engine", fun game_economy_grant/0},
@@ -177,6 +185,47 @@ game_broadcast() ->
     %% broadcast uses the live match_pid (self() in the test fixture),
     %% not the match_id binary.
     ?assert(meck:called(asobi_match_server, broadcast_event, [self(), ~"hello", '_'])).
+
+%% asobi_lua#125: #303 rejects out-of-shape broadcast event names at the
+%% socket boundary, so the script author must hear about it here rather than
+%% losing the event to a server-side log line.
+game_broadcast_name_charset_ok() ->
+    St = install_api(),
+    Code = "return game.broadcast('round_2-start', { msg = 'world' })",
+    {ok, [true | _], _} = eval(Code, St),
+    ?assert(meck:called(asobi_match_server, broadcast_event, [self(), ~"round_2-start", '_'])).
+
+game_broadcast_reserved_name() ->
+    assert_broadcast_rejected("return game.broadcast('tick', { msg = 'world' }).error").
+
+game_broadcast_dotted_name() ->
+    assert_broadcast_rejected("return game.broadcast('my.event', { msg = 'world' }).error").
+
+game_broadcast_empty_name() ->
+    assert_broadcast_rejected("return game.broadcast('', { msg = 'world' }).error").
+
+game_broadcast_long_name() ->
+    Name = lists:duplicate(65, $a),
+    assert_broadcast_rejected("return game.broadcast('" ++ Name ++ "', {}).error").
+
+%% The script-facing guard must stay in step with the wire-facing one: read
+%% the reserved list off its owner rather than restating it, so a name added
+%% to asobi_ws_handler is covered here without touching this file.
+game_broadcast_rejects_all_reserved() ->
+    lists:foreach(
+        fun(Name) ->
+            assert_broadcast_rejected(
+                "return game.broadcast('" ++ binary_to_list(Name) ++ "', {}).error"
+            )
+        end,
+        asobi_ws_handler:reserved_event_names()
+    ).
+
+assert_broadcast_rejected(Code) ->
+    St = install_api(),
+    {ok, [Error | _], _} = eval(Code, St),
+    ?assert(is_binary(Error)),
+    ?assertNot(meck:called(asobi_match_server, broadcast_event, '_')).
 
 game_send() ->
     St = install_api(),
