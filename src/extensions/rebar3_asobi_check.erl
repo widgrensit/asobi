@@ -32,7 +32,9 @@ version in `project_plugins`. Pin it to the same tag as the dependency.
 
 -define(PROVIDER, check).
 -define(NAMESPACE, asobi).
--define(DEPS, [{default, app_discovery}]).
+%% `compile`, not `app_discovery`: a manifest is a module, so it has to exist
+%% as a beam before it can be called.
+-define(DEPS, [{default, compile}]).
 
 -spec init(term()) -> {ok, term()}.
 init(State) ->
