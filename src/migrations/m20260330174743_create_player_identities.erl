@@ -67,8 +67,6 @@ down() ->
         {drop_index, <<"notifications_player_id_index">>},
         {drop_index, <<"notifications_sent_at_index">>},
         {create_index, <<"notifications">>, [player_id, sent_at], #{}},
-        {drop_index, <<"player_identities_provider_provider_uid_index">>},
-        {drop_index, <<"player_identities_player_id_index">>},
         {drop_index, <<"player_items_player_id_index">>},
         {drop_index, <<"player_tokens_context_token_index">>},
         {drop_index, <<"player_tokens_user_id_index">>},

@@ -30,8 +30,5 @@ up() ->
 -spec down() -> [kura_migration:operation()].
 down() ->
     [
-        {drop_table, ~"ops_audit_entries"},
-        {drop_index, ~"ops_audit_entries_actor_id_occurred_at_index"},
-        {drop_index, ~"ops_audit_entries_action_occurred_at_index"},
-        {drop_index, ~"ops_audit_entries_target_id_index"}
+        {drop_table, ~"ops_audit_entries"}
     ].
