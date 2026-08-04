@@ -26,9 +26,17 @@ jobs:
       enable-audit: true
       enable-ct: true
       enable-coverage: true
-      enable-sbom: true
-      enable-sbom-scan: true
-      # The three quality gates still off, and what each is waiting on:
+      # The four quality gates still off, and what each is waiting on:
+      #
+      # enable-sbom / enable-sbom-scan - `rebar3 sbom` crashes on this repo
+      #   with `badarg` in `unicode:characters_to_binary(git)`
+      #   (rebar3_sbom_prv:dep_info/4, the root_app clause). src/asobi.app.src
+      #   carries `{vsn, git}` - the atom - where kura and shigoto carry
+      #   `{vsn, "git"}`, the string, which is why the same plugin works
+      #   there. rebar3 accepts either and resolves both from the git tag, so
+      #   the unblock is one character in .app.src; that file is off-limits
+      #   without a human call, and the plugin should handle the atom anyway
+      #   (filed upstream).
       #
       # enable-elp-lint - the job fails on any error, and elp 1.1.0 reports
       #   twelve on this tree, none of them an asobi defect:
