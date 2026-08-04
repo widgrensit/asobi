@@ -264,8 +264,12 @@ entries_around(Table, Key, N) ->
     Self = [{PlayerId, Score, 0}],
     After = walk_forward(Table, Key, N),
     Entries = Before ++ Self ++ After,
-    [FirstEntry | _] = Entries,
-    StartRank = count_before(Table, element(1, FirstEntry)) + 1,
+    %% Rank the window from the queried player's own rank, walking back by
+    %% however many entries precede them in it. Deriving the start rank from
+    %% the first entry instead needs that entry's ETS key ({-Score, PlayerId}),
+    %% not its player id - passing the id made count_before/2 walk to the end
+    %% of the table and offset every rank by the size of the board (#334).
+    StartRank = count_before(Table, Key) + 1 - length(Before),
     assign_ranks(Entries, StartRank, []).
 
 walk_back(Table, Key, N) ->

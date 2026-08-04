@@ -1,0 +1,65 @@
+name: Console
+
+# The gate that makes a committed bundle safe. `priv/console` is in git so a
+# Hex consumer needs no Node; the risk of that is a bundle that drifts from
+# the source claiming to produce it. This rebuilds from the lockfile and fails
+# if the result differs from what is committed, so the two cannot separate.
+on:
+  push:
+    branches: [main]
+    paths: ['console/**', 'priv/console/**', '.github/workflows/console.yml']
+  pull_request:
+    branches: [main]
+    paths: ['console/**', 'priv/console/**', '.github/workflows/console.yml']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  reproducible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to the major `console/package.json` declares in `engines`. The
+      # fleet has one other Node repo and it pins a major its own package.json
+      # forbids; do not repeat that here.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install from the lockfile
+        working-directory: console
+        run: npm ci
+
+      - name: Test the pure helpers
+        working-directory: console
+        run: npm run check
+
+      - name: Build
+        working-directory: console
+        run: npm run build
+
+      - name: The committed bundle is what the source builds
+        run: |
+          if ! git diff --exit-code -- priv/console; then
+            echo "::error::priv/console differs from a fresh build of console/."
+            echo "::error::Run 'npm run build' in console/ and commit the result."
+            exit 1
+          fi
+
+      # Cheap belt-and-braces on top of the Erlang assertions in
+      # asobi_console_tests: the policy has no 'unsafe-eval', so a bundle that
+      # compiles strings to code is a blank console.
+      - name: No string-to-code in the bundle
+        run: |
+          if grep -qE "eval\(|new Function\(" priv/console/assets/*.js; then
+            echo "::error::The bundle needs 'unsafe-eval'. Drop the dependency, do not widen the CSP."
+            exit 1
+          fi

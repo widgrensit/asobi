@@ -3,7 +3,8 @@
 -export([setup/0]).
 -export([match_started/2, match_finished/3, match_player_joined/2, match_player_left/2]).
 -export([world_started/2, world_finished/3, world_player_joined/2, world_player_left/2]).
--export([world_phase_changed/3]).
+-export([world_phase_changed/3, world_tick/4]).
+-export([zone_opened/2, zone_closed/2]).
 -export([matchmaker_queued/2, matchmaker_removed/2, matchmaker_formed/3, matchmaker_failed/2]).
 -export([session_connected/1, session_disconnected/2]).
 -export([
@@ -29,37 +30,67 @@
 -export([vote_started/2, vote_cast/2, vote_resolved/3]).
 -export([auth_cache_hit/1, auth_cache_miss/1, auth_cache_sweep/0]).
 -export([handle_event/4]).
+-export([events/0]).
+
+-doc """
+Every event name this module emits - the surface locked by ADR 0005
+(`docs/adr/0005-telemetry-event-surface.md`).
+
+Exported so a consumer attaches to the whole surface without restating it.
+Restating it is what let the built-in debug logger and `opentelemetry_asobi`
+both drift to the same stale 24-name subset, leaving the failure and abuse
+signals (rate limits, anticheat, `[asobi, error]`) invisible in dev (#312).
+`asobi_telemetry_tests` asserts this list against the names actually passed
+to `telemetry:execute/3` in this module, so the two cannot drift again.
+""".
+-spec events() -> [telemetry:event_name()].
+events() ->
+    [
+        [asobi, match, started],
+        [asobi, match, finished],
+        [asobi, match, player_joined],
+        [asobi, match, player_left],
+        [asobi, world, started],
+        [asobi, world, finished],
+        [asobi, world, player_joined],
+        [asobi, world, player_left],
+        [asobi, world, phase_changed],
+        [asobi, world, tick],
+        [asobi, zone, opened],
+        [asobi, zone, closed],
+        [asobi, matchmaker, queued],
+        [asobi, matchmaker, removed],
+        [asobi, matchmaker, formed],
+        [asobi, matchmaker, failed],
+        [asobi, session, connected],
+        [asobi, session, disconnected],
+        [asobi, ws, connected],
+        [asobi, ws, disconnected],
+        [asobi, ws, message_in],
+        [asobi, ws, message_out],
+        [asobi, ws, connect_rate_limited],
+        [asobi, ws, idle_auth_timeout],
+        [asobi, ws, origin_rejected],
+        [asobi, join, rate_limited],
+        [asobi, rehome, rate_limited],
+        [asobi, anticheat, violation],
+        [asobi, error],
+        [asobi, economy, transaction],
+        [asobi, store, purchase],
+        [asobi, chat, message_sent],
+        [asobi, vote, started],
+        [asobi, vote, cast],
+        [asobi, vote, resolved],
+        [asobi, auth_cache, hit],
+        [asobi, auth_cache, miss],
+        [asobi, auth_cache, sweep]
+    ].
 
 -spec setup() -> ok.
 setup() ->
     ok = telemetry:attach_many(
         <<"asobi-metrics-logger">>,
-        [
-            [asobi, match, started],
-            [asobi, match, finished],
-            [asobi, match, player_joined],
-            [asobi, match, player_left],
-            [asobi, world, started],
-            [asobi, world, finished],
-            [asobi, world, player_joined],
-            [asobi, world, player_left],
-            [asobi, world, phase_changed],
-            [asobi, matchmaker, queued],
-            [asobi, matchmaker, removed],
-            [asobi, matchmaker, formed],
-            [asobi, session, connected],
-            [asobi, session, disconnected],
-            [asobi, ws, connected],
-            [asobi, ws, disconnected],
-            [asobi, ws, message_in],
-            [asobi, ws, message_out],
-            [asobi, economy, transaction],
-            [asobi, store, purchase],
-            [asobi, chat, message_sent],
-            [asobi, vote, started],
-            [asobi, vote, cast],
-            [asobi, vote, resolved]
-        ],
+        events(),
         fun ?MODULE:handle_event/4,
         #{}
     ),
@@ -121,6 +152,52 @@ world_player_left(WorldId, PlayerId) ->
 world_phase_changed(WorldId, FromPhase, ToPhase) ->
     telemetry:execute([asobi, world, phase_changed], #{count => 1}, #{
         world_id => WorldId, from_phase => FromPhase, to_phase => ToPhase
+    }).
+
+-doc """
+asobi#313: how long a world tick took, sampled.
+
+A world tick is the fan-out to every zone plus the fan-in of their
+`tick_done` replies, so this is the saturation signal that degrades first
+under entity load. Emitting it at the world tick rate (20 Hz by default) is
+too hot for a raw sink, so `asobi_world_ticker` samples roughly once a second
+and carries `max_duration_ms` - the worst tick in the sampled window -
+alongside the sampled tick's own `duration_ms`. Alert on the max; a sampled
+duration alone hides exactly the spikes worth paging on.
+
+`zone_count` is how many zones that tick fanned out to. `world_id` is
+unbounded (one per live world) - never a metric label.
+""".
+-spec world_tick(binary() | undefined, non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
+    ok.
+world_tick(WorldId, DurationMs, MaxDurationMs, ZoneCount) ->
+    telemetry:execute(
+        [asobi, world, tick],
+        #{
+            duration_ms => DurationMs,
+            max_duration_ms => MaxDurationMs,
+            zone_count => ZoneCount,
+            count => 1
+        },
+        #{world_id => WorldId}
+    ).
+
+-doc """
+asobi#313: a zone process started. Zones are lazy, so live-zone count is not
+derivable from world count; pair this with `zone_closed/2` and track the
+difference as a gauge. Both metadata keys are unbounded - never a label.
+""".
+-spec zone_opened(binary() | undefined, {integer(), integer()}) -> ok.
+zone_opened(WorldId, Coords) ->
+    telemetry:execute([asobi, zone, opened], #{count => 1}, #{
+        world_id => WorldId, coords => Coords
+    }).
+
+-doc "asobi#313: a zone process went away (reaped, crashed, or world shutdown). See `zone_opened/2`.".
+-spec zone_closed(binary() | undefined, {integer(), integer()}) -> ok.
+zone_closed(WorldId, Coords) ->
+    telemetry:execute([asobi, zone, closed], #{count => 1}, #{
+        world_id => WorldId, coords => Coords
     }).
 
 %% --- Matchmaker Events ---

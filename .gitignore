@@ -10,3 +10,7 @@ rebar3.crashdump
 erl_crash.dump
 doc/
 *.coverdata
+
+# Console toolchain. `console/` holds the source; the built bundle in
+# priv/console IS committed - see console/README.md.
+console/node_modules/

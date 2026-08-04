@@ -60,9 +60,10 @@ init_per_suite(Config) ->
     B2 = nova_test:json(R2),
     #{~"player_id" := P1Id, ~"access_token" := P1Token} = B1,
     #{~"player_id" := P2Id, ~"access_token" := P2Token} = B2,
-    Suffix = integer_to_binary(erlang:unique_integer([positive])),
+    %% item_defs.slug is unique and this row is never deleted, so the id has
+    %% to be unique across runs, not just within one (asobi#357).
     ItemCS = asobi_item_def:changeset(#{}, #{
-        slug => iolist_to_binary([~"test_sword_", Suffix]),
+        slug => asobi_test_helpers:unique_id(~"test_sword"),
         name => ~"Test Sword",
         category => ~"weapon",
         rarity => ~"rare"

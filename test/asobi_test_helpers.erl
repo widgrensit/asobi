@@ -1,6 +1,6 @@
 -module(asobi_test_helpers).
 
--export([start/1, unique_username/1]).
+-export([start/1, unique_username/1, unique_id/1]).
 -export([http_routes/1, routes_missing_options/1, preflight_targets/1, sample_path/1]).
 
 -spec start(list()) -> list().
@@ -13,6 +13,24 @@ unique_username(_Prefix) ->
     Bytes = crypto:strong_rand_bytes(16),
     Hex = binary:encode_hex(Bytes, lowercase),
     binary:part(Hex, 0, 32).
+
+-doc """
+A value no other run will produce, for any column under a unique index.
+
+The local database persists between runs while CI gets a fresh one, so a
+suite that writes a uniquely-constrained fixture and does not delete it only
+ever breaks local developers - and looks like a regression in unrelated work
+when it does (asobi#357).
+
+`erlang:unique_integer/1` is not a substitute: it is unique within one
+runtime instance, and each `rebar3 ct` run is a new one, so two runs hand out
+the same low integers. Random bytes are unique across runs and let a suite
+run concurrently with itself.
+""".
+-spec unique_id(binary()) -> binary().
+unique_id(Prefix) ->
+    Hex = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
+    <<Prefix/binary, "_", Hex/binary>>.
 
 %% --- Router enumeration ---
 %%

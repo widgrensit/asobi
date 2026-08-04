@@ -47,6 +47,7 @@ init(Config) ->
     },
     TickerConfig = #{
         tick_rate => maps:get(tick_rate, Config, 50),
+        world_id => maps:get(world_id, Config, undefined),
         world_pid => self()
     },
     WorldConfig = Config#{

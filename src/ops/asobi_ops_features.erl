@@ -2,10 +2,15 @@
 -moduledoc """
 The installed feature set, as the ops read plane reports it.
 
-There is no extension registry yet, so everything here comes from core and
-`extensions/0` is empty. Core and an extension are reported in the same shape
-- `#{name, version, capabilities}` - so a registry can fill `extensions/0`
-later without the endpoint, its envelope, or its consumers changing.
+Core and every installed extension are reported in the same shape -
+`#{name, version, capabilities}` - so a console reads one row type and does
+not branch on which half of the deployment a feature came from.
+
+This is the endpoint the console uses to decide which of its built-in screens
+to render: it ships the quests screens and shows them when quests is
+installed. That is the whole mechanism, and it is why the endpoint reports
+the extension's *version* as well as its name - a console rendering against a
+schema that has moved should be able to say so rather than fail oddly.
 
 Capabilities report what is *configured*, not what is compiled in: a console
 needs to know whether Steam auth will work on this deployment, and "the module
@@ -29,13 +34,40 @@ features() ->
     }.
 
 -doc """
-Installed extensions, in the same shape as the `core` entry.
+Installed extensions, in dependency order, in the same shape as `core`.
 
-Always `[]` today. When an extension registry lands this reads from it and
-nothing above this function changes.
+Read from `asobi_extensions:resolve/0`'s memoised result, so this costs a
+`persistent_term` read and can never disagree with the set the node actually
+booted with.
+
+An extension's capabilities are the manifest keys it declares something
+under - `rpc`, `lua`, `tables` - reported as the same `#{name, enabled}` pair
+core uses. They say what the extension contributes, never what it contains:
+no method name, no table name, nothing an operator has not already been told
+by installing it.
 """.
 -spec extensions() -> [map()].
-extensions() -> [].
+extensions() ->
+    [describe(Extension) || Extension <- asobi_extensions:resolve()].
+
+-spec describe(asobi_extensions:extension()) -> map().
+describe(#{app := App, name := Name, rpc := Rpc, lua := Lua, owns := Owns}) ->
+    #{
+        name => Name,
+        version => app_version(App),
+        capabilities => [
+            #{name => ~"lua", enabled => map_size(Lua) > 0},
+            #{name => ~"rpc", enabled => map_size(Rpc) > 0},
+            #{name => ~"tables", enabled => maps:get(tables, Owns, []) =/= []}
+        ]
+    }.
+
+-spec app_version(atom()) -> binary().
+app_version(App) ->
+    case application:get_key(App, vsn) of
+        {ok, Vsn} when is_list(Vsn) -> list_to_binary(Vsn);
+        _ -> ~"unknown"
+    end.
 
 -doc "Core capabilities, sorted by name so the response is stable.".
 -spec capabilities() -> [#{name := binary(), enabled := boolean()}].

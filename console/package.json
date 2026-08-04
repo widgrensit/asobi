@@ -1,0 +1,25 @@
+{
+  "name": "asobi-console",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Operator console for asobi. Builds to ../priv/console.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.0.5",
+    "vite": "8.2.0"
+  }
+}

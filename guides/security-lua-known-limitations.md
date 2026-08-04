@@ -7,25 +7,37 @@ who care about any of these should plan their deployment accordingly.
 
 ## Resource bounds
 
-### The reduction limit Luerl offers is not applied
+### The CPU bound is sampled, not exact
 
-A wall-clock timeout and a per-eval heap cap are the only resource
-bounds asobi enforces. Neither bounds CPU: a script can soak its full
-per-callback budget every tick without being throttled.
+asobi enforces three resource bounds on every callback that runs in a
+child process: a wall-clock timeout, a per-eval heap cap, and a
+reduction budget. The reduction budget is the CPU bound - without it a
+script could soak its full per-callback wall-clock budget every tick,
+because the timeout bounds latency, not work.
 
-Luerl does expose a reduction limit. `luerl_sandbox:run/3` takes
-`max_reductions` and kills the runner once its BEAM reduction count
-passes the limit (luerl 1.5.1, the version asobi pins). asobi does not
-use it, and it is not a drop-in:
+The budget is `asobi_lua.max_reductions_per_ms` (50,000 by default)
+multiplied by that callback's own wall-clock budget, so it scales with
+the callback: `tick` (500 ms) gets 25,000,000 reductions, a bot's
+`think` (50 ms) gets 2,500,000. Overrun surfaces as
+`{error, reductions_exhausted}`, distinct from `timeout` and
+`heap_exhausted`. As with the other two, the callback's result is
+discarded and the previous Lua state is kept - a match or zone is never
+torn down because one callback overran. Set the rate to `0` to disable
+the check.
 
-- `luerl_sandbox:run/3` evaluates a chunk. asobi's hot path is
-  `luerl:call_function/3` against an already-loaded state, which that
-  entry point does not cover.
-- The check polls the runner's reduction count from the parent on a
-  fixed 100 ms interval. It bounds total work, not per-tick latency,
-  and cannot fire sooner than one poll.
+Two limits are worth knowing:
 
-Tracked as [asobi#348](https://github.com/widgrensit/asobi/issues/348).
+- The parent samples the child's reduction count every 10 ms, so a
+  script can overshoot by up to one interval's work before it is
+  killed. The budget bounds sustained CPU, not the instantaneous peak.
+- asobi does not use `luerl_sandbox:run/3`, which offers the same idea
+  upstream: it evaluates a chunk, whereas asobi's hot path is
+  `luerl:call_function/3` against an already-loaded state. The polling
+  loop lives in the `bounded_eval` helper in `asobi_lua_loader`
+  instead, which already spawned and monitored the worker.
+
+`handle_input/3` is the exception: per ADR 0002 it runs in the calling
+process with no child, so none of the three bounds apply to it.
 
 ### The heap cap is per eval, not per script
 

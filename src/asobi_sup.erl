@@ -35,6 +35,7 @@ init([]) ->
         presence_spec(),
         season_manager_spec(),
         guest_reaper_spec(),
+        console_session_spec(),
         lua_game_config_spec(),
         lua_sup(),
         extension_sup()
@@ -86,6 +87,19 @@ extension_sup() ->
         id => asobi_extension_sup,
         start => {asobi_extension_sup, start_link, []},
         type => supervisor
+    }.
+
+%% Started whether or not the console is enabled. The table costs nothing
+%% empty, and starting it conditionally would mean a node that has the console
+%% switched on at runtime resolves every session against a table that is not
+%% there - a 403 with no explanation anywhere.
+console_session_spec() ->
+    #{
+        id => asobi_console_session,
+        start => {asobi_console_session, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker
     }.
 
 guest_reaper_spec() ->

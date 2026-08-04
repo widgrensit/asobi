@@ -23,6 +23,7 @@ routes(_Environment) ->
         iap_routes(),
         api_routes(),
         ops_routes(),
+        console_routes(),
         ws_routes()
     ].
 
@@ -253,6 +254,38 @@ ops_routes() ->
             }},
             {~"/notifications", fun asobi_ops_controller:notifications/1, #{
                 methods => [get, options]
+            }}
+        ]
+    }.
+
+%% Console - the operator UI bundle and the session it exchanges the operator
+%% secret for. `security => false` is the whole group and it is deliberate:
+%% these routes serve a document with no data in it, content-hashed static
+%% files, and a login endpoint that cannot require the credential it accepts.
+%% Every byte of game data the console renders comes from the ops group above.
+%%
+%% Absolute paths under an empty prefix, like the websocket group, and one
+%% `:file` binding rather than a wildcard - `routing_tree` does no dot-segment
+%% normalisation, so this table declares no route form that could carry one.
+%%
+%% Every route answers 404 unless `console` is enabled; see `m:asobi_console`.
+console_routes() ->
+    #{
+        prefix => ~"",
+        security => false,
+        routes => [
+            {~"/console", fun asobi_console_controller:index/1, #{methods => [get, options]}},
+            {~"/console/assets/:file", fun asobi_console_controller:asset/1, #{
+                methods => [get, options]
+            }},
+            {~"/console/session", fun asobi_console_controller:session/1, #{
+                methods => [get, options]
+            }},
+            {~"/console/session", fun asobi_console_controller:login/1, #{
+                methods => [post, options]
+            }},
+            {~"/console/session", fun asobi_console_controller:logout/1, #{
+                methods => [delete, options]
             }}
         ]
     }.

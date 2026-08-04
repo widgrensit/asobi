@@ -82,6 +82,11 @@ select_limiter(Req) ->
         [~"api", ~"v1", ~"auth", ~"register"] -> asobi_register_limiter;
         [~"api", ~"v1", ~"auth" | _] -> asobi_auth_limiter;
         [~"api", ~"v1", ~"iap" | _] -> asobi_iap_limiter;
+        %% The console login trades a shared secret for a session, so it is
+        %% the one place in the deployment where guessing pays. It shares the
+        %% auth bucket rather than getting its own: same threat, same shape,
+        %% one fewer knob to leave unset.
+        [~"console", ~"session"] -> asobi_auth_limiter;
         _ -> asobi_api_limiter
     end.
 

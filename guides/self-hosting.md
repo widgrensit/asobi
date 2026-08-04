@@ -183,6 +183,7 @@ These are read at start time from your `sys.config`.
 | Key | Default | What it does |
 |---|---|---|
 | `asobi_lua.max_heap_words` | `5_000_000` | Per-eval heap cap (in Erlang words) for every Lua callback the runtime invokes. If a single eval allocates past this, the eval process is killed by the VM and the runtime returns `{error, heap_exhausted}`. Persistent state held by the gen_server is not touched — only the runaway eval. Raise only if a single tick legitimately constructs a very large local structure; long-lived tables belong in the persistent Luerl state and cost nothing per eval. |
+| `asobi_lua.max_reductions_per_ms` | `50_000` | Per-eval CPU cap, as BEAM reductions allowed per millisecond of that callback's own wall-clock budget — so `tick` (500 ms) gets 25,000,000 and a bot's `think` (50 ms) gets 2,500,000. The timeout bounds latency but not work: without this, a script that spins is killed at its deadline and does it again next tick, holding a scheduler indefinitely. Overrun returns `{error, reductions_exhausted}`; the callback's result is discarded and the previous Lua state kept, exactly as for a timeout, so the match or zone survives. Sampled every 10 ms, so overshoot is bounded by one interval. Set to `0` to disable. |
 | `asobi_lua.reload_mode` (or env `ASOBI_LUA_RELOAD`) | `auto` | `auto` mtime-polls the script on every tick. `off` skips the poll entirely — appropriate for sealed-bundle prod where new code is a container restart, not a file change. Anything we don't recognise falls back to `auto` so a typo doesn't silently disable reload. |
 
 ```erlang
@@ -190,6 +191,7 @@ These are read at start time from your `sys.config`.
 [
   {asobi_lua, [
     {max_heap_words, 10_000_000},
+    {max_reductions_per_ms, 50_000},
     {reload_mode, off}
   ]}
 ].
@@ -228,6 +230,13 @@ exits on the first failure.
 - **Restarts are cheap.** The container takes single-digit seconds to
   boot. In-flight matches are not preserved across restarts (they
   rely on in-memory state); design clients to reconnect.
+- **The operator console.** Set `console` and `ops_secret` and the node
+  serves a browser console at `/console` (see
+  [Configuration](configuration.md#operator-console)). It shares the game
+  port, because Nova starts one listener, so treat `/console` and
+  `/api/v1/ops` as one thing when you decide what the internet can reach.
+  Both are off until configured. Console sessions are in memory and end with
+  the restart above.
 
 ## What this guide does not cover
 

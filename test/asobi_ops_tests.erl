@@ -409,9 +409,54 @@ features_shape_test() ->
     ?assertEqual(~"asobi", maps:get(name, Core)),
     ?assert(is_binary(maps:get(version, Core))).
 
-features_extensions_empty_until_registry_test() ->
+features_extensions_are_empty_when_none_are_installed_test() ->
     #{data := #{extensions := Extensions}} = asobi_ops_features:features(),
     ?assertEqual([], Extensions).
+
+%% The endpoint the console reads to decide which of its built-in screens to
+%% render. It reported `[]` unconditionally until the registry landed, which
+%% would have left every extension screen dark with nothing to debug.
+features_reports_the_resolved_extension_set_test() ->
+    meck:new(asobi_extensions, [passthrough]),
+    try
+        meck:expect(asobi_extensions, resolve, fun() -> [fake_extension()] end),
+        #{data := #{extensions := [Extension]}} = asobi_ops_features:features(),
+        ?assertEqual([capabilities, name, version], lists:sort(maps:keys(Extension))),
+        ?assertEqual(~"quests", maps:get(name, Extension)),
+        ?assert(is_binary(maps:get(version, Extension))),
+        ?assertNotEqual(~"unknown", maps:get(version, Extension)),
+        ?assertEqual(
+            [{~"lua", false}, {~"rpc", true}, {~"tables", true}],
+            [{N, E} || #{name := N, enabled := E} <- maps:get(capabilities, Extension)]
+        )
+    after
+        meck:unload(asobi_extensions)
+    end.
+
+%% Same shape as the `core` entry, so a console reads one row type.
+features_extension_shape_matches_core_test() ->
+    meck:new(asobi_extensions, [passthrough]),
+    try
+        meck:expect(asobi_extensions, resolve, fun() -> [fake_extension()] end),
+        #{data := #{core := Core, extensions := [Extension]}} = asobi_ops_features:features(),
+        ?assertEqual(lists:sort(maps:keys(Core)), lists:sort(maps:keys(Extension)))
+    after
+        meck:unload(asobi_extensions)
+    end.
+
+%% `kernel` so the reported version is a real application version rather than
+%% the `unknown` fallback.
+fake_extension() ->
+    #{
+        app => kernel,
+        module => fake_quests_extension,
+        name => ~"quests",
+        extension_version => 1,
+        rpc => #{~"quests.claim" => {fake_quests_rpc, claim, 2}},
+        lua => #{},
+        owns => #{tables => [~"quests"], rpc => [~"quests"]},
+        codes => #{}
+    }.
 
 features_capabilities_are_name_and_boolean_only_test() ->
     Capabilities = asobi_ops_features:capabilities(),
