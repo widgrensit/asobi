@@ -193,11 +193,10 @@ Rules:
 
 ### Two gaps you hit today
 
-**Your migration will not run.** `kura_migrator` discovers migrations from
-exactly one OTP application. This is a live kura defect independent of
-extensions. `asobi_repo:migration_apps/0` is the seam kura 2.20.0 calls; asobi
-pins `{kura, "~> 2.17"}`, so until the pin moves the host writes one delegating
-migration file.
+**Your migration will not run.** On the pinned kura, `kura_migrator` discovers
+migrations from exactly one OTP application. `asobi_repo:migration_apps/0` is
+the seam kura 2.20 calls; asobi pins `{kura, "~> 2.17"}`, so until the pin
+moves the host writes one delegating migration file.
 
 **Your foreign key will not cascade.** `#kura_assoc` has no `on_delete` field
 and rebar3_kura hardcodes `no_action`, so the generated migration gives you

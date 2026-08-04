@@ -16,6 +16,7 @@ extensions_test_() ->
         fun optional_callbacks_default_to_empty/0,
         fun dependency_order_beats_alphabetical_order/0,
         fun resolve_is_memoised/0,
+        fun the_migration_seam_lists_the_extensions/0,
         fun one_lua_namespace_two_claimants/0,
         fun one_table_two_claimants/0,
         fun one_rpc_prefix_two_claimants/0,
@@ -107,6 +108,16 @@ resolve_is_memoised() ->
     ?assertEqual(1, length(asobi_extensions:resolve())),
     asobi_extensions:reset(),
     ?assertEqual(2, length(asobi_extensions:resolve())).
+
+%% kura 2.20 calls this optional kura_repo callback; the pinned 2.17 does not,
+%% so it is a seam. It names the extensions only: kura adds the repo's own
+%% application and sorts the result itself.
+the_migration_seam_lists_the_extensions() ->
+    ?assertEqual([], asobi_repo:migration_apps()),
+    install(?QUESTS),
+    ok = asobi_fixture_app:install(?CLANS, asobi_fixture_clans_extension, [?QUESTS]),
+    asobi_extensions:reset(),
+    ?assertEqual([?QUESTS, ?CLANS], asobi_repo:migration_apps()).
 
 %% --- Disjointness ---
 
