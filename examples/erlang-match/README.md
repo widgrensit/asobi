@@ -1,12 +1,20 @@
-# erlang-match — asobi, minus Lua
+# erlang-match - an asobi game written in Erlang
 
-A runnable fork-and-go example showing how to depend on the `asobi` library
-from a plain Erlang/OTP application. Two-player click-counter, hot-reloadable
-from the `rebar3 shell`, PostgreSQL-backed.
+A runnable fork-and-go example of an asobi node whose game module is an
+Erlang module implementing the `asobi_match` behaviour, rather than a Lua
+script. Two-player click-counter, hot-reloadable from the `rebar3 shell`,
+PostgreSQL-backed.
 
-Companion to the [/docs/erlang/getting-started](https://asobi.dev/docs/erlang/getting-started)
-guide on asobi.dev. Read that for the walkthrough; clone this for the
-starting point.
+The Lua runtime ships in the release either way: asobi depends on `luerl`
+directly, so `luerl` is in `rebar.lock` and in the built release whether or
+not you write a line of Lua. This example simply does not use it. The two
+styles also mix - `game_modes` takes an Erlang module for one mode and
+`{lua, "script.lua"}` for the next, in the same node.
+
+Read [guides/getting-started.md](../../guides/getting-started.md) for the
+library-level walkthrough and
+[asobi.dev/docs/erlang/api](https://asobi.dev/docs/erlang/api) for the
+callback reference. Clone this for the starting point.
 
 ## Run it
 
@@ -24,9 +32,8 @@ curl -s localhost:8084/api/v1/auth/register \
   -d '{"username":"alice","password":"hunter-2026"}' | jq
 ```
 
-> Passwords must be at least 8 characters; asobi's auth returns a
-> structured 422 with the exact reason if validation fails.
-
+Passwords must be at least 8 characters; asobi's auth returns a structured
+422 with the exact reason if validation fails.
 
 Expected:
 
@@ -38,8 +45,8 @@ Expected:
 }
 ```
 
-> The `session_token` is a base64-encoded random secret (not a JWT). Pass it
-> verbatim in `Authorization: Bearer …` on subsequent calls.
+The `session_token` is a base64-encoded random secret (not a JWT). Pass it
+verbatim in `Authorization: Bearer ...` on subsequent calls.
 
 Now connect a WebSocket client (`wscat`, Defold, Godot, etc.) and play
 the `hello` mode. See the full client protocol in
@@ -47,7 +54,7 @@ the `hello` mode. See the full client protocol in
 
 ## Hot reload
 
-Edit `src/hello_game.erl` — say, change the broadcast event from
+Edit `src/hello_game.erl` - say, change the broadcast event from
 `update` to `tick`. In the running shell:
 
 ```erlang
@@ -62,20 +69,25 @@ restart.
 
 ## What's here
 
-- `rebar.config` — depends on `asobi` from Hex, points the shell at
-  `config/sys.config`.
-- `config/sys.config` — Nova → kura → shigoto → asobi wiring. The
-  minimal set of keys you need to boot.
-- `src/erlang_match_app.erl` + `src/erlang_match_sup.erl` — standard
+- `rebar.config` - depends on `asobi`, points the shell at
+  `config/sys.config`. The dependency is pinned to a git tag until the
+  post-merge asobi reaches Hex; swap it back to `{asobi, "~> 0.51"}` then.
+- `config/sys.config` - Nova, kura, shigoto and asobi wiring. The minimal
+  set of keys you need to boot. `{game_modes, #{~"hello" => hello_game}}`
+  binds the mode name to the module below.
+- `src/erlang_match_app.erl` + `src/erlang_match_sup.erl` - standard
   OTP app + empty supervisor. We don't actually run anything under
   our supervisor; asobi's own supervision tree owns all the match
   processes.
-- `src/hello_game.erl` — the match module. Six callbacks, no more,
-  no less.
+- `src/hello_game.erl` - the match module. `asobi_match` requires
+  `init/1`, `join/2`, `leave/2`, `handle_input/3` and one of
+  `get_state/2` or `get_state/1`. Everything else is optional, including
+  the `tick/1` implemented here.
 
 ## Where next
 
-- [guides/getting-started.md](../../guides/getting-started.md) — library-level walkthrough.
-- [guides/matchmaking.md](../../guides/matchmaking.md) — ticket shapes, strategies.
-- [guides/voting.md](../../guides/voting.md) — pluggable vote methods.
-- [guides/world-server.md](../../guides/world-server.md) — persistent zones instead of short-lived matches.
+- [guides/getting-started.md](../../guides/getting-started.md) - library-level walkthrough.
+- [guides/matchmaking.md](../../guides/matchmaking.md) - ticket shapes, strategies.
+- [guides/voting.md](../../guides/voting.md) - pluggable vote methods.
+- [guides/world-server.md](../../guides/world-server.md) - persistent zones instead of short-lived matches.
+- [guides/lua-scripting.md](../../guides/lua-scripting.md) - the other way to write a mode, in the same node.
