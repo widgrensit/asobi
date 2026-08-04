@@ -318,7 +318,7 @@ ops_path(_Path) -> false.
 %% runtime, so this is the check that turns that denial into a build failure.
 ops_routes_and_capability_classes_agree_test() ->
     Routed = lists:sort([
-        {Method, binary:split(Path, ~"/", [global, trim_all])}
+        {Method, [binding_or_literal(S) || S <- binary:split(Path, ~"/", [global, trim_all])]}
      || #{prefix := ~"/api/v1/ops", routes := Routes} <- asobi_router:routes(dev),
         {Path, _Handler, Opts} <- Routes,
         Method <- maps:get(methods, Opts),
@@ -326,6 +326,12 @@ ops_routes_and_capability_classes_agree_test() ->
     ]),
     Tagged = lists:sort([{Method, Segments} || {Method, Segments, _} <- asobi_ops_caps:classes()]),
     ?assertEqual(Tagged, Routed).
+
+%% The router spells a bound segment `:id`; the class table spells it `'_'`,
+%% because it matches against a real request path where the binding is already
+%% a value. Normalise so the two are comparable without weakening the check.
+binding_or_literal(<<":", _/binary>>) -> '_';
+binding_or_literal(Segment) -> Segment.
 
 route(Groups, Prefix, Path) ->
     [Found] = [

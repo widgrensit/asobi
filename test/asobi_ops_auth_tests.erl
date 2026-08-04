@@ -17,8 +17,34 @@
 class_is_read_for_every_shipped_route_test() ->
     [
         ?assertEqual(read, asobi_ops_caps:class(~"GET", Path))
-     || Path <- [~"/api/v1/ops/players", ~"/api/v1/ops/matches", ~"/api/v1/ops/features"]
+     || Path <- [
+            ~"/api/v1/ops/players",
+            ~"/api/v1/ops/matches",
+            ~"/api/v1/ops/features",
+            ~"/api/v1/ops/leaderboards",
+            ~"/api/v1/ops/matchmaker"
+        ]
     ].
+
+%% A bound segment is tagged `'_'` and the request carries a real value, so
+%% any id must resolve. Without this the route is untagged at runtime and
+%% denied, which is the safe failure but still a broken endpoint.
+class_resolves_a_bound_segment_test() ->
+    [
+        ?assertEqual(read, asobi_ops_caps:class(~"GET", Path))
+     || Path <- [
+            ~"/api/v1/ops/leaderboards/global/entries",
+            ~"/api/v1/ops/leaderboards/019fca02-8553-792c-93e0-a0c7f803bc98/entries"
+        ]
+    ].
+
+%% The wildcard must not widen: it stands for exactly one segment, so neither
+%% a missing nor an extra segment may borrow the tag.
+class_wildcard_matches_exactly_one_segment_test() ->
+    ?assertEqual(undefined, asobi_ops_caps:class(~"GET", ~"/api/v1/ops/leaderboards/entries")),
+    ?assertEqual(
+        undefined, asobi_ops_caps:class(~"GET", ~"/api/v1/ops/leaderboards/a/b/entries")
+    ).
 
 %% routing_tree collapses `//` and edge slashes, so a variant that still
 %% routes must still find its tag - otherwise it would be denied as untagged.
