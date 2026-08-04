@@ -7,20 +7,36 @@ who care about any of these should plan their deployment accordingly.
 
 ## Resource bounds
 
-### No reduction limit / hard CPU cap
+### The reduction limit Luerl offers is not applied
 
-The wall-clock timeout is the only resource bound today. A script can
-soak its full per-callback budget every tick without being throttled.
-Luerl upstream does not currently expose a "reduction limit" or
-"process-bound state" knob; a future hardening pass may add a soft
-budget on the Luerl scheduler.
+A wall-clock timeout and a per-eval heap cap are the only resource
+bounds asobi enforces. Neither bounds CPU: a script can soak its full
+per-callback budget every tick without being throttled.
 
-### No per-script heap cap
+Luerl does expose a reduction limit. `luerl_sandbox:run/3` takes
+`max_reductions` and kills the runner once its BEAM reduction count
+passes the limit (luerl 1.5.1, the version asobi pins). asobi does not
+use it, and it is not a drop-in:
 
-Lua tables grow inside the BEAM process heap. A pathological script
-that allocates 100 MB of tables and drops them every tick will pressure
-the OS memory allocator. The decode depth cap (64 levels) bounds
-recursion at the bridge boundary, but does not bound table *size*.
+- `luerl_sandbox:run/3` evaluates a chunk. asobi's hot path is
+  `luerl:call_function/3` against an already-loaded state, which that
+  entry point does not cover.
+- The check polls the runner's reduction count from the parent on a
+  fixed 100 ms interval. It bounds total work, not per-tick latency,
+  and cannot fire sooner than one poll.
+
+Tracked as [asobi#348](https://github.com/widgrensit/asobi/issues/348).
+
+### The heap cap is per eval, not per script
+
+Every callback runs in a child process carrying `max_heap_size` with
+`kill => true` (`asobi_lua.max_heap_words`, 5,000,000 words by
+default), so a single runaway allocation is killed and surfaces as
+`{error, heap_exhausted}`. Nothing caps a script's *steady* footprint:
+a state that stays just under the limit is copied into every later
+eval, and the total across concurrent matches is unbounded. The decode
+depth cap (64 levels) bounds recursion at the bridge boundary, not
+table size.
 
 ### Per-callback state copy cost is linear
 

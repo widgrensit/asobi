@@ -89,6 +89,35 @@ Since the bot only decides from `state`, difficulty is a property of the
 script, not a config knob: throttle a reaction-time delay or degrade the target
 selection by keying private per-bot state off `bot_id` in a module-level table.
 
+### What a bot script gets
+
+A bot script is loaded into the same hardened Luerl state a match script
+starts from, but **without** the `game.*` API. That namespace is installed
+only for match and world scripts; inside a bot's `think`, `game` is `nil`.
+There is no `game.economy`, `game.log`, `game.storage` or `game.leaderboard`
+for a bot.
+
+What is available:
+
+- The Lua standard library, minus what the sandbox clears. `io`, `package`,
+  `load`, `loadfile`, `loadstring`, `dofile`, `print`, `eprint` and
+  `os.execute` / `os.exit` / `os.getenv` / `os.remove` / `os.rename` /
+  `os.tmpname` are all `nil` (see [Sandbox model](security-sandbox.md)).
+- `require("module")`, resolved relative to the bot script's own directory --
+  `require("targeting")` reads `<bot script dir>/targeting.lua`. Dotted paths
+  work; parent traversal and absolute paths are rejected.
+- `math.random` and `math.sqrt`, backed by the BEAM's `rand` and `math`.
+- The two arguments of `think(bot_id, state)`, plus whatever the script
+  itself defines at the top level. `state` is the match state as broadcast to
+  players, so a bot sees what a client sees and nothing more.
+
+Anything else has to come through the match script: put the value in the
+state the match broadcasts, and the bot reads it from `state`.
+
+Each `think` call runs under a 50 ms wall-clock budget and a heap cap. A
+timeout, an error, or a missing `think` falls back to the built-in default AI
+(below).
+
 ```lua
 -- game/bots/chaser.lua
 
@@ -233,5 +262,6 @@ if you need the human answer.
 
 ## Next steps
 
-- [Lua scripting](lua-scripting.md) - the `game.*` API a bot's `think` shares with match logic.
+- [Lua scripting](lua-scripting.md) - the `game.*` API, which match and world
+  scripts get and bots do not (see [What a bot script gets](#what-a-bot-script-gets)).
 - [Trust model](security-trust-model.md) - a bot's `think` runs bounded, like any callback.
