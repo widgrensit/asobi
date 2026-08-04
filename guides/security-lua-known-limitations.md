@@ -33,8 +33,8 @@ Two limits are worth knowing:
 - asobi does not use `luerl_sandbox:run/3`, which offers the same idea
   upstream: it evaluates a chunk, whereas asobi's hot path is
   `luerl:call_function/3` against an already-loaded state. The polling
-  loop lives in `asobi_lua_loader:bounded_eval/2` instead, which
-  already spawned and monitored the worker.
+  loop lives in the `bounded_eval` helper in `asobi_lua_loader`
+  instead, which already spawned and monitored the worker.
 
 `handle_input/3` is the exception: per ADR 0002 it runs in the calling
 process with no child, so none of the three bounds apply to it.

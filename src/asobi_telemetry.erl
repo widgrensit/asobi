@@ -33,8 +33,8 @@
 -export([events/0]).
 
 -doc """
-Every event name this module emits - the surface locked by
-[ADR 0005](docs/adr/0005-telemetry-event-surface.md).
+Every event name this module emits - the surface locked by ADR 0005
+(`docs/adr/0005-telemetry-event-surface.md`).
 
 Exported so a consumer attaches to the whole surface without restating it.
 Restating it is what let the built-in debug logger and `opentelemetry_asobi`
