@@ -20,8 +20,22 @@ fields() ->
         #kura_field{name = inserted_at, type = utc_datetime, nullable = false}
     ].
 
+%% The foreign key has existed since m20260701120000 created the table with
+%% `references = {<<"players">>, id}`, but the schema never declared the
+%% association to match. rebar3_kura could not see the difference until v0.16.0
+%% taught the diff to compare references, and its first reading of the gap is to
+%% propose dropping the constraint - which would take referential integrity off
+%% purchase records. The database is right and the schema was incomplete.
+%%
+%% No `on_delete`: the constraint was created without one, so declaring anything
+%% else here would generate a migration altering a live financial table.
 -spec associations() -> [#kura_assoc{}].
-associations() -> [].
+associations() ->
+    [
+        #kura_assoc{
+            name = player, type = belongs_to, schema = asobi_player, foreign_key = player_id
+        }
+    ].
 
 -spec indexes() -> [{[atom()], map()}].
 indexes() ->
