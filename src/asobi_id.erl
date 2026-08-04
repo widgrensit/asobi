@@ -35,5 +35,5 @@ characters are pure millisecond timestamp (see the moduledoc above), so
 two calls in the same millisecond produce the identical prefix.
 """.
 -spec rand_suffix(pos_integer()) -> binary().
-rand_suffix(ByteLen) ->
+rand_suffix(ByteLen) when is_integer(ByteLen), ByteLen > 0 ->
     binary:encode_hex(crypto:strong_rand_bytes(ByteLen), lowercase).

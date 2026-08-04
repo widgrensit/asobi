@@ -125,4 +125,48 @@ select_limiter_test_() ->
             asobi_register_limiter, select_limiter(fake_req(#{path => ~"//api/v1/auth/register"}))
         )
     ].
+
+-define(PEER_IP, ~"198.51.100.7").
+
+peer_req(Extra) ->
+    Base = #{peer => {{198, 51, 100, 7}, 41234}},
+    fake_req(maps:merge(Base, Extra)).
+
+%% Which bucket a request counts against decides whether one abusive
+%% player throttles only themselves or everyone sharing their egress IP,
+%% and a regression here is invisible until a CGNAT or CDN customer
+%% complains. Pin both branches and every way the authenticated branch
+%% can fail open to the IP.
+rate_limit_key_test_() ->
+    Authed = fun(AuthData) ->
+        peer_req(#{
+            headers => #{~"authorization" => ~"Bearer t"},
+            auth_data => AuthData
+        })
+    end,
+    [
+        %% An authenticated player is bucketed by identity, so their
+        %% neighbours on the same IP are unaffected.
+        ?_assertEqual(~"player-1", rate_limit_key(Authed(#{player_id => ~"player-1"}))),
+        %% Anonymous traffic has no identity to bucket on: fall back to IP.
+        ?_assertEqual(?PEER_IP, rate_limit_key(peer_req(#{headers => #{}}))),
+        %% A non-Bearer scheme is not an asobi session, so it must not
+        %% reach the auth_data branch at all.
+        ?_assertEqual(
+            ?PEER_IP,
+            rate_limit_key(
+                peer_req(#{
+                    headers => #{~"authorization" => ~"Basic dXNlcjpwYXNz"},
+                    auth_data => #{player_id => ~"player-1"}
+                })
+            )
+        ),
+        %% Bearer present but the auth plugin never populated auth_data,
+        %% or populated it with a non-binary id: fail closed onto the IP
+        %% bucket rather than crashing or sharing a bucket.
+        ?_assertEqual(?PEER_IP, rate_limit_key(Authed(undefined))),
+        ?_assertEqual(?PEER_IP, rate_limit_key(Authed(#{}))),
+        ?_assertEqual(?PEER_IP, rate_limit_key(Authed(#{player_id => undefined}))),
+        ?_assertEqual(?PEER_IP, rate_limit_key(Authed(#{player_id => 12345})))
+    ].
 -endif.
