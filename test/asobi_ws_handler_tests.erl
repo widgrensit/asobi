@@ -180,7 +180,7 @@ nova_splices_a_list_reply_into_separate_commands_test() ->
 %% The dual-emit is what asobi#347's nova pin bought: nova 0.15.1 consed a
 %% list-valued reply onto the command list as one cowboy command, so both
 %% frames arrived at cow_ws:frame/2 as a single frame and took the
-%% connection process down. Pin the frame count, not just the payloads —
+%% connection process down. Pin the frame count, not just the payloads -
 %% a regression to a single frame is exactly what shipped in #330.
 extension_frames_are_two_separate_frames_test() ->
     Msg = {asobi_message, {game_message, ~"hi"}},
