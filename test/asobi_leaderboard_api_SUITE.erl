@@ -2,6 +2,8 @@
 
 -include_lib("nova_test/include/nova_test.hrl").
 
+-define(OPS_SECRET, ~"8e3a5d17c94b60f2ae81d3705c6f9b24d0a7e158b3c92f46071dab5e8c249f30").
+
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1]).
 -export([
     submit_score/1,
@@ -34,6 +36,10 @@ groups() ->
 
 init_per_suite(Config) ->
     Config0 = asobi_test_helpers:start(Config),
+    %% The ops plane authenticates as an operator, not as a player (ADR 0007).
+    %% Without this the reads below get a correct 403 rather than their data.
+    OpsSecretWas = application:get_env(asobi, ops_secret),
+    application:set_env(asobi, ops_secret, ?OPS_SECRET),
     Players = lists:map(
         fun(I) when is_integer(I) ->
             U = asobi_test_helpers:unique_username(
@@ -76,16 +82,29 @@ init_per_suite(Config) ->
         {ops_board_id, OpsBoardId},
         {player1_id, P1Id},
         {player1_token, P1Token},
-        {players, Players}
+        {players, Players},
+        {ops_secret_was, OpsSecretWas}
         | Config0
     ].
 
 end_per_suite(Config) ->
     application:unset_env(asobi, leaderboard_client_submit),
+    restore_ops_secret(Config),
     Config.
+
+restore_ops_secret(Config) ->
+    case lists:keyfind(ops_secret_was, 1, Config) of
+        {ops_secret_was, {ok, Value}} -> application:set_env(asobi, ops_secret, Value);
+        _ -> application:unset_env(asobi, ops_secret)
+    end.
 
 auth(Token) when is_binary(Token) ->
     [{~"authorization", <<"Bearer ", Token/binary>>}].
+
+%% The ops plane takes the operator credential, never a player token - a player
+%% token is a correct 403 here (ADR 0007), which is asserted in asobi_api_SUITE.
+ops_auth() ->
+    [{~"authorization", <<"Bearer ", (?OPS_SECRET)/binary>>}].
 
 seed_entry(BoardId, PlayerId, Score) ->
     Changeset = kura_changeset:cast(
@@ -213,7 +232,7 @@ ops_board_listing(Config) ->
     true = is_binary(Token),
     {ok, Resp} = nova_test:get(
         "/api/v1/ops/leaderboards?q=" ++ binary_to_list(BoardId),
-        #{headers => auth(Token)},
+        #{headers => ops_auth()},
         Config
     ),
     ?assertStatus(200, Resp),
@@ -234,7 +253,7 @@ ops_board_entries_are_ranked_across_pages(Config) ->
     true = is_binary(BoardId),
     true = is_binary(Token),
     Path = "/api/v1/ops/leaderboards/" ++ binary_to_list(BoardId) ++ "/entries",
-    {ok, First} = nova_test:get(Path ++ "?limit=2", #{headers => auth(Token)}, Config),
+    {ok, First} = nova_test:get(Path ++ "?limit=2", #{headers => ops_auth()}, Config),
     ?assertStatus(200, First),
     #{~"data" := FirstRows, ~"page" := FirstPage} = nova_test:json(First),
     ?assertEqual(3, maps:get(~"total", FirstPage)),
@@ -243,7 +262,7 @@ ops_board_entries_are_ranked_across_pages(Config) ->
      || R <- FirstRows
     ]),
     {ok, Second} = nova_test:get(
-        Path ++ "?limit=2&offset=2", #{headers => auth(Token)}, Config
+        Path ++ "?limit=2&offset=2", #{headers => ops_auth()}, Config
     ),
     ?assertStatus(200, Second),
     #{~"data" := SecondRows} = nova_test:json(Second),
@@ -260,7 +279,7 @@ ops_board_entries_reject_unknown_sort(Config) ->
     true = is_binary(Token),
     {ok, Resp} = nova_test:get(
         "/api/v1/ops/leaderboards/" ++ binary_to_list(BoardId) ++ "/entries?sort=metadata",
-        #{headers => auth(Token)},
+        #{headers => ops_auth()},
         Config
     ),
     ?assertStatus(400, Resp),
