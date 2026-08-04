@@ -285,12 +285,13 @@ extensions in general, which is why the producer travels in the payload's
 extension in the wire type, where no second extension could reuse it -
 that is what the rename fixes.
 
-**Wire history.** asobi v0.53.0 and earlier emit `game.error` /
-`game.message` only; `module.*` does not exist on the wire there, despite
-what the message on commit `a6bc2eb` says (its own follow-up commit in
-the same PR removed the dual-emit it describes, because Nova could not
-send two frames from one reply at the time - novaframework/nova#400).
-From this release both pairs are emitted.
+**Wire history.** `module.*` did not exist on the wire in any release
+before this change: not in v0.54.0, and not in v0.53.0, where commit
+`a6bc2eb` says otherwise. That commit's message describes a dual-emit
+that its own follow-up commit in the same pull request removed, because
+Nova could not send two frames from one reply at the time
+(novaframework/nova#400). Every release up to v0.54.0 emits `game.error`
+and `game.message` only.
 
 **Turning the legacy pair off.** Set `asobi.ws_legacy_game_frames` to
 `false` to emit only `module.*`. `game.message` is `game.send/2`, which a
