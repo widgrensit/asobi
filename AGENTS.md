@@ -50,7 +50,9 @@ rebar3 shell               # dev node on port 8082, DB asobi_dev
 ```
 
 Postgres is Docker Compose only, never a system install. CT integration
-suites talk to that container.
+suites talk to that container. `asobi_lua_storage_SUITE` in particular runs
+`game.storage.*` against it with no mocks - a mock is only as good as its
+assumption about the driver, which is how #296 shipped.
 
 ## Pre-push checklist (mandatory)
 
