@@ -33,6 +33,7 @@ bots           = { script = "bots/ai.lua", min_players = 4 } -- optional; min_pl
 game_type      = "world"                    -- optional, "match" (default) or "world"
 state_strategy = "shared"                   -- optional, "shared" picks asobi_lua_match_shared (encode-once broadcast)
 guest_auth     = true                       -- optional, offer anonymous no-account play (needs an operator pepper; ADR 0004)
+registration   = "closed"                   -- optional, "open" | "oauth_only" | "closed" (operator sys.config wins)
 
 -- World mode config (large session games, game_type = "world"):
 tick_rate               = 50              -- optional, ms per world tick (default 50 = 20 Hz)
@@ -53,9 +54,13 @@ Setting `game_type = "world"` routes the script through the `asobi_lua_world`
 bridge (zone_tick/2 + handle_input/3 returning entities). Defaults to "match",
 which uses the `asobi_lua_match` bridge (tick/1 + wrapped-state callbacks).
 
-`guest_auth` is read from `match.lua` in single-mode and from `config.lua` (the
-manifest) in multi-mode. It only *declares* intent; guest auth is on iff the
-operator also supplies a >= 32-byte pepper (ADR 0004).
+`guest_auth` and `registration` are read from `match.lua` in single-mode and
+from `config.lua` (the manifest) in multi-mode. `guest_auth` only *declares*
+intent; guest auth is on iff the operator also supplies a >= 32-byte pepper
+(ADR 0004). `registration` declares a signup posture for a deployment that
+states none: it lands in the script layer `asobi_registration` reads only when
+the operator's `sys.config` leaves `registration` unset, and an unrecognised
+value is logged and dropped rather than downgrading the posture.
 
 This module reads Lua and nothing else: it hands the config term it derived to
 `asobi_game_config:apply_config/1`, which owns the merge with operator config
@@ -71,7 +76,12 @@ names = {"Spark", "Blitz", "Volt"}
 -include_lib("kernel/include/logger.hrl").
 -include("asobi_lua_bots.hrl").
 
--export([maybe_load_game_config/0, reload_game_modes/0, apply_guest_auth/1]).
+-export([
+    maybe_load_game_config/0,
+    reload_game_modes/0,
+    apply_guest_auth/1,
+    apply_registration_mode/1
+]).
 -ifdef(TEST).
 -export([safe_join/2]).
 -endif.
@@ -79,21 +89,22 @@ names = {"Spark", "Blitz", "Volt"}
 -spec maybe_load_game_config() -> ok | {error, term()}.
 maybe_load_game_config() ->
     GameDirStr = game_dir(),
-    GuestAuth = declared_guest_auth(GameDirStr),
+    Declared = declared_config(GameDirStr),
     case read_modes(GameDirStr) of
         {ok, Modes} ->
-            asobi_game_config:apply_config(#{guest_auth => GuestAuth, modes => Modes});
+            asobi_game_config:apply_config(Declared#{modes => Modes});
         {error, _} = Err ->
             %% A broken bundle must still land its auth posture: leaving a stale
             %% `true` behind is the one failure the loader cannot fail soft on.
-            ok = asobi_game_config:apply_config(#{guest_auth => GuestAuth}),
+            ok = asobi_game_config:apply_config(Declared),
             Err
     end.
 
 %% Refresh only the game_modes registry from the mode scripts, WITHOUT
-%% re-deriving guest_auth. The config watcher (asobi#232) calls this on a live
-%% mode-shape edit, so guest-auth posture (ADR 0004's two-key AND) stays a
-%% boot-only decision that a bundle write cannot flip at runtime.
+%% re-deriving guest_auth or the registration posture. The config watcher
+%% (asobi#232) calls this on a live mode-shape edit, so auth posture (ADR
+%% 0004's two-key AND, and the signup gate) stays a boot-only decision that a
+%% bundle write cannot flip at runtime.
 -spec reload_game_modes() -> ok | {error, term()}.
 reload_game_modes() ->
     case read_modes(game_dir()) of
@@ -132,10 +143,70 @@ game_dir() ->
 %% the same.
 -spec apply_guest_auth(string() | binary()) -> ok.
 apply_guest_auth(GameDir) ->
-    asobi_game_config:apply_config(#{guest_auth => declared_guest_auth(GameDir)}).
+    asobi_game_config:apply_config(
+        maps:with([guest_auth], declared_config(GameDir))
+    ).
 
--spec declared_guest_auth(string() | binary()) -> boolean().
-declared_guest_auth(GameDir) ->
+%% Registration posture (ADR 0002) used to be reachable only through the
+%% release's sys.config, which no engine-hosted game can edit - so every hosted
+%% game silently ran the `open` default (asobi_lua#122). Shared with
+%% asobi_engine's bundle loader so managed cloud behaves the same.
+-spec apply_registration_mode(string() | binary()) -> ok.
+apply_registration_mode(GameDir) ->
+    asobi_game_config:apply_config(
+        maps:with([registration], declared_config(GameDir))
+    ).
+
+%% The whole config term the game's script declares. `guest_auth` is always
+%% present because a stale `true` from a previous bundle has to be reset;
+%% `registration` is present only when the script declares a recognised value,
+%% since an absent key is what leaves the operator's layer alone (ADR 0006).
+-spec declared_config(string() | binary()) -> asobi_game_config:config().
+declared_config(GameDir) ->
+    case config_script_state(GameDir) of
+        error ->
+            #{guest_auth => false};
+        {ok, St} ->
+            Config = #{guest_auth => read_global_bool(~"guest_auth", St) =:= true},
+            case read_registration(St) of
+                undefined ->
+                    Config;
+                {ok, Mode} ->
+                    Config#{registration => Mode};
+                {invalid, Value} ->
+                    log_invalid_registration(Value),
+                    Config
+            end
+    end.
+
+-spec read_registration(dynamic()) ->
+    undefined | {ok, asobi_registration:mode()} | {invalid, term()}.
+read_registration(St) ->
+    case luerl:get_table_keys([~"registration"], St) of
+        {ok, nil, _} -> undefined;
+        {ok, ~"open", _} -> {ok, open};
+        {ok, ~"oauth_only", _} -> {ok, oauth_only};
+        {ok, ~"closed", _} -> {ok, closed};
+        {ok, Other, _} -> {invalid, Other};
+        _ -> undefined
+    end.
+
+-spec log_invalid_registration(term()) -> ok.
+log_invalid_registration(Value) ->
+    ?LOG_ERROR(#{
+        msg => ~"invalid registration global, keeping the configured mode",
+        value => describe(Value),
+        expected => [~"open", ~"oauth_only", ~"closed"]
+    }).
+
+-spec describe(term()) -> binary().
+describe(V) when is_binary(V) -> V;
+describe(V) -> iolist_to_binary(io_lib:format("~p", [V])).
+
+%% Evaluate the game's config script (config.lua when present, else match.lua)
+%% in a sandboxed Luerl state so the deployment-wide globals can be read off it.
+-spec config_script_state(string() | binary()) -> {ok, dynamic()} | error.
+config_script_state(GameDir) ->
     GameDirStr = to_string(GameDir),
     ConfigPath = filename:join(GameDirStr, "config.lua"),
     MatchPath = filename:join(GameDirStr, "match.lua"),
@@ -146,12 +217,12 @@ declared_guest_auth(GameDir) ->
         end,
     case filelib:is_regular(Script) of
         false ->
-            false;
+            error;
         true ->
             St0 = asobi_lua_loader:init_sandboxed(),
             case do_file(Script, St0) of
-                {ok, _Results, St1} -> read_global_bool(~"guest_auth", St1) =:= true;
-                {error, _} -> false
+                {ok, _Results, St1} -> {ok, St1};
+                {error, _} -> error
             end
     end.
 

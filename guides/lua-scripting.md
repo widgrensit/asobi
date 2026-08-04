@@ -149,6 +149,7 @@ max_players  = 10                         -- optional: max per match (defaults t
 strategy     = "fill"                     -- optional: "fill" or "skill_based"
 bots         = { script = "bots/ai.lua" } -- optional: enable bot filling
 guest_auth   = true                       -- optional: allow anonymous guest play
+registration = "closed"                   -- optional: signup posture
 ```
 
 | Global | Required | Default | Description |
@@ -158,6 +159,7 @@ guest_auth   = true                       -- optional: allow anonymous guest pla
 | `strategy` | no | `"fill"` | Matchmaking strategy |
 | `bots` | no | none | Bot configuration (see [Bots](lua-bots.md)) |
 | `guest_auth` | no | `false` | Enable anonymous guest play. Also requires an operator-supplied pepper; on iff both are present (asobi ADR 0004) |
+| `registration` | no | `"open"` | Signup posture: `"open"`, `"oauth_only"` (no password signup), or `"closed"` (no new players at all). The operator layer wins: this applies only when the release's `sys.config` leaves `registration` unset |
 | `lazy_zones` | no | auto | On-demand zone loading (auto-enabled for grids > 100) |
 | `zone_idle_timeout` | no | 30000 | Milliseconds before an idle zone is reaped |
 | `max_active_zones` | no | 10000 | Maximum concurrent zones in memory |
@@ -166,7 +168,8 @@ guest_auth   = true                       -- optional: allow anonymous guest pla
 
 For a single-mode game these globals live in `match.lua`. In a multi-mode game
 (a `config.lua` manifest that maps modes to match scripts), deployment-wide
-settings such as `guest_auth` go in `config.lua`, not the per-mode scripts.
+settings such as `guest_auth` and `registration` go in `config.lua`, not the
+per-mode scripts.
 
 ## Using with Erlang Projects
 

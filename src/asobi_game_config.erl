@@ -31,6 +31,15 @@ the pepper), so a declared value simply replaces the current flag. It is
 written before the modes so a reader waking on the mode change already sees
 the final auth posture.
 
+## registration is a second layer, like the modes
+
+A game may declare a signup posture, which lands in `script_registration` -
+never in `registration`, the operator's key from `sys.config`. `asobi_registration`
+composes the two the same way `modes/0` does: the operator layer wins whenever
+it is set. That is what lets an engine-hosted game with no `sys.config` of its
+own pick a posture (asobi_lua#122) without letting a game bundle widen an
+operator's `closed` deployment back to `open`.
+
 A term that omits a key leaves that key alone: `apply_config(#{modes => M})` is
 how the config watcher refreshes mode shape without letting a bundle write flip
 auth posture at runtime.
@@ -41,7 +50,11 @@ auth posture at runtime.
 -export([apply_config/1, modes/0]).
 
 -type modes() :: #{binary() => map() | module()}.
--type config() :: #{modes => modes(), guest_auth => boolean()}.
+-type config() :: #{
+    modes => modes(),
+    guest_auth => boolean(),
+    registration => asobi_registration:mode()
+}.
 
 -export_type([config/0, modes/0]).
 
@@ -54,12 +67,21 @@ modes() ->
 -spec apply_config(config()) -> ok.
 apply_config(Config) ->
     ok = write_guest_auth(Config),
+    ok = write_registration(Config),
     write_modes(Config).
 
 -spec write_guest_auth(config()) -> ok.
 write_guest_auth(#{guest_auth := Declared}) when is_boolean(Declared) ->
     application:set_env(asobi, guest_auth, Declared);
 write_guest_auth(_) ->
+    ok.
+
+-spec write_registration(config()) -> ok.
+write_registration(#{registration := Declared}) when
+    Declared =:= open; Declared =:= oauth_only; Declared =:= closed
+->
+    application:set_env(asobi, script_registration, Declared);
+write_registration(_) ->
     ok.
 
 -spec write_modes(config()) -> ok.

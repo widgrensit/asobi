@@ -73,6 +73,16 @@ config_test_() ->
         {"guest_auth truthy non-bool does not enable", fun guest_auth_truthy_nonbool_stays_off/0},
         {"guest_auth resets a stale true when a later bundle omits it",
             fun guest_auth_stale_true_is_reset/0},
+        {"registration global sets the effective registration mode",
+            fun registration_global_sets_mode/0},
+        {"registration global is read from config.lua in multi-mode",
+            fun registration_global_from_manifest/0},
+        {"registration absent leaves the operator's app env alone",
+            fun registration_absent_keeps_app_env/0},
+        {"registration with an unrecognised value keeps the configured mode",
+            fun registration_invalid_keeps_app_env/0},
+        {"an operator sys.config registration mode beats the script's",
+            fun operator_registration_beats_script/0},
         {"a mode deleted from config.lua disappears on reload",
             fun deleted_mode_disappears_on_reload/0},
         {"an operator sys.config mode survives a bundle load",
@@ -160,6 +170,91 @@ guest_auth_stale_true_is_reset() ->
     ?assertEqual({ok, false}, application:get_env(asobi, guest_auth)),
     application:unset_env(asobi, guest_auth),
     cleanup_temp_dir(TmpDir).
+
+%% asobi_lua#122: an engine-hosted game has no sys.config, so a posture it
+%% cannot declare is a posture it never gets. Assert the effective mode
+%% asobi_registration resolves, not the raw key, since the script writes the
+%% script layer and only the composition is the observable behaviour.
+registration_global_sets_mode() ->
+    application:unset_env(asobi, registration),
+    application:unset_env(asobi, script_registration),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nregistration = \"closed\"\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual(closed, asobi_registration:mode()),
+    ?assertEqual({deny, ~"registration_closed"}, asobi_registration:check(password)),
+    reset_registration(),
+    cleanup_temp_dir(TmpDir).
+
+registration_global_from_manifest() ->
+    application:unset_env(asobi, registration),
+    application:unset_env(asobi, script_registration),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "config.lua"),
+        ~"registration = \"oauth_only\"\nreturn { solo = \"solo.lua\" }\n"
+    ),
+    ok = file:write_file(filename:join(TmpDir, "solo.lua"), ~"match_size = 2\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual(oauth_only, asobi_registration:mode()),
+    reset_registration(),
+    cleanup_temp_dir(TmpDir).
+
+registration_absent_keeps_app_env() ->
+    application:set_env(asobi, registration, closed),
+    application:unset_env(asobi, script_registration),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual(closed, asobi_registration:mode()),
+    ?assertEqual(undefined, application:get_env(asobi, script_registration)),
+    reset_registration(),
+    cleanup_temp_dir(TmpDir).
+
+registration_invalid_keeps_app_env() ->
+    application:set_env(asobi, registration, closed),
+    application:unset_env(asobi, script_registration),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nregistration = \"invite_only\"\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual(closed, asobi_registration:mode()),
+    ?assertEqual(undefined, application:get_env(asobi, script_registration)),
+    reset_registration(),
+    cleanup_temp_dir(TmpDir).
+
+%% ADR 0006's trust direction, applied to the signup gate: a bundle may pick a
+%% posture for a deployment that states none, and may never widen one that
+%% does. Without the two layers this `open` would overwrite the operator's
+%% `closed` and reopen public signup.
+operator_registration_beats_script() ->
+    application:set_env(asobi, registration, closed),
+    application:unset_env(asobi, script_registration),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nregistration = \"open\"\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, open}, application:get_env(asobi, script_registration)),
+    ?assertEqual(closed, asobi_registration:mode()),
+    ?assertEqual({deny, ~"registration_closed"}, asobi_registration:check(password)),
+    reset_registration(),
+    cleanup_temp_dir(TmpDir).
+
+reset_registration() ->
+    application:unset_env(asobi, registration),
+    application:unset_env(asobi, script_registration).
 
 %% The registry used to be a "new wins, nothing is ever removed" merge, so a
 %% mode dropped from config.lua stayed matchable for the life of the node. The

@@ -9,11 +9,15 @@
 
 -export_type([mode/0, kind/0]).
 
-%% Registration posture is an operator deployment decision, not a game
-%% capability, so it reads from app env, not the game manifest. See ADR 0002
-%% for why `open` is the default and why an unrecognised value falls to `open`.
-%% mode/0 is on the per-request create path and stays silent; log_mode/0 emits
-%% the invalid-value signal once at boot.
+%% Registration posture has two layers, composed the way ADR 0006 composes the
+%% mode registry: `registration` is the operator's key from sys.config and wins
+%% whenever it is set, `script_registration` is what the loaded game declared
+%% (asobi_lua#122 - an engine-hosted game has no sys.config to edit, so without
+%% a script layer every hosted game silently ran `open`). A game bundle can
+%% therefore choose a posture for a deployment that states none, and can never
+%% widen one that does. See ADR 0002 for why `open` is the default and why an
+%% unrecognised value falls to `open`. mode/0 is on the per-request create path
+%% and stays silent; log_mode/0 emits the invalid-value signal once at boot.
 -spec mode() -> mode().
 mode() ->
     case classify() of
@@ -23,12 +27,16 @@ mode() ->
 
 -spec classify() -> {ok, mode()} | {invalid, term()}.
 classify() ->
-    case application:get_env(asobi, registration, open) of
-        open -> {ok, open};
-        oauth_only -> {ok, oauth_only};
-        closed -> {ok, closed};
-        Other -> {invalid, Other}
+    case application:get_env(asobi, registration) of
+        undefined -> classify_value(application:get_env(asobi, script_registration, open));
+        {ok, Value} -> classify_value(Value)
     end.
+
+-spec classify_value(term()) -> {ok, mode()} | {invalid, term()}.
+classify_value(open) -> {ok, open};
+classify_value(oauth_only) -> {ok, oauth_only};
+classify_value(closed) -> {ok, closed};
+classify_value(Other) -> {invalid, Other}.
 
 %% Whether a create path may mint a new player. `closed` freezes every public
 %% signup path (password, oauth-first-time, guest-first-time); `oauth_only`
