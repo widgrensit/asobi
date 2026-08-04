@@ -83,7 +83,7 @@ being silently dropped downstream.
 
 ## Extension namespaces
 
-An installed extension declaring `asobi_extension:lua/0` gets its namespace
+An installed extension declaring `c:asobi_extension:lua/0` gets its namespace
 installed here too, so a game script calls `game.quests.progress(...)` exactly
 as it calls a core function. Four mechanics, each forced by how Luerl behaves:
 the namespace table is pre-created (`set_table_keys` does not auto-vivify),
