@@ -68,12 +68,24 @@ init_per_testcase(_TC, Config) ->
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     meck:expect(asobi_repo, insert, fun(_CS, _Opts) -> {ok, #{}} end),
+    %% asobi#329 wrapped the match-result write in a transaction so the record
+    %% and the stats bump land together. The mock is strict, so every repo
+    %% function the finish path reaches has to be stubbed or it is `undef` -
+    %% which kills the match server mid-finish and surfaces here only as
+    %% `match_did_not_finish`. This suite runs without a repo pool, so run the
+    %% fun inline rather than reaching for a database that is not there.
+    meck:expect(asobi_repo, transaction, fun(Fun) -> {ok, Fun()} end),
+    %% Stats persistence has its own tests; this suite is the Lua match
+    %% lifecycle and should not need to know how a stats row is written.
+    meck:new(asobi_player_stats, [no_link]),
+    meck:expect(asobi_player_stats, record_match, fun(_Participants, _Result) -> ok end),
     meck:new(asobi_presence, [non_strict, no_link]),
     meck:expect(asobi_presence, send, fun(_PlayerId, _Msg) -> ok end),
     Config.
 
 end_per_testcase(_TC, _Config) ->
     meck:unload(asobi_presence),
+    meck:unload(asobi_player_stats),
     meck:unload(asobi_repo),
     ok.
 
