@@ -63,8 +63,88 @@ zone_manager_test_() ->
         {"revive_zone declines while the named zone is still running",
             fun revive_zone_declines_live_zone/0},
         {"per-coord initial zone_state reaches zone init", fun initial_zone_states_threaded/0},
-        {"missing per-coord state leaves zone_state default", fun initial_zone_states_default/0}
+        {"missing per-coord state leaves zone_state default", fun initial_zone_states_default/0},
+        {"a zone start emits zone/opened", fun zone_open_emits_telemetry/0},
+        {"a zone death emits exactly one zone/closed", fun zone_close_emits_telemetry_once/0},
+        {"manager shutdown emits no zone/closed", fun manager_shutdown_emits_no_close/0}
     ]}.
+
+%% --- #313: zone lifecycle telemetry ---
+%%
+%% Zones are lazy, so a live-zone count is not derivable from world count.
+%% opened/closed are a counter pair an operator can subtract into a gauge -
+%% which only works if closed fires exactly once per open.
+
+zone_open_emits_telemetry() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    Events = with_subscription([asobi, zone, opened], {0, 2}, fun(Ref) ->
+        {ok, _, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 2}),
+        %% ensure_zone is a call, so the emit has already happened.
+        drain(Ref)
+    end),
+    stop_manager(Ctx),
+    ?assertEqual([#{world_id => ~"test-world", coords => {0, 2}}], Events).
+
+zone_close_emits_telemetry_once() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    Events = with_subscription([asobi, zone, closed], {1, 2}, fun(Ref) ->
+        {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 2}),
+        exit(ZonePid, kill),
+        timer:sleep(50),
+        %% The manager has already cleaned up; a further cleanup pass over the
+        %% same coords must not emit a second close, or a gauge built from
+        %% opened minus closed drifts negative.
+        not_loaded = asobi_zone_manager:get_zone(Mgr, {1, 2}),
+        drain(Ref)
+    end),
+    stop_manager(Ctx),
+    ?assertEqual([#{world_id => ~"test-world", coords => {1, 2}}], Events).
+
+%% Pins the documented limitation rather than a wish: the manager does not trap
+%% exits, so a shutdown kills it without running terminate/2, and the instance
+%% supervisor stops it before the zone supervisor, so it never sees the zones'
+%% DOWNs either. A live-zone gauge therefore has to be keyed on world_id and
+%% dropped when the world ends; it cannot be a single global counter pair.
+%% If this ever starts emitting, ADR 0005 needs updating with it.
+manager_shutdown_emits_no_close() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    Events = with_subscription([asobi, zone, closed], {2, 2}, fun(Ref) ->
+        {ok, _, created} = asobi_zone_manager:ensure_zone(Mgr, {2, 2}),
+        stop_manager(Ctx),
+        drain(Ref)
+    end),
+    ?assertEqual([], Events).
+
+%% Filter on coords: every manager in this module shares one world_id, and a
+%% manager started by an earlier test can still be reaping when this one
+%% subscribes.
+with_subscription(Event, Coords, Fun) ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    Self = self(),
+    Ref = make_ref(),
+    telemetry:attach(
+        Ref,
+        Event,
+        fun
+            (_E, _M, #{coords := C} = Meta, _) when C =:= Coords -> Self ! {Ref, Meta};
+            (_E, _M, _Meta, _) -> ok
+        end,
+        []
+    ),
+    try
+        Fun(Ref)
+    after
+        telemetry:detach(Ref)
+    end.
+
+drain(Ref) ->
+    drain(Ref, []).
+
+drain(Ref, Acc) ->
+    receive
+        {Ref, Meta} -> drain(Ref, [Meta | Acc])
+    after 50 -> lists:reverse(Acc)
+    end.
 
 starts_ok() ->
     Ctx = start_manager(),

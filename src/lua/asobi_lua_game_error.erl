@@ -78,6 +78,8 @@ format_reason(timeout) ->
     ~"callback timed out";
 format_reason(heap_exhausted) ->
     ~"callback exhausted its memory budget";
+format_reason(reductions_exhausted) ->
+    ~"callback exhausted its CPU budget";
 format_reason({lua_error, LuaErr}) ->
     Msg =
         try

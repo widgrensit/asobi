@@ -66,7 +66,7 @@ building an exporter safely - not a step to defer until after one is built.
   cardinality cap.
 - **Unbounded metadata** - per-entity identifiers, client-controlled values,
   or free-form data: `match_id`, `world_id`, `player_id`, `sender_id`,
-  `vote_id`, `peer_ip`, `channel_id`, `details`, `result`, and `type` on
+  `vote_id`, `peer_ip`, `channel_id`, `coords`, `details`, `result`, and `type` on
   `ws/message_in` and `ws/message_out`. **Never** route these into a metric
   label. They stay on the raw event for tracing/audit sinks (e.g.
   `opentelemetry_asobi` spans) that can afford per-entity cardinality.
@@ -79,12 +79,42 @@ building an exporter safely - not a step to defer until after one is built.
 - `finished`: measurements add `duration_ms`; metadata `#{match_id, result :: map()}`
 - `player_joined` / `player_left`: metadata `#{match_id, player_id}`
 
-#### World - `[asobi, world, started | finished | player_joined | player_left | phase_changed]`
+#### World - `[asobi, world, started | finished | player_joined | player_left | phase_changed | tick]`
 
 - `started`: metadata `#{world_id, mode}`
 - `finished`: measurements add `duration_ms`; metadata `#{world_id, result :: map()}`
 - `player_joined` / `player_left`: metadata `#{world_id, player_id}`
 - `phase_changed`: metadata `#{world_id, from_phase, to_phase}`
+- `tick`: measurements `#{duration_ms, max_duration_ms, zone_count, count}`;
+  metadata `#{world_id}`. A world tick is the fan-out from
+  `asobi_world_ticker` to every zone plus the fan-in of their `tick_done`
+  replies, so `duration_ms` is the saturation signal that degrades first
+  under entity load. **Sampled, not per tick**: at the default 50 ms tick
+  rate a raw per-tick event is 20/s per world, so the ticker emits roughly
+  once a second (`tick_sample_interval_ms`, default 1000, divided by the
+  tick rate) and carries `max_duration_ms` - the worst tick in the sampled
+  window - alongside the sampled tick's own `duration_ms`. Alert on the max;
+  a sampled duration alone hides exactly the spikes worth paging on. A tick
+  that never fans in (a zone died mid-tick) is not sampled at all rather
+  than being reported with a fabricated duration.
+
+#### Zone - `[asobi, zone, opened | closed]`
+
+- Both: metadata `#{world_id, coords :: {integer(), integer()}}`, both
+  unbounded (one per live world, one per grid cell) - never a label. Zones
+  are lazy, so a live-zone count is not derivable from world count; subtract
+  the two counters for a gauge. `closed` is gated on the zone still being in
+  the manager's table, so it fires exactly once per `opened` even though
+  `cleanup_zone/2` is reachable more than once for the same coords - a gauge
+  built from the pair does not drift negative. It **can** drift upward: a
+  world teardown emits no `closed` at all, because `asobi_zone_manager` does
+  not trap exits (so a supervisor shutdown never runs its `terminate/2`) and
+  `asobi_world_instance` stops the manager before the zone supervisor (so it
+  never processes the zones' `DOWN`s). Key the gauge on `world_id` and drop a
+  world's counters when `[asobi, world, finished]` arrives, rather than
+  keeping one global counter pair. Making the manager trap exits to close the
+  difference is a supervision-tree change with its own shutdown-latency cost
+  and was deliberately not made here.
 
 #### Matchmaker - `[asobi, matchmaker, queued | removed | formed | failed]`
 
@@ -185,10 +215,18 @@ building an exporter safely - not a step to defer until after one is built.
 - `hit` / `miss`: metadata `#{kind :: positive | negative}`
 - `sweep`: no metadata
 
-That is 35 events across 13 domains (match, world, matchmaker, session, ws,
-join, rehome, anticheat, error, economy, store, chat, vote, auth_cache - 14
-domains if `join`/`rehome` are counted separately from `ws`, as they are
+That is 38 events across 14 domains (match, world, zone, matchmaker, session,
+ws, join, rehome, anticheat, error, economy, store, chat, vote, auth_cache -
+15 domains if `join`/`rehome` are counted separately from `ws`, as they are
 distinct top-level event-name prefixes).
+
+`asobi_telemetry:events/0` returns the list, so a consumer attaches to the
+whole surface without restating it. Restating it is what let the built-in
+debug logger and `opentelemetry_asobi` drift to the same stale 24-name
+subset; `opentelemetry_asobi` should switch to `events/0` rather than keep
+its own copy. `asobi_telemetry_tests` asserts `events/0` against the event
+names actually passed to `telemetry:execute/3` in the module's compiled
+abstract code, so an emitter added without a matching entry fails the build.
 
 ### Stability
 
@@ -206,20 +244,21 @@ minor release.
 
 ### Known gaps (documented, not fixed by this ADR)
 
-- `asobi_telemetry:setup/0` (the built-in debug logger) attaches to only 24
-  of the 35 events. Missing: `matchmaker/failed`, `join/rate_limited`,
-  `ws/connect_rate_limited`, `rehome/rate_limited`, `ws/idle_auth_timeout`,
-  `ws/origin_rejected`, `anticheat/violation`, `error`, and all three
-  `auth_cache/*` events. `opentelemetry_asobi` mirrors the same stale list.
-  Tracked in asobi#312, not addressed here.
-- No event exists for world-tick duration or live zone/world count -
-  `asobi_world_ticker`, `asobi_zone_manager`, and `asobi_zone_spawner` emit
-  nothing today. This is the one genuine instrumentation gap identified
-  against the "world/ECS/network/RPC/DB/queue/scheduler" scope proposed
-  alongside `asobi_metrics`; ECS and RPC don't exist in asobi, and DB/queue
-  are kura's and shigoto's telemetry surfaces respectively, not asobi's.
-  Tracked in asobi#313, not addressed here.
-- Four of the 35 events are declared API with no in-tree emitter today -
+- ~~`asobi_telemetry:setup/0` (the built-in debug logger) attaches to only 24
+  of the 35 events.~~ Closed by asobi#312: `setup/0` attaches
+  `asobi_telemetry:events/0`, the whole surface, and a test pins that list
+  against the emitters. `opentelemetry_asobi` still carries its own copy of
+  the stale list and should move to `events/0`.
+- ~~No event exists for world-tick duration or live zone/world count.~~
+  Closed by asobi#313, which added `[asobi, world, tick]` and the
+  `[asobi, zone, opened | closed]` pair above. This was the one genuine
+  instrumentation gap identified against the
+  "world/ECS/network/RPC/DB/queue/scheduler" scope proposed alongside
+  `asobi_metrics`; ECS and RPC don't exist in asobi, and DB/queue are kura's
+  and shigoto's telemetry surfaces respectively, not asobi's.
+  `asobi_zone_spawner` is a pure entity-template registry, not a zone
+  lifecycle owner, and still emits nothing by design.
+- Four of the 38 events are declared API with no in-tree emitter today -
   the `asobi_telemetry` function exists and is exported, but nothing in
   `src/` or `test/` calls it: `session_disconnected/2`
   (`[asobi, session, disconnected]`), `ws_message_out/1`
@@ -231,8 +270,9 @@ minor release.
   the one to be careful with: an alert built on it never fires, and reads as
   "no cheating detected" when it actually means "no detector is wired up".
   Do not build a cheating alert on this event until core emits it. Wiring
-  emitters (or dropping the unused functions) is a follow-up to this ADR,
-  alongside asobi#312 and asobi#313.
+  emitters (or dropping the unused functions) is still a follow-up to this
+  ADR. Note that they are now attached by `setup/0` along with everything
+  else, so "attached" is not evidence that anything emits them.
 
 ## Consequences
 

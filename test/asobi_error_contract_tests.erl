@@ -199,6 +199,14 @@ produces_error(Node) -> builds_error(Node).
 %% behaviour is pinned by asobi_error_tests instead.
 code_violations(asobi_error, _Nodes) ->
     [];
+%% The other definition site. `asobi_rpc` maps an extension handler's *returned*
+%% code onto an object, so it is a runtime term and the literal check cannot
+%% apply. Its runtime equivalent does: it emits only a code
+%% `asobi_error:defined/1` accepts - the same closed set, core's plus every
+%% installed manifest's - and anything else becomes `internal`. Pinned by
+%% `asobi_rpc_tests:an_undeclared_code_does_not_reach_the_client/0`.
+code_violations(asobi_rpc, _Nodes) ->
+    [];
 code_violations(_Module, Nodes) ->
     Codes = asobi_error:codes(),
     [V || Node <- Nodes, {violation, V} <- [code_violation(Node, Codes)]].

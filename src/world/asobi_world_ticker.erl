@@ -6,6 +6,14 @@
 -export([promote_zone/2, demote_zone/2, remove_zone/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
+%% #313: a world tick is the fan-out to every zone plus the fan-in of their
+%% tick_done replies, which is the saturation signal an operator watching a
+%% world server wants. At the default 50ms tick rate that is 20 events per
+%% second per world - too hot for a raw sink - so sample roughly once a second
+%% and carry the window's worst tick alongside the sampled one. Override with
+%% `tick_sample_interval_ms` in the ticker config.
+-define(DEFAULT_TICK_SAMPLE_INTERVAL_MS, 1000).
+
 %% --- Public API ---
 
 -spec start_link(map()) -> gen_server:start_ret().
@@ -53,6 +61,7 @@ init(Config) ->
     {ok, #{
         tick => 0,
         tick_rate => TickRate,
+        world_id => maps:get(world_id, Config, undefined),
         world_pid => WorldPid,
         zone_manager => ZoneManager,
         hot_zones => [],
@@ -60,8 +69,19 @@ init(Config) ->
         cold_tick_divisor => ColdTickDivisor,
         tick_count => 0,
         pending => #{},
-        running => false
+        running => false,
+        tick_started_at => undefined,
+        tick_zone_count => 0,
+        max_duration_ms => 0,
+        sampled_ticks => 0,
+        sample_every => sample_every(TickRate, Config)
     }}.
+
+sample_every(TickRate, Config) ->
+    IntervalMs = maps:get(
+        tick_sample_interval_ms, Config, ?DEFAULT_TICK_SAMPLE_INTERVAL_MS
+    ),
+    max(1, IntervalMs div max(TickRate, 1)).
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call(get_tick, _From, #{tick := Tick} = State) ->
@@ -111,7 +131,7 @@ handle_cast(
             case map_size(Pending1) of
                 0 ->
                     asobi_world_server:post_tick(WorldPid, TickN),
-                    {noreply, State#{pending => #{}}};
+                    {noreply, complete_tick(State#{pending => #{}})};
                 _ ->
                     {noreply, State#{pending => Pending1}}
             end;
@@ -155,15 +175,51 @@ handle_info(
     Pending = maps:from_keys(ZonesToTick, true),
     tick_zones(ZonesToTick, NextTick),
     erlang:send_after(TickRate, self(), tick),
+    State1 = State#{
+        tick => NextTick,
+        tick_count => NextTickCount,
+        tick_started_at => erlang:monotonic_time(millisecond),
+        tick_zone_count => length(ZonesToTick)
+    },
     case map_size(Pending) of
         0 ->
             asobi_world_server:post_tick(maps:get(world_pid, State), NextTick),
-            {noreply, State#{tick => NextTick, tick_count => NextTickCount, pending => #{}}};
+            {noreply, complete_tick(State1#{pending => #{}})};
         _ ->
-            {noreply, State#{tick => NextTick, tick_count => NextTickCount, pending => Pending}}
+            {noreply, State1#{pending => Pending}}
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% A tick that never fans in (a zone died mid-tick) is simply never sampled -
+%% the next fan-out overwrites tick_started_at. Emitting a bogus duration for
+%% it would be worse than the gap, and the zone's own DOWN is the signal for
+%% that failure.
+complete_tick(#{tick_started_at := undefined} = State) ->
+    State;
+complete_tick(
+    #{
+        tick_started_at := StartedAt,
+        tick_zone_count := ZoneCount,
+        max_duration_ms := MaxSoFar,
+        sampled_ticks := Sampled,
+        sample_every := SampleEvery,
+        world_id := WorldId
+    } = State
+) ->
+    DurationMs = erlang:monotonic_time(millisecond) - StartedAt,
+    MaxDurationMs = max(MaxSoFar, DurationMs),
+    case Sampled + 1 >= SampleEvery of
+        true ->
+            asobi_telemetry:world_tick(WorldId, DurationMs, MaxDurationMs, ZoneCount),
+            State#{tick_started_at => undefined, max_duration_ms => 0, sampled_ticks => 0};
+        false ->
+            State#{
+                tick_started_at => undefined,
+                max_duration_ms => MaxDurationMs,
+                sampled_ticks => Sampled + 1
+            }
+    end.
 
 -spec tick_zones([term()], non_neg_integer()) -> ok.
 tick_zones([], _NextTick) ->

@@ -79,10 +79,13 @@ call_with_timeout_ok() ->
     Cfg = encode_map(#{}, St),
     {ok, [_ | _], _} = asobi_lua_loader:call(init, [Cfg], St, 5000).
 
+%% slow_tick.lua spins for 100M iterations, so it trips whichever bound comes
+%% first on this machine: the 50ms deadline, or #348's CPU budget.
 call_with_timeout_slow() ->
     {ok, St} = asobi_lua_loader:new(fixture("slow_tick.lua")),
     Cfg = encode_map(#{}, St),
-    {error, timeout} = asobi_lua_loader:call(tick, [Cfg], St, 50).
+    Result = asobi_lua_loader:call(tick, [Cfg], St, 50),
+    true = lists:member(Result, [{error, timeout}, {error, reductions_exhausted}]).
 
 %% A tick that allocates an unbounded table must be killed by the per-eval
 %% heap cap and surface as `heap_exhausted`, not as a timeout. Use a

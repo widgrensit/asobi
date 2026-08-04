@@ -719,8 +719,70 @@ A new notification for the player.
 }
 ```
 
+## Extension RPC
+
+One frame type reaches every method any installed
+[extension](extensions.md) declares, so an extension needs no per-extension
+SDK work to be callable from a client.
+
+### `rpc.call`
+
+```json
+{
+  "type": "rpc.call",
+  "cid": "c-1",
+  "payload": {"protocol": 1, "method": "quests.claim", "params": {"quest_id": "q-1"}}
+}
+```
+
+- `cid` is **required** here and validated by the server: 1 to 64 printable
+  ASCII bytes. Elsewhere on this socket it is an optional echo; an RPC reply
+  is useless without it, because it is the only way to pair a reply with its
+  call. A rejected `cid` is not echoed back, so that one reply carries none.
+- `protocol` is the RPC payload version, currently `1`. Version the payload
+  rather than the frame type, so a server that does not speak your version
+  says so instead of answering `unknown_type`.
+- `params` is **always** an object, `{}` when the method takes nothing.
+- `method` is `<extension>.<name>`. The socket must already be authenticated:
+  every declared method is player-scoped, and the player is the one that sent
+  `session.connect`.
+
+### `rpc.ok` (reply)
+
+```json
+{"type": "rpc.ok", "cid": "c-1", "payload": {"result": {"reward": 100}}}
+```
+
+`result` is **always** an object, so a method can grow a field without
+breaking a shipped client.
+
+### `rpc.error` (reply)
+
+```json
+{"type": "rpc.error", "cid": "c-1", "payload": {"error": {"code": "quests.already_claimed", "message": "This quest was already claimed.", "details": {}}}}
+```
+
+The same error object the rest of this socket and the
+[REST API](rest-api.md#errors) carry, and only that object - the flatter
+`reason` dialect is not repeated on a frame nothing has shipped against.
+
+An extension mints codes in its own domain, so a failure arrives as
+`quests.already_claimed` rather than `internal`. The set stays closed: a code
+no installed extension declared is answered as `internal` instead of being
+reflected back. Codes core itself adds for this surface:
+
+| Code | Meaning |
+|---|---|
+| `rpc.unknown_method` | No installed extension serves that method |
+| `rpc.invalid_cid` | `cid` was missing, not a string, empty, over 64 bytes, or not printable ASCII |
+| `rpc.unsupported_protocol` | `details.supported` lists the versions this server speaks |
+| `rpc.invalid_params` | `params` was not an object |
+| `unauthenticated` | The socket has not completed `session.connect` |
+| `not_ready` | The node is still running migrations. Retry |
+
 ## Next steps
 
 - [REST API](rest-api.md) - the request/response surface alongside this socket protocol.
+- [Extensions](extensions.md) - declaring the methods `rpc.call` reaches.
 - [Authentication](authentication.md) - obtaining the token the socket authenticates with.
 - [Voting](voting.md) - the vote flow whose `match.vote_*` pushes appear above.

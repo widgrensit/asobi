@@ -57,6 +57,25 @@ load a specific script and pin its base directory for `require`.
 %% distinguish heap-blow from timeout.
 -define(DEFAULT_MAX_HEAP_WORDS, 5_000_000).
 
+%% #348: CPU bound, expressed as reductions allowed per millisecond of the
+%% callback's own wall-clock budget. The timeout bounds latency but not work:
+%% a script that spins is killed at its deadline and then does it again on the
+%% next tick, burning a whole scheduler indefinitely.
+%%
+%% The rate is per-ms rather than absolute because the budgets it has to serve
+%% span two orders of magnitude (50 ms for `think`, 5000 ms for
+%% `generate_world`); scaling keeps their relative weights. 50,000 is measured
+%% against Luerl on this workload: a 200-entity tick costs ~24k reductions
+%% total, while a spin sustains ~284k reductions/ms, so the budget sits ~1000x
+%% above a normal tick and cuts a spin at ~18% of its wall-clock window. Set
+%% `asobi_lua.max_reductions_per_ms` to 0 to disable the check.
+-define(DEFAULT_MAX_REDUCTIONS_PER_MS, 50_000).
+
+%% How often the parent samples the worker's reduction count. Overshoot is
+%% bounded by one interval's worth of work (~2.8M reductions at the rate
+%% above), an order of magnitude under the smallest budget this produces.
+-define(REDUCTION_POLL_MS, 10).
+
 -spec new(binary() | string()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath) ->
     new(ScriptPath, ?DEFAULT_INIT_TIMEOUT_MS, fun(St) -> St end).
@@ -160,17 +179,24 @@ call(FuncPath, Args, St) ->
 call(FuncPath, Args, St, TimeoutMs) ->
     bounded_eval(fun() -> call(FuncPath, Args, St) end, TimeoutMs).
 
-%% Spawn the work in a child with a bounded wall-clock budget AND a
-%% bounded heap, monitor it, and translate the three terminal states
-%% the parent might observe into return values:
+%% Spawn the work in a child with a bounded wall-clock budget, a bounded
+%% heap AND a bounded reduction count, monitor it, and translate the four
+%% terminal states the parent might observe into return values:
 %%   - normal exit + {Ref, Result} message    → Result
 %%   - timeout (we kill it, exit reason `kill`) → {error, timeout}
 %%   - VM kills it for heap (exit reason `killed`) → {error, heap_exhausted}
+%%   - reduction budget passed (we kill it) → {error, reductions_exhausted}
 %% A heap kill happens *before* the worker can send {Ref, _}, so the
 %% DOWN message races. We give the message a tiny grace window in case
 %% it is in flight.
+%%
+%% Callers treat all three failures the same way - discard the result, keep
+%% the previous Luerl state, log, carry on - so a callback that overruns
+%% costs its tick, never the match or the zone. `reductions_exhausted` is a
+%% distinct tag only so an operator can tell "burned CPU" apart from "was
+%% slow" and from "allocated too much" in the logs.
 -spec bounded_eval(fun(() -> R), non_neg_integer()) ->
-    R | {error, timeout | heap_exhausted | {worker_exit, term()}}.
+    R | {error, timeout | heap_exhausted | reductions_exhausted | {worker_exit, term()}}.
 bounded_eval(Fun, TimeoutMs) ->
     Self = self(),
     Ref = make_ref(),
@@ -190,6 +216,10 @@ bounded_eval(Fun, TimeoutMs) ->
             end,
             SpawnOpts
         ),
+    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+    await_eval(Pid, Ref, MonRef, Deadline, reduction_budget(TimeoutMs)).
+
+await_eval(Pid, Ref, MonRef, Deadline, Budget) ->
     receive
         {Ref, Result} ->
             erlang:demonitor(MonRef, [flush]),
@@ -198,18 +228,58 @@ bounded_eval(Fun, TimeoutMs) ->
             {error, heap_exhausted};
         {'DOWN', MonRef, process, Pid, Reason} ->
             {error, {worker_exit, Reason}}
-    after TimeoutMs ->
-        exit(Pid, kill),
-        receive
-            {Ref, Result} ->
-                erlang:demonitor(MonRef, [flush]),
-                Result;
-            {'DOWN', MonRef, process, Pid, _} ->
-                {error, timeout}
-        after 0 ->
-            erlang:demonitor(MonRef, [flush]),
-            {error, timeout}
+    after wait_slice(Deadline, Budget) ->
+        case erlang:monotonic_time(millisecond) >= Deadline of
+            true ->
+                kill_and_settle(Pid, Ref, MonRef, timeout);
+            false ->
+                case over_budget(Pid, Budget) of
+                    true -> kill_and_settle(Pid, Ref, MonRef, reductions_exhausted);
+                    false -> await_eval(Pid, Ref, MonRef, Deadline, Budget)
+                end
         end
+    end.
+
+%% With no reduction budget this is one receive for the whole window, exactly
+%% as before the budget existed - the poll costs nothing when it is disabled,
+%% and nothing when the eval returns inside the first slice.
+wait_slice(Deadline, infinity) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond));
+wait_slice(Deadline, _Budget) ->
+    min(?REDUCTION_POLL_MS, max(0, Deadline - erlang:monotonic_time(millisecond))).
+
+over_budget(Pid, Budget) ->
+    case process_info(Pid, reductions) of
+        {reductions, N} -> N > Budget;
+        %% Already gone: the DOWN is in flight, let the next receive take it.
+        undefined -> false
+    end.
+
+kill_and_settle(Pid, Ref, MonRef, Reason) ->
+    exit(Pid, kill),
+    receive
+        {Ref, Result} ->
+            erlang:demonitor(MonRef, [flush]),
+            Result;
+        {'DOWN', MonRef, process, Pid, _} ->
+            {error, Reason}
+    after 0 ->
+        erlang:demonitor(MonRef, [flush]),
+        {error, Reason}
+    end.
+
+-spec reduction_budget(non_neg_integer()) -> pos_integer() | infinity.
+reduction_budget(TimeoutMs) ->
+    case max_reductions_per_ms() of
+        0 -> infinity;
+        Rate -> Rate * max(TimeoutMs, 1)
+    end.
+
+-spec max_reductions_per_ms() -> non_neg_integer().
+max_reductions_per_ms() ->
+    case asobi_lua_env:get_env(max_reductions_per_ms) of
+        {ok, N} when is_integer(N), N >= 0 -> N;
+        _ -> ?DEFAULT_MAX_REDUCTIONS_PER_MS
     end.
 
 -spec max_heap_words() -> pos_integer().

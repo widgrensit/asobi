@@ -50,7 +50,7 @@ working and a new one reads one place: see `legacy/2`.
 
 -export([object/1, object/2, object/3]).
 -export([legacy/2, legacy_body/2]).
--export([status/1, message/1, codes/0, core_codes/0]).
+-export([status/1, message/1, codes/0, core_codes/0, defined/1]).
 -export([from_ws_reason/1, ws_reasons/0]).
 -export([handle/3, register_handler/0]).
 
@@ -80,6 +80,13 @@ working and a new one reads one place: see `legacy/2`.
     {~"length_required", 411, ~"The request must declare a Content-Length."},
     {~"client_gate_denied", 403, ~"The registration gate rejected this request."},
     {~"not_ready", 503, ~"The server is still starting. Retry shortly."},
+
+    %% Extension RPC. `rpc` is a core code domain, so no extension may own the
+    %% `rpc` prefix and mint codes that look like the dispatcher's own.
+    {~"rpc.unknown_method", 404, ~"No installed extension serves this RPC method."},
+    {~"rpc.invalid_cid", 400, ~"`cid` must be 1-64 printable ASCII characters."},
+    {~"rpc.unsupported_protocol", 400, ~"This server does not speak that RPC protocol version."},
+    {~"rpc.invalid_params", 400, ~"`params` must be a JSON object."},
 
     %% Accounts, providers, guests.
     {~"auth.registration_closed", 403, ~"This deployment is not accepting new players."},
@@ -306,6 +313,17 @@ claims a namespace it owns.
 -spec core_codes() -> [code()].
 core_codes() ->
     [Code || {Code, _, _} <- ?CODES].
+
+-doc """
+Whether `Code` is defined by core or by an installed extension.
+
+For a caller that reports an error on a surface with no Nova return handler
+to log for it - `m:asobi_rpc` - and must not let an undefined code reach a
+client unnoticed.
+""".
+-spec defined(code()) -> boolean().
+defined(Code) when is_binary(Code) ->
+    entry(Code) =/= false.
 
 -doc """
 The error object for a WebSocket `reason` string.

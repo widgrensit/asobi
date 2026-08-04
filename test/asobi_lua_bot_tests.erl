@@ -56,17 +56,18 @@ think_raising_returns_error_test() ->
         file:delete(Path)
     end.
 
-think_infinite_loop_times_out_test() ->
-    %% asobi_bot uses a 50ms timeout for think. A while-true must hit
-    %% it and produce {error, timeout} so the bot falls back to
-    %% default_ai for that tick rather than hanging the gen_server.
+think_infinite_loop_is_terminated_test() ->
+    %% asobi_bot uses a 50ms budget for think. A while-true must hit one of
+    %% its bounds and produce an error so the bot falls back to default_ai
+    %% for that tick rather than hanging the gen_server. Which bound trips
+    %% first (deadline or #348's CPU budget) is machine-dependent.
     Path = bot_temp_script(~"function think(_, _) while true do end end\n"),
     try
         {ok, St} = asobi_lua_loader:new(Path),
         Start = erlang:monotonic_time(millisecond),
         Result = asobi_lua_loader:call(think, [~"bot1", #{}], St, 50),
         Elapsed = erlang:monotonic_time(millisecond) - Start,
-        ?assertEqual({error, timeout}, Result),
+        ?assert(lists:member(Result, [{error, timeout}, {error, reductions_exhausted}])),
         %% Wall-clock close to 50ms; never near a second.
         ?assert(Elapsed < 500)
     after

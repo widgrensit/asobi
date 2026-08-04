@@ -247,13 +247,18 @@ apple_valid_jws_wrong_bundle(Config) ->
     cleanup_apple_env(),
     Config.
 
+%% asobi#357: this used a fixed `txn-1`. iap_transactions is unique on
+%% (provider, transaction_id) and the suite never deleted the row, so the
+%% first run passed and every later run against the same database got a 409.
+%% A run-unique id is better than cleaning up afterwards: it also lets the
+%% suite run concurrently with itself.
 apple_valid_jws_correct_bundle(Config) ->
     configure_apple(Config, ~"com.test.app"),
     Chain = ?config(test_chain, Config),
     Jws = build_signed_jws(Chain, #{
         ~"bundleId" => ~"com.test.app",
         ~"productId" => ~"premium_pack",
-        ~"transactionId" => ~"txn-1",
+        ~"transactionId" => asobi_test_helpers:unique_id(~"txn"),
         ~"quantity" => 1,
         ~"type" => ~"Consumable"
     }),

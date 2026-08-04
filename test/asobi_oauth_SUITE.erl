@@ -172,9 +172,7 @@ unlink_last_auth_method(Config) ->
     IdentityCS = asobi_player_identity:changeset(#{}, #{
         player_id => NoPasswordId,
         provider => ~"google",
-        provider_uid => iolist_to_binary([
-            ~"google_", integer_to_binary(erlang:unique_integer([positive]))
-        ]),
+        provider_uid => asobi_test_helpers:unique_id(~"google"),
         provider_email => ~"test@example.com"
     }),
     {ok, _} = asobi_repo:insert(IdentityCS),
@@ -185,9 +183,7 @@ unlink_last_auth_method(Config) ->
 unlink_success(Config) ->
     {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
     true = is_binary(PlayerId),
-    ProviderUid = iolist_to_binary([
-        ~"discord_", integer_to_binary(erlang:unique_integer([positive]))
-    ]),
+    ProviderUid = asobi_test_helpers:unique_id(~"discord"),
     IdentityCS = asobi_player_identity:changeset(#{}, #{
         player_id => PlayerId,
         provider => ~"discord",
@@ -208,9 +204,7 @@ unlink_success(Config) ->
 identity_db_roundtrip(Config) ->
     {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
     true = is_binary(PlayerId),
-    ProviderUid = iolist_to_binary([
-        ~"test_uid_", integer_to_binary(erlang:unique_integer([positive]))
-    ]),
+    ProviderUid = asobi_test_helpers:unique_id(~"test_uid"),
     CS = asobi_player_identity:changeset(#{}, #{
         player_id => PlayerId,
         provider => ~"apple",
@@ -248,9 +242,7 @@ login_existing_identity(Config) ->
 %% first-sign-ins for the same provider_uid collided often) must retry with
 %% a fresh one instead of surfacing a 500 on the first collision.
 create_player_retries_on_username_collision(Config) ->
-    ProviderUid = iolist_to_binary([
-        ~"collide_uid_", integer_to_binary(erlang:unique_integer([positive]))
-    ]),
+    ProviderUid = asobi_test_helpers:unique_id(~"collide_uid"),
     Short = binary:part(ProviderUid, 0, min(8, byte_size(ProviderUid))),
     CollisionRand = asobi_id:rand_suffix(4),
     CollisionUsername = <<"discord_", Short/binary, "_", CollisionRand/binary>>,
@@ -329,9 +321,7 @@ create_player_deletes_orphan_on_identity_race_loss(Config) ->
             meck:passthrough([CS])
     end),
     try
-        ProviderUid = iolist_to_binary([
-            ~"race_uid_", integer_to_binary(erlang:unique_integer([positive]))
-        ]),
+        ProviderUid = asobi_test_helpers:unique_id(~"race_uid"),
         Claims = #{provider_uid => ProviderUid, provider_display_name => undefined},
         ?assertEqual(
             {asobi_error, ~"auth.already_registering"},
@@ -360,9 +350,7 @@ create_player_identity_insert_real_failure_returns_500(Config) ->
             meck:passthrough([CS])
     end),
     try
-        ProviderUid = iolist_to_binary([
-            ~"real_failure_uid_", integer_to_binary(erlang:unique_integer([positive]))
-        ]),
+        ProviderUid = asobi_test_helpers:unique_id(~"real_failure_uid"),
         Claims = #{
             provider_uid => ProviderUid,
             provider_display_name => undefined,

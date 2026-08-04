@@ -69,6 +69,7 @@ init(Config) ->
         end,
     GameConfig = maps:get(game_config, Config, #{}),
     Ctx = #{
+        vm => match,
         match_id => maps:get(match_id, Config, undefined),
         match_pid => self(),
         script => ScriptPath
@@ -357,6 +358,7 @@ boot_throwaway_lua_state(Config, Caller) ->
     case maps:get(lua_script, Config, undefined) of
         ScriptPath when is_binary(ScriptPath); is_list(ScriptPath) ->
             Ctx = #{
+                vm => match,
                 match_id => maps:get(match_id, Config, undefined),
                 match_pid => self(),
                 script => ScriptPath,

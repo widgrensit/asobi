@@ -3,8 +3,8 @@
 Reads a Lua-runtime setting from the application environment.
 
 The Lua runtime used to ship as its own OTP application, so its knobs
-(`dev_errors`, `reload_mode`, `max_heap_words`, `terrain_providers`,
-`config_watch_interval`, `rate_limits`) were configured under the `asobi_lua`
+(`dev_errors`, `reload_mode`, `max_heap_words`, `max_reductions_per_ms`,
+`terrain_providers`, `config_watch_interval`, `rate_limits`) were configured under the `asobi_lua`
 application key. After the asobi_lua merge there is no `asobi_lua`
 application, and `application:get_env/3` on an application that is never loaded
 silently returns the default - every existing `{asobi_lua, [...]}` block in a

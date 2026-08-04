@@ -862,6 +862,7 @@ restore_game_state(ZoneState0, LuaSt) ->
 zone_ctx(Config, TemplatesTab) ->
     GameConfig = maps:get(game_config, Config, #{}),
     #{
+        vm => zone,
         zone_pid => self(),
         match_pid => maps:get(world_server_pid, Config, self()),
         match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined)),
@@ -884,6 +885,7 @@ zone_ctx(Config, TemplatesTab) ->
 make_ctx(Config) ->
     GameConfig = maps:get(game_config, Config, Config),
     #{
+        vm => world,
         match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined)),
         match_pid => self(),
         script => maps:get(lua_script, GameConfig, undefined)

@@ -42,7 +42,7 @@ end_per_suite(_Config) ->
 
 set_then_get(Config) ->
     St = install_api(Config),
-    Collection = unique(~"settings"),
+    Collection = asobi_test_helpers:unique_id(~"settings"),
     {[true], _} = eval(
         [
             "local w = game.storage.set('",
@@ -62,7 +62,7 @@ set_then_get(Config) ->
 %% #296: the second write is the one that used to be silently dropped.
 set_twice_updates_the_row(Config) ->
     St = install_api(Config),
-    Collection = unique(~"saves"),
+    Collection = asobi_test_helpers:unique_id(~"saves"),
     {[true], St1} = eval(
         ["return game.storage.set('", Collection, "', 'slot1', { n = 1 }).ok ~= nil\n"], St
     ),
@@ -84,7 +84,7 @@ set_twice_updates_the_row(Config) ->
 
 player_set_then_player_get(Config) ->
     St = install_api(Config),
-    Collection = unique(~"inventory"),
+    Collection = asobi_test_helpers:unique_id(~"inventory"),
     PlayerId = create_player(),
     {[true], _} = eval(
         [
@@ -113,7 +113,7 @@ player_set_then_player_get(Config) ->
 %% below updates it instead of inserting its own.
 global_write_does_not_clobber_player_row(Config) ->
     St = install_api(Config),
-    Collection = unique(~"save"),
+    Collection = asobi_test_helpers:unique_id(~"save"),
     PlayerId = create_player(),
     {[true], St1} = eval(
         [
@@ -149,7 +149,7 @@ global_write_does_not_clobber_player_row(Config) ->
 %% update_all/2 #296 replaced) rewrites the global row too.
 player_write_does_not_clobber_global_row(Config) ->
     St = install_api(Config),
-    Collection = unique(~"save"),
+    Collection = asobi_test_helpers:unique_id(~"save"),
     PlayerId = create_player(),
     {[true], St1} = eval(
         [
@@ -205,14 +205,12 @@ storage_rows(Collection, Key) ->
 
 create_player() ->
     Now = calendar:universal_time(),
-    Params = #{username => unique(~"p"), inserted_at => Now, updated_at => Now},
+    Params = #{
+        username => asobi_test_helpers:unique_id(~"p"), inserted_at => Now, updated_at => Now
+    },
     CS = kura_changeset:cast(asobi_player, #{}, Params, maps:keys(Params)),
     {ok, #{id := Id}} = asobi_repo:insert(CS),
     Id.
-
-unique(Prefix) ->
-    Hex = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
-    <<Prefix/binary, "_", Hex/binary>>.
 
 safe_lib_dir() ->
     case code:lib_dir(asobi) of

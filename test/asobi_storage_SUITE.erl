@@ -216,10 +216,10 @@ list_storage(Config) ->
 list_storage_filters_owner_perm(Config) ->
     %% Unique collection/key per run so the asserts aren't polluted by
     %% leftover rows from previous test runs (the storage table persists
-    %% across runs).
-    Suffix = integer_to_binary(erlang:unique_integer([positive])),
-    Col = <<"private_listing_", Suffix/binary>>,
-    Key = <<"p1_secret_", Suffix/binary>>,
+    %% across runs). erlang:unique_integer/1 did not deliver that - it is
+    %% unique within a runtime instance, and each run is a new one (#357).
+    Col = asobi_test_helpers:unique_id(~"private_listing"),
+    Key = asobi_test_helpers:unique_id(~"p1_secret"),
     {ok, PutResp} = nova_test:put(
         binary_to_list(<<"/api/v1/storage/", Col/binary, "/", Key/binary>>),
         #{
@@ -308,9 +308,8 @@ storage_owner_permission(Config) ->
 %% schema directly via kura — that's the path `asobi_lua_api`'s
 %% `game.storage.player_set` follows for per-player rows.
 put_storage_per_player_keys_dont_collide(Config) ->
-    Suffix = integer_to_binary(erlang:unique_integer([positive])),
-    Col = <<"shared_", Suffix/binary>>,
-    Key = <<"counter_", Suffix/binary>>,
+    Col = asobi_test_helpers:unique_id(~"shared"),
+    Key = asobi_test_helpers:unique_id(~"counter"),
     {player1_id, P1} = lists:keyfind(player1_id, 1, Config),
     %% Register a fresh second player whose id we can capture here.
     U2 = asobi_test_helpers:unique_username(~"index_collide_p2"),
@@ -365,9 +364,10 @@ put_storage_per_player_keys_dont_collide(Config) ->
 %% DELETE through the controller and confirms each operates on
 %% player1's own row without crashing, leaving the global row alone.
 global_and_player_row_coexist_at_same_key(Config) ->
-    Suffix = integer_to_binary(erlang:unique_integer([positive])),
-    Col = <<"coexist_", Suffix/binary>>,
-    Key = <<"flag_", Suffix/binary>>,
+    %% The global row (player_id IS NULL) is unique on (collection, key) and
+    %% is never deleted, so both have to be unique across runs (asobi#357).
+    Col = asobi_test_helpers:unique_id(~"coexist"),
+    Key = asobi_test_helpers:unique_id(~"flag"),
     Path = binary_to_list(<<"/api/v1/storage/", Col/binary, "/", Key/binary>>),
 
     GlobalParams = #{

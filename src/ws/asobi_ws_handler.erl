@@ -766,6 +766,18 @@ handle_message(
         exit:{noproc, _} ->
             {ok, State#{session => undefined}}
     end;
+%% The extension wire (Wave 2b). Everything about the call - `cid` validation,
+%% readiness, the method table, the error object - belongs to asobi_rpc; this
+%% clause only decides who is calling and encodes the answer. One clause, not
+%% one per authentication state, so an unauthenticated caller cannot be told
+%% `unknown_type` for a method that exists.
+handle_message(#{~"type" := ~"rpc.call"} = Msg, State) ->
+    {Cid, Outcome} = asobi_rpc:handle(
+        maps:get(~"cid", Msg, undefined),
+        maps:get(~"payload", Msg, #{}),
+        rpc_caller(State)
+    ),
+    {reply, {text, encode_rpc(Cid, Outcome)}, State};
 handle_message(#{~"type" := _Type} = Msg, State) ->
     %% F-26: do NOT echo the client-supplied `type` back into the error
     %% reply or logs — an attacker could craft strings that pollute the
@@ -776,6 +788,22 @@ handle_message(#{~"type" := _Type} = Msg, State) ->
     {reply, {text, Reply}, State};
 handle_message(_Msg, State) ->
     {ok, State}.
+
+rpc_caller(#{session := SessionPid, player_id := PlayerId}) when
+    is_pid(SessionPid), is_binary(PlayerId)
+->
+    #{player_id => PlayerId, session => SessionPid};
+rpc_caller(_State) ->
+    unauthenticated.
+
+%% `rpc.error` carries the error object alone. The `reason` half of the older
+%% `error` frame is not repeated here: nothing has ever shipped against this
+%% frame, so there is no client to keep working, and one dialect on a new
+%% surface is the point of the object.
+encode_rpc(Cid, {ok, Result}) ->
+    encode_reply(Cid, ~"rpc.ok", #{~"result" => Result});
+encode_rpc(Cid, {error, Object}) ->
+    encode_reply(Cid, ~"rpc.error", Object).
 
 %% --- Safe Message Dispatch ---
 

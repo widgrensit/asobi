@@ -22,19 +22,89 @@ safe_lib_dir() ->
 
 %% --- Loader-level timeout always enforced ---
 
-infinite_loop_call_returns_timeout_test() ->
-    %% asobi_lua_loader:call/4 must kill the child and return a
-    %% timeout result rather than blocking the parent. We give the
-    %% loop 100ms to be killed; if call/4 ever hangs the eunit timeout
-    %% catches it but the assertion below is what we want signalling.
+infinite_loop_call_is_terminated_test() ->
+    %% asobi_lua_loader:call/4 must kill the child and return an error
+    %% rather than blocking the parent. Which bound trips first depends on
+    %% how fast this machine interprets Lua - the CPU budget usually gets
+    %% there before the 100ms deadline - so assert the contract that
+    %% matters: killed, with a resource reason, inside the window.
     {ok, St} = asobi_lua_loader:new(temp_script(infinite_loop_script())),
     Cfg = encode_map(#{}, St),
     Start = erlang:monotonic_time(millisecond),
     Result = asobi_lua_loader:call(tick, [Cfg], St, 100),
     Elapsed = erlang:monotonic_time(millisecond) - Start,
-    ?assertEqual({error, timeout}, Result),
+    ?assert(lists:member(Result, [{error, timeout}, {error, reductions_exhausted}])),
     %% Wall-clock should be roughly the timeout; certainly under 1s.
     ?assert(Elapsed < 1000).
+
+%% --- #348: reduction budget ---
+
+%% The wall-clock timeout bounds latency, not work. Without a CPU bound a
+%% spinning callback is killed at its deadline and simply does it again on the
+%% next tick, holding a scheduler for its full budget forever.
+reduction_budget_kills_spin_before_deadline_test() ->
+    with_reductions_per_ms(1, fun() ->
+        {ok, St} = asobi_lua_loader:new(temp_script(infinite_loop_script())),
+        Cfg = encode_map(#{}, St),
+        Start = erlang:monotonic_time(millisecond),
+        %% Budget is 1 reduction per ms of the callback's own window, so a
+        %% 5s window buys 5000 reductions - gone almost immediately, while
+        %% the deadline is nowhere near.
+        Result = asobi_lua_loader:call(tick, [Cfg], St, 5000),
+        Elapsed = erlang:monotonic_time(millisecond) - Start,
+        ?assertEqual({error, reductions_exhausted}, Result),
+        ?assert(Elapsed < 1000)
+    end).
+
+%% Setting the rate to 0 restores the pre-#348 behaviour exactly: one receive
+%% for the whole window, and the deadline is the only thing that fires.
+reduction_budget_disabled_falls_back_to_timeout_test() ->
+    with_reductions_per_ms(0, fun() ->
+        {ok, St} = asobi_lua_loader:new(temp_script(infinite_loop_script())),
+        Cfg = encode_map(#{}, St),
+        Start = erlang:monotonic_time(millisecond),
+        Result = asobi_lua_loader:call(tick, [Cfg], St, 200),
+        Elapsed = erlang:monotonic_time(millisecond) - Start,
+        ?assertEqual({error, timeout}, Result),
+        %% Ran the full window rather than being cut short by a budget.
+        ?assert(Elapsed >= 200)
+    end).
+
+%% The budget must not fire on work a game legitimately does. A tick that
+%% builds and sums 200 entity tables costs ~24k reductions; the default rate
+%% gives a 500ms tick 25,000,000.
+reduction_budget_passes_normal_callback_test() ->
+    {ok, St} = asobi_lua_loader:new(temp_script(entity_tick_script())),
+    Cfg = encode_map(#{}, St),
+    ?assertMatch({ok, [_ | _], _}, asobi_lua_loader:call(tick, [Cfg], St, 500)).
+
+%% The three resource failures must be distinguishable in a log line, or an
+%% operator cannot tell a script that burned CPU from one that was merely slow.
+reduction_exhaustion_renders_distinctly_test() ->
+    ?assertEqual(
+        ~"callback exhausted its CPU budget",
+        asobi_lua_game_error:format_reason(reductions_exhausted)
+    ),
+    ?assertNotEqual(
+        asobi_lua_game_error:format_reason(timeout),
+        asobi_lua_game_error:format_reason(reductions_exhausted)
+    ),
+    ?assertNotEqual(
+        asobi_lua_game_error:format_reason(heap_exhausted),
+        asobi_lua_game_error:format_reason(reductions_exhausted)
+    ).
+
+with_reductions_per_ms(Rate, Fun) ->
+    Prev = application:get_env(asobi, max_reductions_per_ms),
+    application:set_env(asobi, max_reductions_per_ms, Rate),
+    try
+        Fun()
+    after
+        case Prev of
+            {ok, Old} -> application:set_env(asobi, max_reductions_per_ms, Old);
+            undefined -> application:unset_env(asobi, max_reductions_per_ms)
+        end
+    end.
 
 stack_overflow_does_not_crash_parent_test() ->
     %% Lua-level stack overflow must not propagate as an Erlang error
@@ -236,6 +306,23 @@ os_exit_does_not_halt_beam_test() ->
 infinite_loop_script() ->
     ~"""
     function tick(_) while true do end end
+    function init(_) return {} end
+    function join(id, s) return s end
+    function leave(id, s) return s end
+    function handle_input(_, _, s) return s end
+    function get_state(_, s) return s end
+    """.
+
+entity_tick_script() ->
+    ~"""
+    function tick(s)
+      local t = {}
+      for i = 1, 200 do t[i] = { x = i * 1.5, y = i * 2.5, hp = 100 } end
+      local sum = 0
+      for i = 1, 200 do sum = sum + t[i].x end
+      s.sum = sum
+      return s
+    end
     function init(_) return {} end
     function join(id, s) return s end
     function leave(id, s) return s end

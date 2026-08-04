@@ -80,6 +80,18 @@ event name asobi rejects at the socket boundary (empty, over 64 bytes,
 outside `[A-Za-z0-9_-]`, or one of asobi's own reserved wire event names such
 as `state`/`tick`/`finished`) returns `{ error = "reason" }` rather than
 being silently dropped downstream.
+
+## Extension namespaces
+
+An installed extension declaring `c:asobi_extension:lua/0` gets its namespace
+installed here too, so a game script calls `game.quests.progress(...)` exactly
+as it calls a core function. Four mechanics, each forced by how Luerl behaves:
+the namespace table is pre-created (`set_table_keys` does not auto-vivify),
+installation happens in this same PreInstall window (Lua closures capture
+`_ENV` at compile time), the declared `effects` runs through `pick/3` like
+core's own, and `{M, F, A}` is applied fully qualified rather than captured as
+a fun. A binding returns `{ok, Value} | {error, Binary}` and reaches Lua
+through the same `{ ok = ... }` / `{ error = "..." }` envelope.
 """.
 
 -include_lib("kernel/include/logger.hrl").
@@ -102,16 +114,22 @@ install(#{probe := true} = Ctx, St0) ->
     %% get/player_get, spatial.*) run for real - calling them twice is safe.
     install_pure(Ctx, St0);
 install(Ctx, St0) ->
-    St1 = create_tables(St0),
+    St1 = create_tables(Ctx, St0),
     install_fns(api_fns(Ctx, live), St1).
 
 -spec install_pure(map(), dynamic()) -> dynamic().
 install_pure(Ctx, St0) ->
-    St1 = create_tables(St0),
+    St1 = create_tables(Ctx, St0),
     install_fns(api_fns(Ctx, probe), St1).
 
-create_tables(St) ->
-    create_namespaces(asobi_lua_surface:reserved_namespaces(), St).
+%% Extension namespaces are pre-created alongside core's, in the same
+%% parent-before-child order: `set_table_keys` does not auto-vivify, so
+%% installing `game.quests.progress` into a nil `game.quests` raises.
+create_tables(Ctx, St) ->
+    create_namespaces(
+        asobi_lua_surface:reserved_namespaces() ++ extension_namespaces(Ctx),
+        St
+    ).
 
 create_namespaces([], St) ->
     St;
@@ -165,7 +183,145 @@ api_surface(Ctx) ->
         %% Terrain
         {[~"game", ~"terrain", ~"get_chunk"], none, fun_terrain_get_chunk(Ctx)},
         {[~"game", ~"terrain", ~"preload"], terrain_effect(Ctx), fun_terrain_preload(Ctx)}
+    ] ++ extension_surface(Ctx).
+
+%%--------------------------------------------------------------------
+%% Extension namespaces (asobi_extension:lua/0)
+%%--------------------------------------------------------------------
+%%
+%% An extension declares `game.<ns>.<fn>` in its manifest and core installs it
+%% here, in the same PreInstall window core's own surface uses. It has to be
+%% this window: Lua closures capture `_ENV` at compile time, so anything
+%% installed after the chunk evaluates is invisible to every function the
+%% script defines.
+%%
+%% The declared `effects` goes through pick/3 unchanged, so an extension's
+%% `write` binding is stubbed in a probe VM exactly like core's - without that
+%% a top-level `game.quests.progress(...)` fires twice per match creation.
+%%
+%% `{M, F, A}` is applied fully qualified rather than captured as a fun: a
+%% closure would pin the code version into a long-lived match VM, so an
+%% upgrade would not take effect until every live match ended.
+
+-spec extension_bindings(map()) -> [asobi_extensions:binding()].
+extension_bindings(Ctx) ->
+    Vm = vm_kind(Ctx),
+    [Binding || #{vms := Vms} = Binding <- asobi_extensions:lua_bindings(), lists:member(Vm, Vms)].
+
+-spec extension_namespaces(map()) -> [[binary(), ...]].
+extension_namespaces(Ctx) ->
+    lists:usort([[~"game", Namespace] || #{namespace := Namespace} <- extension_bindings(Ctx)]).
+
+-spec extension_surface(map()) -> [{[binary(), ...], asobi_lua_surface:effect(), function()}].
+extension_surface(Ctx) ->
+    [
+        {
+            [~"game", Namespace, Function],
+            Effects,
+            extension_fn(Mfa, Args, [
+                ~"game", Namespace, Function
+            ])
+        }
+     || #{
+            namespace := Namespace,
+            function := Function,
+            mfa := Mfa,
+            args := Args,
+            effects := Effects
+        } <-
+            extension_bindings(Ctx)
     ].
+
+%% A world VM's Ctx is shape-identical to a match VM's, so the kind is stated
+%% at the install site rather than inferred. `zone_pid` is the one kind that
+%% is unambiguous from Ctx alone, and it is kept as a fallback so a caller
+%% that predates the `vm` key still lands on the right kind rather than on
+%% `match`. Bot VMs never reach install/2 at all (asobi_lua_loader:new/1's
+%% PreInstall is the identity), so `vms => [bot]` installs nothing today.
+-spec vm_kind(map()) -> asobi_lua_surface:vm_kind().
+vm_kind(#{vm := Vm}) ->
+    case lists:member(Vm, asobi_lua_surface:vm_kinds()) of
+        true -> Vm;
+        false -> match
+    end;
+vm_kind(#{zone_pid := _}) ->
+    zone;
+vm_kind(_Ctx) ->
+    match.
+
+-spec extension_fn(mfa(), [asobi_extension:lua_arg()], [binary(), ...]) -> function().
+extension_fn({Module, Function, _Arity}, Types, Path) ->
+    Name = asobi_lua_surface:name(Path),
+    fun(Args, St) ->
+        case decode_typed(Types, Args, St, 1, []) of
+            {ok, Decoded} -> call_extension(Module, Function, Decoded, Name, St);
+            {error, Reason} -> error_result(Reason, St)
+        end
+    end.
+
+%% The binding contract, mirroring the `{ ok = ... }` / `{ error = "..." }`
+%% envelope every persistence-style game.* call already returns, so a game
+%% developer reads one result shape whoever wrote the function.
+call_extension(Module, Function, Args, Name, St) ->
+    try apply(Module, Function, Args) of
+        {ok, Value} ->
+            ok_result(sanitize(Value), St);
+        {error, Reason} ->
+            error_result(Reason, St);
+        Other ->
+            ?LOG_ERROR(#{
+                event => extension_binding_bad_return,
+                fn => Name,
+                returned => io_lib:format("~0P", [Other, 4]),
+                detail => ~"a lua binding returns {ok, term()} | {error, binary()}"
+            }),
+            error_result(~"binding returned an unexpected value", St)
+    catch
+        Class:Reason:Stack ->
+            ?LOG_ERROR(#{
+                event => extension_binding_crashed,
+                fn => Name,
+                class => Class,
+                reason => Reason,
+                stacktrace => Stack
+            }),
+            error_result(~"binding failed", St)
+    end.
+
+%% `args` is one declared type per mfa argument (asobi_extensions validates the
+%% lengths agree), so a script calling with the wrong shape gets a legible
+%% error at its own call site instead of a function_clause deep in Erlang.
+decode_typed([], _Args, _St, _N, Acc) ->
+    {ok, lists:reverse(Acc)};
+decode_typed([Type | Types], [Arg | Rest], St, N, Acc) ->
+    case decode_typed_arg(Type, Arg, St) of
+        {ok, Value} -> decode_typed(Types, Rest, St, N + 1, [Value | Acc]);
+        error -> {error, arg_error(N, Type, ~"must be a ")}
+    end;
+decode_typed([Type | _Types], [], _St, N, _Acc) ->
+    {error, arg_error(N, Type, ~"is missing; expected a ")}.
+
+arg_error(N, Type, Detail) ->
+    iolist_to_binary([
+        ~"argument ", integer_to_binary(N), ~" ", Detail, atom_to_binary(Type)
+    ]).
+
+decode_typed_arg(binary, V, _St) when is_binary(V) -> {ok, V};
+decode_typed_arg(integer, V, _St) when is_integer(V) -> {ok, V};
+%% Lua has one number type, so a script writing `1` may hand over 1.0.
+decode_typed_arg(integer, V, _St) when is_float(V), V == trunc(V) -> {ok, trunc(V)};
+decode_typed_arg(number, V, _St) when is_number(V) -> {ok, V};
+decode_typed_arg(boolean, V, _St) when is_boolean(V) -> {ok, V};
+decode_typed_arg(table, V, St) -> decode_typed_table(V, St);
+decode_typed_arg(any, V, St) -> {ok, deep_decode(luerl:decode(V, St))};
+decode_typed_arg(_Type, _V, _St) -> error.
+
+decode_typed_table(V, St) ->
+    try
+        {ok, decode_to_map(V, St)}
+    catch
+        _:_ -> error
+    end.
 
 %% The effect belongs to the closure, not to the name: `zone.*`/`terrain.*`
 %% gate on a handle in Ctx (see fun_zone_spawn/1, fun_terrain_preload/1), and
