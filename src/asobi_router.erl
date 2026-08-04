@@ -9,8 +9,15 @@
 %% short-circuit ever runs. Listing `options` lets the plugin intercept the
 %% preflight and reply 200 without the handler ever seeing it.
 
+%% The first caller of asobi_extensions:resolve/0, and the reason it is a pure
+%% memoised function rather than a process: nova is in asobi's `applications`
+%% list, so nova_sup:init/1 compiles this route table before asobi_app:start/2
+%% has run and before any asobi process exists. Resolving here validates the
+%% installed set at the earliest possible moment. Extensions contribute no
+%% routes (ADR 0003); core owns the whole table.
 -spec routes(atom()) -> [map()].
 routes(_Environment) ->
+    _ = asobi_extensions:resolve(),
     [
         auth_routes(),
         iap_routes(),

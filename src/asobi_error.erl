@@ -71,6 +71,7 @@ working and a new one reads one place: see `legacy/2`.
     {~"validation_failed", 422, ~"One or more fields are invalid. See `details`."},
     {~"length_required", 411, ~"The request must declare a Content-Length."},
     {~"client_gate_denied", 403, ~"The registration gate rejected this request."},
+    {~"not_ready", 503, ~"The server is still starting. Retry shortly."},
 
     %% Accounts, providers, guests.
     {~"auth.registration_closed", 403, ~"This deployment is not accepting new players."},

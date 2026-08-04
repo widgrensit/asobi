@@ -36,7 +36,8 @@ init([]) ->
         season_manager_spec(),
         guest_reaper_spec(),
         lua_game_config_spec(),
-        lua_sup()
+        lua_sup(),
+        extension_sup()
     ],
     {ok, {SupFlags, Children}}.
 
@@ -74,6 +75,16 @@ lua_sup() ->
     #{
         id => asobi_lua_sup,
         start => {asobi_lua_sup, start_link, []},
+        type => supervisor
+    }.
+
+%% Last, so an extension's processes start after every core service they might
+%% call. With no extensions installed this is one idle supervisor with no
+%% children.
+extension_sup() ->
+    #{
+        id => asobi_extension_sup,
+        start => {asobi_extension_sup, start_link, []},
         type => supervisor
     }.
 

@@ -8,9 +8,11 @@ start(_StartType, _StartArgs) ->
     setup_telemetry(),
     asobi_error:register_handler(),
     register_lua_game_modes(),
+    report_extensions(),
     case kura_migrator:migrate(asobi_repo) of
         {ok, Applied} ->
-            logger:notice(#{msg => ~"migrations_applied", versions => Applied});
+            logger:notice(#{msg => ~"migrations_applied", versions => Applied}),
+            asobi_readiness:mark_ready();
         {error, MigErr} ->
             logger:error(#{msg => ~"migration_failed", error => MigErr})
     end,
@@ -34,6 +36,18 @@ setup_telemetry() ->
 %% keeps it ahead of every asobi_sup child, including the matchmaker.
 register_lua_game_modes() ->
     asobi_lua_sup:register_game_modes().
+
+%% A host can add an extension to the release and forget the dependency, or
+%% the reverse. Reporting the resolved set makes the mismatch visible instead
+%% of silent. `resolve/0` is memoised and the router has usually called it
+%% already, from inside Nova's boot; this call is here so the set is also
+%% known before migrations run.
+report_extensions() ->
+    Extensions = [
+        #{name => Name, app => App, extension_version => Version}
+     || #{name := Name, app := App, extension_version := Version} <- asobi_extensions:resolve()
+    ],
+    logger:notice(#{msg => ~"extensions_resolved", extensions => Extensions}).
 
 -spec stop(term()) -> ok.
 stop(_State) ->

@@ -5,6 +5,7 @@
 
 -export([
     otp_app/0,
+    migration_apps/0,
     all/1,
     aggregate/2,
     get/2,
@@ -25,6 +26,26 @@
 
 -spec otp_app() -> asobi.
 otp_app() -> asobi.
+
+-doc """
+The applications kura discovers migrations from: core first, then each
+extension in dependency order.
+
+Inert today. `kura_migrator` discovers migrations from exactly one
+application - `application:get_application(RepoMod)` - so an extension's
+migrations do not run and its tables are created by nothing. That is a live
+kura defect independent of extensions: `asobi_gdpr` declares three schemas and
+no migration in any repo creates those tables.
+
+kura 2.20.0 adds multi-application discovery and calls this optional
+`kura_repo` callback. asobi pins `{kura, "~> 2.17"}`, where nothing calls it,
+so this is a seam and not yet a behaviour change. Moving the pin to
+`~> 2.20` is the whole of the change: extension migrations then run inside
+core's transaction, under one advisory lock, in this order.
+""".
+-spec migration_apps() -> [atom(), ...].
+migration_apps() ->
+    [asobi | [App || #{app := App} <- asobi_extensions:resolve()]].
 
 -spec all(#kura_query{}) -> {ok, [map()]} | {error, term()}.
 all(Q) -> kura_repo_worker:all(?MODULE, Q).

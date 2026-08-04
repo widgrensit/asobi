@@ -19,9 +19,12 @@ lua_children_are_supervised_test() ->
     ?assert(lists:member(asobi_lua_config, Ids)),
     ?assert(lists:member(asobi_lua_sup, Ids)).
 
-lua_children_start_last_test() ->
+%% Extensions come after the Lua runtime, and the Lua runtime after every core
+%% child. An extension may call anything core provides, including Lua.
+lua_children_start_after_core_and_before_extensions_test() ->
     Ids = child_ids(asobi_sup),
-    ?assertEqual([asobi_lua_config, asobi_lua_sup], lists:nthtail(length(Ids) - 2, Ids)).
+    Tail = [asobi_lua_config, asobi_lua_sup, asobi_extension_sup],
+    ?assertEqual((Ids -- Tail) ++ Tail, Ids).
 
 guest_reaper_starts_before_game_config_test() ->
     Ids = child_ids(asobi_sup),
