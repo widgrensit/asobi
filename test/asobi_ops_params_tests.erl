@@ -264,3 +264,69 @@ cursor_rejects_oversized_token_test() ->
 
 cursor_rejects_valueless_param_test() ->
     ?assertEqual({error, invalid_cursor}, asobi_ops_params:cursor(#{~"cursor" => true})).
+
+%%--------------------------------------------------------------------
+%% Exact-match and boolean filters
+%%--------------------------------------------------------------------
+
+filter_reads_a_value_test() ->
+    ?assertEqual({ok, ~"gold"}, asobi_ops_params:filter(#{~"currency" => ~"gold"}, ~"currency")).
+
+filter_absent_is_none_test() ->
+    ?assertEqual(none, asobi_ops_params:filter(#{}, ~"currency")).
+
+filter_empty_is_none_test() ->
+    ?assertEqual(none, asobi_ops_params:filter(#{~"currency" => ~""}, ~"currency")).
+
+filter_valueless_param_is_none_test() ->
+    ?assertEqual(none, asobi_ops_params:filter(#{~"currency" => true}, ~"currency")).
+
+filter_oversized_is_none_test() ->
+    Long = binary:copy(~"c", 65),
+    ?assertEqual(none, asobi_ops_params:filter(#{~"currency" => Long}, ~"currency")).
+
+filter_at_the_limit_is_kept_test() ->
+    Limit = binary:copy(~"c", 64),
+    ?assertEqual({ok, Limit}, asobi_ops_params:filter(#{~"currency" => Limit}, ~"currency")).
+
+boolean_reads_true_and_false_test() ->
+    ?assertEqual({ok, true}, asobi_ops_params:boolean(#{~"active" => ~"true"}, ~"active")),
+    ?assertEqual({ok, false}, asobi_ops_params:boolean(#{~"active" => ~"false"}, ~"active")).
+
+%% `?active=1` reading as `false` would answer with the opposite of what was
+%% asked for, so anything that is not the two words does not filter at all.
+boolean_rejects_anything_else_test() ->
+    [
+        ?assertEqual(none, asobi_ops_params:boolean(#{~"active" => Value}, ~"active"))
+     || Value <- [~"1", ~"0", ~"TRUE", ~"yes", ~"", true]
+    ].
+
+boolean_absent_is_none_test() ->
+    ?assertEqual(none, asobi_ops_params:boolean(#{}, ~"active")).
+
+%%--------------------------------------------------------------------
+%% Uuid shape
+%%--------------------------------------------------------------------
+
+uuid_accepts_a_generated_id_test() ->
+    ?assert(asobi_ops_params:uuid(asobi_id:generate())).
+
+uuid_rejects_a_malformed_id_test() ->
+    [
+        ?assertNot(asobi_ops_params:uuid(Id))
+     || Id <- [
+            ~"",
+            ~"not-a-uuid",
+            ~"0197f3d0-1c2b-7000-8000-00000000000",
+            ~"0197f3d0-1c2b-7000-8000-0000000000012",
+            ~"0197f3d01c2b70008000000000000001",
+            ~"0197F3D0-1C2B-7000-8000-000000000001",
+            ~"0197f3d0-1c2b-7000-8000-00000000000g",
+            ~"0197f3d0'-1c2b-7000-8000-00000000001"
+        ]
+    ].
+
+%% A non-binary binding must not crash the shape check.
+uuid_rejects_a_non_binary_test() ->
+    ?assertNot(asobi_ops_params:uuid(undefined)),
+    ?assertNot(asobi_ops_params:uuid(42)).

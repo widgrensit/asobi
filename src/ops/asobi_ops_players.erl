@@ -26,30 +26,22 @@ operator had to already know the username to find it.
 -spec sortable() -> asobi_ops_params:sort_allowlist().
 sortable() -> ?SORTABLE.
 
+-define(FILTERS, [
+    {~"q", [username, display_name], ilike}
+]).
+
 -spec query(asobi_ops_params:params()) ->
-    {ok, #kura_query{}} | {error, {unknown_sort, binary()} | {unknown_order, binary()}}.
+    {ok, #kura_query{}}
+    | {error, {unknown_sort, binary()} | {unknown_order, binary()} | {invalid_filter, binary()}}.
 query(Params) ->
     case asobi_ops_params:sort(Params, ?SORTABLE, [{inserted_at, desc}]) of
         {ok, Orders} ->
-            Query = search(kura_query:from(asobi_player), Params),
-            {ok, kura_query:order_by(Query, Orders)};
+            case asobi_ops_filters:build(kura_query:from(asobi_player), Params, ?FILTERS) of
+                {ok, Query} -> {ok, kura_query:order_by(Query, Orders)};
+                {error, _} = Error -> Error
+            end;
         {error, _} = Error ->
             Error
-    end.
-
--spec search(#kura_query{}, asobi_ops_params:params()) -> #kura_query{}.
-search(Query, Params) ->
-    case asobi_ops_params:like_pattern(Params, ~"q") of
-        none ->
-            Query;
-        {ok, Pattern} ->
-            kura_query:where(
-                Query,
-                {'or', [
-                    {username, ilike, Pattern},
-                    {display_name, ilike, Pattern}
-                ]}
-            )
     end.
 
 -doc """

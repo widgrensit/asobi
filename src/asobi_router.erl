@@ -216,7 +216,9 @@ ops_routes() ->
         security => fun asobi_ops_auth:verify/1,
         routes => [
             {~"/players", fun asobi_ops_controller:players/1, #{methods => [get, options]}},
+            {~"/players/:id", fun asobi_ops_controller:player/1, #{methods => [get, options]}},
             {~"/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
+            {~"/matches/:id", fun asobi_ops_controller:match/1, #{methods => [get, options]}},
             {~"/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}},
             {~"/leaderboards", fun asobi_ops_controller:leaderboards/1, #{
                 methods => [get, options]
@@ -224,7 +226,34 @@ ops_routes() ->
             {~"/leaderboards/:id/entries", fun asobi_ops_controller:leaderboard_entries/1, #{
                 methods => [get, options]
             }},
-            {~"/matchmaker", fun asobi_ops_controller:matchmaker/1, #{methods => [get, options]}}
+            {~"/matchmaker", fun asobi_ops_controller:matchmaker/1, #{methods => [get, options]}},
+            {~"/economy/items", fun asobi_ops_controller:economy_items/1, #{
+                methods => [get, options]
+            }},
+            {~"/economy/items/:id", fun asobi_ops_controller:economy_item/1, #{
+                methods => [get, options]
+            }},
+            {~"/economy/listings", fun asobi_ops_controller:economy_listings/1, #{
+                methods => [get, options]
+            }},
+            {~"/economy/listings/:id", fun asobi_ops_controller:economy_listing/1, #{
+                methods => [get, options]
+            }},
+            {~"/chat/channels", fun asobi_ops_controller:chat_channels/1, #{
+                methods => [get, options]
+            }},
+            {~"/chat/channels/:id/messages", fun asobi_ops_controller:chat_messages/1, #{
+                methods => [get, options]
+            }},
+            {~"/tournaments", fun asobi_ops_controller:tournaments/1, #{
+                methods => [get, options]
+            }},
+            {~"/tournaments/:id", fun asobi_ops_controller:tournament/1, #{
+                methods => [get, options]
+            }},
+            {~"/notifications", fun asobi_ops_controller:notifications/1, #{
+                methods => [get, options]
+            }}
         ]
     }.
 

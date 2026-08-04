@@ -287,22 +287,26 @@ matches_sortable_fields_are_all_projected_test() ->
 %% The ops plane has its own identity (ADR 0007). If a later edit moves these
 %% routes back onto the player-scoped check - which admits any player, guest
 %% included - or into an unsecured group, this fails.
+%%
+%% Enumerated from the group rather than listed, so a route added without a
+%% thought for its security is caught here rather than merged.
 ops_routes_are_mounted_behind_the_operator_check_test() ->
-    Groups = asobi_router:routes(dev),
-    [
-        ?assertEqual(
-            {fun asobi_ops_auth:verify/1, [get, options]},
-            route(Groups, ~"/api/v1/ops", Path)
-        )
-     || Path <- [
-            ~"/players",
-            ~"/matches",
-            ~"/features",
-            ~"/leaderboards",
-            ~"/leaderboards/:id/entries",
-            ~"/matchmaker"
-        ]
-    ].
+    #{security := Security, routes := Routes} = ops_group(),
+    ?assertEqual(fun asobi_ops_auth:verify/1, Security),
+    ?assert(Routes =/= []),
+    [?assertEqual([get, options], maps:get(methods, Opts)) || {_Path, _Handler, Opts} <- Routes].
+
+%% Read-only means read-only: the plane must not grow a write route by
+%% accident, and `asobi_ops_notifications:broadcast/5` is deliberately not one.
+ops_plane_serves_no_write_method_test() ->
+    #{routes := Routes} = ops_group(),
+    Methods = lists:usort([M || {_Path, _Handler, Opts} <- Routes, M <- maps:get(methods, Opts)]),
+    ?assertEqual([get, options], Methods),
+    ?assertEqual([], [Class || {_M, _S, Class} <- asobi_ops_caps:classes(), Class =/= read]).
+
+ops_group() ->
+    [Group] = [G || #{prefix := ~"/api/v1/ops"} = G <- asobi_router:routes(dev)],
+    Group.
 
 no_ops_route_sits_in_the_player_scoped_group_test() ->
     [
@@ -333,15 +337,65 @@ ops_routes_and_capability_classes_agree_test() ->
 binding_or_literal(<<":", _/binary>>) -> '_';
 binding_or_literal(Segment) -> Segment.
 
-route(Groups, Prefix, Path) ->
-    [Found] = [
-        {maps:get(security, Group), maps:get(methods, Opts)}
-     || #{prefix := GroupPrefix, routes := Routes} = Group <- Groups,
-        GroupPrefix =:= Prefix,
-        {RoutePath, _Handler, Opts} <- Routes,
-        RoutePath =:= Path
-    ],
-    Found.
+%%--------------------------------------------------------------------
+%% Lookup by id
+%%--------------------------------------------------------------------
+
+lookup_test_() ->
+    {setup, fun setup_repo/0, fun cleanup_repo/1, [
+        fun lookup_projects_the_row/0,
+        fun lookup_reports_a_miss_as_not_found/0,
+        fun lookup_reports_a_failed_read_separately/0
+    ]}.
+
+setup_repo() ->
+    meck:new(asobi_repo, [passthrough]),
+    ok.
+
+cleanup_repo(_) ->
+    catch meck:unload(asobi_repo),
+    ok.
+
+%% The lookup must not be able to return a field the list would have
+%% withheld, so it runs the same projection.
+lookup_projects_the_row() ->
+    meck:expect(asobi_repo, get, fun(asobi_player, _Id) -> {ok, sample_player()} end),
+    {ok, Row} = asobi_ops_lookup:fetch(
+        asobi_player, ~"0197f3d0-1c2b-7000-8000-000000000001", fun asobi_ops_players:project/1
+    ),
+    ?assertNot(maps:is_key(hashed_password, Row)),
+    ?assertEqual(~"kaito", maps:get(username, Row)).
+
+lookup_reports_a_miss_as_not_found() ->
+    meck:expect(asobi_repo, get, fun(_Schema, _Id) -> {error, not_found} end),
+    ?assertEqual(
+        {error, not_found},
+        asobi_ops_lookup:fetch(
+            asobi_player, ~"0197f3d0-1c2b-7000-8000-000000000001", fun identity/1
+        )
+    ).
+
+%% A dropped connection is a 500 and a miss is a 404; collapsing the two
+%% would report the database being down as "no such player".
+lookup_reports_a_failed_read_separately() ->
+    meck:expect(asobi_repo, get, fun(_Schema, _Id) -> {error, closed} end),
+    ?assertEqual(
+        {error, {query_failed, closed}},
+        asobi_ops_lookup:fetch(
+            asobi_player, ~"0197f3d0-1c2b-7000-8000-000000000001", fun identity/1
+        )
+    ).
+
+%% A binding that is not uuid-shaped must not reach Postgres: it raises
+%% there, which would turn a malformed request into a 500.
+lookup_rejects_a_malformed_id_without_a_query_test() ->
+    ?assertEqual(
+        {error, invalid_id},
+        asobi_ops_lookup:fetch(asobi_player, ~"'; drop table players --", fun identity/1)
+    ).
+
+lookup_rejects_a_missing_id_test() ->
+    ?assertEqual({error, invalid_id}, asobi_ops_lookup:fetch(asobi_player, ~"", fun identity/1)).
 
 %%--------------------------------------------------------------------
 %% Features

@@ -86,3 +86,73 @@ an_actor_without_player_data_sends_nothing() ->
     ),
     ?assertNot(meck:called(asobi_notify, send_many, '_')),
     ?assertEqual(~"error", maps:get(outcome, row())).
+
+%%--------------------------------------------------------------------
+%% The read half
+%%--------------------------------------------------------------------
+
+default_order_is_deterministic_test() ->
+    {ok, #kura_query{order_bys = Orders}} = asobi_ops_notifications:query(#{}),
+    ?assertEqual([{sent_at, desc}, {id, desc}], Orders).
+
+every_sort_ends_on_the_unique_key_test() ->
+    [
+        begin
+            {ok, #kura_query{order_bys = Orders}} = asobi_ops_notifications:query(#{
+                ~"sort" => Wire
+            }),
+            ?assertMatch({id, _Direction}, lists:last(Orders))
+        end
+     || {Wire, _Column} <- asobi_ops_notifications:sortable()
+    ].
+
+reject_unknown_sort_test() ->
+    ?assertEqual(
+        {error, {unknown_sort, ~"content"}},
+        asobi_ops_notifications:query(#{~"sort" => ~"content"})
+    ).
+
+read_filter_is_a_boolean_test() ->
+    {ok, #kura_query{wheres = Wheres}} = asobi_ops_notifications:query(#{~"read" => ~"false"}),
+    ?assertEqual([{read, false}], Wheres).
+
+search_is_ilike_on_the_subject_test() ->
+    {ok, #kura_query{wheres = Wheres}} = asobi_ops_notifications:query(#{~"q" => ~"maintenance"}),
+    ?assertEqual([{subject, ilike, ~"%maintenance%"}], Wheres).
+
+%% Dropping a malformed `player_id` would answer "who did this broadcast
+%% reach" with every notification in the deployment.
+malformed_player_filter_is_rejected_test() ->
+    ?assertEqual(
+        {error, {invalid_filter, ~"player_id"}},
+        asobi_ops_notifications:query(#{~"player_id" => ~"kaito"})
+    ).
+
+player_filter_accepts_a_uuid_test() ->
+    Id = asobi_id:generate(),
+    {ok, #kura_query{wheres = Wheres}} = asobi_ops_notifications:query(#{~"player_id" => Id}),
+    ?assertEqual([{player_id, Id}], Wheres).
+
+sortable_fields_are_all_projected_test() ->
+    Projected = maps:keys(asobi_ops_notifications:project(sample_notification())),
+    [
+        ?assert(lists:member(Column, Projected))
+     || {_Wire, Column} <- asobi_ops_notifications:sortable()
+    ].
+
+projection_is_an_allowlist_test() ->
+    Projected = asobi_ops_notifications:project(sample_notification()),
+    ?assertNot(maps:is_key(hashed_password, Projected)),
+    ?assertEqual(~"Maintenance", maps:get(subject, Projected)).
+
+sample_notification() ->
+    #{
+        id => ~"0197f3d0-1c2b-7000-8000-0000000000c1",
+        player_id => ~"0197f3d0-1c2b-7000-8000-0000000000c2",
+        type => ~"system",
+        subject => ~"Maintenance",
+        content => #{~"body" => ~"back at 10"},
+        read => false,
+        sent_at => {{2026, 8, 3}, {12, 0, 0}},
+        hashed_password => ~"never"
+    }.

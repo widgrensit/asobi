@@ -1,6 +1,7 @@
 -module(asobi_ops_params).
 -moduledoc """
-Query-string parsing for the ops read plane.
+Request-input parsing for the ops read plane: query string, and the id in a
+bound path segment.
 
 Three rules, each of them load-bearing:
 
@@ -22,6 +23,7 @@ given. The offset returned is the one the query actually used - see `page/1`.
 """.
 
 -export([page/1, sort/3, sort/4, search/2, like_pattern/2, cursor/1, encode_cursor/1]).
+-export([filter/2, boolean/2, uuid/1]).
 
 -export_type([params/0, page_spec/0, sort_spec/0, sort_allowlist/0, tie_break/0]).
 
@@ -37,6 +39,7 @@ given. The offset returned is the one the query actually used - see `page/1`.
 -define(MAX_OFFSET, 100000).
 -define(MAX_PAGE, 10000).
 -define(MAX_SEARCH_BYTES, 64).
+-define(MAX_FILTER_BYTES, 64).
 -define(MAX_CURSOR_BYTES, 128).
 
 -doc """
@@ -161,6 +164,56 @@ escape_like(Term) ->
     Backslashes = binary:replace(Term, ~"\\", ~"\\\\", [global]),
     Percents = binary:replace(Backslashes, ~"%", ~"\\%", [global]),
     binary:replace(Percents, ~"_", ~"\\_", [global]).
+
+-doc """
+Read an exact-match filter parameter.
+
+`none` when the parameter is absent, empty, valueless, or longer than 64
+bytes - the same soft drop `search/2` applies, and for the same reason: a
+value no column of this size can hold is not worth a query.
+""".
+-spec filter(params(), binary()) -> {ok, binary()} | none.
+filter(Params, Key) ->
+    case maps:get(Key, Params, undefined) of
+        Value when is_binary(Value), Value =/= ~"", byte_size(Value) =< ?MAX_FILTER_BYTES ->
+            {ok, Value};
+        _ ->
+            none
+    end.
+
+-doc """
+Read a boolean filter parameter.
+
+Only `true` and `false` are values. `?active=1` is a typo, and reading it as
+`false` would answer with the exact opposite of what was asked for, so
+anything else is `none` and the filter does not apply.
+""".
+-spec boolean(params(), binary()) -> {ok, boolean()} | none.
+boolean(Params, Key) ->
+    case maps:get(Key, Params, undefined) of
+        ~"true" -> {ok, true};
+        ~"false" -> {ok, false};
+        _ -> none
+    end.
+
+-doc """
+Whether `Id` is a canonical lowercase hyphenated uuid.
+
+Every primary key in this plane is a `uuid` column. Postgres *raises* on a
+value that is not one, so an id checked only by the database turns a
+malformed request into a 500 and a log line. Checking the shape first makes
+it the 400 it is, and costs no query.
+""".
+-spec uuid(term()) -> boolean().
+uuid(<<A:8/binary, $-, B:4/binary, $-, C:4/binary, $-, D:4/binary, $-, E:12/binary>>) ->
+    lists:all(fun is_hex/1, binary_to_list(<<A/binary, B/binary, C/binary, D/binary, E/binary>>));
+uuid(_Id) ->
+    false.
+
+-spec is_hex(term()) -> boolean().
+is_hex(Char) when Char >= $0, Char =< $9 -> true;
+is_hex(Char) when Char >= $a, Char =< $f -> true;
+is_hex(_Char) -> false.
 
 -doc """
 Decode an opaque `?cursor=` token back to its keyset value.

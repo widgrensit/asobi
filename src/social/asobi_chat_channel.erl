@@ -1,7 +1,7 @@
 -module(asobi_chat_channel).
 -behaviour(gen_server).
 
--export([start_link/2, join/2, leave/2, send_message/3, get_history/2]).
+-export([start_link/2, join/2, leave/2, send_message/3, get_history/2, channels/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(MAX_BUFFER, 100).
@@ -10,6 +10,7 @@
 %% F-16: stop channels with no live members after this many ms so an
 %% attacker who joins-then-disconnects cannot leak channel processes.
 -define(IDLE_TIMEOUT_MS, 60000).
+-define(MAX_CHANNELS, 1000).
 
 -spec start_link(binary(), binary()) -> gen_server:start_ret().
 start_link(ChannelId, ChannelType) ->
@@ -49,6 +50,49 @@ get_history(ChannelId, Limit) when is_integer(Limit) ->
         error ->
             []
     end.
+
+-doc """
+Every chat channel running on this node, with its current member count.
+
+Two ETS reads and one `pg` lookup per channel: no channel process is called,
+so an operator listing channels cannot block behind one that is busy.
+
+The registry is the source rather than `pg:which_groups/1`, which the console
+this replaces used. `pg` drops a group when its last member leaves, so a
+running channel nobody is currently joined to is simply absent there - and
+the console asked the wrong scope besides, so its channel list was always
+empty.
+
+Capped at 1000 channels, the same ceiling `asobi_leaderboards:boards/0`
+enumerates under, so the in-memory sort behind this stays bounded. `[]`
+before the chat supervisor has started, and `members => 0` for every channel
+when `pg` has not.
+""".
+-spec channels() -> [#{channel_id := binary(), members := non_neg_integer()}].
+channels() ->
+    case ets:whereis(?REGISTRY) of
+        undefined -> [];
+        _ -> live_channels(ets:whereis(?PG_SCOPE))
+    end.
+
+-spec live_channels(ets:table() | undefined) -> [map()].
+live_channels(Scope) ->
+    case ets:match_object(?REGISTRY, {'_', '_'}, ?MAX_CHANNELS) of
+        {Rows, _Continuation} ->
+            [
+                #{channel_id => ChannelId, members => members(Scope, ChannelId)}
+             || {ChannelId, Pid} <- Rows,
+                is_binary(ChannelId),
+                is_pid(Pid),
+                is_process_alive(Pid)
+            ];
+        '$end_of_table' ->
+            []
+    end.
+
+-spec members(ets:table() | undefined, binary()) -> non_neg_integer().
+members(undefined, _ChannelId) -> 0;
+members(_Scope, ChannelId) -> length(pg:get_members(?PG_SCOPE, {chat, ChannelId})).
 
 -spec init({binary(), binary()}) -> {ok, map(), pos_integer()}.
 init({ChannelId, ChannelType}) ->

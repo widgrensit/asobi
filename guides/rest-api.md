@@ -234,11 +234,22 @@ DELETE /api/v1/storage/:collection/:key        Delete object
 
 ```
 GET /api/v1/ops/players                      Paginated player list
+GET /api/v1/ops/players/:id                  One player
 GET /api/v1/ops/matches                      Paginated match-record list
+GET /api/v1/ops/matches/:id                  One match record
 GET /api/v1/ops/features                     Installed feature set
 GET /api/v1/ops/leaderboards                 Paginated board list
 GET /api/v1/ops/leaderboards/:id/entries     Paginated, ranked board entries
 GET /api/v1/ops/matchmaker                   Matchmaking queue, by mode
+GET /api/v1/ops/economy/items                Paginated item catalogue
+GET /api/v1/ops/economy/items/:id            One item definition
+GET /api/v1/ops/economy/listings             Paginated store listings
+GET /api/v1/ops/economy/listings/:id         One store listing
+GET /api/v1/ops/chat/channels                Live chat channels, by members
+GET /api/v1/ops/chat/channels/:id/messages   Paginated channel history
+GET /api/v1/ops/tournaments                  Paginated tournament list
+GET /api/v1/ops/tournaments/:id              One tournament
+GET /api/v1/ops/notifications                Paginated sent notifications
 ```
 
 The game-operations read plane, for a console rather than a game client. The
@@ -272,16 +283,109 @@ A malformed number is never an error: `?limit=abc` uses the default. A
 malformed *sort* always is, because ordering the wrong rows silently is worse
 than a 400.
 
+A filter is dropped when its value is empty or too long: you get a superset,
+and the rows show it. The exception is a filter on an **id** column
+(`player_id`, `sender_id`, `item_def_id`): a value that is not a uuid is
+`400 ops.invalid_filter`, because dropping it would answer a request scoped to
+one player with everybody's rows and nothing in the response would say so.
+
 Sorts always end on a unique column, so paging by offset cannot repeat or skip
 a row when the sort key has duplicates. That column is `id` on most lists,
-`board_id` for the board list, `player_id` within a board and `mode` for the
-queue.
+`board_id` for the board list, `player_id` within a board, `mode` for the
+queue and `channel_id` for the channel list.
+
+### Lookup by id
+
+Every list with a `:id` route beside it returns one row in the same envelope
+minus the page:
+
+```json
+{ "data": { "id": "0197...", "username": "kaito" } }
+```
+
+The row is passed through the list's own projection, so a lookup can never
+return a field the list withheld. An id that is not a uuid is
+`400 ops.invalid_id` and never reaches the database; a real miss is
+`404 ops.not_found`.
+
+### Players and matches
 
 `ops/players` sorts on `id`, `username`, `display_name`, `inserted_at`,
 `updated_at`, and searches username and display name. `ops/matches` sorts on
 `id`, `mode`, `status`, `started_at`, `finished_at`, `inserted_at`, filters on
 `mode` and `status`, and searches mode. Both return the same fields as their
 public counterparts - no roster, no credentials.
+
+### Economy
+
+`GET /api/v1/ops/economy/items` is the item catalogue. Sorts on `id`, `slug`,
+`name`, `category`, `rarity`, `inserted_at`, `updated_at`, filters on
+`category` and `rarity`, and searches slug and name.
+
+`GET /api/v1/ops/economy/listings` is the store. Sorts on `id`, `item_def_id`,
+`currency`, `price`, `active`, `valid_from`, `valid_until`, and filters on
+`item_def_id`, `currency` and `active` (`true` or `false` - nothing else
+filters).
+
+```json
+{
+  "data": [
+    { "id": "0198...", "item_def_id": "0197...", "currency": "gold",
+      "price": 250, "active": true, "valid_from": null, "valid_until": null,
+      "metadata": {} }
+  ],
+  "page": { "limit": 50, "offset": 0, "total": 38 }
+}
+```
+
+Listings carry no timestamp, so they default to `id` descending. Ids are
+UUIDv7, so that is still newest-first. There is no `q` on listings: nothing on
+a listing is prose. Search the catalogue and filter by the `item_def_id` it
+gives you.
+
+### Chat
+
+`GET /api/v1/ops/chat/channels` lists the channels running on this node with
+their current member count. Sorts on `channel_id` and `members`, busiest
+first, and searches the channel id. It is process state, so it is this node's
+view and it changes between reads.
+
+```json
+{
+  "data": [{ "channel_id": "room:lobby", "members": 14 }],
+  "page": { "limit": 50, "offset": 0, "total": 1 }
+}
+```
+
+`GET /api/v1/ops/chat/channels/:id/messages` pages one channel's persisted
+history. Sorts on `id`, `channel_type`, `sender_id`, `sent_at`, newest first,
+filters on `sender_id` and `channel_type`, and searches message content - the
+read a moderator acting on a report needs. `metadata` does not leave.
+
+A channel with history but no live process is still readable here; a live
+channel that has not been written to yet has no rows.
+
+### Tournaments
+
+`GET /api/v1/ops/tournaments` sorts on `id`, `name`, `leaderboard_id`,
+`status`, `start_at`, `end_at`, `inserted_at`, filters on `status` and
+`leaderboard_id`, and searches the name.
+
+Every row carries `live`: whether a tournament process is actually running for
+it. A row can say `"status": "active"` with `"live": false` after a node
+restart, and no other read shows that. `metadata` does not leave; `entry_fee`
+and `rewards` do.
+
+### Notifications
+
+`GET /api/v1/ops/notifications` is the send history. Sorts on `id`,
+`player_id`, `type`, `subject`, `read`, `sent_at`, newest first, filters on
+`player_id`, `type` and `read`, and searches the subject. It answers the
+question a broadcast raises: who received it, and how many have opened it.
+
+The ops plane is read-only, so there is no broadcast route here. The broadcast
+is an in-process entry point that writes an audit row - see
+[Ops audit](#ops-audit).
 
 ### Leaderboards
 

@@ -147,6 +147,9 @@ working and a new one reads one place: see `legacy/2`.
 
     %% Ops read plane.
     {~"ops.invalid_board_id", 400, ~"The leaderboard id is missing or too long."},
+    {~"ops.invalid_id", 400, ~"The id is missing or not the shape this endpoint accepts."},
+    {~"ops.invalid_filter", 400, ~"That filter value is not the shape its column holds."},
+    {~"ops.not_found", 404, ~"No record exists with this id."},
     {~"ops.unknown_sort_field", 400, ~"That is not a field this endpoint sorts on."},
     {~"ops.unknown_sort_order", 400, ~"`order` must be \"asc\" or \"desc\"."},
     {~"ops.query_failed", 500, ~"The ops query failed."},

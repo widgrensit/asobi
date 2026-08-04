@@ -35,11 +35,22 @@ so a new ops route cannot ship untagged.
 classes() ->
     [
         {get, [~"players"], read},
+        {get, [~"players", '_'], read},
         {get, [~"matches"], read},
+        {get, [~"matches", '_'], read},
         {get, [~"features"], read},
         {get, [~"leaderboards"], read},
         {get, [~"leaderboards", '_', ~"entries"], read},
-        {get, [~"matchmaker"], read}
+        {get, [~"matchmaker"], read},
+        {get, [~"economy", ~"items"], read},
+        {get, [~"economy", ~"items", '_'], read},
+        {get, [~"economy", ~"listings"], read},
+        {get, [~"economy", ~"listings", '_'], read},
+        {get, [~"chat", ~"channels"], read},
+        {get, [~"chat", ~"channels", '_', ~"messages"], read},
+        {get, [~"tournaments"], read},
+        {get, [~"tournaments", '_'], read},
+        {get, [~"notifications"], read}
     ].
 
 -doc """
