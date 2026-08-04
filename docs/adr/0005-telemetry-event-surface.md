@@ -106,7 +106,15 @@ building an exporter safely - not a step to defer until after one is built.
   the two counters for a gauge. `closed` is gated on the zone still being in
   the manager's table, so it fires exactly once per `opened` even though
   `cleanup_zone/2` is reachable more than once for the same coords - a gauge
-  built from the pair does not drift negative.
+  built from the pair does not drift negative. It **can** drift upward: a
+  world teardown emits no `closed` at all, because `asobi_zone_manager` does
+  not trap exits (so a supervisor shutdown never runs its `terminate/2`) and
+  `asobi_world_instance` stops the manager before the zone supervisor (so it
+  never processes the zones' `DOWN`s). Key the gauge on `world_id` and drop a
+  world's counters when `[asobi, world, finished]` arrives, rather than
+  keeping one global counter pair. Making the manager trap exits to close the
+  difference is a supervision-tree change with its own shutdown-latency cost
+  and was deliberately not made here.
 
 #### Matchmaker - `[asobi, matchmaker, queued | removed | formed | failed]`
 

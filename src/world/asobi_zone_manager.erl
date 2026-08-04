@@ -299,6 +299,12 @@ handle_info(
 handle_info(_Info, State) ->
     {noreply, State}.
 
+%% No zone/closed events here on purpose: this process does not trap exits, so
+%% a supervisor shutdown kills it without running terminate/2 at all, and the
+%% instance supervisor stops the manager before the zone supervisor, so the
+%% zones' DOWNs are never processed either. A consumer deriving a live-zone
+%% gauge from opened minus closed must key it on world_id and drop the world's
+%% counters when the world ends - see ADR 0005.
 -spec terminate(term(), map()) -> ok.
 terminate(_Reason, #{ets_tab := Tab}) ->
     ets:delete(Tab),
