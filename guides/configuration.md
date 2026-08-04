@@ -333,6 +333,33 @@ point `guest_verifier_key_id` at it; keep the old key ids for at least the
 retention window so existing guests can still resume. Guest creation is bounded
 by the per-IP auth limiter plus the global `guest_global` create limit.
 
+## Ops plane
+
+The `/api/v1/ops` routes are for a game-operations console, not a game client,
+and they carry their own credential. **Fails closed**: unset the key and every
+ops request is rejected, so a deployment that never reads this page is closed
+rather than open. There is no default credential.
+
+```erlang
+%% Required to use /api/v1/ops at all. Random, >= 32 bytes.
+{ops_secret, ~"a-32-byte-or-longer-random-secret"}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ops_secret` | none | Operator bearer token for `/api/v1/ops`. Unset rejects every ops request |
+
+Send it as `Authorization: Bearer <ops_secret>`. It is compared in constant
+time and never leaves the server, so keep it in an env var or secret manager,
+never in source. Player and guest tokens are rejected here - the ops plane
+never consults the player token store.
+
+One secret is one privilege level: whoever holds it holds every ops capability
+class, including `config`. Restrict who can reach the console with a reverse
+proxy, and set `x-asobi-operator` per person for attribution in the audit
+trail - it is a label, never authority. See
+[REST API](rest-api.md#ops-authentication).
+
 ## Vote Templates
 
 Define reusable vote configurations:

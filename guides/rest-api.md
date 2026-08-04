@@ -244,6 +244,9 @@ The game-operations read plane, for a console rather than a game client. The
 lists differ from the ones above in three ways: they report a total, they
 accept a sort, and they page by offset.
 
+These routes do **not** accept player tokens. They are their own auth plane -
+see [Ops authentication](#ops-authentication) below.
+
 Every list returns the same envelope:
 
 ```json
@@ -296,12 +299,42 @@ Capabilities report what is *configured*, not what is compiled in, and carry a
 boolean only - never the configured value. `extensions` is empty until an
 extension registry exists; entries will have the same shape as `core`.
 
-> #### Ops routes use player auth today {: .warning}
+### Ops authentication
+
+Ops routes sit behind an operator credential, never a player token. Send the
+configured operator secret as a bearer token:
+
+```
+GET /api/v1/ops/players
+Authorization: Bearer <ops_secret>
+```
+
+Configure it with the `ops_secret` application env (see
+[Configuration](configuration.md#ops-plane)). There is **no default**: a
+deployment that has not set one rejects every ops request. A player or guest
+token is rejected the same way - the ops plane never consults the player token
+store at all.
+
+Every rejection is `403` with `{"error": "forbidden"}`, whatever the cause. A
+caller cannot tell an unconfigured deployment from a wrong secret.
+
+Each route carries exactly one capability class - `read`, `player_data` or
+`config` - and a request is admitted only if the credential holds that class.
+Everything above is `read`. Role names never appear on the wire.
+
+> #### One secret means one privilege level {: .warning}
 >
-> These routes sit behind the same bearer check as the rest of `/api/v1`, so
-> any authenticated player can read them, and their fields are held to exactly
-> what the public endpoints already expose. An operator capability model is
-> the follow-up.
+> The static secret resolves to all three classes, so anyone holding it holds
+> `config`. A studio cannot hand a community manager `player_data` without
+> also handing over everything else. Restrict who reaches the console at all
+> with a reverse proxy; per-person capabilities arrive with managed cloud,
+> which mints a short-lived token carrying an explicit capability list.
+
+Optionally send `x-asobi-operator: <name>` to name the human behind a shared
+secret. It is attribution only: it is read after the credential is accepted,
+it never affects what a request may do, and it is recorded unattested. A
+label that is empty, multi-valued, over 64 bytes, or not printable ASCII is
+dropped rather than trusted.
 
 ## Errors
 

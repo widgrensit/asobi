@@ -213,17 +213,41 @@ matches_sortable_fields_are_all_projected_test() ->
 %% Routing
 %%--------------------------------------------------------------------
 
-%% The ops plane reuses core's bearer check rather than inventing one. If a
-%% later edit moves these routes to an unsecured group, this fails.
-ops_routes_are_mounted_behind_auth_test() ->
+%% The ops plane has its own identity (ADR 0007). If a later edit moves these
+%% routes back onto the player-scoped check - which admits any player, guest
+%% included - or into an unsecured group, this fails.
+ops_routes_are_mounted_behind_the_operator_check_test() ->
     Groups = asobi_router:routes(dev),
     [
         ?assertEqual(
-            {fun asobi_auth_plugin:verify/1, [get, options]},
-            route(Groups, ~"/api/v1", Path)
+            {fun asobi_ops_auth:verify/1, [get, options]},
+            route(Groups, ~"/api/v1/ops", Path)
         )
-     || Path <- [~"/ops/players", ~"/ops/matches", ~"/ops/features"]
+     || Path <- [~"/players", ~"/matches", ~"/features"]
     ].
+
+no_ops_route_sits_in_the_player_scoped_group_test() ->
+    [
+        ?assertEqual([], [Path || {Path, _Handler, _Opts} <- Routes, ops_path(Path)])
+     || #{prefix := Prefix, routes := Routes} <- asobi_router:routes(dev), Prefix =/= ~"/api/v1/ops"
+    ].
+
+ops_path(<<"/ops", _/binary>>) -> true;
+ops_path(_Path) -> false.
+
+%% Every ops route carries exactly one capability class, and the class table
+%% carries no route the router does not serve. An untagged route is denied at
+%% runtime, so this is the check that turns that denial into a build failure.
+ops_routes_and_capability_classes_agree_test() ->
+    Routed = lists:sort([
+        {Method, binary:split(Path, ~"/", [global, trim_all])}
+     || #{prefix := ~"/api/v1/ops", routes := Routes} <- asobi_router:routes(dev),
+        {Path, _Handler, Opts} <- Routes,
+        Method <- maps:get(methods, Opts),
+        Method =/= options
+    ]),
+    Tagged = lists:sort([{Method, Segments} || {Method, Segments, _} <- asobi_ops_caps:classes()]),
+    ?assertEqual(Tagged, Routed).
 
 route(Groups, Prefix, Path) ->
     [Found] = [

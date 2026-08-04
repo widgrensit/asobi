@@ -6,10 +6,10 @@ Every list endpoint here returns the same envelope, clamps its own paging, and
 rejects a sort field it does not recognise with 400 rather than ordering by
 something the caller did not ask for.
 
-These routes are mounted behind `asobi_auth_plugin:verify/1`, the same
-player-scoped bearer check the rest of `/api/v1` uses. That is a placeholder,
-not the destination: ops calls want an operator capability, which is ADR 0007
-and a follow-up PR. Until then every projection here is held to exactly what
+These routes are mounted behind `asobi_ops_auth:verify/1`, the operator
+capability check (ADR 0007) - never the player-scoped bearer check the rest of
+`/api/v1` uses, which would let any authenticated player, guest included,
+enumerate the deployment. Every projection here is still held to exactly what
 the equivalent public endpoint already exposes.
 """.
 

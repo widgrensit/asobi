@@ -15,6 +15,7 @@ routes(_Environment) ->
         auth_routes(),
         iap_routes(),
         api_routes(),
+        ops_routes(),
         ws_routes()
     ].
 
@@ -183,12 +184,6 @@ api_routes() ->
             {~"/saves/:slot", fun asobi_storage_controller:get_save/1, #{methods => [get, options]}},
             {~"/saves/:slot", fun asobi_storage_controller:put_save/1, #{methods => [put, options]}},
 
-            %% Ops - read plane. Mounted on the existing player-scoped auth
-            %% plugin; the operator capability model is ADR 0007 (follow-up).
-            {~"/ops/players", fun asobi_ops_controller:players/1, #{methods => [get, options]}},
-            {~"/ops/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
-            {~"/ops/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}},
-
             %% Storage - Generic
             {~"/storage/:collection", fun asobi_storage_controller:list_storage/1, #{
                 methods => [get, options]
@@ -202,6 +197,20 @@ api_routes() ->
             {~"/storage/:collection/:key", fun asobi_storage_controller:delete_storage/1, #{
                 methods => [delete, options]
             }}
+        ]
+    }.
+
+%% Ops - the game-operations plane. Its own group because it is its own
+%% identity: the operator capability check (ADR 0007), never the player-scoped
+%% one. Every route here must carry a class in `asobi_ops_caps:classes/0`.
+ops_routes() ->
+    #{
+        prefix => ~"/api/v1/ops",
+        security => fun asobi_ops_auth:verify/1,
+        routes => [
+            {~"/players", fun asobi_ops_controller:players/1, #{methods => [get, options]}},
+            {~"/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
+            {~"/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}}
         ]
     }.
 

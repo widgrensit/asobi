@@ -2,6 +2,8 @@
 
 -include_lib("nova_test/include/nova_test.hrl").
 
+-define(OPS_SECRET, ~"8e3a5d17c94b60f2ae81d3705c6f9b24d0a7e158b3c92f46071dab5e8c249f30").
+
 -export([
     all/0,
     groups/0,
@@ -25,11 +27,14 @@
     update_player_unauthorized/1,
     health_check/1,
     readiness_check/1,
-    liveness_check/1
+    liveness_check/1,
+    ops_rejects_a_player_token/1,
+    ops_rejects_an_anonymous_request/1,
+    ops_accepts_the_operator_secret/1
 ]).
 
 all() ->
-    [{group, auth}, {group, players}, {group, health}].
+    [{group, auth}, {group, players}, {group, health}, {group, ops}].
 
 groups() ->
     [
@@ -53,6 +58,11 @@ groups() ->
             health_check,
             readiness_check,
             liveness_check
+        ]},
+        {ops, [sequence], [
+            ops_rejects_a_player_token,
+            ops_rejects_an_anonymous_request,
+            ops_accepts_the_operator_secret
         ]}
     ].
 
@@ -95,9 +105,19 @@ init_per_group(players, Config) ->
         {player_id, PlayerId}
         | Config
     ];
+init_per_group(ops, Config) ->
+    Original = application:get_env(asobi, ops_secret),
+    application:set_env(asobi, ops_secret, ?OPS_SECRET),
+    [{ops_secret_was, Original} | Config];
 init_per_group(_Group, Config) ->
     Config.
 
+end_per_group(ops, Config) ->
+    case lists:keyfind(ops_secret_was, 1, Config) of
+        {ops_secret_was, {ok, Value}} -> application:set_env(asobi, ops_secret, Value);
+        _ -> application:unset_env(asobi, ops_secret)
+    end,
+    Config;
 end_per_group(_Group, Config) ->
     Config.
 
@@ -342,4 +362,46 @@ liveness_check(Config) ->
     ?assertStatus(200, Resp),
     Body = nova_test:json(Resp),
     ?assertMatch(#{~"status" := ~"alive"}, Body),
+    Config.
+
+%% --- Ops Tests ---
+
+%% Before ADR 0007 these routes sat behind the player-scoped bearer check, so
+%% any authenticated player - a guest included - could page every player and
+%% every match record in the deployment. A player token must now be a 403.
+ops_rejects_a_player_token(Config) ->
+    {session_token, Token} = lists:keyfind(session_token, 1, Config),
+    true = is_binary(Token),
+    [
+        begin
+            {ok, Resp} = nova_test:get(
+                Path,
+                #{headers => [{~"authorization", <<"Bearer ", Token/binary>>}]},
+                Config
+            ),
+            ?assertStatus(403, Resp)
+        end
+     || Path <- ["/api/v1/ops/players", "/api/v1/ops/matches", "/api/v1/ops/features"]
+    ],
+    Config.
+
+ops_rejects_an_anonymous_request(Config) ->
+    {ok, Resp} = nova_test:get("/api/v1/ops/players", Config),
+    ?assertStatus(403, Resp),
+    ?assertMatch(#{~"error" := ~"forbidden"}, nova_test:json(Resp)),
+    Config.
+
+ops_accepts_the_operator_secret(Config) ->
+    {ok, Resp} = nova_test:get(
+        "/api/v1/ops/players",
+        #{
+            headers => [
+                {~"authorization", <<"Bearer ", ?OPS_SECRET/binary>>},
+                {~"x-asobi-operator", ~"kaito"}
+            ]
+        },
+        Config
+    ),
+    ?assertStatus(200, Resp),
+    ?assertMatch(#{~"data" := _, ~"page" := _}, nova_test:json(Resp)),
     Config.
