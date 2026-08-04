@@ -207,8 +207,8 @@ down the Nakama server.
 ## Things Nakama has that asobi doesn't (yet)
 
 - **Satori** (LiveOps platform). asobi's LiveOps story is rougher.
-- **Hiro** (progression system). asobi has tournaments, seasons, and
-  phases but nothing as opinionated as Hiro.
+- **Hiro** (progression system). asobi has tournaments and phases, plus
+  seasons and quests as extensions, but nothing as opinionated as Hiro.
 - **Go and TypeScript runtimes** as alternatives to Lua. asobi is Lua or
   Erlang — no JS/TS runtime.
 - **Nakama Console** is further along than asobi_admin today.
@@ -224,7 +224,7 @@ in asobi or accept the feature loss.
 - **Plain PostgreSQL** — no CockroachDB requirement
 - **Spatial zones / terrain** — purpose-built for large-world games
 - **Built-in voting** (plurality / ranked / approval / weighted)
-- **Phases and seasons** as first-class primitives
+- **Phases** as a first-class primitive, and seasons as an extension
 - **Per-match process isolation** via OTP supervision — crashes never
   leak between matches, no shared GC pauses
 
