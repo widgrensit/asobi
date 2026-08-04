@@ -23,7 +23,7 @@ jobs:
   reproducible:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Pinned to the major `console/package.json` declares in `engines`. The
       # fleet has one other Node repo and it pins a major its own package.json
