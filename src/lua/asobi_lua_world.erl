@@ -735,9 +735,14 @@ decode_spawn_templates_acc([{TemplateId, Props} | Rest], Acc) when
 ->
     Type = proplists:get_value(~"type", Props, ~"npc"),
     BaseState = deep_decode(proplists:get_value(~"base_state", Props, [])),
+    %% asobi_zone_spawner merges base_state straight into the new entity, and
+    %% every atom-keyed consumer in asobi_zone (snapshot_entities' `persistent`
+    %% read, the crossing clauses, asobi_spatial) then reads it. Without this
+    %% the entity is binary-keyed until the next zone_tick round-trip happens
+    %% to atomize it - the same gap asobi#270 closed for tick results.
     Base =
         case is_map(BaseState) of
-            true -> BaseState;
+            true -> asobi_lua_api:atomize_keys(BaseState);
             false -> #{}
         end,
     Template = #{

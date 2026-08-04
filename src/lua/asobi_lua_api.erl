@@ -82,7 +82,7 @@ their value directly.
 -export([install/2]).
 -export([deep_decode/1, decode_to_map/2]).
 -export([to_storage_value/1]).
--export([atomize_entities/1]).
+-export([atomize_entities/1, atomize_keys/1]).
 
 -spec install(map(), dynamic()) -> dynamic().
 install(#{probe := true} = Ctx, St0) ->
@@ -814,7 +814,9 @@ fun_zone_spawn(#{zone_pid := ZonePid} = Ctx) ->
                         %% populated, string-keyed table already decodes to a map.
                         case Overrides0 of
                             Overrides when is_map(Overrides) ->
-                                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
+                                asobi_zone:spawn_entity(
+                                    ZonePid, TemplateId, {X, Y}, atomize_keys(Overrides)
+                                ),
                                 {[true], St};
                             [] ->
                                 asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, #{}),
@@ -1193,6 +1195,11 @@ atomize_entities(Entities) ->
         Entities
     ).
 
+%% Same conversion for a single entity-shaped map: a spawn template's
+%% base_state and a game.zone.spawn override table both become entity fields
+%% inside asobi_zone_spawner:spawn_entity/5, so they have to arrive in the
+%% same key shape zone_tick results do. See widgrensit/asobi_lua#118.
+-spec atomize_keys(map()) -> map().
 atomize_keys(M) when is_map(M) ->
     maps:fold(
         fun(K, V, Acc) ->

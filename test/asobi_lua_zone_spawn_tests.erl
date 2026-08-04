@@ -124,10 +124,13 @@ lua_spawn_reaches_zone() ->
     ?assertEqual(2, length(Chests)),
 
     [Goblin] = Goblins,
-    ?assert(maps:get(~"health", Goblin) == 100),
-    ?assertEqual(~"patrol", maps:get(~"ai", Goblin)),
+    %% asobi_lua#118: base_state and override fields must land atom-keyed at
+    %% spawn time, not only after some later zone_tick round-trip re-atomizes
+    %% the entity. These reads happen before any tick has returned entities.
+    ?assert(maps:get(health, Goblin) == 100),
+    ?assertEqual(~"patrol", maps:get(ai, Goblin)),
 
-    ChestLoot = lists:sort([maps:get(~"loot", C) || C <- Chests]),
+    ChestLoot = lists:sort([maps:get(loot, C) || C <- Chests]),
     ?assertEqual([~"common", ~"rare"], ChestLoot),
 
     gen_server:stop(ZonePid),

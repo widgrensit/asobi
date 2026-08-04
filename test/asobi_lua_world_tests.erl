@@ -284,7 +284,12 @@ spawn_templates_decodes_test() ->
         ?assertMatch(#{~"goblin" := _}, Templates),
         Goblin = maps:get(~"goblin", Templates),
         ?assertEqual(~"npc", maps:get(type, Goblin)),
-        ?assertEqual(true, maps:get(persistent, Goblin))
+        ?assertEqual(true, maps:get(persistent, Goblin)),
+        %% asobi_lua#118: base_state is merged straight into the spawned
+        %% entity by asobi_zone_spawner, so its keys must already be in the
+        %% atom shape asobi_zone reads - not binary until a later zone_tick
+        %% round-trip fixes them up.
+        ?assertEqual(#{hp => 10}, maps:get(base_state, Goblin))
     after
         file:delete(Path)
     end.
