@@ -315,7 +315,8 @@ start_zone(
         zone_monitors := Monitors,
         max_active_zones := MaxActive,
         zone_config := BaseConfig,
-        initial_zone_states := InitialStates
+        initial_zone_states := InitialStates,
+        world_id := WorldId
     } = State
 ) ->
     case ets:info(Tab, size) >= MaxActive of
@@ -332,6 +333,7 @@ start_zone(
             case asobi_zone_sup:start_zone(ZoneSup, Config) of
                 {ok, Pid} ->
                     ets:insert(Tab, {Coords, Pid}),
+                    asobi_telemetry:zone_opened(WorldId, Coords),
                     MonRef = monitor(process, Pid),
                     Now = erlang:monotonic_time(millisecond),
                     State1 = State#{
@@ -349,9 +351,18 @@ cleanup_zone(
     #{
         ets_tab := Tab,
         zone_last_active := Active,
-        zone_monitors := Monitors
+        zone_monitors := Monitors,
+        world_id := WorldId
     } = State
 ) ->
+    %% cleanup_zone/2 is reachable more than once for the same coords (a DOWN
+    %% racing await_zone_down/3, for one), so gate the close on the row still
+    %% being there - a live-zone gauge built from opened minus closed would go
+    %% negative otherwise.
+    case ets:member(Tab, Coords) of
+        true -> asobi_telemetry:zone_closed(WorldId, Coords);
+        false -> ok
+    end,
     ets:delete(Tab, Coords),
     Monitors1 =
         case maps:get(Coords, Monitors, undefined) of
