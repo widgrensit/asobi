@@ -473,8 +473,24 @@ data and waits on the capability model.
 ```
 
 Capabilities report what is *configured*, not what is compiled in, and carry a
-boolean only - never the configured value. `extensions` is empty until an
-extension registry exists; entries will have the same shape as `core`.
+boolean only - never the configured value.
+
+`extensions` is the resolved extension set, in dependency order and in the
+same shape as `core`, so a client reads one row type:
+
+```json
+{ "name": "quests", "version": "1.0.0",
+  "capabilities": [{ "name": "lua", "enabled": true },
+                   { "name": "rpc", "enabled": true },
+                   { "name": "tables", "enabled": true }] }
+```
+
+An extension's capabilities are the manifest keys it declares something under.
+They say what it contributes, never what it contains - no method name, no
+table name. `[]` when nothing is installed.
+
+This is what a console reads to decide which of its built-in screens to
+render, and to surface a version it was not built against.
 
 ### Ops authentication
 
@@ -494,6 +510,16 @@ store at all.
 
 Every rejection is `403` with `{"error": "forbidden"}`, whatever the cause. A
 caller cannot tell an unconfigured deployment from a wrong secret.
+
+A browser has a second transport for the same credential. `POST
+/console/session` with `{"secret": "..."}` exchanges the operator secret for
+an `HttpOnly` session cookie and a derived CSRF token; every later ops request
+then carries the cookie plus `x-csrf-token` instead of the bearer header. A
+cookie **without** a matching header is refused, so a cross-site request that
+arrives with the browser's cookies attached gets 403.
+
+A bearer token wins when both are present. See
+[Configuration](configuration.md#operator-console).
 
 Each route carries exactly one capability class - `read`, `player_data` or
 `config` - and a request is admitted only if the credential holds that class.

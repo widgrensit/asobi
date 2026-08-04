@@ -9,19 +9,36 @@ authorises. The actor ships from the first release because it is the one part
 of an identity design that is expensive to retrofit: every audit row and every
 token consumer would have to be rewritten.
 
-`static_secret` is the only source built. It is the operator secret in the
-`ops_secret` application env, compared in constant time. **There is no default
-credential**: a deployment that has not configured one rejects every ops
-request, so an install that never reads the docs is closed rather than wide
-open.
+Two sources are built, and they are the two transports the same operator
+credential arrives on:
+
+* **`static_secret`** - the operator secret in the `ops_secret` application
+  env, presented as a bearer token and compared in constant time. CI, the CLI
+  and any server-side caller. **There is no default credential**: a deployment
+  that has not configured one rejects every bearer request, so an install that
+  never reads the docs is closed rather than wide open.
+* **`local_user`** - the console's session cookie plus its `x-csrf-token`
+  header (`m:asobi_console_session`). A browser exchanges the secret for a
+  session once and then never holds it again, so an XSS on the console cannot
+  exfiltrate a credential that outlives the page.
+
+A bearer token wins when both are present, because a caller that sent one
+meant to use it and silently answering as somebody else's session would be
+worse than a 403.
 
 A player bearer token is not a credential here. This module never consults
 `asobi_auth_cache`, so no player - and no guest - can reach the plane, which
 is the whole point of taking these routes off the player-scoped check.
 
-`cloud` and `local_user` are reserved in `t:source/0` and not built. Cloud
-mints a short-lived env-scoped token in `asobi_saas` and maps its roles onto
-capability classes there.
+A session stands on its own once minted: it resolves without re-reading
+`ops_secret`, and it is revoked by logging out or by the node restarting.
+That is deliberate - a session has its own expiry and its own revocation, so
+tying it to a value that can change underneath it would end sessions at
+surprising moments without ending the bearer access that matters.
+
+`cloud` is reserved in `t:source/0` and not built. Cloud mints a short-lived
+env-scoped token in `asobi_saas` and maps its roles onto capability classes
+there.
 
 Every rejection is 403 with the same body whatever the cause, so a caller
 cannot tell "no secret configured" from "wrong secret" from "not authorised
@@ -30,9 +47,11 @@ for this class".
 
 -include_lib("kernel/include/logger.hrl").
 
--export([verify/1, resolve/1, display/1]).
+-export([verify/1, resolve/1, display/1, verify_secret/1]).
 
 -define(LABEL_HEADER, ~"x-asobi-operator").
+-define(CSRF_HEADER, ~"x-csrf-token").
+-define(COOKIE, ~"asobi_console").
 -define(LABEL_MAX_BYTES, 64).
 -define(DEFAULT_DISPLAY, ~"operator").
 
@@ -70,23 +89,97 @@ verify(Req) ->
 -doc """
 Resolve a request to an ops actor.
 
-`static_secret` is the only source built, and it fails closed: an unset or
-empty `ops_secret` rejects every request rather than admitting one.
+Bearer first, then the console session cookie. Both fail closed: an unset or
+empty `ops_secret` rejects every bearer request, and a cookie without a
+matching `x-csrf-token` is not a credential.
 """.
 -spec resolve(cowboy_req:req()) -> {ok, actor()} | {error, atom()}.
 resolve(Req) ->
+    case presented(Req) of
+        {ok, Presented} -> bearer(Presented, Req);
+        error -> session(Req)
+    end.
+
+-doc """
+Whether `Presented` is the configured operator secret.
+
+The one entry point the console login uses, so the constant-time comparison
+and the no-default rule are stated in exactly one place. `false` when nothing
+is configured, never `true`.
+""".
+-spec verify_secret(term()) -> boolean().
+verify_secret(Presented) when is_binary(Presented), Presented =/= ~"" ->
     case secret() of
-        {ok, Secret} ->
-            case presented(Req) of
-                {ok, Presented} -> match(Secret, Presented, Req);
-                error -> {error, no_credential}
-            end;
-        error ->
-            ?LOG_WARNING(#{
-                msg => ~"ops request rejected: no ops_secret configured",
-                path => cowboy_req:path(Req)
-            }),
-            {error, not_configured}
+        {ok, Secret} -> equal(Secret, Presented);
+        error -> false
+    end;
+verify_secret(_Presented) ->
+    false.
+
+-spec bearer(binary(), cowboy_req:req()) -> {ok, actor()} | {error, atom()}.
+bearer(Presented, Req) ->
+    case secret() of
+        {ok, Secret} -> match(Secret, Presented, Req);
+        error -> unconfigured(Req)
+    end.
+
+-spec session(cowboy_req:req()) -> {ok, actor()} | {error, atom()}.
+session(Req) ->
+    case cookie(Req) of
+        {ok, Id} -> resolved(asobi_console_session:resolve(Id, csrf_header(Req)));
+        error -> no_credential(Req)
+    end.
+
+%% A request with nothing on it still reports `not_configured` when nothing is
+%% configured, and still logs it. That warning is the only signal an operator
+%% gets that the plane is dark because they never set a secret, and it must
+%% not disappear just because a second credential source exists.
+-spec no_credential(cowboy_req:req()) -> {error, atom()}.
+no_credential(Req) ->
+    case secret() of
+        {ok, _} -> {error, no_credential};
+        error -> unconfigured(Req)
+    end.
+
+-spec unconfigured(cowboy_req:req()) -> {error, not_configured}.
+unconfigured(Req) ->
+    ?LOG_WARNING(#{
+        msg => ~"ops request rejected: no ops_secret configured",
+        path => cowboy_req:path(Req)
+    }),
+    {error, not_configured}.
+
+-spec resolved({ok, asobi_console_session:session()} | {error, atom()}) ->
+    {ok, actor()} | {error, atom()}.
+resolved({ok, Session}) -> {ok, session_actor(Session)};
+resolved({error, Reason}) -> {error, Reason}.
+
+%% The session id is a credential, so it never becomes the actor id: an audit
+%% row and a log line would then carry a live cookie. A truncated hash of it
+%% is enough to correlate rows to one session and useless to replay.
+-spec session_actor(asobi_console_session:session()) -> actor().
+session_actor(#{id := Id, label := Label}) ->
+    Digest = binary:encode_hex(binary:part(crypto:hash(sha256, Id), 0, 8), lowercase),
+    #{
+        id => <<"console:", Digest/binary>>,
+        display => Label,
+        source => local_user,
+        caps => [read, player_data, config],
+        attested => false
+    }.
+
+-spec cookie(cowboy_req:req()) -> {ok, binary()} | error.
+cookie(Req) ->
+    case lists:keyfind(?COOKIE, 1, cowboy_req:parse_cookies(Req)) of
+        {_, Value} when is_binary(Value), Value =/= ~"" -> {ok, Value};
+        _ -> error
+    end.
+
+-spec csrf_header(cowboy_req:req()) -> binary().
+csrf_header(Req) ->
+    case cowboy_req:header(?CSRF_HEADER, Req) of
+        Token when is_binary(Token) -> Token;
+        undefined -> ~""
     end.
 
 -doc """

@@ -228,6 +228,13 @@ exits on the first failure.
 - **Restarts are cheap.** The container takes single-digit seconds to
   boot. In-flight matches are not preserved across restarts (they
   rely on in-memory state); design clients to reconnect.
+- **The operator console.** Set `console` and `ops_secret` and the node
+  serves a browser console at `/console` (see
+  [Configuration](configuration.md#operator-console)). It shares the game
+  port, because Nova starts one listener, so treat `/console` and
+  `/api/v1/ops` as one thing when you decide what the internet can reach.
+  Both are off until configured. Console sessions are in memory and end with
+  the restart above.
 
 ## What this guide does not cover
 

@@ -162,6 +162,12 @@ working and a new one reads one place: see `legacy/2`.
     {~"ops.unknown_sort_order", 400, ~"`order` must be \"asc\" or \"desc\"."},
     {~"ops.query_failed", 500, ~"The ops query failed."},
 
+    %% Operator console. One 404 covers both "this node does not serve the
+    %% console" and "no such asset", so a caller cannot tell a deployment that
+    %% has the console switched off from one that has it on.
+    {~"console.not_found", 404, ~"No console resource exists at this path."},
+    {~"console.not_built", 503, ~"The console bundle is not built into this release."},
+
     %% Cloud saves.
     {~"save.not_found", 404, ~"No cloud save exists in this slot."},
     {~"save.too_large", 413, ~"The save data is larger than the per-slot limit."},

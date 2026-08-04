@@ -27,3 +27,20 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+
+  # Console toolchain. The fleet's first npm ecosystem: the console is the
+  # only JavaScript asobi ships, and a bundle nobody patches is worse than
+  # no bundle. A version bump here needs `npm run build` committed with it,
+  # which the Console workflow enforces.
+  - package-ecosystem: "npm"
+    directory: "/console"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "console"
+    commit-message:
+      prefix: "chore"
+      include: "scope"

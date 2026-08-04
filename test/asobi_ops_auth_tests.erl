@@ -287,3 +287,158 @@ label_is_ignored_without_a_credential() ->
     ?assertMatch({false, 403, _, _}, asobi_ops_auth:verify(labelled(~"wrong", ~"kaito"))),
     Req = req(~"/api/v1/ops/players", #{~"x-asobi-operator" => ~"kaito"}),
     ?assertMatch({false, 403, _, _}, asobi_ops_auth:verify(Req)).
+
+%%--------------------------------------------------------------------
+%% The console session source
+%%
+%% The second transport for the same operator credential: a cookie the page
+%% cannot read plus a header it can. The properties that matter are that the
+%% cookie alone is not enough, that a bearer token still wins, and that the
+%% session id never reaches the actor - an audit row carrying a live cookie
+%% would be worse than no attribution at all.
+%%--------------------------------------------------------------------
+
+session_test_() ->
+    {foreach, fun session_setup/0, fun session_cleanup/1, [
+        fun cookie_and_csrf_admit/0,
+        fun session_actor_has_the_adr_shape/0,
+        fun session_actor_never_carries_the_cookie/0,
+        fun cookie_without_csrf_is_denied/0,
+        fun cookie_with_a_wrong_csrf_is_denied/0,
+        fun an_unknown_cookie_is_denied/0,
+        fun a_deleted_session_is_denied/0,
+        fun a_bearer_token_wins_over_a_cookie/0,
+        fun a_session_still_cannot_reach_an_untagged_route/0
+    ]}.
+
+session_setup() ->
+    Original = setup(),
+    {ok, Pid} = asobi_console_session:start_link(),
+    {Original, Pid}.
+
+session_cleanup({Original, Pid}) ->
+    unlink(Pid),
+    Ref = monitor(process, Pid),
+    exit(Pid, shutdown),
+    receive
+        {'DOWN', Ref, process, Pid, _} -> ok
+    after 5000 -> ok
+    end,
+    cleanup(Original).
+
+session_req(Path, Cookie, Csrf) ->
+    req(Path, #{~"cookie" => <<"asobi_console=", Cookie/binary>>, ~"x-csrf-token" => Csrf}).
+
+open() ->
+    {ok, #{id := Id, csrf := Csrf}} = asobi_console_session:create(~"kaito"),
+    {Id, Csrf}.
+
+cookie_and_csrf_admit() ->
+    {Id, Csrf} = open(),
+    ?assertMatch(
+        {true, #{ops_actor := #{}}},
+        asobi_ops_auth:verify(session_req(~"/api/v1/ops/players", Id, Csrf))
+    ).
+
+session_actor_has_the_adr_shape() ->
+    {Id, Csrf} = open(),
+    {true, #{ops_actor := Actor}} = asobi_ops_auth:verify(
+        session_req(~"/api/v1/ops/players", Id, Csrf)
+    ),
+    ?assertEqual([attested, caps, display, id, source], lists:sort(maps:keys(Actor))),
+    ?assertEqual(local_user, maps:get(source, Actor)),
+    ?assertEqual([read, player_data, config], maps:get(caps, Actor)),
+    ?assertEqual(false, maps:get(attested, Actor)),
+    ?assertEqual(~"kaito", maps:get(display, Actor)).
+
+%% The actor id lands in audit rows and logs. If it were the session id those
+%% rows would each carry a replayable credential.
+session_actor_never_carries_the_cookie() ->
+    {Id, Csrf} = open(),
+    {true, #{ops_actor := #{id := ActorId}}} = asobi_ops_auth:verify(
+        session_req(~"/api/v1/ops/players", Id, Csrf)
+    ),
+    ?assertMatch(<<"console:", _/binary>>, ActorId),
+    ?assertEqual(nomatch, binary:match(ActorId, Id)).
+
+cookie_without_csrf_is_denied() ->
+    {Id, _Csrf} = open(),
+    Req = req(~"/api/v1/ops/players", #{~"cookie" => <<"asobi_console=", Id/binary>>}),
+    ?assertMatch({false, 403, _, _}, asobi_ops_auth:verify(Req)).
+
+cookie_with_a_wrong_csrf_is_denied() ->
+    {Id, _Csrf} = open(),
+    ?assertMatch(
+        {false, 403, _, _},
+        asobi_ops_auth:verify(session_req(~"/api/v1/ops/players", Id, ~"guessed"))
+    ).
+
+an_unknown_cookie_is_denied() ->
+    ?assertMatch(
+        {false, 403, _, _},
+        asobi_ops_auth:verify(session_req(~"/api/v1/ops/players", ~"nope", ~"nope"))
+    ).
+
+a_deleted_session_is_denied() ->
+    {Id, Csrf} = open(),
+    ok = asobi_console_session:delete(Id),
+    ?assertMatch(
+        {false, 403, _, _}, asobi_ops_auth:verify(session_req(~"/api/v1/ops/players", Id, Csrf))
+    ).
+
+%% A caller that sent a bearer token meant to use it. Silently answering as
+%% whatever session the browser happens to hold would be worse than a 403.
+a_bearer_token_wins_over_a_cookie() ->
+    {Id, Csrf} = open(),
+    Both = req(~"/api/v1/ops/players", #{
+        ~"authorization" => <<"Bearer ", ?SECRET/binary>>,
+        ~"cookie" => <<"asobi_console=", Id/binary>>,
+        ~"x-csrf-token" => Csrf
+    }),
+    {true, #{ops_actor := #{source := Source}}} = asobi_ops_auth:verify(Both),
+    ?assertEqual(static_secret, Source),
+    Wrong = req(~"/api/v1/ops/players", #{
+        ~"authorization" => ~"Bearer not-the-secret",
+        ~"cookie" => <<"asobi_console=", Id/binary>>,
+        ~"x-csrf-token" => Csrf
+    }),
+    ?assertMatch({false, 403, _, _}, asobi_ops_auth:verify(Wrong)).
+
+a_session_still_cannot_reach_an_untagged_route() ->
+    {Id, Csrf} = open(),
+    ?assertMatch(
+        {false, 403, _, _}, asobi_ops_auth:verify(session_req(~"/api/v1/ops/economy", Id, Csrf))
+    ).
+
+%%--------------------------------------------------------------------
+%% verify_secret/1, the console login's one check
+%%--------------------------------------------------------------------
+
+verify_secret_test_() ->
+    {foreach, fun setup/0, fun cleanup/1, [
+        fun verify_secret_accepts_the_configured_value/0,
+        fun verify_secret_rejects_everything_else/0
+    ]}.
+
+verify_secret_accepts_the_configured_value() ->
+    ?assert(asobi_ops_auth:verify_secret(?SECRET)).
+
+verify_secret_rejects_everything_else() ->
+    <<Prefix:32/binary, _/binary>> = ?SECRET,
+    [
+        ?assertNot(asobi_ops_auth:verify_secret(Value), Value)
+     || Value <- [~"", Prefix, ~"not-the-secret", undefined, "a-string", 42]
+    ].
+
+verify_secret_is_false_with_nothing_configured_test() ->
+    Original = application:get_env(asobi, ops_secret),
+    application:unset_env(asobi, ops_secret),
+    try
+        ?assertNot(asobi_ops_auth:verify_secret(~"anything")),
+        ?assertNot(asobi_ops_auth:verify_secret(~""))
+    after
+        case Original of
+            {ok, Value} -> application:set_env(asobi, ops_secret, Value);
+            undefined -> application:unset_env(asobi, ops_secret)
+        end
+    end.

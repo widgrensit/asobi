@@ -82,6 +82,7 @@ your release.
 - **Auth** — email/password, Google / Apple / Steam sign-in, and **guest (anonymous) play** with device-based create-or-resume and upgrade-to-account (game-declared, operator-peppered).
 - **Rate limiting** via `seki` (sliding window, per route group), **sessions** cached in ETS, **presence** via `pg`, **chat / social / economy / inventory / storage / tournaments / notifications** as Nova controllers.
 - **Client SDKs** for Godot, Defold, Unity, Unreal, JS/TS, Dart, Flame — [see below](#client-sdks).
+- **Operator console** — a browser UI over the ops read plane: players, matches, matchmaker queue, leaderboards, economy, chat, tournaments, notifications. Served by the node itself at `/console`, off until you turn it on.
 
 ## Benchmarks
 
@@ -121,7 +122,7 @@ UDP relay if you need sub-3ms physics.
 - [**Matchmaking**](guides/matchmaking.md) · [**Voting**](guides/voting.md) · [**World server**](guides/world-server.md) · [**Large worlds**](guides/large-worlds.md)
 - [**Economy**](guides/economy.md) · [**Authentication**](guides/authentication.md) · [**IAP**](guides/iap.md)
 - [**Lua scripting**](guides/lua-scripting.md) · [**Lua bots**](guides/lua-bots.md)
-- [**Configuration**](guides/configuration.md) · [**Clustering**](guides/clustering.md) · [**Performance tuning**](guides/performance-tuning.md)
+- [**Configuration**](guides/configuration.md) · [**Operator console**](console/README.md) · [**Clustering**](guides/clustering.md) · [**Performance tuning**](guides/performance-tuning.md)
 - [**Benchmarks**](guides/benchmarks.md) · [**Comparison vs Nakama / Colyseus / SpacetimeDB**](guides/comparison.md)
 - [**HexDocs**](https://hexdocs.pm/asobi) — full API reference
 

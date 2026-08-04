@@ -379,6 +379,40 @@ proxy, and set `x-asobi-operator` per person for attribution in the audit
 trail - it is a label, never authority. See
 [REST API](rest-api.md#ops-authentication).
 
+## Operator console
+
+A browser console for the ops plane, served by this node at `/console`.
+
+**Off by default.** Nova starts one listener, so the console shares the game
+port; an operator surface on a public port has to be asked for.
+
+```erlang
+{console, true},
+{ops_secret, ~"a-32-byte-or-longer-random-secret"}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `console` | `false` | Serve the console at `/console`. Anything but `true` is off, and every console route answers 404 |
+| `console_session_ttl` | `43200` | Session lifetime in seconds, clamped to 60-86400. Absolute: it is not extended by use |
+| `console_secure_cookie` | `false` | Force `Secure` on the session cookies. Set it behind a TLS terminator that does not send `x-forwarded-proto` |
+| `console_api_base` | none | Absolute `https://host[:port]` origin the console should call instead of this one. Also widens `connect-src`. Anything that is not a bare origin is ignored |
+
+The console does not hold `ops_secret`. It posts it once to
+`/console/session`, gets back an `HttpOnly` cookie plus a derived CSRF token,
+and sends the cookie and the `x-csrf-token` header on every later request. A
+cookie without the header is refused, which is what stops a cross-site request
+reaching the plane.
+
+Sessions live in memory: restarting the node signs everyone out.
+
+Enabling the console does not change the bearer transport, and disabling it
+does not close the ops plane - CI and the CLI keep working either way.
+
+Serving it over plain HTTP is only reasonable on a loopback or a private
+network. `Secure` is set automatically when the request is HTTPS or arrives
+with `x-forwarded-proto: https`.
+
 ## Vote Templates
 
 Define reusable vote configurations:
