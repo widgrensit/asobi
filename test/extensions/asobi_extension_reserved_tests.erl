@@ -25,6 +25,18 @@ tables_come_from_core_schemas_test() ->
     ?assert(lists:member(asobi_wallet:table(), Reserved)),
     ?assertNot(lists:member(~"quests", Reserved)).
 
+%% `seasons` left core for asobi_seasons, but its CREATE TABLE stayed in
+%% m20260412172429 - it shares that file with zone_snapshots and the migration
+%% has run against live databases. Re-adding a core schema for it would reserve
+%% the name and make the extension's owns/0 claim invalid at boot.
+seasons_is_no_longer_reserved_test() ->
+    #{tables := Reserved} = asobi_extension_reserved:namespaces(),
+    ?assertNot(lists:member(~"seasons", Reserved)),
+    _ = application:load(asobi),
+    {ok, Modules} = application:get_key(asobi, modules),
+    ?assertNot(lists:member(asobi_season, Modules)),
+    ?assertNot(lists:member(asobi_season_manager, Modules)).
+
 queues_come_from_core_shigoto_workers_test() ->
     #{queues := Reserved} = asobi_extension_reserved:namespaces(),
     ?assertEqual([asobi_broadcast_worker:queue()], Reserved).

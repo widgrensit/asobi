@@ -4,6 +4,11 @@
 -include_lib("kura/include/kura.hrl").
 -export([up/0, down/0]).
 
+%% `seasons` belongs to the asobi_seasons extension, which declares it in
+%% `owns/0`. Its history stays here because it shares this file with
+%% `zone_snapshots`, and this migration has run against live databases: moving
+%% it would mean rewriting applied history. Core has no `seasons` schema, so
+%% `rebar3 kura compile` will offer to drop the table - decline.
 -spec up() -> [kura_migration:operation()].
 up() ->
     [

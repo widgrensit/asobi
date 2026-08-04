@@ -1,17 +1,15 @@
-# Phases and seasons
-
-Two clocks, different scopes.
+# Phases
 
 A **phase** is a stage in one session's lifecycle - lobby, then play, then
 results - inside a single match or world. It starts and ends with that
 session and is authored in the game script.
 
-A **season** is a wall-clock window across the whole deployment - a
-fortnight of ranked play, a themed event - shared by every session. It
-lives in the database and is read by game logic.
+The other clock, a **season**, is a wall-clock window across the whole
+deployment - a fortnight of ranked play, a themed event. Seasons are not part
+of core: they ship as the [`asobi_seasons`][seasons] extension. The two do not
+interact.
 
-They do not interact. This guide covers both because a reader who sees
-`phase` on a `world.list` response, or hears "season", lands here.
+[seasons]: https://github.com/widgrensit/asobi_seasons
 
 ## Phases
 
@@ -154,67 +152,14 @@ logic and `game.broadcast`, or move that game to Erlang.
 
 ## Seasons
 
-A season is a named, dated window stored in the `seasons` table. A
-background manager checks the clock once a minute and moves each season
-`upcoming -> active -> ended` as its `starts_at` and `ends_at` pass. Exactly
-the parts of a game you want gated on "the current event" - a ranked ladder,
-a reward set - key off the active season.
+Seasons live in [`asobi_seasons`][seasons], an extension. asobi still creates
+the `seasons` table - the extraction moved the code, not the migration history
+- but the schema, the query API and the background manager that flips
+`upcoming -> active -> ended` are all in that package now.
 
-Seasons are a server-side primitive today. There is no Lua binding, no
-WebSocket event and no REST endpoint. You seed a season row into the
-database and read it from Erlang game logic.
+Add it to your release and read [its guide][seasons-guide].
 
-### Seed a season
-
-A season is one row. `starts_at` and `ends_at` are millisecond epochs.
-
-```erlang
-Now = erlang:system_time(millisecond),
-CS = kura_changeset:cast(asobi_season, #{}, #{
-    name      => ~"Spring Ladder",
-    starts_at => Now,
-    ends_at   => Now + 14 * 24 * 60 * 60 * 1000,
-    status    => ~"active",
-    config    => #{theme => ~"spring"},
-    rewards   => #{top10 => ~"gold_frame"}
-}, [name, starts_at, ends_at, status, config, rewards]),
-{ok, _} = asobi_repo:insert(CS).
-```
-
-Where that row goes differs by deployment:
-
-**Cloud.** The per-project database is provisioned for you and the `seasons`
-table already exists. Open a console against your project
-(`console.asobi.dev`) and insert the row - or run the snippet above from a
-release remote shell attached to your project's node.
-
-**Self-hosted.** Point `ASOBI_*` at your own Postgres, apply migrations so
-the `seasons` table exists (`rebar3 kura migrate`), then insert the row from
-your release's remote shell. See [Configuration](configuration.md) for the
-`ASOBI_*` database variables.
-
-Once the row exists the season manager runs the same on both: it flips
-`status` by wall clock with no further action from you.
-
-### Read the active season from game logic
-
-```erlang
-case asobi_season:current() of
-    {ok, #{name := Name, rewards := Rewards}} ->
-        %% gate ranked play, pick the reward table, etc.
-        {ranked, Name, Rewards};
-    {error, no_active_season} ->
-        casual
-end.
-```
-
-Other queries: `asobi_season:config(Key)` pulls one key from the active
-season's `config`; `upcoming/0` and `history/0` list scheduled and past
-seasons; `time_remaining/0` returns milliseconds left in the active season
-(or `infinity` if none is active).
-
-To surface the season to players, read it in your game module and put it in
-the state you already send - there is no season frame to subscribe to.
+[seasons-guide]: https://github.com/widgrensit/asobi_seasons/blob/main/guides/seasons.md
 
 ## Checkpoint
 
@@ -227,15 +172,6 @@ Phases, with a Lua world game running locally:
    after five seconds another with `"phase": "active"`.
 3. Call `world.list`; the entry carries a `phase` block with the live
    `phase` and `remaining_ms`.
-
-Seasons:
-
-1. Insert a season row with `status = "active"` and an `ends_at` a minute
-   out (cloud console, or self-hosted remote shell as above).
-2. From a remote shell, `asobi_season:current()` returns `{ok, Season}` and
-   `asobi_season:time_remaining()` counts down.
-3. Wait past `ends_at`; within a minute the manager logs `season_ended` and
-   `current()` returns `{error, no_active_season}`.
 
 If the phase frames never arrive, confirm the game is a **world** (matches
 run phases but do not push them) and that `phases()` returns a list. A

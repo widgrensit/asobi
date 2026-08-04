@@ -78,7 +78,7 @@ your release.
 - **`asobi_matchmaker`** — pluggable strategies (`fill`, `skill_based`); your own via the `asobi_matchmaker_strategy` behaviour.
 - **`asobi_world_server`** — persistent worlds with lazy zones, spatial grid indexing, terrain chunk serving, adaptive tick rates.
 - **`asobi_vote_server`** — plurality, ranked choice, approval, weighted. Fixed / ready-up / hybrid / adaptive windows. Spectator voting, veto tokens, majority-tyranny mitigations.
-- **`asobi_phase`, `asobi_season_manager`, `asobi_timer`** — phase engine, season lifecycles, five timer primitives.
+- **`asobi_phase`, `asobi_timer`** — phase engine, five timer primitives. Seasons moved out to [`asobi_seasons`](https://github.com/widgrensit/asobi_seasons), an extension.
 - **Auth** — email/password, Google / Apple / Steam sign-in, and **guest (anonymous) play** with device-based create-or-resume and upgrade-to-account (game-declared, operator-peppered).
 - **Rate limiting** via `seki` (sliding window, per route group), **sessions** cached in ETS, **presence** via `pg`, **chat / social / economy / inventory / storage / tournaments / notifications** as Nova controllers.
 - **Client SDKs** for Godot, Defold, Unity, Unreal, JS/TS, Dart, Flame — [see below](#client-sdks).

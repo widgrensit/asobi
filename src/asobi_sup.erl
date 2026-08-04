@@ -33,7 +33,6 @@ init([]) ->
         chat_sup(),
         tournament_sup(),
         presence_spec(),
-        season_manager_spec(),
         guest_reaper_spec(),
         console_session_spec(),
         lua_game_config_spec(),
@@ -326,10 +325,4 @@ auth_cache_spec() ->
     #{
         id => asobi_auth_cache,
         start => {asobi_auth_cache, start_link, []}
-    }.
-
-season_manager_spec() ->
-    #{
-        id => asobi_season_manager,
-        start => {asobi_season_manager, start_link, []}
     }.

@@ -201,8 +201,8 @@ credits typically fits on a €15/month Hetzner CX32 box with asobi.
 - Open-source — read the code, fork it, own it
 - Linux servers are first-class
 - One unified matchmaker, not three competing services
-- Friends / groups / chat / votes / tournaments / seasons / phases as
-  first-class primitives, not bolt-ons
+- Friends / groups / chat / votes / tournaments / phases as first-class
+  primitives, not bolt-ons; seasons and quests as extensions
 - Built-in voting system (plurality, ranked, approval, weighted)
 - Godot and Defold SDKs at engine-parity with Unity
 

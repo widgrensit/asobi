@@ -104,8 +104,9 @@ that to be you again.
   up — no rebuild, no redeploy, no kicked players.
 - **One container, one Postgres.** No CockroachDB. No Redis. No Kubernetes.
 - **Matchmaking, lobbies, rooms, leaderboards, economy, chat, friends,
-  tournaments, voting, phases, seasons, reconnection** are all already there
-  — see the [feature list](../README.md#features).
+  tournaments, voting, phases, reconnection** are all already there
+  — see the [feature list](../README.md#features). Seasons ship as an
+  extension.
 - **Godot and Defold SDKs are first-class**, alongside Unity/Unreal/JS/Flutter.
 - **EU-hosted, GDPR-ready, NIS2-aware** if that matters to you.
 

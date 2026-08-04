@@ -104,7 +104,7 @@ asobi_sup (one_for_one)
 ├── asobi_chat_sup
 ├── asobi_tournament_sup
 ├── asobi_presence            (pg-backed)
-└── asobi_season_manager
+└── asobi_extension_sup       (one sub-supervisor per installed extension)
 ```
 
 - **REST** is Nova controllers under `src/controllers/`

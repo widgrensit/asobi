@@ -223,6 +223,21 @@ Your migrations run from your own application: kura discovers them through
 advisory lock. Declare `on_delete = cascade` on the `#kura_assoc` into
 `players.id` and the generated migration carries it.
 
+### A table extracted out of core
+
+`owns/0` and the migration that creates a table are separable, and one case
+needs them separate: a table that used to be core's.
+
+`asobi_seasons` owns `seasons`, but the `CREATE TABLE` sits in an asobi
+migration that has already run against live databases - and shares a file with
+a table core kept. So the extension ships a schema and no migration, and asobi
+keeps the history it cannot honestly disown. Ownership is the manifest's job;
+history is append-only.
+
+This is the shape of every future extraction, not a special case for seasons.
+It only applies to a table core once created: a table an extension invents is
+created by the extension's own migration, like `quests`.
+
 ## Counters
 
 `update_all/2` SETs literals and kura's `on_conflict` overwrites, so neither
