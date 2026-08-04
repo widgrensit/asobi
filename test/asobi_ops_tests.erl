@@ -294,15 +294,37 @@ ops_routes_are_mounted_behind_the_operator_check_test() ->
     #{security := Security, routes := Routes} = ops_group(),
     ?assertEqual(fun asobi_ops_auth:verify/1, Security),
     ?assert(Routes =/= []),
-    [?assertEqual([get, options], maps:get(methods, Opts)) || {_Path, _Handler, Opts} <- Routes].
+    [
+        ?assertEqual([get, options], maps:get(methods, Opts))
+     || {Path, _Handler, Opts} <- Routes, not extension_route(Path)
+    ].
 
-%% Read-only means read-only: the plane must not grow a write route by
-%% accident, and `asobi_ops_notifications:broadcast/5` is deliberately not one.
-ops_plane_serves_no_write_method_test() ->
+%% Core's own plane is read-only and must not grow a write route by accident,
+%% and `asobi_ops_notifications:broadcast/5` is deliberately not one. The
+%% extension dispatch route is the single exception, and it is not an exception
+%% to the audit: every method on it but `get` runs inside
+%% `asobi_ops_audit:mutation/4`.
+core_ops_routes_serve_no_write_method_test() ->
     #{routes := Routes} = ops_group(),
-    Methods = lists:usort([M || {_Path, _Handler, Opts} <- Routes, M <- maps:get(methods, Opts)]),
+    Methods = lists:usort([
+        M
+     || {Path, _Handler, Opts} <- Routes,
+        not extension_route(Path),
+        M <- maps:get(methods, Opts)
+    ]),
     ?assertEqual([get, options], Methods),
     ?assertEqual([], [Class || {_M, _S, Class} <- asobi_ops_caps:classes(), Class =/= read]).
+
+%% The exception, stated once so it cannot widen quietly: exactly one route
+%% carries a write method, and it is the extension dispatch.
+exactly_one_ops_route_carries_a_write_method_test() ->
+    #{routes := Routes} = ops_group(),
+    Writing = [
+        Path
+     || {Path, _Handler, Opts} <- Routes,
+        [] =/= [M || M <- maps:get(methods, Opts), M =/= get, M =/= options]
+    ],
+    ?assertEqual([~"/ext/:extension/:action"], Writing).
 
 ops_group() ->
     [Group] = [G || #{prefix := ~"/api/v1/ops"} = G <- asobi_router:routes(dev)],
@@ -313,6 +335,9 @@ no_ops_route_sits_in_the_player_scoped_group_test() ->
         ?assertEqual([], [Path || {Path, _Handler, _Opts} <- Routes, ops_path(Path)])
      || #{prefix := Prefix, routes := Routes} <- asobi_router:routes(dev), Prefix =/= ~"/api/v1/ops"
     ].
+
+extension_route(~"/ext/:extension/:action") -> true;
+extension_route(_Path) -> false.
 
 ops_path(<<"/ops", _/binary>>) -> true;
 ops_path(_Path) -> false.
@@ -325,11 +350,27 @@ ops_routes_and_capability_classes_agree_test() ->
         {Method, [binding_or_literal(S) || S <- binary:split(Path, ~"/", [global, trim_all])]}
      || #{prefix := ~"/api/v1/ops", routes := Routes} <- asobi_router:routes(dev),
         {Path, _Handler, Opts} <- Routes,
+        not extension_route(Path),
         Method <- maps:get(methods, Opts),
         Method =/= options
     ]),
     Tagged = lists:sort([{Method, Segments} || {Method, Segments, _} <- asobi_ops_caps:classes()]),
     ?assertEqual(Tagged, Routed).
+
+%% The extension dispatch is the one route with no entry in `classes/0`,
+%% because its class is per action and lives in the manifest that also declares
+%% the handler. Excluded above, so it is checked here instead: an action nobody
+%% declared has no class, which is what denies it.
+extension_route_is_classed_by_the_manifest_test() ->
+    asobi_extensions:reset(),
+    ?assertEqual(
+        undefined,
+        asobi_ops_caps:class(~"POST", ~"/api/v1/ops/ext/quests/define")
+    ),
+    ?assertEqual(
+        undefined,
+        asobi_ops_caps:class(~"GET", ~"/api/v1/ops/ext/nothing/at-all")
+    ).
 
 %% The router spells a bound segment `:id`; the class table spells it `'_'`,
 %% because it matches against a real request path where the binding is already

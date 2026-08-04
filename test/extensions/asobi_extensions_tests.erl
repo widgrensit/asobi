@@ -40,6 +40,10 @@ extensions_test_() ->
         fun lua_args_must_match_the_mfa_arity/0,
         fun an_rpc_handler_must_have_arity_two/0,
         fun a_bot_binding_is_refused_not_ignored/0,
+        fun an_ops_handler_must_have_arity_two/0,
+        fun an_ops_action_must_carry_a_real_class/0,
+        fun an_ops_action_must_be_one_path_segment/0,
+        fun a_declared_ops_action_is_reachable_by_its_class/0,
         fun a_declared_code_carries_its_status_and_message/0,
         fun an_undeclared_code_is_still_a_server_bug/0,
         fun core_codes_stay_core_only/0,
@@ -344,6 +348,61 @@ a_bot_binding_is_refused_not_ignored() ->
 
 binding(Vms) ->
     #{mfa => {tunable_lua, status, 1}, args => [binary], effects => none, vms => Vms}.
+
+%% asobi#372. `ops/0` is dispatched by core as `Module:Function(Params, Ctx)`,
+%% exactly as `rpc/0` is, so the same arity rule holds for the same reason.
+an_ops_handler_must_have_arity_two() ->
+    tunable(#{ops => #{~"thing" => ops_entry(#{mfa => {tunable_ops, thing, 1}})}}),
+    ?assertMatch(
+        [{bad_manifest, ?TUNABLE, _, {ops, _, ~"thing"}}],
+        check_problems()
+    ),
+    retune(#{ops => #{~"thing" => ops_entry(#{})}}),
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
+
+%% The class is the only thing that authorises the call, so a class outside
+%% ADR 0007's vocabulary is a build failure rather than a route that resolves
+%% to a capability nobody can hold.
+an_ops_action_must_carry_a_real_class() ->
+    tunable(#{ops => #{~"thing" => ops_entry(#{class => superuser})}}),
+    ?assertMatch(
+        [{bad_manifest, ?TUNABLE, _, {ops, _, ~"thing"}}],
+        check_problems()
+    ).
+
+%% The action is one path segment under /api/v1/ops/ext/<name>/, so a slash
+%% would silently mount somewhere the capability check cannot tag.
+an_ops_action_must_be_one_path_segment() ->
+    tunable(#{ops => #{~"quests/define" => ops_entry(#{})}}),
+    ?assertMatch(
+        [{bad_manifest, ?TUNABLE, _, {ops, _, ~"quests/define"}}],
+        check_problems()
+    ).
+
+%% The end of the chain: a declared action resolves to its declared class on
+%% the path the router serves, and the same path with a method it does not
+%% answer resolves to nothing - which is what denies it.
+a_declared_ops_action_is_reachable_by_its_class() ->
+    tunable(#{ops => #{~"thing" => ops_entry(#{class => player_data})}}),
+    _ = asobi_extensions:resolve(),
+    ?assertEqual(
+        player_data,
+        asobi_ops_caps:class(~"POST", ~"/api/v1/ops/ext/tunable/thing")
+    ),
+    ?assertEqual(
+        undefined,
+        asobi_ops_caps:class(~"GET", ~"/api/v1/ops/ext/tunable/thing")
+    ),
+    ?assertEqual(
+        undefined,
+        asobi_ops_caps:class(~"POST", ~"/api/v1/ops/ext/tunable/other")
+    ).
+
+ops_entry(Overrides) ->
+    maps:merge(
+        #{method => post, mfa => {tunable_ops, thing, 2}, class => config},
+        Overrides
+    ).
 
 %% --- Error codes ---
 

@@ -207,6 +207,12 @@ code_violations(asobi_error, _Nodes) ->
 %% `asobi_rpc_tests:an_undeclared_code_does_not_reach_the_client/0`.
 code_violations(asobi_rpc, _Nodes) ->
     [];
+%% And the third, for the same reason on the ops plane: `asobi_ops_extension`
+%% maps an extension handler's *returned* code onto an object, gates it on the
+%% same `asobi_error:defined/1`, and answers `internal` for anything else.
+%% Pinned by `asobi_ops_extension_tests:an_undeclared_code_is_a_defect/0`.
+code_violations(asobi_ops_extension, _Nodes) ->
+    [];
 code_violations(_Module, Nodes) ->
     Codes = asobi_error:codes(),
     [V || Node <- Nodes, {violation, V} <- [code_violation(Node, Codes)]].

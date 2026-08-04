@@ -254,6 +254,15 @@ ops_routes() ->
             }},
             {~"/notifications", fun asobi_ops_controller:notifications/1, #{
                 methods => [get, options]
+            }},
+            %% The one route core owns on behalf of extensions. Extensions
+            %% contribute no routes (ADR 0003); this dispatches every action an
+            %% installed manifest declares, exactly as one WebSocket frame type
+            %% dispatches `rpc/0`. Its class is per action and comes from that
+            %% manifest, so it is deliberately absent from
+            %% `asobi_ops_caps:classes/0` - see `m:asobi_ops_extension`.
+            {~"/ext/:extension/:action", fun asobi_ops_extension:handle/1, #{
+                methods => [get, post, put, delete, options]
             }}
         ]
     }.

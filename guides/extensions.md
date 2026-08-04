@@ -53,16 +53,19 @@ Two consumption paths, and an extension wants both.
 |---|---|---|
 | Game logic, in-match, server-side | `game.quests.progress(player_id, 1)` | "player killed something, +1" |
 | Game client, over the network | `asobi.rpc("quests.claim", ...)` | "give me my reward" |
+| An operator, on the ops plane | `POST /api/v1/ops/ext/quests/define` | "add a daily quest" |
 
 An extension with only the wire cannot observe gameplay; one with only Lua
-cannot be triggered by a player action from the client.
+cannot be triggered by a player action from the client. The third is a
+different audience, not a third way to reach the same one: `rpc/0` is
+player-scoped, and no player ever holds an operator capability.
 
 ## What you declare
 
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
 
@@ -90,6 +93,10 @@ owns() -> #{tables => [~"quests", ~"quest_progress"],
 codes() -> #{~"quests.already_claimed" =>
                #{status => 409, message => ~"This quest was already claimed."}}.
 
+ops()  -> #{~"define" => #{method => post,
+                           mfa    => {asobi_quests_ops, define, 2},
+                           class  => config}}.
+
 erase_player(PlayerId) ->
     {ok, _} = asobi_repo:delete_all(by_player(asobi_quest_progress, PlayerId)),
     ok.
@@ -110,6 +117,8 @@ Only `info/0` is required. The rest default to nothing.
   derivation rather than its source.
 - `codes/0` - the error codes this extension mints. Core's set is closed, so
   an undeclared code answers 500 and logs as a core defect.
+- `ops/0` - operator actions, reached on the ops plane rather than by a player.
+  See [Writing an operator action](#writing-an-operator-action).
 - `erase_player/1` - how to erase one player, when your rows do not cascade.
 - `info/0` - the contract version, distinct from the package version, because a
   minor release can change an experimental contract.
@@ -172,8 +181,8 @@ player on that socket; an unauthenticated socket is refused before the method
 is looked up. There is deliberately no per-method capability class:
 `read | player_data | config` (ADR 0007) is an operator vocabulary that a
 player never holds, so tagging a socket method with one would make it deniable
-for every caller the dispatcher has. An operator-only extension method needs
-the ops plane, which is read-only today.
+for every caller the dispatcher has. An operator-only method goes in `ops/0`
+instead - see [Writing an operator action](#writing-an-operator-action).
 
 ### Readiness
 
@@ -182,6 +191,63 @@ The route table compiles during Nova's boot; migrations run afterwards, from
 tables exist, so the dispatcher fails closed until migrations finish: every
 call answers `not_ready` (503) until then. You get this for free - there is
 nothing to call.
+
+## Writing an operator action
+
+`rpc/0` is player-scoped by construction, so an admin action - defining a
+quest, correcting a counter, anything a player must never call - has no home
+there. `ops/0` is that home, and it is reached on the ops plane by an operator
+credential:
+
+```erlang
+-spec ops() -> asobi_extension:ops().
+ops() ->
+    #{~"define" => #{method => post,
+                     mfa    => {asobi_quests_ops, define, 2},
+                     class  => config},
+      ~"summary" => #{method => get,
+                      mfa    => {asobi_quests_ops, summary, 2},
+                      class  => read}}.
+```
+
+```
+POST /api/v1/ops/ext/quests/define
+GET  /api/v1/ops/ext/quests/summary?filter=active
+```
+
+You still declare no routes. Core owns exactly one - `/ext/:extension/:action`
+- and dispatches every declared action behind it, the same way it owns one
+WebSocket frame type and dispatches `rpc/0` behind that (ADR 0003).
+
+A handler has the same shape as an RPC handler, because there is no reason for
+a second one:
+
+```erlang
+-spec define(map(), asobi_ops_extension:ctx()) -> asobi_rpc:reply().
+define(#{~"key" := Key}, #{actor := #{id := ActorId}}) ->
+    case asobi_quests:define(Key, ActorId) of
+        {ok, Quest}          -> {ok, #{quest => Quest}};
+        {error, name_taken}  -> {error, ~"quests.name_taken"}
+    end.
+```
+
+`Params` is the decoded JSON body for a write and the parsed query string for
+a `get`. `Ctx` carries the actor that was admitted, so recording who asked
+needs no second lookup.
+
+Three things are core's, not yours:
+
+- **`class` is the whole authorisation.** `read | player_data | config` is
+  ADR 0007's vocabulary, the same one core's own ops routes carry. An action
+  is admitted when its class is in the caller's capabilities and never
+  otherwise. There is nothing to check inside your handler.
+- **An undeclared action is denied, not 404.** It has no class, and a route
+  with no class is refused - so an unknown extension, an unknown action and a
+  method the action does not answer all answer 403. Which extensions are
+  installed is not something an unauthorised caller gets to enumerate.
+- **Every method but `get` is audited.** Core wraps the call in a durable
+  audit row naming the operator before your function runs. You cannot opt out,
+  and declaring a method other than `get` is what opts in.
 
 ## Writing a Lua binding
 

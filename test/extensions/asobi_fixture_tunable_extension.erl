@@ -5,7 +5,7 @@ and colliding shape instead of a file per case.
 """.
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0]).
 -export([set/1, clear/0]).
 
 -define(KEY, {?MODULE, manifest}).
@@ -26,6 +26,10 @@ info() ->
 -spec rpc() -> asobi_extension:rpc().
 rpc() ->
     value(rpc, #{}).
+
+-spec ops() -> asobi_extension:ops().
+ops() ->
+    value(ops, #{}).
 
 -spec lua() -> asobi_extension:lua().
 lua() ->

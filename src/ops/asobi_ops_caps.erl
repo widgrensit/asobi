@@ -17,7 +17,7 @@ A route with no entry in `classes/0` has no class and `authorised/2` denies
 it, so an untagged or mis-mounted route is closed rather than open.
 """.
 
--export([classes/0, class/2, authorised/2]).
+-export([classes/0, class/2, authorised/2, class_names/0]).
 
 -type class() :: read | player_data | config.
 -type segment() :: binary() | '_'.
@@ -73,9 +73,23 @@ class(Method, Path) ->
 authorised(undefined, _Caps) -> false;
 authorised(Class, Caps) -> lists:member(Class, Caps).
 
+-doc "Every class, for validating one declared in an extension manifest.".
+-spec class_names() -> [class()].
+class_names() ->
+    [read, player_data, config].
+
 -spec lookup(atom(), [binary()]) -> class() | undefined.
 lookup(undefined, _Segments) ->
     undefined;
+%% The one route core owns on behalf of extensions. Its class is not in
+%% classes/0 because it is per action, declared in the manifest that also
+%% declares the handler - so an action reaches its own class or nothing, and
+%% "untagged denies" holds unchanged for a method or extension nobody declared.
+lookup(Method, [~"ext", Extension, Action]) ->
+    case asobi_extensions:ops_action(Extension, Action) of
+        #{method := Method, class := Class} -> Class;
+        _ -> undefined
+    end;
 lookup(Method, Segments) ->
     case [Class || {M, S, Class} <- classes(), M =:= Method, matches(S, Segments)] of
         [Class] -> Class;

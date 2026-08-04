@@ -128,7 +128,10 @@ second consumer has said what it is missing.
     owns/0,
     token/0,
     code_spec/0,
-    codes/0
+    codes/0,
+    ops/0,
+    ops_action/0,
+    ops_entry/0
 ]).
 
 -doc "The extension's short name, and the root of everything it owns.".
@@ -265,11 +268,63 @@ operator-facing erasure calls the same function.
 """.
 -callback erase_player(PlayerId :: binary()) -> ok | {error, term()}.
 
+-doc "One operator action, the last segment of `/api/v1/ops/ext/<name>/<action>`.".
+-type ops_action() :: binary().
+
+-doc """
+One operator action: the method it answers, the target, and its capability
+class.
+
+`class` is `read | player_data | config` (ADR 0007), the same vocabulary core's
+own ops routes carry, and it is the only thing that authorises the call. An
+action with no class is not reachable, because `asobi_ops_caps` denies a route
+it cannot tag.
+
+`mfa` is applied as `Module:Function(Params, Ctx)` - the same shape as `rpc/0`,
+for the same reason - where `Params` is the decoded JSON body for a write and
+the query string for a read, and `Ctx` carries the `t:asobi_ops_auth:actor/0`
+that was admitted.
+
+Anything but `get` is audited: core wraps it in `asobi_ops_audit:mutation/4`
+before it runs, so an extension cannot write on the ops plane without a durable
+row naming the operator who asked. That is not something an extension can opt
+out of, which is why the method is declared here rather than inferred.
+""".
+-type ops_entry() :: #{
+    method := get | post | put | delete,
+    mfa := mfa(),
+    class := asobi_ops_caps:class()
+}.
+
+-doc """
+The operator actions this extension serves, as `Action => t:ops_entry/0`.
+
+`rpc/0` is player-scoped by construction: the caller is the authenticated
+player on that socket, and `read | player_data | config` is an operator
+vocabulary no player ever holds. So an extension with an admin surface - the
+first one hit it immediately with `quests.define` - had nowhere to put it.
+This is that home.
+
+Extensions still contribute **no routes** (ADR 0003). Core owns one route,
+`/api/v1/ops/ext/:extension/:action`, and dispatches it here exactly as it owns
+one WebSocket frame type and dispatches `rpc/0` behind it. An action is
+therefore reachable at:
+
+```
+POST /api/v1/ops/ext/quests/define
+```
+
+Actions cannot collide across extensions: they are keyed by the extension's
+own name, and two extensions cannot share a name.
+""".
+-type ops() :: #{ops_action() => ops_entry()}.
+
 -callback info() -> info().
 -callback rpc() -> rpc().
 -callback lua() -> lua().
 -callback sup() -> [supervisor:child_spec()].
 -callback owns() -> owns().
 -callback codes() -> codes().
+-callback ops() -> ops().
 
--optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1]).
+-optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1]).

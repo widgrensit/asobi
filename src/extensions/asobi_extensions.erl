@@ -44,7 +44,7 @@ surfaces with Nova's crash context rather than a legible asobi error.
 -include_lib("kernel/include/logger.hrl").
 
 -export([resolve/0, check/0, validate/1, describe/1, sup_specs/1, error_codes/0]).
--export([rpc_methods/0, lua_bindings/0]).
+-export([rpc_methods/0, lua_bindings/0, ops_action/2]).
 -ifdef(TEST).
 -export([reset/0]).
 -endif.
@@ -53,6 +53,7 @@ surfaces with Nova's crash context rather than a legible asobi error.
 -define(CODES_KEY, {?MODULE, error_codes}).
 -define(RPC_KEY, {?MODULE, rpc_methods}).
 -define(LUA_KEY, {?MODULE, lua_bindings}).
+-define(OPS_KEY, {?MODULE, ops_actions}).
 
 -doc "One resolved extension. `sup/0` is deliberately absent; see `sup_specs/1`.".
 -type extension() :: #{
@@ -61,6 +62,7 @@ surfaces with Nova's crash context rather than a legible asobi error.
     name := asobi_extension:name(),
     extension_version := pos_integer(),
     rpc := asobi_extension:rpc(),
+    ops := asobi_extension:ops(),
     lua := asobi_extension:lua(),
     owns := asobi_extension:owns(),
     codes := asobi_extension:codes()
@@ -100,6 +102,7 @@ resolve() ->
             persistent_term:put(?CODES_KEY, error_code_table(Extensions)),
             persistent_term:put(?RPC_KEY, rpc_table(Extensions)),
             persistent_term:put(?LUA_KEY, lua_table(Extensions)),
+            persistent_term:put(?OPS_KEY, ops_table(Extensions)),
             persistent_term:put(?KEY, Extensions),
             Extensions;
         Extensions ->
@@ -145,6 +148,19 @@ one pass over bindings, not a walk over namespaces.
 lua_bindings() ->
     persistent_term:get(?LUA_KEY, []).
 
+-doc """
+The operator action `Extension` declares as `Action`, or `undefined`.
+
+Read on two request paths - the capability check in `m:asobi_ops_caps` and the
+dispatch in `m:asobi_ops_extension` - so like `rpc_methods/0` it reads the
+memoised table and never triggers discovery. `undefined` for an extension that
+is not installed and for an action it does not declare, which is one answer
+because they are one outcome: nothing to route to, and nothing to authorise.
+""".
+-spec ops_action(binary(), binary()) -> asobi_extension:ops_entry() | undefined.
+ops_action(Extension, Action) ->
+    maps:get({Extension, Action}, persistent_term:get(?OPS_KEY, #{}), undefined).
+
 %% The codes term is written before the resolved term, so a concurrent second
 %% caller that sees ?KEY populated also sees the codes it implies.
 error_code_table(Extensions) ->
@@ -156,6 +172,12 @@ error_code_table(Extensions) ->
 
 rpc_table(Extensions) ->
     maps:from_list([{Method, Target} || #{rpc := Rpc} <- Extensions, Method := Target <- Rpc]).
+
+ops_table(Extensions) ->
+    maps:from_list([
+        {{atom_to_binary(Name, utf8), Action}, Entry}
+     || #{name := Name, ops := Ops} <- Extensions, Action := Entry <- Ops
+    ]).
 
 lua_table(Extensions) ->
     [
@@ -217,6 +239,7 @@ sup_specs(Module) ->
 -spec reset() -> ok.
 reset() ->
     _ = persistent_term:erase(?KEY),
+    _ = persistent_term:erase(?OPS_KEY),
     _ = persistent_term:erase(?CODES_KEY),
     _ = persistent_term:erase(?RPC_KEY),
     _ = persistent_term:erase(?LUA_KEY),
@@ -313,6 +336,7 @@ read_manifest(App, Module) ->
         {lua, call(Module, lua, #{})},
         {owns, call(Module, owns, #{})},
         {codes, call(Module, codes, #{})},
+        {ops, call(Module, ops, #{})},
         {sup, call(Module, sup, [])}
     ],
     case [{Key, Detail} || {Key, {error, Detail}} <- Reads] of
@@ -336,8 +360,16 @@ call(Module, Function, Default) ->
     end.
 
 build(App, Module, Values) ->
-    #{info := Info, rpc := Rpc, lua := Lua, owns := Owns, codes := Codes, sup := Sup} = Values,
-    case shape_problems(Info, Rpc, Lua, Owns, Codes, Sup) of
+    #{
+        info := Info,
+        rpc := Rpc,
+        lua := Lua,
+        owns := Owns,
+        codes := Codes,
+        ops := Ops,
+        sup := Sup
+    } = Values,
+    case shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Sup) of
         [] ->
             #{name := Name, extension_version := Version} = Info,
             {ok, #{
@@ -348,18 +380,20 @@ build(App, Module, Values) ->
                 rpc => Rpc,
                 lua => Lua,
                 owns => Owns,
-                codes => Codes
+                codes => Codes,
+                ops => Ops
             }};
         Details ->
             {error, [{bad_manifest, App, Module, Detail} || Detail <- Details]}
     end.
 
-shape_problems(Info, Rpc, Lua, Owns, Codes, Sup) ->
+shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Sup) ->
     info_problems(Info) ++
         rpc_problems(Rpc) ++
         lua_problems(Lua) ++
         owns_problems(Owns) ++
         codes_problems(Codes) ++
+        ops_problems(Ops) ++
         sup_problems(Sup).
 
 info_problems(#{name := Name, extension_version := Version}) when
@@ -384,6 +418,32 @@ rpc_problems(Rpc) ->
 is_rpc_entry(Method, {M, F, 2}) when is_atom(M), is_atom(F) ->
     is_dotted(Method);
 is_rpc_entry(_Method, _Target) ->
+    false.
+
+ops_problems(Ops) when is_map(Ops) ->
+    [
+        {ops, ~"action must map to #{method, mfa => {Module, Function, 2}, class}", Action}
+     || Action := Entry <- Ops, not is_ops_entry(Action, Entry)
+    ];
+ops_problems(Ops) ->
+    [{ops, ~"must be a map", Ops}].
+
+%% The action is one path segment, so it may not carry a slash or a dot: the
+%% router splits on the first and the console builds links from the second.
+%% Arity 2 for the same reason `rpc/0` insists on it - core applies every
+%% target as `Module:Function(Params, Ctx)`.
+is_ops_entry(Action, #{method := Method, mfa := {M, F, 2}, class := Class}) when
+    is_atom(M), is_atom(F)
+->
+    is_segment(Action) andalso
+        lists:member(Method, [get, post, put, delete]) andalso
+        lists:member(Class, asobi_ops_caps:class_names());
+is_ops_entry(_Action, _Entry) ->
+    false.
+
+is_segment(Action) when is_binary(Action), Action =/= ~"" ->
+    binary:match(Action, [~"/", ~".", ~"?", ~"#", ~"%"]) =:= nomatch;
+is_segment(_Action) ->
     false.
 
 is_dotted(Method) when is_binary(Method) ->
