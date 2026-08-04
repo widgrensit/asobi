@@ -543,13 +543,13 @@ fun_notify_many() ->
                 is_list(PlayerIds), is_binary(Type), is_binary(Subject)
             ->
                 Ids = [Id || Id <- PlayerIds, is_binary(Id)],
-                Sent = asobi_notify:send_many(Ids, Type, Subject, to_map(Data)),
+                {ok, Sent, _Failed} = asobi_notify:send_many(Ids, Type, Subject, to_map(Data)),
                 ok_result(Sent, St);
             [PlayerIds, Type, Subject] when
                 is_list(PlayerIds), is_binary(Type), is_binary(Subject)
             ->
                 Ids = [Id || Id <- PlayerIds, is_binary(Id)],
-                Sent = asobi_notify:send_many(Ids, Type, Subject, #{}),
+                {ok, Sent, _Failed} = asobi_notify:send_many(Ids, Type, Subject, #{}),
                 ok_result(Sent, St);
             _ ->
                 error_result(~"notify_many requires (player_ids, type, subject[, data])", St)

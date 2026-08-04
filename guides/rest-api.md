@@ -411,6 +411,36 @@ it never affects what a request may do, and it is recorded unattested. A
 label that is empty, multi-valued, over 64 bytes, or not printable ASCII is
 dropped rather than trusted.
 
+### Ops audit
+
+Every ops-plane mutation writes a row to `ops_audit_entries`, carrying the
+acting operator (`actor_id`, `actor_display`, `actor_source`,
+`actor_attested`), the action, its subject, and when it happened. Reads are
+not audited.
+
+The routes above are all reads, so nothing above writes a row yet. The table
+exists ahead of the write plane, and the one operator mutation that already
+exists - broadcasting a notification - goes through it.
+
+`actor_attested` is the important column. A name that came from
+`x-asobi-operator` is self-declared, so it is stored `false`; only a verified
+identity is stored `true`. Treat an unattested name as a hint, not evidence.
+
+`outcome` is `ok`, `partial` or `error`, with `succeeded_count` and
+`failed_count` beside it, so a fan-out that reached some of its subjects is
+never recorded as a success. Per-subject reasons sit in `details` and are
+diagnostic only; the counts are what you query.
+
+Rows are append-only and core never prunes them. Retention is yours to set:
+delete by `occurred_at`, which leads both composite indexes. Nothing cascades
+into the table either, so deleting a player does not erase the record of what
+was done to them.
+
+An audit write never fails the operation it describes. It runs after the
+change has already happened, so refusing the response could only invite a
+retry that applies the change twice. If the insert fails, the row is emitted
+instead at error level with the same field names, so ship your logs.
+
 ## Errors
 
 A failing request returns its HTTP status and one object:

@@ -42,6 +42,7 @@ api_test_() ->
         {"game.leaderboard.around returns entries", fun game_lb_around/0},
         {"game.notify sends notification", fun game_notify/0},
         {"game.notify_many forwards ids", fun game_notify_many/0},
+        {"game.notify_many reports only the recipients reached", fun game_notify_many_partial/0},
         {"game.storage.get reads doc", fun game_storage_get/0},
         {"game.storage.set writes doc", fun game_storage_set/0},
         {"game.storage.player_get reads player doc", fun game_storage_player_get/0},
@@ -132,7 +133,7 @@ setup() ->
     end),
     meck:new(asobi_notify, [no_link]),
     meck:expect(asobi_notify, send, fun(_, _, _, _) -> {ok, #{}} end),
-    meck:expect(asobi_notify, send_many, fun(Ids, _, _, _) -> Ids end),
+    meck:expect(asobi_notify, send_many, fun(Ids, _, _, _) -> {ok, Ids, []} end),
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, all, fun(_) -> {ok, []} end),
     meck:expect(asobi_repo, insert, fun(_) -> {ok, #{value => #{}}} end),
@@ -283,6 +284,17 @@ game_notify_many() ->
     {ok, [Count | _], _} = eval(Code, St),
     ?assertEqual(2, trunc(Count)),
     ?assert(meck:called(asobi_notify, send_many, '_')).
+
+%% The Lua surface still returns the recipients that were reached, so a script
+%% comparing that count against the ids it passed can see a partial send.
+game_notify_many_partial() ->
+    meck:expect(asobi_notify, send_many, fun([First | _], _, _, _) ->
+        {ok, [First], [{~"p2", connection_closed}]}
+    end),
+    St = install_api(),
+    Code = "local r = game.notify_many({'p1','p2'}, 'reward', 'gg')\nreturn #r.ok",
+    {ok, [Count | _], _} = eval(Code, St),
+    ?assertEqual(1, trunc(Count)).
 
 game_storage_get() ->
     St = install_api(),
