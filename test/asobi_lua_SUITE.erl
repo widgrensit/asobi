@@ -122,7 +122,11 @@ start_lua_match(Config, Script, Extra) ->
         },
         Extra
     ),
+    %% Unlinked: a match left in `waiting` stops with {shutdown, timeout}
+    %% after ?WAITING_TIMEOUT, and a still-linked one takes the test process
+    %% with it long after the case that started it (asobi#376).
     {ok, Pid} = asobi_match_server:start_link(MatchConfig),
+    unlink(Pid),
     Pid.
 
 stop(Pid) ->

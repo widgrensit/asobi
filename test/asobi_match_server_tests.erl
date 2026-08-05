@@ -43,9 +43,14 @@ cleanup(_) ->
 start_match() ->
     start_match(#{}).
 
+%% Unlinked deliberately. A match left in `waiting` stops with
+%% {shutdown, timeout} after ?WAITING_TIMEOUT, and a still-linked one takes
+%% the eunit process with it - sixty seconds later, in whatever unrelated
+%% group happens to be running by then (asobi#376).
 start_match(Overrides) ->
     Config = maps:merge(?BASE_CONFIG, Overrides),
     {ok, Pid} = asobi_match_server:start_link(Config),
+    unlink(Pid),
     Pid.
 
 %% --- Test generators ---

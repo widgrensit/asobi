@@ -25,8 +25,10 @@ cleanup(_) ->
     meck:unload(asobi_repo),
     ok.
 
+%% Unlinked: see the note in asobi_match_server_tests (asobi#376).
 start_match(Overrides) ->
     {ok, Pid} = asobi_match_server:start_link(maps:merge(?BASE_CONFIG, Overrides)),
+    unlink(Pid),
     Pid.
 
 stop_match(Pid) ->
