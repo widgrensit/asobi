@@ -64,6 +64,11 @@ setup() ->
         _ ->
             ets:delete_all_objects(asobi_player_worlds)
     end,
+    %% `no_link` mocks outlive the process that created them, so one left
+    %% behind by an earlier module makes this meck:new/2 raise
+    %% `already_started` - a fixture that fails in milliseconds, which eunit
+    %% reports as a cancelled group with nothing named. Clear first.
+    unload_stale([asobi_repo, asobi_presence]),
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     meck:expect(asobi_repo, insert, fun(_CS, _Opts) -> {ok, #{}} end),
@@ -210,3 +215,14 @@ start_world() ->
     timer:sleep(40),
     ServerPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
     #{instance_pid => InstancePid, world_pid => ServerPid}.
+
+unload_stale(Modules) ->
+    [
+        try
+            meck:unload(M)
+        catch
+            _:_ -> ok
+        end
+     || M <- Modules
+    ],
+    ok.

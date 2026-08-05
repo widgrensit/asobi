@@ -51,6 +51,11 @@ setup() ->
         _ ->
             ok
     end,
+    %% `no_link` mocks outlive the process that created them, so one left
+    %% behind by an earlier module makes this meck:new/2 raise
+    %% `already_started` - a fixture that fails in milliseconds, which eunit
+    %% reports as a cancelled group with nothing named. Clear first.
+    unload_stale([asobi_repo, asobi_presence]),
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     ok.
@@ -250,3 +255,14 @@ cleanup_listeners(Listeners) ->
 
 -spec narrow_list(term()) -> [term()].
 narrow_list(L) when is_list(L) -> L.
+
+unload_stale(Modules) ->
+    [
+        try
+            meck:unload(M)
+        catch
+            _:_ -> ok
+        end
+     || M <- Modules
+    ],
+    ok.
