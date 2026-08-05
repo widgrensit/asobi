@@ -101,13 +101,24 @@ session(Req) ->
     end.
 
 -doc """
-Exchange the operator secret for a session.
+Exchange a credential for a session.
 
-The secret is checked by `asobi_ops_auth:verify_secret/1`, so the
-constant-time comparison and the no-default rule live in one place and this
-endpoint cannot drift from the bearer plane.
+Two are accepted, and they are the two the ops plane already takes:
 
-A wrong secret is `403 forbidden` with the same body a wrong bearer token
+* `secret` - the operator secret, checked by `asobi_ops_auth:verify_secret/1`
+  so the constant-time comparison and the no-default rule live in one place
+  and this endpoint cannot drift from the bearer plane. It proves every
+  capability class.
+* `token` - a minted, env-scoped token from the control plane
+  (`m:asobi_ops_token`). It proves only the classes it carries, and the
+  session it opens carries exactly those and expires no later than the token
+  does. A fifteen-minute credential must not buy a twelve-hour session.
+
+The minted path is what makes a managed environment's console reachable: the
+browser posts the token once and then holds a cookie, so the token never has
+to live in JavaScript for the length of a session.
+
+A wrong credential is `403 forbidden` with the same body a wrong bearer token
 gets, so the two planes are indistinguishable to a caller guessing.
 """.
 -spec login(cowboy_req:req()) -> response().
@@ -124,14 +135,45 @@ authenticate(#{json := #{~"secret" := Secret} = Body} = Req) ->
             {ok, Session} = asobi_console_session:create(maps:get(~"label", Body, ~"operator")),
             granted(Session, Req);
         false ->
-            ?LOG_WARNING(#{
-                msg => ~"console login rejected",
-                peer => asobi_peer:client_ip(Req)
-            }),
-            {asobi_error, ~"forbidden"}
+            rejected(Req)
+    end;
+authenticate(#{json := #{~"token" := Token}} = Req) when is_binary(Token) ->
+    minted(Token, Req, json);
+%% A form POST, which is how the control plane hands a browser over: the token
+%% rides in the body, so unlike a query parameter or a fragment it never enters
+%% a URL, a referrer, an access log or the history. The reply is a redirect
+%% rather than JSON because the caller is a navigating browser, and after it
+%% the page is same-origin, so the SameSite=Strict cookies just set are sent
+%% normally from then on.
+%%
+%% `body` rather than cowboy_req:read_urlencoded_body/1: nova_request_plugin
+%% has already drained the one-shot stream, so reading it again finds nothing
+%% (asobi_saas#100).
+authenticate(#{body := Body} = Req) when is_binary(Body), Body =/= ~"" ->
+    case lists:keyfind(~"token", 1, cow_qs:parse_qs(Body)) of
+        {_, Token} when is_binary(Token), Token =/= ~"" -> minted(Token, Req, redirect);
+        _ -> {asobi_error, ~"missing_field"}
     end;
 authenticate(_Req) ->
     {asobi_error, ~"missing_field"}.
+
+minted(Token, Req, Reply) ->
+    case asobi_ops_token:verify(Token) of
+        {ok, #{sub := Sub, caps := Caps, exp := Exp}} ->
+            {ok, Session} = asobi_console_session:create(Sub, Caps, Exp),
+            granted(Session, Req, Reply);
+        {error, _Reason} ->
+            rejected(Req)
+    end.
+
+%% One log line and one body for both credentials: which one was wrong, and
+%% why, is not something a caller guessing gets to learn.
+rejected(Req) ->
+    ?LOG_WARNING(#{
+        msg => ~"console login rejected",
+        peer => asobi_peer:client_ip(Req)
+    }),
+    {asobi_error, ~"forbidden"}.
 
 %% Two cookies. The session id is `HttpOnly` so script cannot read it; the
 %% CSRF token deliberately is not, because the page has to send it back as a
@@ -139,11 +181,20 @@ authenticate(_Req) ->
 %% reload. It is derived from the session and useless without it, so a page
 %% that can read it can already act as the session it belongs to.
 -spec granted(asobi_console_session:session(), cowboy_req:req()) -> response().
-granted(#{id := Id, csrf := Csrf, expires_at := ExpiresAt} = Session, Req) ->
+granted(Session, Req) ->
+    granted(Session, Req, json).
+
+granted(#{id := Id, csrf := Csrf, expires_at := ExpiresAt} = Session, Req, Reply) ->
     Options = cookie_options(Req),
     Req1 = cowboy_req:set_resp_cookie(?COOKIE, Id, Req, Options#{http_only => true}),
     Req2 = cowboy_req:set_resp_cookie(?CSRF_COOKIE, Csrf, Req1, Options#{http_only => false}),
-    {json, 200, #{~"cache-control" => ~"no-store"}, Req2, #{
+    reply(Reply, Session, Csrf, ExpiresAt, Req2).
+
+%% 303, not 302: the browser must follow with GET whatever it posted with.
+reply(redirect, _Session, _Csrf, _ExpiresAt, Req) ->
+    {status, 303, #{~"location" => ~"/console", ~"cache-control" => ~"no-store"}, Req};
+reply(json, Session, Csrf, ExpiresAt, Req) ->
+    {json, 200, #{~"cache-control" => ~"no-store"}, Req, #{
         data => #{
             display => maps:get(label, Session),
             expires_at => ExpiresAt,

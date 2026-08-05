@@ -9,6 +9,8 @@
 %% wrong without any unit test noticing.
 
 -define(OPS_SECRET, ~"31d0f7a5c8b26e94103fa87c5d29b6e0475cf1a83b9d6e2047ca5813fd6e9b02").
+-define(ENGINE_KEY, ~"ak_0123456789abcdef0123456789abcdef").
+-define(ENV_ID, ~"019f7646-9ddb-77ee-82f5-b5e7f3b9ee9d").
 
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_group/2, end_per_group/2]).
 -export([
@@ -26,7 +28,11 @@
     session_cookie_opens_the_ops_plane/1,
     cookie_without_csrf_is_refused/1,
     whoami_reports_the_actor/1,
-    logout_ends_the_session/1
+    logout_ends_the_session/1,
+    a_minted_token_opens_a_session/1,
+    a_minted_session_carries_only_the_token_s_caps/1,
+    a_minted_session_does_not_outlive_its_token/1,
+    a_bad_minted_token_is_refused_like_a_bad_secret/1
 ]).
 
 all() ->
@@ -47,6 +53,10 @@ groups() ->
         {session, [sequence], [
             login_rejects_a_wrong_secret,
             login_sets_both_cookies,
+            a_minted_token_opens_a_session,
+            a_minted_session_carries_only_the_token_s_caps,
+            a_minted_session_does_not_outlive_its_token,
+            a_bad_minted_token_is_refused_like_a_bad_secret,
             session_cookie_opens_the_ops_plane,
             cookie_without_csrf_is_refused,
             whoami_reports_the_actor,
@@ -70,7 +80,20 @@ init_per_group(disabled, Config) ->
 init_per_group(_Group, Config) ->
     application:set_env(asobi, console, true),
     application:set_env(asobi, ops_secret, ?OPS_SECRET),
+    application:set_env(asobi, ops_token_secret, ?ENGINE_KEY),
+    application:set_env(asobi, env_id, ?ENV_ID),
     Config.
+
+%% A token the way asobi_saas mints one.
+minted(Caps) ->
+    Now = erlang:system_time(second),
+    asobi_ops_token:sign(asobi_ops_token:key(?ENGINE_KEY), #{
+        env => ?ENV_ID,
+        sub => ~"user-7",
+        caps => Caps,
+        iat => Now,
+        exp => Now + asobi_ops_token:max_ttl()
+    }).
 
 end_per_group(_Group, Config) ->
     Config.
@@ -209,6 +232,51 @@ login_sets_both_cookies(Config) ->
         ?assertNotEqual(nomatch, binary:match(string:lowercase(Cookie), ~"samesite=strict"))
      || Cookie <- [Session, Csrf]
     ],
+    Config.
+
+%% The managed path: a tenant's browser posts the token the control plane
+%% minted and then holds a cookie, so the token never has to live in
+%% JavaScript for the length of a session.
+a_minted_token_opens_a_session(Config) ->
+    {ok, Resp} = nova_test:post(
+        "/console/session", #{json => #{~"token" => minted([read])}}, Config
+    ),
+    ?assertStatus(200, Resp),
+    ?assertMatch(#{~"data" := #{~"display" := ~"user-7"}}, nova_test:json(Resp)),
+    Config.
+
+%% The whole point of mapping roles to classes at mint time would be undone if
+%% the exchange widened them back out.
+a_minted_session_carries_only_the_token_s_caps(Config) ->
+    {ok, Resp} = nova_test:post(
+        "/console/session", #{json => #{~"token" => minted([read])}}, Config
+    ),
+    Csrf = maps:get(~"csrf", maps:get(~"data", nova_test:json(Resp))),
+    Cookie = find(~"asobi_console=", set_cookies(Resp)),
+    {ok, Whoami} = nova_test:get(
+        "/console/session",
+        #{headers => [{~"cookie", Cookie}, {~"x-csrf-token", Csrf}]},
+        Config
+    ),
+    ?assertMatch(#{~"data" := #{~"caps" := [~"read"]}}, nova_test:json(Whoami)),
+    Config.
+
+%% A fifteen-minute credential must not buy a twelve-hour session.
+a_minted_session_does_not_outlive_its_token(Config) ->
+    {ok, Resp} = nova_test:post(
+        "/console/session", #{json => #{~"token" => minted([read])}}, Config
+    ),
+    #{~"data" := #{~"expires_at" := ExpiresAt}} = nova_test:json(Resp),
+    Now = erlang:system_time(second),
+    ?assert(ExpiresAt =< Now + asobi_ops_token:max_ttl()),
+    ?assert(ExpiresAt > Now),
+    Config.
+
+a_bad_minted_token_is_refused_like_a_bad_secret(Config) ->
+    {ok, Resp} = nova_test:post(
+        "/console/session", #{json => #{~"token" => ~"v1.not.valid"}}, Config
+    ),
+    ?assertStatus(403, Resp),
     Config.
 
 session_cookie_opens_the_ops_plane(Config) ->

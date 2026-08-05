@@ -38,7 +38,7 @@ while a tab sits open is the wrong default for a surface that bans players.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/0, create/1, resolve/2, delete/1, csrf/1, ttl_seconds/0]).
+-export([start_link/0, create/1, create/3, resolve/2, delete/1, csrf/1, ttl_seconds/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 -ifdef(TEST).
 -export([expire/1, sweep/0]).
@@ -54,7 +54,13 @@ while a tab sits open is the wrong default for a surface that bans players.
 -define(SWEEP_MS, 60000).
 -define(MAX_LABEL_BYTES, 64).
 
--type session() :: #{id := binary(), csrf := binary(), label := binary(), expires_at := integer()}.
+-type session() :: #{
+    id := binary(),
+    csrf := binary(),
+    label := binary(),
+    caps := [asobi_ops_caps:class()],
+    expires_at := integer()
+}.
 -type reason() :: unknown | expired | bad_csrf.
 
 -export_type([session/0, reason/0]).
@@ -73,7 +79,21 @@ it is held to the same shape `asobi_ops_auth:display/1` holds the
 """.
 -spec create(binary()) -> {ok, session()}.
 create(Label) ->
-    gen_server:call(?MODULE, {create, label(Label)}).
+    create(Label, asobi_ops_caps:class_names(), erlang:system_time(second) + ttl_seconds()).
+
+-doc """
+Open a session carrying `Caps` and expiring no later than `NotAfter`.
+
+The operator secret proves every capability, so `create/1` grants all three.
+A **minted** token proves only the classes it carries and expires in minutes,
+so exchanging one for a session must not widen either: the session inherits
+the token's capabilities, and its expiry is clamped to the token's. Otherwise
+a fifteen-minute credential with two classes would buy a twelve-hour session
+with three, which is the whole point of the token undone by the exchange.
+""".
+-spec create(binary(), [asobi_ops_caps:class()], integer()) -> {ok, session()}.
+create(Label, Caps, NotAfter) ->
+    gen_server:call(?MODULE, {create, label(Label), Caps, NotAfter}).
 
 -doc """
 Resolve a cookie and its CSRF token to a live session.
@@ -120,11 +140,19 @@ init([]) ->
     {ok, #{}}.
 
 -spec handle_call(term(), gen_server:from(), #{}) -> {reply, term(), #{}}.
-handle_call({create, Label}, _From, State) ->
+handle_call({create, Label, Caps, NotAfter}, _From, State) ->
     Id = base64:encode(crypto:strong_rand_bytes(?ID_BYTES), #{mode => urlsafe, padding => false}),
-    ExpiresAt = erlang:system_time(second) + ttl_seconds(),
-    true = ets:insert(?TABLE, {Id, ExpiresAt, Label}),
-    {reply, {ok, #{id => Id, csrf => csrf(Id), label => Label, expires_at => ExpiresAt}}, State};
+    ExpiresAt = min(erlang:system_time(second) + ttl_seconds(), NotAfter),
+    true = ets:insert(?TABLE, {Id, ExpiresAt, Label, Caps}),
+    {reply,
+        {ok, #{
+            id => Id,
+            csrf => csrf(Id),
+            label => Label,
+            caps => Caps,
+            expires_at => ExpiresAt
+        }},
+        State};
 handle_call({delete, Id}, _From, State) ->
     true = ets:delete(?TABLE, Id),
     {reply, ok, State};
@@ -132,7 +160,10 @@ handle_call({expire, Id}, _From, State) ->
     %% Test-only, and it goes through the owner because the table is
     %% `protected`. Ageing a row is the only way to exercise expiry and the
     %% sweeper without waiting out a real TTL.
-    Aged = [{Id, erlang:system_time(second) - 1, Label} || {_, _, Label} <- ets:lookup(?TABLE, Id)],
+    Aged = [
+        {Id, erlang:system_time(second) - 1, Label, Caps}
+     || {_, _, Label, Caps} <- ets:lookup(?TABLE, Id)
+    ],
     true = Aged =:= [] orelse ets:insert(?TABLE, Aged),
     {reply, ok, State};
 handle_call(sweep, _From, State) ->
@@ -159,14 +190,14 @@ handle_info(_Message, State) ->
 -spec sweep_expired() -> ok.
 sweep_expired() ->
     Removed = ets:select_delete(?TABLE, [
-        {{'_', '$1', '_'}, [{'<', '$1', erlang:system_time(second)}], [true]}
+        {{'_', '$1', '_', '_'}, [{'<', '$1', erlang:system_time(second)}], [true]}
     ]),
     log_sweep(Removed).
 
 -spec lookup(binary()) -> {ok, session()} | {error, reason()}.
 lookup(Id) ->
     try ets:lookup(?TABLE, Id) of
-        [{Id, ExpiresAt, Label}] -> live(Id, ExpiresAt, Label);
+        [{Id, ExpiresAt, Label, Caps}] -> live(Id, ExpiresAt, Label, Caps);
         [] -> {error, unknown}
     catch
         %% The table is gone only while the owner is restarting. That is a
@@ -174,11 +205,20 @@ lookup(Id) ->
         error:badarg -> {error, unknown}
     end.
 
--spec live(binary(), integer(), binary()) -> {ok, session()} | {error, reason()}.
-live(Id, ExpiresAt, Label) ->
+-spec live(binary(), integer(), binary(), [asobi_ops_caps:class()]) ->
+    {ok, session()} | {error, reason()}.
+live(Id, ExpiresAt, Label, Caps) ->
     case ExpiresAt > erlang:system_time(second) of
-        true -> {ok, #{id => Id, csrf => csrf(Id), label => Label, expires_at => ExpiresAt}};
-        false -> {error, expired}
+        true ->
+            {ok, #{
+                id => Id,
+                csrf => csrf(Id),
+                label => Label,
+                caps => Caps,
+                expires_at => ExpiresAt
+            }};
+        false ->
+            {error, expired}
     end.
 
 -spec checked(session(), binary()) -> {ok, session()} | {error, reason()}.

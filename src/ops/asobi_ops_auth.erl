@@ -201,13 +201,16 @@ resolved({error, Reason}) -> {error, Reason}.
 %% row and a log line would then carry a live cookie. A truncated hash of it
 %% is enough to correlate rows to one session and useless to replay.
 -spec session_actor(asobi_console_session:session()) -> actor().
-session_actor(#{id := Id, label := Label}) ->
+session_actor(#{id := Id, label := Label, caps := Caps}) ->
     Digest = binary:encode_hex(binary:part(crypto:hash(sha256, Id), 0, 8), lowercase),
     #{
         id => <<"console:", Digest/binary>>,
         display => Label,
         source => local_user,
-        caps => [read, player_data, config],
+        %% Whatever the credential behind this session proved. The operator
+        %% secret proves all three; a minted token proves only what it carried,
+        %% and the session must not widen it.
+        caps => Caps,
         attested => false
     }.
 
