@@ -30,14 +30,17 @@
 }).
 
 input_never_dropped_test_() ->
-    %% The timeout wraps the whole fixture, not just the property: eunit
-    %% gives setup/0 the default 5s, and starting a world under a loaded
-    %% CI runner can exceed it - which cancels the group with 0 failures
-    %% and fails the build with nothing named.
+    %% Two timeouts, because there are two ways this cancels a group with
+    %% zero failures and nothing named. The outer one covers setup/0 and
+    %% cleanup/1, which otherwise run under eunit's 5s default; the inner
+    %% one is the property's own, and its floor is 300s rather than 60s
+    %% because 60 is a performance budget, not a hang detector - a CI runner
+    %% managed 21 of 25 iterations of the reconnect property inside it
+    %% (asobi#376).
     {timeout, 120,
         {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
             [
-                {timeout, max(60, ?NUMTESTS div 2),
+                {timeout, max(300, ?NUMTESTS div 2),
                     ?_assert(
                         proper:quickcheck(prop_input_never_dropped(Ctx), [
                             {numtests, ?NUMTESTS}, {to_file, user}
