@@ -10,8 +10,17 @@ name: Protocol sync
 # decision in that repo.
 #
 # Needs SDK_SYNC_TOKEN, a fine-grained PAT with contents:write and
-# pull-requests:write on the seven SDK repos. Without it the job says so and
-# stops, rather than failing a build nobody can fix.
+# pull-requests:write on the seven SDK repos.
+#
+# Without it this FAILS. It used to log the reason and pass, on the reasoning
+# that a build nobody can fix should not go red - but the token was never set,
+# so every run since has reported success while syncing nothing, and the drift
+# this workflow exists to prevent happened anyway: the defold corpus went stale
+# enough to hide a real entity-sync bug for weeks, and unity's fixtures had to
+# be copied across by hand on 2026-08-05.
+#
+# A green run that did nothing is worse than a red one. This repo's owner is
+# the person who can add the secret, so red is the signal that gets it fixed.
 
 on:
   push:
@@ -48,21 +57,18 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Check for the sync token
-        id: token
         env:
           TOKEN: ${{ secrets.SDK_SYNC_TOKEN }}
         run: |
           if [ -z "$TOKEN" ]; then
-            echo "SDK_SYNC_TOKEN is not set - cannot open a PR in ${{ matrix.repo }}."
+            echo "::error::SDK_SYNC_TOKEN is not set, so ${{ matrix.repo }} was NOT synced."
+            echo "The corpus changed and this SDK's vendored copy is now behind."
             echo "Create a fine-grained PAT with contents:write and pull-requests:write"
-            echo "on the seven SDK repos and add it as a repository secret."
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "on the seven SDK repos and add it as the SDK_SYNC_TOKEN secret."
+            exit 1
           fi
 
       - name: Check out ${{ matrix.repo }}
-        if: steps.token.outputs.present == 'true'
         uses: actions/checkout@v5
         with:
           repository: ${{ matrix.repo }}
@@ -70,7 +76,6 @@ jobs:
           path: sdk
 
       - name: Sync the corpus
-        if: steps.token.outputs.present == 'true'
         id: sync
         run: |
           scripts/protocol-sync.sh apply "${{ matrix.sdk }}" sdk
