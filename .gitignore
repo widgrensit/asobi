@@ -14,3 +14,7 @@ doc/
 # Console toolchain. `console/` holds the source; the built bundle in
 # priv/console IS committed - see console/README.md.
 console/node_modules/
+
+# Agent-created git worktrees. Each is its own repository, so a bare
+# `git add -A` records it as a gitlink to a path that exists on one machine.
+.claude/worktrees/
