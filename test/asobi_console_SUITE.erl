@@ -32,7 +32,8 @@
     a_minted_token_opens_a_session/1,
     a_minted_session_carries_only_the_token_s_caps/1,
     a_minted_session_does_not_outlive_its_token/1,
-    a_bad_minted_token_is_refused_like_a_bad_secret/1
+    a_bad_minted_token_is_refused_like_a_bad_secret/1,
+    a_form_post_redirects_into_the_console/1
 ]).
 
 all() ->
@@ -57,6 +58,7 @@ groups() ->
             a_minted_session_carries_only_the_token_s_caps,
             a_minted_session_does_not_outlive_its_token,
             a_bad_minted_token_is_refused_like_a_bad_secret,
+            a_form_post_redirects_into_the_console,
             session_cookie_opens_the_ops_plane,
             cookie_without_csrf_is_refused,
             whoami_reports_the_actor,
@@ -282,6 +284,24 @@ a_bad_minted_token_is_refused_like_a_bad_secret(Config) ->
         "/console/session", #{json => #{~"token" => ~"v1.not.valid"}}, Config
     ),
     ?assertStatus(403, Resp),
+    Config.
+
+%% The shape the control plane actually sends: a urlencoded body, answered with
+%% a redirect rather than JSON because the caller is a navigating browser. The
+%% JSON cases above all passed while this crashed with a function_clause in
+%% nova_handler, because none of them posted a form.
+a_form_post_redirects_into_the_console(Config) ->
+    {ok, Resp} = nova_test:post(
+        "/console/session",
+        #{
+            headers => [{~"content-type", ~"application/x-www-form-urlencoded"}],
+            body => <<"token=", (minted([read]))/binary>>
+        },
+        Config
+    ),
+    ?assertStatus(302, Resp),
+    Cookies = set_cookies(Resp),
+    ?assertNotEqual(nomatch, binary:match(find(~"asobi_console=", Cookies), ~"asobi_console=")),
     Config.
 
 session_cookie_opens_the_ops_plane(Config) ->

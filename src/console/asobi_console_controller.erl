@@ -190,9 +190,13 @@ granted(#{id := Id, csrf := Csrf, expires_at := ExpiresAt} = Session, Req, Reply
     Req2 = cowboy_req:set_resp_cookie(?CSRF_COOKIE, Csrf, Req1, Options#{http_only => false}),
     reply(Reply, Session, Csrf, ExpiresAt, Req2).
 
-%% 303, not 302: the browser must follow with GET whatever it posted with.
+%% `{redirect, Route, Req}` rather than a hand-rolled status tuple: it is the
+%% only redirect shape that carries a Req, and the Req is what holds the two
+%% cookies just set. Nova's `{status, Code, Headers, Body}` takes a *body* in
+%% that position, so passing a Req there matches the `is_map(Body)` clause and
+%% crashes trying to encode the request as JSON.
 reply(redirect, _Session, _Csrf, _ExpiresAt, Req) ->
-    {status, 303, #{~"location" => ~"/console", ~"cache-control" => ~"no-store"}, Req};
+    {redirect, ~"/console", Req};
 reply(json, Session, Csrf, ExpiresAt, Req) ->
     {json, 200, #{~"cache-control" => ~"no-store"}, Req, #{
         data => #{
