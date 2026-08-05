@@ -235,11 +235,22 @@ clear(Req) ->
 %% `Secure` is set whenever the request looks like TLS, directly or through a
 %% proxy that says so. A forwarded header can only *add* the flag here, so
 %% believing an unverified one can make a cookie stricter and never weaker.
+%%
+%% `Lax`, not `Strict`. The managed hand-off arrives as a cross-site form POST
+%% from the control plane, and a browser treats every hop of that redirect
+%% chain as cross-site - so a `Strict` cookie is set and then not sent on the
+%% redirect to `/console`, landing the operator on a login page holding a
+%% session they cannot use until they reload.
+%%
+%% `Lax` still refuses to send these on a cross-site POST or an XHR, which is
+%% the case that matters: every state-changing request also needs the
+%% `x-csrf-token` header, and that is the defence doing the work. What `Lax`
+%% adds is the top-level GET navigation, which is exactly the hop being fixed.
 -spec cookie_options(cowboy_req:req()) -> map().
 cookie_options(Req) ->
     #{
         path => ~"/",
-        same_site => strict,
+        same_site => lax,
         secure => secure(Req),
         max_age => asobi_console_session:ttl_seconds()
     }.

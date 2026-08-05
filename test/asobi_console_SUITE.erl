@@ -228,8 +228,13 @@ login_sets_both_cookies(Config) ->
     %% not be, because the page has to send it back as a header after reload.
     ?assertNotEqual(nomatch, binary:match(string:lowercase(Session), ~"httponly")),
     ?assertEqual(nomatch, binary:match(string:lowercase(Csrf), ~"httponly")),
+    %% Lax, not Strict: the managed hand-off is a cross-site form POST, and a
+    %% browser treats the redirect after one as cross-site too - a Strict
+    %% cookie would be set and then withheld on the very next hop. Lax still
+    %% withholds it from a cross-site POST or XHR, which is the case the CSRF
+    %% header exists to cover.
     [
-        ?assertNotEqual(nomatch, binary:match(string:lowercase(Cookie), ~"samesite=strict"))
+        ?assertNotEqual(nomatch, binary:match(string:lowercase(Cookie), ~"samesite=lax"))
      || Cookie <- [Session, Csrf]
     ],
     Config.
