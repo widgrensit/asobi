@@ -1,0 +1,103 @@
+name: Protocol sync
+
+# The fixture corpus is ground truth for every SDK's dispatch tests, and all
+# seven vendor a copy. Without this, a new event reaches the SDKs whenever
+# somebody remembers - which is how core got to 38 fixtures while the SDKs sat
+# between 28 and 35.
+#
+# On a corpus change this opens (or updates) one PR per SDK. It does not merge
+# them: an SDK may need a dispatch case for the new event, and that is a human
+# decision in that repo.
+#
+# Needs SDK_SYNC_TOKEN, a fine-grained PAT with contents:write and
+# pull-requests:write on the seven SDK repos. Without it the job says so and
+# stops, rather than failing a build nobody can fix.
+
+on:
+  push:
+    branches: [main]
+    paths: ['priv/protocol/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdk: js
+            repo: widgrensit/asobi-js
+          - sdk: dart
+            repo: widgrensit/asobi-dart
+          - sdk: godot
+            repo: widgrensit/asobi-godot
+          - sdk: love2d
+            repo: widgrensit/asobi-love2d
+          - sdk: defold
+            repo: widgrensit/asobi-defold
+          - sdk: unity
+            repo: widgrensit/asobi-unity
+          - sdk: unreal
+            repo: widgrensit/asobi-unreal
+    steps:
+      - name: Check out asobi
+        uses: actions/checkout@v5
+
+      - name: Check for the sync token
+        id: token
+        env:
+          TOKEN: ${{ secrets.SDK_SYNC_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "SDK_SYNC_TOKEN is not set - cannot open a PR in ${{ matrix.repo }}."
+            echo "Create a fine-grained PAT with contents:write and pull-requests:write"
+            echo "on the seven SDK repos and add it as a repository secret."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out ${{ matrix.repo }}
+        if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.repo }}
+          token: ${{ secrets.SDK_SYNC_TOKEN }}
+          path: sdk
+
+      - name: Sync the corpus
+        if: steps.token.outputs.present == 'true'
+        id: sync
+        run: |
+          scripts/protocol-sync.sh apply "${{ matrix.sdk }}" sdk
+          cd sdk
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat
+          fi
+
+      - name: Open a PR
+        if: steps.sync.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          path: sdk
+          token: ${{ secrets.SDK_SYNC_TOKEN }}
+          branch: chore/protocol-fixtures
+          base: main
+          commit-message: "chore: sync the protocol fixtures from asobi"
+          title: "chore: sync the protocol fixtures from asobi"
+          body: |
+            The fixture corpus in `widgrensit/asobi` changed, so this brings the
+            vendored copy back in line. Opened by asobi's `protocol-sync`
+            workflow from ${{ github.sha }}.
+
+            **A new fixture is not automatically dispatched.** If this adds an
+            event this SDK has no case for, the dispatch test will fail and the
+            case belongs in this PR before it merges.
+          delete-branch: true

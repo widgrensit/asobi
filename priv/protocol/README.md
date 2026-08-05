@@ -40,6 +40,26 @@ priv/protocol/
 
 One file per event. Filename is the `type` field plus `.json`.
 
+## Keeping the SDK copies in sync
+
+Every official SDK vendors a copy, and copies drift: when the automation below
+was written core had 38 fixtures and the SDKs had between 28 and 35, with
+nothing to notice.
+
+```sh
+scripts/protocol-sync.sh check <sdk> <path-to-sdk-repo>   # fails on drift, names each file
+scripts/protocol-sync.sh apply <sdk> <path-to-sdk-repo>   # copies in, removes stale
+scripts/protocol-sync.sh sdks                             # js dart godot love2d defold unity unreal
+```
+
+`.github/workflows/protocol-sync.yml` runs `apply` against all seven on any
+change under `priv/protocol/` on main and opens one PR per SDK. It does not
+merge them: a new event usually needs a dispatch case, and that is a decision
+in the SDK's own repo.
+
+An SDK's own CI should run `check` against a pinned asobi so drift fails there
+too, rather than waiting for the next corpus change to reveal it.
+
 ## Using the corpus from a client SDK
 
 A typical SDK dispatch test fetches `priv/protocol/fixtures/<type>.json` (vendored or pulled from a published asobi release artifact), feeds the raw bytes into the SDK's `_handle_message` (or equivalent), and asserts a callback fired:
