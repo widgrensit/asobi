@@ -20,12 +20,15 @@
 chat_zone_routing_test_() ->
     %% Two timeouts, because there are two ways this cancels a group with
     %% zero failures and nothing named. The outer one covers setup/0 and
-    %% cleanup/1, which otherwise run under eunit's 5s default; the inner
-    %% one is the property's own, and its floor is 300s rather than 60s
-    %% because 60 is a performance budget, not a hang detector - a CI runner
-    %% managed 21 of 25 iterations of the reconnect property inside it
-    %% (asobi#376).
-    {timeout, 120,
+    %% cleanup/1, which otherwise run under eunit's 5s default; the inner one
+    %% is the property's own, and its floor is 300s rather than 60s because 60
+    %% is a performance budget, not a hang detector (asobi#376).
+    %%
+    %% The outer MUST outlast the inner. It covers the whole fixture, tests
+    %% included, so a shorter outer silently pre-empts the inner and cancels
+    %% the group - which is exactly what #374 did, moving the failure from one
+    %% property module to the next.
+    {timeout, 900,
         {setup, fun setup/0, fun cleanup/1, [
             {timeout, max(300, ?NUMTESTS div 2),
                 ?_assert(
@@ -48,6 +51,11 @@ setup() ->
         _ ->
             ok
     end,
+    %% `no_link` mocks outlive the process that created them, so one left
+    %% behind by an earlier module makes this meck:new/2 raise
+    %% `already_started` - a fixture that fails in milliseconds, which eunit
+    %% reports as a cancelled group with nothing named. Clear first.
+    unload_stale([asobi_repo, asobi_presence]),
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, insert, fun(_CS) -> {ok, #{}} end),
     ok.
@@ -247,3 +255,14 @@ cleanup_listeners(Listeners) ->
 
 -spec narrow_list(term()) -> [term()].
 narrow_list(L) when is_list(L) -> L.
+
+unload_stale(Modules) ->
+    [
+        try
+            meck:unload(M)
+        catch
+            _:_ -> ok
+        end
+     || M <- Modules
+    ],
+    ok.
