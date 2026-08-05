@@ -36,9 +36,16 @@ That is deliberate - a session has its own expiry and its own revocation, so
 tying it to a value that can change underneath it would end sessions at
 surprising moments without ending the bearer access that matters.
 
-`cloud` is reserved in `t:source/0` and not built. Cloud mints a short-lived
-env-scoped token in `asobi_saas` and maps its roles onto capability classes
-there.
+* **`cloud`** - a short-lived, env-scoped token minted by `asobi_saas` after
+  its own ownership check, presented as a bearer token and verified by
+  `m:asobi_ops_token`. The tenant's role is mapped onto capability classes at
+  mint time, so the string "owner" never reaches this plane, and the token
+  carries only the classes it was minted with rather than all three.
+
+A bearer token is tried as the operator secret first and as a minted token
+second. The two cannot be confused: a minted token is three dot-separated
+parts beginning `v1.`, and the secret comparison is over a hash of the whole
+value, so neither can be mistaken for the other.
 
 Every rejection is 403 with the same body whatever the cause, so a caller
 cannot tell "no secret configured" from "wrong secret" from "not authorised
@@ -119,9 +126,45 @@ verify_secret(_Presented) ->
 -spec bearer(binary(), cowboy_req:req()) -> {ok, actor()} | {error, atom()}.
 bearer(Presented, Req) ->
     case secret() of
-        {ok, Secret} -> match(Secret, Presented, Req);
-        error -> unconfigured(Req)
+        {ok, Secret} ->
+            case match(Secret, Presented, Req) of
+                {ok, _} = Ok -> Ok;
+                {error, _} -> minted(Presented, Req)
+            end;
+        error ->
+            %% A deployment with no operator secret can still be a managed
+            %% environment: the control plane's minted token is its own
+            %% credential and does not depend on one being configured.
+            case minted(Presented, Req) of
+                {ok, _} = Ok -> Ok;
+                {error, _} -> unconfigured(Req)
+            end
     end.
+
+%% The cloud path. Every failure is one reason and every reason answers 403,
+%% so a holder of a bad token learns nothing about which check refused it.
+-spec minted(binary(), cowboy_req:req()) -> {ok, actor()} | {error, atom()}.
+minted(Presented, Req) ->
+    case asobi_ops_token:verify(Presented) of
+        {ok, Claims} -> {ok, minted_actor(Claims, Req)};
+        {error, _Reason} -> {error, bad_credential}
+    end.
+
+%% `sub` is the control plane's own id for the person, already authenticated
+%% there, so unlike the static secret and the console session this actor has a
+%% real identity behind it - which is what `attested` says. The label header
+%% is not read here: a minted token already names who it was minted for, and
+%% letting a header override that would make the audit trail worse, not
+%% better.
+-spec minted_actor(asobi_ops_token:claims(), cowboy_req:req()) -> actor().
+minted_actor(#{sub := Sub, caps := Caps}, _Req) ->
+    #{
+        id => <<"cloud:", Sub/binary>>,
+        display => Sub,
+        source => cloud,
+        caps => Caps,
+        attested => true
+    }.
 
 -spec session(cowboy_req:req()) -> {ok, actor()} | {error, atom()}.
 session(Req) ->

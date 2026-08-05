@@ -9,6 +9,8 @@
 %% here, and an unconfigured deployment admits nobody.
 
 -define(SECRET, ~"7f4c1b9a2e6d8053f1a4c7b0e9d2635847ac1fbe2093d75641c8ba0fe3729d15").
+-define(ENGINE_KEY, ~"engine-api-key-not-a-real-one").
+-define(ENV_ID, ~"019f7646-9ddb-77ee-82f5-b5e7f3b9ee9d").
 
 %%--------------------------------------------------------------------
 %% Capability classes
@@ -107,6 +109,79 @@ verify_test_() ->
         fun rejects_a_path_outside_the_ops_prefix/0,
         fun denial_is_403_and_says_nothing_about_the_cause/0
     ]}.
+
+%% The cloud path: a token minted by asobi_saas after its own ownership check.
+cloud_test_() ->
+    {foreach, fun cloud_setup/0, fun cloud_cleanup/1, [
+        fun admits_a_minted_token/0,
+        fun a_minted_actor_carries_only_its_own_caps/0,
+        fun a_minted_actor_is_attested/0,
+        fun a_class_the_token_does_not_carry_is_denied/0,
+        fun a_token_for_another_environment_is_denied/0,
+        fun the_operator_label_cannot_rename_a_minted_actor/0
+    ]}.
+
+cloud_setup() ->
+    Original = setup(),
+    application:set_env(asobi, ops_token_secret, ?ENGINE_KEY),
+    application:set_env(asobi, env_id, ?ENV_ID),
+    Original.
+
+cloud_cleanup(Original) ->
+    application:unset_env(asobi, ops_token_secret),
+    application:unset_env(asobi, env_id),
+    cleanup(Original).
+
+minted(Caps) -> minted(Caps, ?ENV_ID).
+
+minted(Caps, EnvId) ->
+    Now = erlang:system_time(second),
+    asobi_ops_token:sign(asobi_ops_token:key(?ENGINE_KEY), #{
+        env => EnvId,
+        sub => ~"user-7",
+        caps => Caps,
+        iat => Now,
+        exp => Now + 300
+    }).
+
+admits_a_minted_token() ->
+    ?assertMatch(
+        {true, #{ops_actor := #{source := cloud}}},
+        asobi_ops_auth:verify(ops_req(minted([read])))
+    ).
+
+%% The whole point of mapping roles to classes at mint time: a `member` gets a
+%% token carrying two classes, and this plane can only ever see those two.
+a_minted_actor_carries_only_its_own_caps() ->
+    {true, #{ops_actor := Actor}} = asobi_ops_auth:verify(ops_req(minted([read, player_data]))),
+    ?assertEqual([read, player_data], maps:get(caps, Actor)),
+    ?assertEqual(~"cloud:user-7", maps:get(id, Actor)).
+
+%% Unlike the shared secret and the console session, there is a real
+%% authenticated person behind this one.
+a_minted_actor_is_attested() ->
+    {true, #{ops_actor := Actor}} = asobi_ops_auth:verify(ops_req(minted([read]))),
+    ?assertEqual(true, maps:get(attested, Actor)).
+
+a_class_the_token_does_not_carry_is_denied() ->
+    Req = req(~"/api/v1/ops/ext/quests/define", bearer(minted([read]))),
+    ?assertMatch({false, 403, _, _}, asobi_ops_auth:verify(Req#{method => ~"POST"})).
+
+a_token_for_another_environment_is_denied() ->
+    ?assertMatch(
+        {false, 403, _, _},
+        asobi_ops_auth:verify(ops_req(minted([read], ~"a-different-env")))
+    ).
+
+%% x-asobi-operator is attribution for a credential that carries no name. A
+%% minted token names who it was minted for, and a header must not overwrite
+%% that in the audit trail.
+the_operator_label_cannot_rename_a_minted_actor() ->
+    Headers = maps:put(~"x-asobi-operator", ~"somebody-else", bearer(minted([read]))),
+    {true, #{ops_actor := Actor}} = asobi_ops_auth:verify(
+        req(~"/api/v1/ops/players", Headers)
+    ),
+    ?assertEqual(~"user-7", maps:get(display, Actor)).
 
 setup() ->
     Original = application:get_env(asobi, ops_secret),

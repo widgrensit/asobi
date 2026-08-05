@@ -379,6 +379,36 @@ proxy, and set `x-asobi-operator` per person for attribution in the audit
 trail - it is a label, never authority. See
 [REST API](rest-api.md#ops-authentication).
 
+### Minted tokens (managed environments)
+
+A managed environment takes a second kind of ops credential: a short-lived,
+env-scoped token minted by the control plane after it has authenticated the
+tenant and checked they own this environment. Self-hosting needs none of this
+and can skip it.
+
+```erlang
+{ops_token_secret, ~"${ENGINE_API_KEY}"},
+{env_id, ~"${GAME_ID}"}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ops_token_secret` | none | The value the control plane also holds. The signing key is **derived** from it, never used directly |
+| `env_id` | none | This environment's id. A token minted for another one is refused |
+
+Both or neither: a node that knows the secret but not which environment it is
+cannot check a token's `env` claim, so it refuses every minted token rather
+than accepting one issued for somebody else's environment.
+
+Unlike `ops_secret`, a minted token carries **only the capability classes it
+was minted with**, so a tenant whose role maps to `read` and `player_data`
+cannot reach a `config` route with it. The role name never arrives here; the
+control plane maps it to classes at mint time.
+
+The lifetime is capped at 15 minutes **by this node**, not by the minter. A
+token signed with a longer one is refused, because there is no revocation list
+to fall back on if the minting side ever issues a bad one.
+
 ## Operator console
 
 A browser console for the ops plane, served by this node at `/console`.
