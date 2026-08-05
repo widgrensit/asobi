@@ -30,16 +30,21 @@
 }).
 
 input_never_dropped_test_() ->
-    {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
-        [
-            {timeout, max(60, ?NUMTESTS div 2),
-                ?_assert(
-                    proper:quickcheck(prop_input_never_dropped(Ctx), [
-                        {numtests, ?NUMTESTS}, {to_file, user}
-                    ])
-                )}
-        ]
-    end}.
+    %% The timeout wraps the whole fixture, not just the property: eunit
+    %% gives setup/0 the default 5s, and starting a world under a loaded
+    %% CI runner can exceed it - which cancels the group with 0 failures
+    %% and fails the build with nothing named.
+    {timeout, 120,
+        {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
+            [
+                {timeout, max(60, ?NUMTESTS div 2),
+                    ?_assert(
+                        proper:quickcheck(prop_input_never_dropped(Ctx), [
+                            {numtests, ?NUMTESTS}, {to_file, user}
+                        ])
+                    )}
+            ]
+        end}}.
 
 setup() ->
     {ok, _} = application:ensure_all_started(telemetry),
