@@ -122,7 +122,9 @@ start_match(GameModule) ->
         max_players => 4,
         tick_rate => 30
     },
+    %% Unlinked: see the note in asobi_match_server_tests (asobi#376).
     {ok, Pid} = asobi_match_server:start_link(Config),
+    unlink(Pid),
     Pid.
 
 stop(Pid) ->
