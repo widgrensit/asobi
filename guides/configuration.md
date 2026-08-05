@@ -387,14 +387,22 @@ tenant and checked they own this environment. Self-hosting needs none of this
 and can skip it.
 
 ```erlang
-{ops_token_secret, ~"${ENGINE_API_KEY}"},
+{ops_token_secret, ~"${ASOBI_OPS_TOKEN_SECRET}"},
 {env_id, ~"${GAME_ID}"}
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `ops_token_secret` | none | The value the control plane also holds. The signing key is **derived** from it, never used directly |
+| `ops_token_secret` | none | A per-environment secret that signs ops tokens and nothing else. At least 32 bytes; shorter is treated as unset |
 | `env_id` | none | This environment's id. A token minted for another one is refused |
+
+It is deliberately **not** the credential the engine authenticates with. A
+value that both proves who the engine is and signs the operator credentials it
+accepts is one leak away from doing both for an attacker, and deriving one
+from the other prevents confusion but not shared compromise.
+
+Rotating it revokes every ops token outstanding for the environment at once,
+which is the only revocation there is.
 
 Both or neither: a node that knows the secret but not which environment it is
 cannot check a token's `env` claim, so it refuses every minted token rather

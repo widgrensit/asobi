@@ -3,7 +3,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(ENV, ~"019f7646-9ddb-77ee-82f5-b5e7f3b9ee9d").
--define(ENGINE_KEY, ~"engine-api-key-not-a-real-one").
+-define(SIGNING_SECRET, ~"a-per-env-ops-signing-secret-32b!").
 
 %% The cloud credential. A valid MAC is necessary and not sufficient, and most
 %% of what is asserted here is the "not sufficient" half: a signature the
@@ -25,11 +25,11 @@ token_test_() ->
         fun a_malformed_token_is_refused/0,
         fun a_version_that_is_not_ours_is_refused/0,
         fun nothing_verifies_without_both_halves_of_the_config/0,
-        fun the_key_is_derived_not_the_credential/0
+        fun a_short_secret_is_not_a_configuration/0
     ]}.
 
 setup() ->
-    application:set_env(asobi, ops_token_secret, ?ENGINE_KEY),
+    application:set_env(asobi, ops_token_secret, ?SIGNING_SECRET),
     application:set_env(asobi, env_id, ?ENV),
     ok.
 
@@ -55,7 +55,7 @@ a_token_for_another_environment_is_refused() ->
     ?assertEqual({error, wrong_environment}, asobi_ops_token:verify(Token)).
 
 a_token_signed_with_another_key_is_refused() ->
-    Token = asobi_ops_token:sign(asobi_ops_token:key(~"a-different-engine-key"), claims(#{})),
+    Token = asobi_ops_token:sign(~"a-different-per-env-signing-secret", claims(#{})),
     ?assertEqual({error, bad_signature}, asobi_ops_token:verify(Token)).
 
 a_tampered_payload_is_refused() ->
@@ -124,18 +124,15 @@ nothing_verifies_without_both_halves_of_the_config() ->
     application:unset_env(asobi, ops_token_secret),
     ?assertEqual({error, not_configured}, asobi_ops_token:verify(Token)).
 
-%% A credential used to authenticate must not double as a signing key.
-the_key_is_derived_not_the_credential() ->
-    ?assertNotEqual(?ENGINE_KEY, asobi_ops_token:key(?ENGINE_KEY)),
-    ?assertEqual(32, byte_size(asobi_ops_token:key(?ENGINE_KEY))),
-    ?assertNotEqual(
-        asobi_ops_token:key(?ENGINE_KEY),
-        asobi_ops_token:key(<<?ENGINE_KEY/binary, "x">>)
-    ).
+%% A short secret is how a placeholder becomes a signing key, so it is treated
+%% as no configuration at all rather than as a weak one.
+a_short_secret_is_not_a_configuration() ->
+    application:set_env(asobi, ops_token_secret, ~"too-short"),
+    ?assertEqual({error, not_configured}, asobi_ops_token:verify(mint())).
 
 %%--------------------------------------------------------------------
 
-key() -> asobi_ops_token:key(?ENGINE_KEY).
+key() -> ?SIGNING_SECRET.
 
 mint() -> mint(#{}).
 

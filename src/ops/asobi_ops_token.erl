@@ -21,19 +21,22 @@ stripped down to this one.
 
 ## The key
 
-Not `ops_secret`, and not the credential it is derived from either:
+`ops_token_secret`, from `ASOBI_OPS_TOKEN_SECRET` - a per-environment secret
+that signs ops tokens and does nothing else.
 
-```erlang
-Key = crypto:mac(hmac, sha256, EngineApiKey, <<"asobi.ops.token.v1">>)
-```
+It was briefly derived from `ENGINE_API_KEY`, because both sides already held
+that value. Deriving through a label stops two keys being *confused*; it does
+not stop them being *compromised together*, and a value that both
+authenticates this engine to the control plane and signs the operator
+credentials it accepts is one leak away from doing both for an attacker. So
+it is its own secret, generated per environment by the provisioner and held
+nowhere else - not even in the control plane's database.
 
-`ENGINE_API_KEY` is the one value the control plane and this environment
-already both hold, so signing needs no new plumbing - but a credential used
-to authenticate must not double as a signing key, so it is separated by
-label first. The same construction the console's CSRF token uses.
+Being per environment, a token minted for one env cannot validate at another
+even before `env` is checked. `env` is checked anyway.
 
-It is **per environment**, so a token minted for one env cannot validate at
-another even before `env` is checked. `env` is checked anyway.
+Rotating it revokes every token outstanding for this environment at once,
+which is the only revocation there is.
 
 ## What a signature does not buy
 
@@ -47,10 +50,9 @@ Nothing here is stateful: there is no revocation list, which is exactly why
 the lifetime is capped rather than merely checked.
 """.
 
--export([verify/1, key/1, sign/2, max_ttl/0]).
+-export([verify/1, sign/2, max_ttl/0]).
 
 -define(VERSION, ~"v1").
--define(LABEL, ~"asobi.ops.token.v1").
 %% Fifteen minutes. Long enough that an operator is not re-minting mid-task,
 %% short enough that a leaked token is a nuisance rather than an incident -
 %% and there is nothing to revoke it with.
@@ -72,16 +74,6 @@ the lifetime is capped rather than merely checked.
 -doc "The longest lifetime this node will honour, in seconds.".
 -spec max_ttl() -> pos_integer().
 max_ttl() -> ?MAX_TTL_SECONDS.
-
--doc """
-The signing key for `EngineApiKey`.
-
-Exported because the control plane derives the same key from the same value,
-and the derivation is the contract between them.
-""".
--spec key(binary()) -> binary().
-key(EngineApiKey) when is_binary(EngineApiKey), EngineApiKey =/= ~"" ->
-    crypto:mac(hmac, sha256, EngineApiKey, ?LABEL).
 
 -doc """
 Mint a token for `Claims`.
@@ -200,10 +192,12 @@ claims_json(#{env := Env, sub := Sub, caps := Caps, iat := Iat, exp := Exp}) ->
 %% for one tenant's environment gets honoured by another's.
 config() ->
     case {application:get_env(asobi, ops_token_secret), application:get_env(asobi, env_id)} of
+        %% A short secret is how a placeholder becomes a signing key. 32 bytes
+        %% is what the provisioner generates; anything less is unconfigured.
         {{ok, Secret}, {ok, EnvId}} when
-            is_binary(Secret), Secret =/= ~"", is_binary(EnvId), EnvId =/= ~""
+            is_binary(Secret), byte_size(Secret) >= 32, is_binary(EnvId), EnvId =/= ~""
         ->
-            {ok, key(Secret), EnvId};
+            {ok, Secret, EnvId};
         _ ->
             error
     end.

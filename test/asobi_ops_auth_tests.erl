@@ -9,7 +9,7 @@
 %% here, and an unconfigured deployment admits nobody.
 
 -define(SECRET, ~"7f4c1b9a2e6d8053f1a4c7b0e9d2635847ac1fbe2093d75641c8ba0fe3729d15").
--define(ENGINE_KEY, ~"engine-api-key-not-a-real-one").
+-define(SIGNING_SECRET, ~"a-per-env-ops-signing-secret-32b!").
 -define(ENV_ID, ~"019f7646-9ddb-77ee-82f5-b5e7f3b9ee9d").
 
 %%--------------------------------------------------------------------
@@ -123,7 +123,7 @@ cloud_test_() ->
 
 cloud_setup() ->
     Original = setup(),
-    application:set_env(asobi, ops_token_secret, ?ENGINE_KEY),
+    application:set_env(asobi, ops_token_secret, ?SIGNING_SECRET),
     application:set_env(asobi, env_id, ?ENV_ID),
     Original.
 
@@ -136,7 +136,7 @@ minted(Caps) -> minted(Caps, ?ENV_ID).
 
 minted(Caps, EnvId) ->
     Now = erlang:system_time(second),
-    asobi_ops_token:sign(asobi_ops_token:key(?ENGINE_KEY), #{
+    asobi_ops_token:sign(?SIGNING_SECRET, #{
         env => EnvId,
         sub => ~"user-7",
         caps => Caps,

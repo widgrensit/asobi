@@ -9,7 +9,7 @@
 %% wrong without any unit test noticing.
 
 -define(OPS_SECRET, ~"31d0f7a5c8b26e94103fa87c5d29b6e0475cf1a83b9d6e2047ca5813fd6e9b02").
--define(ENGINE_KEY, ~"ak_0123456789abcdef0123456789abcdef").
+-define(SIGNING_SECRET, ~"a-per-env-ops-signing-secret-32b!").
 -define(ENV_ID, ~"019f7646-9ddb-77ee-82f5-b5e7f3b9ee9d").
 
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_group/2, end_per_group/2]).
@@ -80,14 +80,14 @@ init_per_group(disabled, Config) ->
 init_per_group(_Group, Config) ->
     application:set_env(asobi, console, true),
     application:set_env(asobi, ops_secret, ?OPS_SECRET),
-    application:set_env(asobi, ops_token_secret, ?ENGINE_KEY),
+    application:set_env(asobi, ops_token_secret, ?SIGNING_SECRET),
     application:set_env(asobi, env_id, ?ENV_ID),
     Config.
 
 %% A token the way asobi_saas mints one.
 minted(Caps) ->
     Now = erlang:system_time(second),
-    asobi_ops_token:sign(asobi_ops_token:key(?ENGINE_KEY), #{
+    asobi_ops_token:sign(?SIGNING_SECRET, #{
         env => ?ENV_ID,
         sub => ~"user-7",
         caps => Caps,
