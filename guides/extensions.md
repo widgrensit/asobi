@@ -305,8 +305,8 @@ upgrade takes effect without waiting for every live match VM to end.
 | Namespace ownership | Cannot be inferred | `owns/0` |
 
 Discovery walks the OTP application graph, filtering on "exports
-`<app>_extension`". Depending on asobi is not the filter: `asobi_lua`,
-`asobi_engine` and `asobi_admin` all have asobi in their closure and none is an
+`<app>_extension`". Depending on asobi is not the filter: `asobi_engine` and
+every game that embeds asobi have it in their closure and none is an
 extension.
 
 ## Prefer a library application

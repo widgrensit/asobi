@@ -134,8 +134,8 @@ UDP relay if you need sub-3ms physics.
 
 ## Related projects
 
-- [**asobi_lua**](https://github.com/widgrensit/asobi_lua) — Lua scripting runtime + Docker image (`ghcr.io/widgrensit/asobi_lua`)
-- [**asobi_admin**](https://github.com/widgrensit/asobi_admin) — admin dashboard
+- Lua scripting and the operator console ship in asobi itself — see [Self-hosting](guides/self-hosting.md)
+- Docker image: `ghcr.io/widgrensit/asobi_lua`
 - Client SDKs: [asobi-godot](https://github.com/widgrensit/asobi-godot) · [asobi-defold](https://github.com/widgrensit/asobi-defold) · [asobi-love2d](https://github.com/widgrensit/asobi-love2d) · [asobi-unity](https://github.com/widgrensit/asobi-unity) · [asobi-unreal](https://github.com/widgrensit/asobi-unreal) · [asobi-js](https://github.com/widgrensit/asobi-js) · [asobi-dart](https://github.com/widgrensit/asobi-dart) · [flame_asobi](https://github.com/widgrensit/flame_asobi)
 
 ## Stability

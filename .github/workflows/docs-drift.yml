@@ -17,6 +17,10 @@ on:
       - 'src/controllers/asobi_guest_controller.erl'
       - 'src/asobi_auth_error.erl'
       - 'scripts/check-error-drift.sh'
+      - 'scripts/check-archived-refs.sh'
+      - 'guides/**'
+      - 'README.md'
+      - 'docs/ARCHITECTURE.md'
       - '.github/workflows/docs-drift.yml'
   pull_request:
     branches: [main]
@@ -25,6 +29,10 @@ on:
       - 'src/controllers/asobi_guest_controller.erl'
       - 'src/asobi_auth_error.erl'
       - 'scripts/check-error-drift.sh'
+      - 'scripts/check-archived-refs.sh'
+      - 'guides/**'
+      - 'README.md'
+      - 'docs/ARCHITECTURE.md'
       - '.github/workflows/docs-drift.yml'
 
 concurrency:
@@ -40,3 +48,6 @@ jobs:
           persist-credentials: false
       - name: Check error-table-vs-controller drift
         run: scripts/check-error-drift.sh
+
+      - name: No user-facing doc points at an archived repository
+        run: scripts/check-archived-refs.sh

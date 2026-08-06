@@ -71,7 +71,7 @@ Nakama and asobi agree on most of the vocabulary:
 | **RPC endpoints** | Nova controllers (Erlang) or Lua callbacks | For per-match logic, use Lua in `match.lua`. For cross-match workflows, write a Nova controller. |
 | **Hooks (`before_authenticate`, `after_friendAdd`)** | Nova plugins + match lifecycle callbacks | Pre- and post-request middleware in Nova. |
 | **Runtime Lua / TS / Go** | Luerl Lua (for match logic), Erlang/OTP (for the engine) | One scripting language (Lua); the engine is all OTP. |
-| **Nakama Console** | [asobi_admin](https://github.com/widgrensit/asobi_admin) | Pre-1.0 admin surface. |
+| **Nakama Console** | Built-in operator console at `/console` | Ships in asobi. Set `{console, true}` and an `ops_secret`. |
 | **`sessiontoken`** | `session_token` | Same concept, returned from `/register` or `/login`. |
 | **WebSocket** | `/ws` with `session.connect` first frame | See the Hathora guide's [WebSocket handshake](migrate-from-hathora.md#websocket-handshake) section for the protocol. |
 
@@ -211,7 +211,9 @@ down the Nakama server.
   seasons and quests as extensions, but nothing as opinionated as Hiro.
 - **Go and TypeScript runtimes** as alternatives to Lua. asobi is Lua or
   Erlang — no JS/TS runtime.
-- **Nakama Console** is further along than asobi_admin today.
+- **Nakama Console** is further along than asobi's console today: asobi's ops
+  plane is read-only, so moderation still means a database write or a Lua
+  handler, not a button.
 - **Published case studies from AAA studios.** asobi is newer.
 
 If you're deeply reliant on Satori, you'll need to build the equivalent

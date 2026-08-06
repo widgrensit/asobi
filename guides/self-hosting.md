@@ -128,17 +128,30 @@ and writes to `/app/game/` using pattern 2. Tracked in [#TBD].
 
 ## A minimal production compose
 
+Two files sit next to it, neither of which belongs in git:
+
+```bash
+echo "ASOBI_DB_PASSWORD=$(openssl rand -hex 24)" > .env
+openssl rand -hex 32 > ops_secret.txt
+printf '.env\nops_secret.txt\n' >> .gitignore
+```
+
+`.env` is read by compose automatically and is the single source for the
+database password - Postgres and asobi both take it from there, so it cannot
+drift between them. `ops_secret.txt` is mounted as a file rather than passed as
+a variable, which keeps it out of `docker inspect` and out of the process
+environment.
+
 ```yaml
 services:
   postgres:
     image: postgres:17
     environment:
       POSTGRES_USER: asobi
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_PASSWORD: ${ASOBI_DB_PASSWORD:?set ASOBI_DB_PASSWORD in .env}
       POSTGRES_DB: asobi
     volumes:
       - pgdata:/var/lib/postgresql/data
-    secrets: [db_password]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U asobi"]
       interval: 5s
@@ -155,26 +168,60 @@ services:
       ASOBI_DB_HOST: postgres
       ASOBI_DB_NAME: asobi
       ASOBI_DB_USER: asobi
-      ASOBI_DB_PASSWORD_FILE: /run/secrets/db_password
+      # Compose reads a sibling `.env` automatically, so the password lives
+      # there rather than in this file. There is no ASOBI_DB_PASSWORD_FILE:
+      # the password is substituted into sys.config before the VM starts, so
+      # unlike the ops secret below it cannot be read from a file.
+      ASOBI_DB_PASSWORD: ${ASOBI_DB_PASSWORD:?set ASOBI_DB_PASSWORD in .env}
       ASOBI_NODE_HOST: 0.0.0.0
+      # The operator console, on the game port. Drop these two lines to run
+      # without it.
+      ASOBI_CONSOLE: "true"
+      ASOBI_OPS_SECRET_FILE: /run/secrets/ops_secret
     volumes:
       - /srv/asobi/game:/app/game:ro
-    secrets: [db_password]
+    secrets: [ops_secret]
     ports:
       - "8084:8084"
     restart: unless-stopped
 
 secrets:
-  db_password:
-    file: ./db_password.txt
+  ops_secret:
+    file: ./ops_secret.txt
 
 volumes:
   pgdata:
 ```
 
 Put this behind a TLS-terminating reverse proxy (Caddy, nginx,
-Traefik) — asobi_lua speaks plain HTTP/WebSocket and expects the proxy
+Traefik) — asobi speaks plain HTTP/WebSocket and expects the proxy
 to handle certificates.
+
+### Opening the console
+
+Browse to `/console` on the same host and port your game uses, and paste the
+contents of `ops_secret.txt`. That is the whole sign-in: the secret is
+exchanged once for an `HttpOnly` cookie plus a CSRF token, and the browser
+never holds it again.
+
+You get players, matches, the matchmaker, leaderboards, economy, chat,
+tournaments, notifications, and live runtime stats — the same console the
+managed cloud uses, because it ships in asobi itself.
+
+The console is on the **game port**, so anyone who can reach your game can
+reach `/console`. Restrict it at the proxy: allowlist your own address, or
+require an extra layer in front of `/console` and `/api/v1/ops`. If it did not
+come up, the node logs why at boot — `console_disabled_without_secret` means
+the secret file was missing, unreadable or empty.
+
+Name it if you run more than one:
+
+```yaml
+      ASOBI_CONSOLE_LABEL: prod
+      ASOBI_CONSOLE_PRODUCTION: "true"
+```
+
+The label shows in the tab title, which is what tells two open consoles apart.
 
 ## Tuning knobs
 

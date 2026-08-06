@@ -491,10 +491,15 @@ persists and broadcasts the result.
 
 ## Admin
 
-This node ships no admin console. The dashboard is a separate project,
-[asobi_admin](https://github.com/widgrensit/asobi_admin), which reads the same
-database. There is no `/admin` route in `asobi_router.erl`, and asobi no longer
-depends on Arizona.
+This node serves its own operator console at `/console`, off unless
+`{console, true}` and an `ops_secret` are configured. It reads the ops plane at
+`/api/v1/ops` over HTTP like any other client - it holds no privileged path
+into the database of its own.
+
+The console was previously a separate project, `asobi_admin`, which read the
+same database directly. That is archived: a second deployment to run, secure
+and keep in step was the wrong shape for something an operator opens during an
+incident.
 
 ## Background Jobs (Shigoto)
 

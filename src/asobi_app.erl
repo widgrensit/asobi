@@ -5,6 +5,10 @@
 
 -spec start(application:start_type(), term()) -> {ok, pid()} | {error, term()}.
 start(_StartType, _StartArgs) ->
+    %% Before the router compiles: whether the console routes exist at all is
+    %% read from the `console` key, so the environment has to have been folded
+    %% in by now.
+    asobi_console_env:apply(),
     setup_telemetry(),
     asobi_error:register_handler(),
     register_lua_game_modes(),

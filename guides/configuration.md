@@ -435,6 +435,38 @@ port; an operator surface on a public port has to be asked for.
 | `console_session_ttl` | `43200` | Session lifetime in seconds, clamped to 60-86400. Absolute: it is not extended by use |
 | `console_secure_cookie` | `false` | Force `Secure` on the session cookies. Set it behind a TLS terminator that does not send `x-forwarded-proto` |
 | `console_api_base` | none | Absolute `https://host[:port]` origin the console should call instead of this one. Also widens `connect-src`. Anything that is not a bare origin is ignored |
+| `console_label` | none | Names this deployment in the tab title and the console header, so several open consoles are distinguishable |
+| `console_production` | `false` | Marks a deployment to be careful in. The console colours its label |
+
+### From the environment
+
+Running a release rather than writing a `sys.config`? Every key above has an
+environment variable, read at boot. A variable overrides `sys.config` only when
+it is set, so the two can coexist.
+
+| Variable | Sets |
+|----------|------|
+| `ASOBI_CONSOLE` | `console`. `1`, `true`, `yes` or `on` enable it; anything else, including a typo, leaves it off |
+| `ASOBI_OPS_SECRET_FILE` | `ops_secret`, read from a file. **Preferred** |
+| `ASOBI_OPS_SECRET` | `ops_secret`, read from the variable itself |
+| `ASOBI_CONSOLE_LABEL` | `console_label` |
+| `ASOBI_CONSOLE_PRODUCTION` | `console_production` |
+
+Prefer the file: it keeps the secret out of `docker inspect`, out of the
+process environment, and out of a compose file that tends to end up in git. A
+trailing newline is stripped, so the usual `openssl rand -hex 32 > secret`
+works. If the file is named but unreadable or empty, the console stays off and
+says so - it does **not** fall back to `ASOBI_OPS_SECRET`, because a deployment
+that mounted a secret and got the path wrong must not come up quietly using
+something else.
+
+Enabling the console without a secret leaves it off and logs an error. The node
+still starts: the game is the product and the console is an accessory, so an
+operator surface that is misconfigured must not take players offline.
+
+There is no `ASOBI_DB_PASSWORD_FILE`. The database password is substituted into
+`sys.config` before any Erlang runs, so it cannot be read from a file the way
+these can.
 
 The console does not hold `ops_secret`. It posts it once to
 `/console/session`, gets back an `HttpOnly` cookie plus a derived CSRF token,

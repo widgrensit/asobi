@@ -129,7 +129,7 @@ that to be you again.
 | `getConnectionInfo(roomId)` | WebSocket upgrade on `GET /ws` | See [§ WebSocket handshake](#websocket-handshake) — first frame must authenticate. |
 | `ping` region API | *(none)* | If you need client-side region selection, probe each deployment endpoint yourself. |
 | Hathora SDK | asobi SDKs | [asobi-unity](https://github.com/widgrensit/asobi-unity), [asobi-unreal](https://github.com/widgrensit/asobi-unreal), [asobi-js](https://github.com/widgrensit/asobi-js), [asobi-godot](https://github.com/widgrensit/asobi-godot), [asobi-defold](https://github.com/widgrensit/asobi-defold), [asobi-dart](https://github.com/widgrensit/asobi-dart), [flame_asobi](https://github.com/widgrensit/flame_asobi). |
-| Hathora Console | [asobi-admin](https://github.com/widgrensit/asobi_admin) | Tenants, games, API keys, match inspection. Pre-1.0. |
+| Hathora Console | Built-in operator console at `/console` | Match and player inspection. Tenants, games and API keys are an [asobi cloud](https://asobi.dev) concern, not a self-hosted one. |
 | `hathora.yml` | `docker-compose.yml` | Plain Compose, no proprietary spec. |
 | Process-hour billing | Flat per-container | No surprise invoices. |
 

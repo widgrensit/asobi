@@ -74,7 +74,7 @@ This guide walks you from "my PlayFab stack is working but brittle" to
 | **Receipt validation (IAP)** | `/api/v1/iap/apple`, `/api/v1/iap/google` | Verifies Apple App Store and Google Play receipts. |
 | **Automation rules / webhooks** | Shigoto jobs | Write the rule as an Erlang callback or Lua handler. |
 | **Insights / Analytics** | `asobi_telemetry` + your pipeline | We emit telemetry; pipe to Prometheus / Grafana / ClickHouse. No hosted analytics yet. |
-| **Game Manager (web console)** | [asobi_admin](https://github.com/widgrensit/asobi_admin) | Players, leaderboards, economy, chat. Pre-1.0. |
+| **Game Manager (web console)** | Built-in operator console at `/console` | Players, matches, leaderboards, economy, chat. Read-only today. |
 
 ## Migration path
 
