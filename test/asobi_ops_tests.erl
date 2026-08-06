@@ -295,36 +295,56 @@ ops_routes_are_mounted_behind_the_operator_check_test() ->
     ?assertEqual(fun asobi_ops_auth:verify/1, Security),
     ?assert(Routes =/= []),
     [
-        ?assertEqual([get, options], maps:get(methods, Opts))
+        ?assertEqual(expected_methods(Path), maps:get(methods, Opts))
      || {Path, _Handler, Opts} <- Routes, not extension_route(Path)
     ].
 
-%% Core's own plane is read-only and must not grow a write route by accident,
-%% and `asobi_ops_notifications:broadcast/5` is deliberately not one. The
-%% extension dispatch route is the single exception, and it is not an exception
-%% to the audit: every method on it but `get` runs inside
-%% `asobi_ops_audit:mutation/4`.
-core_ops_routes_serve_no_write_method_test() ->
-    #{routes := Routes} = ops_group(),
-    Methods = lists:usort([
-        M
-     || {Path, _Handler, Opts} <- Routes,
-        not extension_route(Path),
-        M <- maps:get(methods, Opts)
-    ]),
-    ?assertEqual([get, options], Methods),
-    ?assertEqual([], [Class || {_M, _S, Class} <- asobi_ops_caps:classes(), Class =/= read]).
+%% One route on core's plane answers a write method, and it is stated here so a
+%% second cannot appear without editing this line.
+expected_methods(~"/players/:id/erase") -> [post, options];
+expected_methods(_Path) -> [get, options].
 
-%% The exception, stated once so it cannot widen quietly: exactly one route
-%% carries a write method, and it is the extension dispatch.
-exactly_one_ops_route_carries_a_write_method_test() ->
+%% Core's plane is a read plane plus exactly two account-lifecycle routes, and
+%% `asobi_ops_notifications:broadcast/5` is still deliberately not a route at
+%% all. Anything else non-read is a write surface that grew by accident.
+%%
+%% `erasure` is its own class rather than `player_data` because it is the only
+%% irreversible action here; `export` is `player_data` rather than `read`
+%% because it returns everything about one identified person.
+core_ops_non_read_classes_are_only_account_lifecycle_test() ->
+    ?assertEqual(
+        [
+            {get, [~"players", '_', ~"export"], player_data},
+            {post, [~"players", '_', ~"erase"], erasure}
+        ],
+        [Route || {_M, _S, Class} = Route <- asobi_ops_caps:classes(), Class =/= read]
+    ).
+
+%% Stated once so it cannot widen quietly: two routes carry a write method, the
+%% erasure and the extension dispatch. Neither is an exception to the audit -
+%% the extension dispatch runs inside `asobi_ops_audit:mutation/4`, and the
+%% erasure writes its row inside its own transaction.
+ops_routes_carrying_a_write_method_test() ->
     #{routes := Routes} = ops_group(),
     Writing = [
         Path
      || {Path, _Handler, Opts} <- Routes,
         [] =/= [M || M <- maps:get(methods, Opts), M =/= get, M =/= options]
     ],
-    ?assertEqual([~"/ext/:extension/:action"], Writing).
+    ?assertEqual([~"/players/:id/erase", ~"/ext/:extension/:action"], Writing).
+
+%% asobi#326: routing_tree returns on the first matching sibling and a binding
+%% matches any segment, so `/players/:id` declared first would not swallow a
+%% deeper path - but the ordering is load-bearing enough elsewhere in this
+%% table that it is pinned rather than assumed.
+erase_and_export_are_declared_before_the_player_binding_test() ->
+    #{routes := Routes} = ops_group(),
+    Paths = [Path || {Path, _Handler, _Opts} <- Routes],
+    ?assert(index_of(~"/players/:id/erase", Paths) < index_of(~"/players/:id", Paths)),
+    ?assert(index_of(~"/players/:id/export", Paths) < index_of(~"/players/:id", Paths)).
+
+index_of(Needle, List) ->
+    length(lists:takewhile(fun(Item) -> Item =/= Needle end, List)).
 
 ops_group() ->
     [Group] = [G || #{prefix := ~"/api/v1/ops"} = G <- asobi_router:routes(dev)],
@@ -535,3 +555,120 @@ capability_enabled(Name) ->
      || #{name := N, enabled := E} <- asobi_ops_features:capabilities(), N =:= Name
     ],
     Enabled.
+
+%%--------------------------------------------------------------------
+%% Erasure and export handlers
+%%--------------------------------------------------------------------
+
+erase_handler_test_() ->
+    {foreach, fun setup_erase/0, fun cleanup_erase/1, [
+        {"a body echoing the username erases", fun erase_confirmed/0},
+        {"no body at all is refused", fun erase_without_a_confirmation/0},
+        {"the wrong username is refused", fun erase_with_the_wrong_username/0},
+        {"a malformed id never reaches the database", fun erase_with_a_malformed_id/0},
+        {"an unknown player is not_found", fun erase_unknown_player/0},
+        {"a refused capability answers forbidden", fun erase_forbidden/0},
+        {"a rolled-back erasure is a 500 code", fun erase_failed/0},
+        {"export projects and never 404s a live player", fun export_ok/0},
+        {"export of an unknown player is not_found", fun export_unknown/0}
+    ]}.
+
+-define(ERASE_ID, ~"01960000-0000-7000-8000-000000000009").
+
+setup_erase() ->
+    meck:new(asobi_repo, [no_link]),
+    meck:expect(asobi_repo, get, fun(asobi_player, ?ERASE_ID) ->
+        {ok, #{id => ?ERASE_ID, username => ~"kaito"}}
+    end),
+    meck:new(asobi_player_erase, [no_link]),
+    meck:expect(asobi_player_erase, run, fun(?ERASE_ID, _Actor) ->
+        {ok, #{player_id => ?ERASE_ID, erased => true}}
+    end),
+    meck:new(asobi_player_export, [no_link]),
+    meck:expect(asobi_player_export, run, fun(?ERASE_ID) -> {ok, #{player => #{}}} end),
+    ok.
+
+cleanup_erase(_) ->
+    meck:unload(asobi_player_export),
+    meck:unload(asobi_player_erase),
+    meck:unload(asobi_repo),
+    ok.
+
+erase_req(Body) ->
+    #{
+        bindings => #{~"id" => ?ERASE_ID},
+        auth_data => #{ops_actor => erase_actor()},
+        json => Body
+    }.
+
+erase_actor() ->
+    #{
+        id => ~"static_secret",
+        display => ~"operator",
+        source => static_secret,
+        caps => [read, player_data, config, erasure],
+        attested => false
+    }.
+
+erase_confirmed() ->
+    ?assertMatch(
+        {json, #{data := #{erased := true}}},
+        asobi_ops_controller:erase_player(erase_req(#{~"username" => ~"kaito"}))
+    ),
+    ?assertEqual(1, meck:num_calls(asobi_player_erase, run, '_')).
+
+%% The echo is the guard that makes an unattended POST insufficient - a
+%% clickjacked console page can send the request but cannot know the username
+%% the server will compare against.
+erase_without_a_confirmation() ->
+    ?assertEqual(
+        {asobi_error, ~"ops.confirmation_required"},
+        asobi_ops_controller:erase_player(erase_req(#{}))
+    ),
+    ?assertEqual(0, meck:num_calls(asobi_player_erase, run, '_')).
+
+erase_with_the_wrong_username() ->
+    ?assertEqual(
+        {asobi_error, ~"ops.confirmation_mismatch"},
+        asobi_ops_controller:erase_player(erase_req(#{~"username" => ~"yuki"}))
+    ),
+    ?assertEqual(0, meck:num_calls(asobi_player_erase, run, '_')).
+
+erase_with_a_malformed_id() ->
+    Req = (erase_req(#{~"username" => ~"kaito"}))#{bindings => #{~"id" => ~"not-a-uuid"}},
+    ?assertEqual({asobi_error, ~"ops.invalid_id"}, asobi_ops_controller:erase_player(Req)),
+    ?assertEqual(0, meck:num_calls(asobi_repo, get, '_')).
+
+erase_unknown_player() ->
+    meck:expect(asobi_repo, get, fun(asobi_player, ?ERASE_ID) -> {error, not_found} end),
+    ?assertEqual(
+        {asobi_error, ~"ops.not_found"},
+        asobi_ops_controller:erase_player(erase_req(#{~"username" => ~"kaito"}))
+    ).
+
+erase_forbidden() ->
+    meck:expect(asobi_player_erase, run, fun(?ERASE_ID, _Actor) -> {error, forbidden} end),
+    ?assertEqual(
+        {asobi_error, ~"forbidden"},
+        asobi_ops_controller:erase_player(erase_req(#{~"username" => ~"kaito"}))
+    ).
+
+erase_failed() ->
+    meck:expect(asobi_player_erase, run, fun(?ERASE_ID, _Actor) -> {error, {error, boom}} end),
+    ?assertEqual(
+        {asobi_error, ~"ops.erase_failed"},
+        asobi_ops_controller:erase_player(erase_req(#{~"username" => ~"kaito"}))
+    ).
+
+export_ok() ->
+    ?assertMatch(
+        {json, #{data := #{player := #{}}}},
+        asobi_ops_controller:export_player(#{bindings => #{~"id" => ?ERASE_ID}})
+    ).
+
+export_unknown() ->
+    meck:expect(asobi_player_export, run, fun(?ERASE_ID) -> {error, not_found} end),
+    ?assertEqual(
+        {asobi_error, ~"ops.not_found"},
+        asobi_ops_controller:export_player(#{bindings => #{~"id" => ?ERASE_ID}})
+    ).

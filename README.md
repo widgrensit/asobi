@@ -90,7 +90,7 @@ your own release.
 - **Rate limiting** via `seki` (sliding window, per route group), **sessions** cached in ETS, **presence** via `pg`, **chat / social / economy / inventory / storage / tournaments / notifications** as Nova controllers.
 - **Extensions** - game-specific methods, callable as an `rpc.call` WebSocket frame and over `/api/v1/ops/ext/:extension/:action`. See [Extensions](guides/extensions.md).
 - **Client SDKs** for Godot, Defold, Unity, Unreal, JS/TS, Dart, Flame - [see below](#client-sdks).
-- **Operator console** - a browser UI over the ops plane, read-only today: players, matches, matchmaker queue, leaderboards, economy, chat, tournaments, notifications. Served by the node itself at `/console`, off until you turn it on.
+- **Operator console** - a browser UI over the ops plane: players, matches, matchmaker queue, leaderboards, economy, chat, tournaments, notifications. Reads, plus erasing and exporting one player. Served by the node itself at `/console`, off until you turn it on.
 
 ## Benchmarks
 
@@ -126,6 +126,7 @@ UDP relay if you need sub-3ms physics.
 - [**Glossary**](guides/glossary.md) - the self-hosted node vs asobi.dev Cloud. Start here if the names blur.
 - [**Getting started**](guides/getting-started.md) - stand up a local node, in Lua or in Erlang
 - [**Self-hosting**](guides/self-hosting.md) - requirements, production compose, operating notes
+- [**Cloud**](guides/cloud.md) - the managed version: the CLI, how Lua reaches an environment, and when to self-host instead
 - [**Architecture**](guides/architecture.md) - supervision tree, modules, design
 - [**REST API**](guides/rest-api.md) · [**WebSocket protocol**](guides/websocket-protocol.md)
 - [**Matchmaking**](guides/matchmaking.md) · [**Lobbies**](guides/lobbies.md) · [**Voting**](guides/voting.md) · [**Phases**](guides/phases.md)

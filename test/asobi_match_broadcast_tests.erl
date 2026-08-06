@@ -29,6 +29,10 @@ setup() ->
         ets:insert(?SENT_TAB, {PlayerId, Msg}),
         ok
     end),
+    meck:expect(asobi_presence, send_match_state, fun(PlayerId, SharedState, PreEncoded) ->
+        ets:insert(?SENT_TAB, {PlayerId, {match_state_shared, SharedState, PreEncoded}}),
+        ok
+    end),
     ok.
 
 cleanup(_) ->
@@ -39,7 +43,7 @@ cleanup(_) ->
 broadcast_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"per-player path delivers match_state per player", fun per_player_path/0},
-        {"shared path delivers match_state_raw with same binary", fun shared_path/0},
+        {"shared path hands presence one term and one binary per tick", fun shared_path/0},
         {"#304: oversized game.broadcast payload is not fanned out to players",
             fun oversized_broadcast_rejected/0},
         {"#304: normal-size game.broadcast payload is still delivered",
@@ -67,17 +71,20 @@ shared_path() ->
     timer:sleep(200),
     Sent = ets:tab2list(?SENT_TAB),
     PerPlayer = [X || X = {_, {match_state, _}} <- Sent],
-    Raw = [{P, B} || {P, {match_state_raw, B}} <- Sent, is_binary(B)],
+    Shared = [{P, S, B} || {P, {match_state_shared, S, B}} <- Sent, is_binary(B)],
     ?assertEqual([], PerPlayer),
-    ?assert(length(Raw) >= 2),
-    %% In any single tick the binary is identical for every player. Pick
-    %% the most-recent binary delivered to each player and compare them.
-    LastByPlayer = #{P => B || {P, B} <- Raw},
+    ?assert(length(Shared) >= 2),
+    %% In any single tick the binary is identical for every player - the
+    %% encode-once win - and the term beside it is the payload that binary
+    %% carries, which is what a bot reads instead of decoding.
+    LastByPlayer = #{P => {S, B} || {P, S, B} <- Shared},
     case maps:values(LastByPlayer) of
-        [B1, B2 | _] ->
+        [{S1, B1}, {_S2, B2} | _] ->
             ?assertEqual(B1, B2),
             Decoded = json:decode(B1),
-            ?assertMatch(#{~"type" := ~"match.state", ~"payload" := _}, Decoded);
+            ?assertMatch(#{~"type" := ~"match.state", ~"payload" := _}, Decoded),
+            ?assertMatch(#{~"world" := _, ~"tick" := _}, S1),
+            ?assertEqual(maps:get(~"tick", S1), maps:get(~"tick", maps:get(~"payload", Decoded)));
         _ ->
             ?assert(false)
     end,

@@ -52,7 +52,7 @@ game alive if we disappear.
 | Granting from a receipt | Your game's job | Nothing is granted by the IAP endpoints. Turn a verified receipt into currency or items yourself through the economy or inventory API. |
 | Automation rules and webhooks | Shigoto jobs | Written as an Erlang callback. |
 | Insights and analytics | `asobi_telemetry` plus your own pipeline | Telemetry is emitted; there is no hosted analytics. |
-| Game Manager (web console) | Built-in operator console at `/console` | Off by default, and read-only. See the note below the table. |
+| Game Manager (web console) | Built-in operator console at `/console` | Off by default, and reads plus player erasure/export. See the note below the table. |
 
 Custom server-side logic that is not tied to a match goes over the WebSocket:
 frame type `rpc.call` with `{protocol: 1, method, params}`, answered by
@@ -61,8 +61,8 @@ correlated by `cid`. All seven client SDKs support it. That is the CloudScript
 replacement. See [Extensions](extensions.md).
 
 A stock node serves neither the console nor the ops API; you turn them on - see
-[Operator console](console.md). When you do, the plane is read-only apart from
-actions an extension declares. If you use Game Manager to ban a player, refund a
+[Operator console](console.md). When you do, the plane is reads plus player
+erasure and export, apart from actions an extension declares. If you use Game Manager to ban a player, refund a
 purchase or edit a catalogue item, budget for building that yourself.
 
 ## Migration path
@@ -182,8 +182,8 @@ PlayFab Title.
 - No push notification service. Use APNs, FCM or a third party directly; the
   built-in notifications are in-game only.
 - No hosted voice.
-- No player-support tooling. The console is read-only, so refunds, bans and
-  grants are your own code.
+- Little player-support tooling. The console erases and exports a player;
+  refunds, bans and grants are your own code.
 - No Entity model. `player_id` is the primary key and you are not required to
   model everything as an entity with objects.
 

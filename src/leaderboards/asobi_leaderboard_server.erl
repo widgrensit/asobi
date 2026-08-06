@@ -3,7 +3,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/1, submit/3, top/2, rank/2, around/3, live_boards/0]).
+-export([start_link/1, submit/3, top/2, rank/2, around/3, live_boards/0, evict_player/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(PG_SCOPE, nova_scope).
@@ -77,6 +77,36 @@ live_boards() ->
     catch
         error:badarg -> []
     end.
+
+%% Drop a player from every live board, for `asobi_player_erase:after_commit/1`.
+%%
+%% ETS is the read source of truth here and `hydrate/1` runs only at init, so
+%% deleting the player's `leaderboard_entries` rows does not take them off a
+%% board that is already running: `top/2`, `rank/2` and `around/3` would keep
+%% serving an erased player's id until that process restarted, which for a
+%% long-lived gen_server is never.
+%%
+%% It also clears them from `dirty`, which is the more damaging half. A pending
+%% score for a deleted player is an INSERT that violates the
+%% `leaderboard_entries` -> `players` foreign key, and `flush_players/4` puts a
+%% failed write straight back into `dirty` - so the board would retry it every
+%% 30 seconds, and log the failure, for the rest of its life.
+%%
+%% Cast, not call: this runs after the erase transaction has already committed,
+%% so a board that is slow, wedged or dying must not be able to fail an erasure
+%% that has happened. A board that starts later hydrates from a table the rows
+%% are already gone from.
+-spec evict_player(binary()) -> ok.
+evict_player(PlayerId) ->
+    lists:foreach(
+        fun(BoardId) ->
+            case whereis_board_optional(BoardId) of
+                {ok, Pid} -> gen_server:cast(Pid, {evict, PlayerId});
+                not_found -> ok
+            end
+        end,
+        live_boards()
+    ).
 
 -spec validate_entries([term()]) -> [{binary(), number(), pos_integer()}].
 validate_entries(Entries) ->
@@ -168,6 +198,20 @@ handle_cast(
     ets:insert(Table, {{-Score, PlayerId}, Score}),
     ets:insert(Idx, {PlayerId, Score}),
     {noreply, State#{dirty => Dirty#{PlayerId => true}}};
+handle_cast({evict, PlayerId}, #{table := Table, player_index := Idx, dirty := Dirty} = State) when
+    is_binary(PlayerId)
+->
+    case ets:lookup(Idx, PlayerId) of
+        [{PlayerId, Score}] ->
+            ets:delete(Table, {-Score, PlayerId}),
+            ets:delete(Idx, PlayerId);
+        [] ->
+            ok
+    end,
+    %% Unconditionally, even when the board never held them: `dirty` and the
+    %% index can disagree, and a stale dirty key is the one that retries a
+    %% foreign-key violation forever.
+    {noreply, State#{dirty => maps:remove(PlayerId, Dirty)}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 

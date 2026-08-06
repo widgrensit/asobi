@@ -454,8 +454,10 @@ operator half.
 %% Optional abuse control: max unclaimed guests, or `infinity`.
 {guest_unlinked_cap, 100000},
 
-%% Optional retention. Unset = permanent guests (never reaped). Seconds after
-%% which unclaimed guests are deleted by the reaper.
+%% Optional retention. Unset = permanent guests (never reaped). Seconds of
+%% inactivity after which an unclaimed guest is deleted by the reaper. The
+%% clock restarts every time the device resumes, so this never expires a
+%% player who is still playing.
 {guest_reap_after, 2592000}
 ```
 
@@ -464,7 +466,19 @@ operator half.
 | `guest_verifier_pepper` | none | Key-id -> pepper map, or a single binary. Each pepper must be at least 32 bytes; a shorter one is treated as absent. Presence is the operator's on switch |
 | `guest_verifier_key_id` | `~"v1"` | Which pepper key id to use when minting new verifiers |
 | `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity` |
-| `guest_reap_after` | unset | Seconds; unset disables the reaper, so guests are permanent |
+| `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent |
+
+Measured from the last resume, not from account creation. Under device auth a
+guest stays unclaimed for life - there is no password to set - so account age
+would say nothing about whether anyone is still playing, and a returning player
+would be deleted on schedule.
+
+A reaped guest is erased in full - wallet, ledger, saves, storage, chat,
+friendships, identities and any installed extension's rows - through the same
+`asobi_player_erase` an operator-initiated erasure uses. This is permanent and
+irreversible, it takes up to 500 accounts per sweep, and the sweep writes no
+audit rows; it logs a count. Set it deliberately. See
+[Erasing and exporting a player](rest-api.md#erasing-and-exporting-a-player).
 
 **In the image today this needs a `sys.config`.** The Dockerfile declares
 `ASOBI_GUEST_VERIFIER_PEPPER`, but nothing substitutes it into `sys.config`, so
@@ -503,9 +517,11 @@ and never leaves the server. Player and guest tokens are rejected here: the ops
 plane never consults the player token store.
 
 One secret is one privilege level: whoever holds it holds every capability
-class, including `config`. Restrict who can reach the plane with a reverse
-proxy, and set `x-asobi-operator` per person for attribution in the audit trail
-- it is a label, never authority. See
+class, including `config` and `erasure`. Restrict who can reach the plane with
+a reverse proxy, and set `x-asobi-operator` per person for attribution in the
+audit trail - it is a label, never authority. A console session opened with
+this secret is the one exception: it gets every class but `erasure` unless
+`console_erasure` is set. See
 [REST API](rest-api.md#ops-authentication) for the per-route reference and
 [Operator console](console.md) for the operator narrative and for what the plane
 can and cannot do.
@@ -514,7 +530,8 @@ can and cannot do.
 
 A managed environment takes a second kind of ops credential: a short-lived,
 env-scoped token minted by a control plane after it has authenticated the tenant
-and checked they own this environment. Self-hosting needs none of this.
+and checked they own this environment. Self-hosting needs none of this, and
+[Cloud](cloud.md#the-console) walks the handoff end to end.
 
 ```erlang
 {ops_token_secret, ~"${ASOBI_OPS_TOKEN_SECRET}"},
@@ -566,12 +583,13 @@ operator surface on a public port has to be asked for.
 | `console_api_base` | none | Absolute `https://host[:port]` origin the console should call instead of this one. Also widens `connect-src`. Anything that is not a bare origin is ignored |
 | `console_label` | none | Names this deployment in the tab title and the console header |
 | `console_production` | `false` | Marks a deployment to be careful in. The console colours its label |
+| `console_erasure` | `false` | Let a console session erase players. Off because a browser can be clickjacked and an erasure cannot be undone; a bearer secret holds the class regardless |
 
 `console`, `console_label` and `console_production` also read
 `ASOBI_CONSOLE`, `ASOBI_CONSOLE_LABEL` and `ASOBI_CONSOLE_PRODUCTION`, and
 `ops_secret` reads `ASOBI_OPS_SECRET_FILE` or `ASOBI_OPS_SECRET`. The other
-three - `console_session_ttl`, `console_secure_cookie` and `console_api_base` -
-have no environment variable and need a `sys.config`. A variable overrides
+four - `console_session_ttl`, `console_secure_cookie`, `console_api_base` and
+`console_erasure` - have no environment variable and need a `sys.config`. A variable overrides
 `sys.config` only when it is set, so the two coexist.
 
 There is no `ASOBI_DB_PASSWORD_FILE`. The database password is substituted into

@@ -99,6 +99,10 @@ every_path_the_console_asks_for_is_a_declared_ops_route_test() ->
 
 %% Not the reverse assertion - the console is allowed to leave a route
 %% unrendered - but it is worth seeing which ones it does not use.
+%%
+%% `/players/_/export` is here because the console has no screen for it yet.
+%% The erasure route is absent from this list for a different reason: it is a
+%% POST, and `declared/0` only reads the `get` half of the table.
 unused_ops_routes_are_visible_test() ->
     Unused = declared() -- paths(),
-    ?assertEqual([~"/economy/listings/_"], Unused).
+    ?assertEqual([~"/economy/listings/_", ~"/players/_/export"], Unused).

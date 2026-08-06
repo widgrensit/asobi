@@ -308,9 +308,20 @@ register_player(Suffix, Config) ->
     #{~"player_id" := PlayerId, ~"access_token" := Token} = nova_test:json(Resp),
     {PlayerId, Token}.
 
+%% asobi#357 again: `erlang:unique_integer/1` is unique within one runtime
+%% instance, and each run is a new one - it restarts from a low value while the
+%% `players` table persists across runs, so a later run re-mints a username an
+%% earlier one already registered and the insert fails the unique index.
+%% Observed as `sequential_clients_reuse_existing_world` failing with "That
+%% username already belongs to another player" on a database that had seen a
+%% few runs.
+%%
+%% `lob_` rather than the old `wsprobe_`, which `asobi_ws_SUITE` also minted -
+%% two suites drawing from one namespace only made the collision likelier. The
+%% whole name has to stay inside the 32-character username limit, so this is a
+%% short tag plus 8 hex rather than `asobi_test_helpers:unique_id/1`.
 unique_name(Suffix) ->
-    N = integer_to_binary(erlang:unique_integer([positive])),
-    <<"wsprobe_", N/binary, "_", Suffix/binary>>.
+    <<"lob_", Suffix/binary, "_", (asobi_id:rand_suffix(4))/binary>>.
 
 ws_connect_authed(Token, Config) ->
     {ok, Conn} = nova_test_ws:connect("/ws", Config),

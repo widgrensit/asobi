@@ -178,12 +178,38 @@ resume(Identity, SecretBin) ->
         _ ->
             case verify(SecretBin, Meta) of
                 true ->
+                    touch(Identity),
                     issue_for_player(maps:get(player_id, Identity));
                 false ->
                     %% Wrong secret for a known device: reject. Never create a
                     %% second player, never overwrite the stored verifier.
                     {asobi_error, ~"guest.invalid_device_secret"}
             end
+    end.
+
+%% Record that this device was seen. `asobi_guest_reaper` keys retention on the
+%% identity's `updated_at`, so without this a guest who plays every day still
+%% looks exactly as stale as one that vanished after the first launch, and an
+%% operator who sets `guest_reap_after` erases their active players.
+%%
+%% A bare `update_all` SET rather than a changeset update: it writes the one
+%% column by id and so cannot round-trip - or clobber - the verifier in
+%% `provider_metadata`. Failure is logged and ignored; a write that only
+%% extends retention must never cost a player their login. The cost is one
+%% single-row UPDATE per resume, which happens at session start, not per tick.
+-spec touch(map()) -> ok.
+touch(Identity) ->
+    Q = kura_query:where(kura_query:from(asobi_player_identity), {id, maps:get(id, Identity)}),
+    case asobi_repo:update_all(Q, #{updated_at => calendar:universal_time()}) of
+        {ok, _} ->
+            ok;
+        Other ->
+            ?LOG_WARNING(#{
+                event => guest_touch_failed,
+                player_id => maps:get(player_id, Identity, undefined),
+                result => Other
+            }),
+            ok
     end.
 
 -spec create(binary(), binary()) -> response().

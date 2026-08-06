@@ -42,11 +42,12 @@ on one.
 Two rows are worth reading twice.
 
 The console is a React SPA served from `priv/console` by the same node that
-serves the game. Every core ops route is a read. The only route that mutates is
-`/api/v1/ops/ext/:extension/:action`, and its behaviour comes from an installed
-extension - so there is no ban, kick, grant, refund or match-end button. Nakama
-Console and PlayFab Game Manager both mutate; if you are moving from one of
-those, that is a real gap. See [Operator console](console.md).
+serves the game. Core's ops routes are reads apart from erasing and exporting
+one player; the third mutating route is `/api/v1/ops/ext/:extension/:action`,
+whose behaviour comes from an installed extension. So there is no ban, kick,
+grant, refund or match-end button. Nakama Console and PlayFab Game Manager both
+mutate; if you are moving from one of those, that is a real gap. See
+[Operator console](console.md).
 
 Custom server-side logic that is not per-match goes over the WebSocket as
 `rpc.call` with `{protocol: 1, method, params}`, answered by `rpc.ok` or
@@ -98,7 +99,8 @@ is CPU spent on message processing, not memory. Figures and method are in
   today.
 - You need a fully managed cloud at hyperscaler breadth. asobi's managed
   version is [asobi.dev/cloud](https://asobi.dev/cloud), which is the same
-  open-source core rather than a different product.
+  open-source core rather than a different product - invite-only today, and
+  narrower than self-hosting in ways [Cloud](cloud.md) lists.
 - You are building a single-player game that only needs analytics and IAP.
   Analytics plus a store validator is cheaper than any backend here.
 

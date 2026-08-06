@@ -147,14 +147,16 @@ What is available:
 Anything else has to come through the match script: put the value in the state
 the match broadcasts and read it from `state`.
 
-Bots do not work in a shared-state mode. A mode that declares
-`state_strategy = "shared"` broadcasts one pre-encoded payload to every
-recipient, and a bot cannot decode it, so `state` stays an empty table for the
-bot's whole life, the phase never advances past `playing`, and the default AI
-returns an empty input. There is no error and no log line. Use per-player
-`get_state` in any mode you want bots in - see
-[Performance tuning](performance-tuning.md) for what the shared path buys and
-what it costs.
+Bots work under both state strategies, and `think` sees the same `state`
+either way. A mode that declares `state_strategy = "shared"` still calls
+`get_state` once per tick and encodes once for the connected sessions; a bot
+is handed the payload behind that frame as a term, so it decodes nothing and
+costs the shared path no extra encode. The difference that remains is what
+`state` contains, not whether it arrives: under `"shared"` every bot sees
+exactly what every player sees, so a bot cannot be given information a client
+is not also given. Use per-player `get_state` when a bot needs a filtered view
+of its own - see [Performance tuning](performance-tuning.md) for what each
+path costs.
 
 Each `think` call runs under a 50 ms wall-clock budget, a heap cap and a
 reduction budget. A timeout, a heap or CPU overrun, an error, or a missing
@@ -284,8 +286,10 @@ is up to the client.
 
 A bot is tracked with `asobi_presence:track_bot/2`, which makes it a delivery
 target for everything the match server broadcasts (state, match events, votes)
-exactly like a connected player session. It receives the shared-state broadcast
-too, but cannot read it - see [What a bot script gets](#what-a-bot-script-gets).
+exactly like a connected player session. Shared state reaches it too:
+`asobi_presence:send_match_state/3` gives a session the pre-encoded frame and
+a bot the same payload as a term, which is the one delivery that differs by
+recipient kind - see [What a bot script gets](#what-a-bot-script-gets).
 
 It deliberately does not make the bot *online*:
 

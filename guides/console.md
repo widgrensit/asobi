@@ -16,10 +16,11 @@ managed environment has a second credential - see
 [Minted tokens](configuration.md#minted-tokens-managed-environments) - which
 needs `ops_token_secret` and `env_id`, neither set by default.)
 
-The two look coupled because enabling the console without a secret turns the
-console back off, below.
+The two look coupled because enabling the console with neither credential
+configured turns the console back off, below.
 
-This plane is read-only. If you came here for moderation actions, skip to
+This plane is reads plus account lifecycle - erasing and exporting one player.
+If you came here for moderation actions, skip to
 [What it cannot do](#what-it-cannot-do) first.
 
 ## Turning it on
@@ -43,10 +44,14 @@ a secret and got the path wrong must not come up quietly using something else.
 A trailing newline is stripped, so `openssl rand -hex 32 > ops_secret.txt`
 works as written.
 
-Enabling the console with no secret leaves the console **off**, logs
-`console_disabled_without_secret` at error level, and starts the node anyway.
-The game is the product; a misconfigured operator surface must not take players
-offline. On success the node logs `console_enabled`.
+Enabling the console with nothing that can sign in leaves the console **off**,
+logs `console_disabled_without_credential` at error level, and starts the node
+anyway. The game is the product; a misconfigured operator surface must not take
+players offline. On success the node logs `console_enabled`.
+
+"Nothing that can sign in" means neither credential. A managed environment
+configures no `ops_secret` on purpose and passes this check on
+`ops_token_secret` + `env_id` instead - see [Cloud](cloud.md#the-console).
 
 The compose fragment, matching the production compose in
 [Self-hosting](self-hosting.md):
@@ -165,38 +170,59 @@ What a reader arriving from another console will look for and not find:
 
 ## What it cannot do
 
-Core's ops routes are all reads. The only route that mutates is
-`/api/v1/ops/ext/:extension/:action`, and its behaviour comes from an installed
-extension.
+Core's ops routes are reads apart from two account-lifecycle routes:
 
-So there is no ban, no grant, no refund, no broadcast, no ticket cancel and no
-match end. If you arrived expecting Nakama Console, PlayFab Game Manager or the
-Hathora console, that expectation gap is real and this is where it is.
+```
+GET  /api/v1/ops/players/:id/export     Everything held about one player
+POST /api/v1/ops/players/:id/erase      Delete one player. Irreversible.
+```
 
-The one mutating route takes its method, its handler and its capability class
+Both are covered in
+[Erasing and exporting a player](rest-api.md#erasing-and-exporting-a-player).
+They exist because an operator must be able to answer a deletion or access
+request without a database shell, and because an Apache-2 self-hoster
+otherwise inherits an obligation the library gives them no way to discharge.
+
+Everything else is still absent: no ban, no grant, no refund, no broadcast, no
+ticket cancel and no match end. If you arrived expecting Nakama Console,
+PlayFab Game Manager or the Hathora console, that expectation gap is real and
+this is where it is.
+
+The third mutating route takes its method, its handler and its capability class
 from an installed extension's manifest. The console cannot invoke it today;
 that surface is HTTP only. See [Extensions](extensions.md) for how an extension
 declares one.
 
 ## Capability classes
 
-Three: `read`, `player_data` and `config`. Every route on the plane carries
-exactly one, and membership of that class in the caller's capabilities is the
-only authorisation decision anywhere in the plane. A route with no class is
-denied, so an untagged or mis-mounted route is closed rather than open.
+Four: `read`, `player_data`, `config` and `erasure`. Every route on the plane
+carries exactly one, and membership of that class in the caller's capabilities
+is the only authorisation decision anywhere in the plane. A route with no class
+is denied, so an untagged or mis-mounted route is closed rather than open.
 
-Core tags only `read` routes today. `player_data` and `config` exist for
-extension actions and for the classes a minted token can carry.
+Core tags `read` on every route but two: the player export is `player_data`,
+because it returns everything about one identified person rather than a list
+view, and the player erasure is `erasure`. `config` exists for extension
+actions and for the classes a minted token can carry.
+
+`erasure` is a class of its own for one reason, and it is not sensitivity:
+it is the only one whose actions cannot be undone by a later call. A ban can
+be lifted and a grant can be clawed back; an erased account is gone.
 
 What proves what:
 
-- The **operator secret** proves all three. One secret is one privilege level:
-  whoever holds it holds `config`.
+- The **operator secret** proves all four over a bearer header. One secret is
+  one privilege level: whoever holds it holds `config`.
 - A **minted token** proves only the classes it carries, and its lifetime is
   capped at 900 seconds by the node that verifies it, not by whatever minted it.
 - A **console session** inherits its credential's classes and expires no later
   than that credential does. A fifteen-minute token cannot buy a twelve-hour
   session with wider capabilities.
+- A console session opened with the **operator secret** gets every class
+  **except** `erasure`. The secret proves it; the transport is what differs.
+  A bearer secret in a config file is a script an operator wrote; a session
+  cookie is a browser that can be XSS'd or clickjacked into posting once. Set
+  `console_erasure` to `true` to allow it anyway.
 
 Every rejection is `403` carrying the shared error object, whatever the cause:
 
@@ -307,7 +333,7 @@ it on and was asked for a file that does not exist.
 This is a build problem, not a configuration one.
 
 **The node is up but the console is off.** Grep the boot log for
-`console_disabled_without_secret`, `ops_secret_file_unreadable` and
+`console_disabled_without_credential`, `ops_secret_file_unreadable` and
 `ops_secret_file_empty`. The line that says it worked is `console_enabled`.
 
 **Every ops call answers 403.** One of three things: no secret is configured,
@@ -324,5 +350,7 @@ front of more than one node. Make the route sticky.
 - [REST API](rest-api.md#ops) - the per-route ops reference.
 - [Configuration](configuration.md#operator-console) - every console key.
 - [Self-hosting](self-hosting.md) - the production compose this fits into.
+- [Cloud](cloud.md#the-console) - how a managed environment reaches this
+  without an operator secret.
 - [Clustering](clustering.md) - what is per node.
 - [Extensions](extensions.md) - declaring an operator action.

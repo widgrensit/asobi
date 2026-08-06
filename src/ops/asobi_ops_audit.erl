@@ -39,6 +39,13 @@ Nothing is dropped silently. A raise inside the audit path is caught for the
 same reason - the audit must not be able to fail an operation that already
 happened.
 
+**Erasure is the stated exception**, and `record_strict/4` is how it is taken.
+An erasure destroys the data it is about, so the row is the only surviving
+evidence the request was honoured; there is no degraded-but-still-there state
+for it to fall back to. `record_strict/4` reports whether the insert landed so
+the caller can write it inside its own transaction and roll the erasure back
+when it did not. Nothing else should use it.
+
 Successful writes are not also logged. The row is the record, and mirroring
 it into logs would double the retention surface holding player ids for no
 new information.
@@ -50,7 +57,7 @@ to hide one by exploding.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([mutation/4, record/4]).
+-export([mutation/4, record/4, record_strict/4]).
 
 -type subject() :: binary().
 -type failure() :: {subject(), term()}.
@@ -108,6 +115,23 @@ record(Actor, Action, Target, Outcome) ->
                 stacktrace => Stack
             }),
             ok
+    end.
+
+-doc """
+Write one audit row and say whether it landed.
+
+For `m:asobi_player_erase` only, and the reason is in the moduledoc: an
+erasure's audit row is the only evidence left that the request was honoured,
+so it commits with the erasure or the erasure does not happen. Every other
+call site wants `mutation/4`, which cannot fail the operation it describes.
+""".
+-spec record_strict(asobi_ops_auth:actor(), binary(), target(), outcome()) -> ok | {error, term()}.
+record_strict(Actor, Action, Target, Outcome) ->
+    Params = params(Actor, Action, Target, Outcome),
+    CS = kura_changeset:cast(asobi_ops_audit_entry, #{}, Params, maps:keys(Params)),
+    case asobi_repo:insert(CS) of
+        {ok, _Row} -> ok;
+        {error, Reason} -> {error, Reason}
     end.
 
 -spec write(asobi_ops_auth:actor(), binary(), target(), outcome()) -> ok.

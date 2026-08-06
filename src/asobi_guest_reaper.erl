@@ -7,6 +7,36 @@
 %% sweep time. "Permanent guests" = leave it unset. It only removes guests that
 %% were never claimed - no password and no non-device identity - so an upgraded
 %% account is never touched.
+%%
+%% Stale means INACTIVE, not old. The predicate is the guest identity's
+%% `updated_at`, which `asobi_guest_controller` refreshes every time a device
+%% resumes its player, so `guest_reap_after` reads as "not seen for N seconds".
+%% Keying it on `inserted_at` instead would read as "created N seconds ago" and
+%% delete a guest who has played daily since - an unclaimed account is the
+%% normal steady state for device auth, not a sign of abandonment, so account
+%% age says nothing about whether anyone is still using it. That distinction is
+%% load-bearing now that the cascade actually completes: it used to delete four
+%% of the fifteen FK children, so any guest with a wallet or a cloud save hit a
+%% constraint violation and was logged skipped, and the wrong predicate stayed
+%% inert. Erasure is permanent and writes no audit row, so the predicate has to
+%% mean what the guides say it means.
+%%
+%% `updated_at` is already NOT NULL on every existing row, so the sweep is
+%% correct from the first tick with no backfill. Any future writer of the
+%% identity row also extends retention, which is the safe direction: this
+%% predicate can only ever spare a guest it should have reaped, never reap one
+%% it should have spared.
+%%
+%% The deletion itself belongs to `asobi_player_erase`; this module owns guest
+%% retention policy and nothing else. That split is why the in-transaction
+%% unclaimed re-check stays here: it is a statement about which guests may be
+%% reaped, not about how a player is erased.
+%%
+%% A sweep writes no audit rows. It is an automated retention pass over up to
+%% ?REAP_BATCH accounts at a time, so a row per player would flood
+%% `ops_audit_entries` with the machine's own housekeeping; the sweep logs a
+%% count instead. Operator-initiated erasure - `asobi_player_erase:run/1,2` -
+%% audits, because there a person asked.
 
 -export([start_link/0, sweep_now/0, cached_unlinked_count/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
@@ -148,10 +178,14 @@ run_sweep() ->
 reap_older_than(Cutoff) ->
     %% Bounded batch per sweep - the next tick drains the rest. Guests are the
     %% highest-volume account type, so an unbounded load would block the sweeper.
+    %%
+    %% `updated_at`, not `inserted_at`: last seen, not account age. See the
+    %% moduledoc - this is the difference between reaping abandoned devices and
+    %% reaping the active player base.
     Q = kura_query:limit(
         kura_query:where(
             kura_query:where(kura_query:from(asobi_player_identity), {provider, ?PROVIDER}),
-            {inserted_at, '<', Cutoff}
+            {updated_at, '<', Cutoff}
         ),
         ?REAP_BATCH
     ),
@@ -176,51 +210,28 @@ reap_all([Identity | Rest], Count) ->
 reap_one(Identity) ->
     PlayerId = maps:get(player_id, Identity),
     case unclaimed_guest(PlayerId) of
-        true -> delete_guest_cascade(PlayerId);
+        true -> erase_guest(PlayerId);
         false -> skipped
     end.
 
-%% Delete the player and its FK children (which are ON DELETE NO ACTION, so the
-%% player row can't go first) atomically, children before the player. Only count
-%% a genuine deletion; a rolled-back/failed sweep reports skipped, not reaped.
-%%
-%% Installed extensions erase first, in the same transaction: an extension row
-%% that does not cascade holds the player row down exactly as core's own
-%% children do, so without this every such extension makes guests unreapable.
-%% Extensions before core so an erase path can still read the player's core
-%% rows.
--spec delete_guest_cascade(binary()) -> reaped | skipped.
-delete_guest_cascade(PlayerId) ->
+%% One transaction around the retention decision and the erasure, so a guest
+%% that gets claimed mid-sweep is not half-deleted. Only count a genuine
+%% deletion; a rolled-back or failed sweep reports skipped, not reaped.
+-spec erase_guest(binary()) -> reaped | skipped.
+erase_guest(PlayerId) ->
     Fun = fun() ->
         %% Re-check inside the transaction: a guest can call /auth/guest/upgrade
         %% between the pre-check and here, becoming a claimed account with a
         %% password and fresh tokens. Deleting it then would be silent loss of a
         %% real account, so a concurrent upgrade must win - abort the reap.
         case unclaimed_guest(PlayerId) of
-            false ->
-                {error, claimed_during_sweep};
-            true ->
-                %% Assert each delete: a bare `{error,_}` return (not a raise)
-                %% would otherwise let pgo commit a partial cascade (children
-                %% gone, player left). Matching {ok,_} turns that into a badmatch
-                %% that raises, rolling the whole transaction back. Same reason
-                %% the extension erase path is asserted rather than inspected.
-                ok = asobi_extension_erase:run(PlayerId),
-                {ok, _} = asobi_repo:delete_all(by_player(asobi_player_stats, PlayerId)),
-                %% player_tokens keys players by `user_id`, not `player_id`.
-                {ok, _} = asobi_repo:delete_all(by_user(asobi_player_token, PlayerId)),
-                {ok, _} = asobi_repo:delete_all(by_player(asobi_player_identity, PlayerId)),
-                case asobi_repo:get(asobi_player, PlayerId) of
-                    {ok, Player} ->
-                        {ok, _} = asobi_repo:delete(asobi_player, Player),
-                        ok;
-                    _ ->
-                        ok
-                end
+            false -> {error, claimed_during_sweep};
+            true -> asobi_player_erase:steps(PlayerId)
         end
     end,
     try asobi_repo:transaction(Fun) of
         ok ->
+            asobi_player_erase:after_commit(PlayerId),
             reaped;
         {error, Reason} ->
             ?LOG_DEBUG(#{event => guest_reap_skipped, player_id => PlayerId, reason => Reason}),
@@ -239,14 +250,6 @@ delete_guest_cascade(PlayerId) ->
             }),
             skipped
     end.
-
--spec by_player(module(), binary()) -> #kura_query{}.
-by_player(Schema, PlayerId) ->
-    kura_query:where(kura_query:from(Schema), {player_id, PlayerId}).
-
--spec by_user(module(), binary()) -> #kura_query{}.
-by_user(Schema, PlayerId) ->
-    kura_query:where(kura_query:from(Schema), {user_id, PlayerId}).
 
 %% A guest is unclaimed only if the player never set a password and has no
 %% identity from another provider (i.e. never upgraded/linked).

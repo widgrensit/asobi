@@ -246,7 +246,7 @@ HTTP and connect limiters - see [Clustering](clustering.md).
 
 The caller is the authenticated player on that socket; an unauthenticated
 socket is refused before the method is looked up. There is deliberately no
-per-method capability class: `read | player_data | config` is an operator
+per-method capability class: `read | player_data | config | erasure` is an operator
 vocabulary that a player never holds, so tagging a socket method with one would
 make it deniable for every caller the dispatcher has. An operator-only method
 goes in `ops/0` instead.
@@ -273,18 +273,21 @@ POST /api/v1/ops/ext/quests/define
 GET  /api/v1/ops/ext/quests/summary?filter=active
 ```
 
-`/api/v1/ops/ext/:extension/:action` is the only mutating route on the whole
-ops plane, and this is what puts something behind it. Core's own ops routes are
-all reads. You still declare no routes: core owns `/ext/:extension/:action` and
-dispatches every declared action behind it, the same way it owns one WebSocket
-frame type and dispatches `rpc/0` behind that.
+`/api/v1/ops/ext/:extension/:action` is the extension seam on the ops plane,
+and this is what puts something behind it. Core's own routes there are reads
+apart from erasing and exporting a player. You still declare no routes: core
+owns `/ext/:extension/:action` and dispatches every declared action behind it,
+the same way it owns one WebSocket frame type and dispatches `rpc/0` behind
+that.
 
 Know what gates it. On a stock deployment there is no `ops_secret`, so every
 bearer request is denied 403 and none of this is reachable. Once a secret is
 set, these routes are live whether or not the console is - `console` gates
 `/console` only, never the ops plane. A holder of the secret holds every
 capability class, so declaring `class => config` restricts which *minted* tokens
-reach an action, not which secret-holders do. See
+reach an action, not which secret-holders do. `erasure` is the one class a
+console session does not get by default, so declaring it also keeps an action
+out of a browser unless the operator set `console_erasure`. See
 [Operator console](console.md).
 
 The console cannot invoke an ops action today. The surface is HTTP only, and
@@ -311,8 +314,8 @@ every action answers `not_ready` (503).
 
 Three things are core's, not yours:
 
-- `class` is the whole authorisation. `read | player_data | config` is the same
-  vocabulary core's own ops routes carry. An action is admitted when its class
+- `class` is the whole authorisation. `read | player_data | config | erasure` is
+  the same vocabulary core's own ops routes carry. An action is admitted when its class
   is in the caller's capabilities and never otherwise. There is nothing to
   check inside your handler.
 - An undeclared action is denied, not 404. It has no class, and a route with no
@@ -563,8 +566,9 @@ Rules:
   `player_id`. Two extensions both adding `level` to `players` is
   unrecoverable, and core adding the same column later is worse.
 - An extension FK into `players.id` must cascade or declare an erase path. A
-  blanket cascade was rejected: cascading `wallets` would erase the financial
-  ledger through `transactions.wallet_id`.
+  blanket cascade was rejected: cascading `players` into `iap_transactions`
+  would destroy real-money purchase records that a refund or chargeback
+  dispute still needs.
 
 Your migrations run from your own application: kura discovers them through
 `asobi_repo:migration_apps/0`, inside core's transaction and under one
@@ -618,6 +622,15 @@ erase_player(PlayerId) ->
     ok.
 ```
 
+### Who calls it, and when
+
+`asobi_player_erase` does. That is the single place core deletes a player, and
+it has two entry points: `asobi_player_erase:run/1` from an Erlang shell, and
+`POST /api/v1/ops/players/:id/erase` on the ops plane. The guest reaper is one
+more caller of the same code rather than a second implementation of it, so
+there is one erasure path and your callback is on it whichever way the deletion
+was asked for.
+
 Core calls it inside its own transaction, before deleting any of its own rows,
 once per installed extension in dependency order. Do not open a transaction of
 your own. Extensions run before core so an erase path can still read the
@@ -633,8 +646,48 @@ around it and the deletion is retried.
 Omit `erase_player/1` when your rows cascade: it is the alternative to that
 declaration, not a second copy of it. Cascade lives on the column because the
 database is what enforces it, which is why this is a callback and not an
-`owns/0` key. Delete the rows or null the player reference and keep the ledger;
-core only needs the player row to be able to go.
+`owns/0` key.
+
+### The third option: sever the reference
+
+Delete the rows, or null the player reference and keep the row. Core does both
+in one function and it is worth reading as the worked example, because a
+receipts table is exactly where authors get stuck.
+
+`asobi_player_erase:steps/1` deletes eleven tables and severs two:
+
+- `iap_transactions.player_id` is set to `NULL`. The receipt carries a
+  provider, a store transaction id and a product id, and a refund or chargeback
+  dispute needs it long after the account is gone. Statutory retention beats
+  erasure for that row.
+- `groups.creator_id` is set to `NULL`. Deleting the group to free the key
+  would destroy every other member's data.
+
+Everything else goes. That *is* the anonymisation: every player-referencing
+table in core stores a bare uuid and nothing else about the person, so once
+`players` and `player_identities` are gone the surviving id resolves to nobody.
+Core does not mint a tombstone player row, and neither should you - a tombstone
+is a record about a person you were told to erase.
+
+Core's own foreign keys are all `no_action` and its erasure enumerates its
+children explicitly rather than delegating to the database. That is deliberate,
+and it is the reason a blanket `ON DELETE CASCADE` migration is refused rather
+than merely discouraged: a database cascade fires below the transaction's
+control flow, so `erase_player/1` would never be called at all and the receipts
+would be destroyed silently.
+
+### There is no `export_player/1`
+
+Core exports a player - `GET /api/v1/ops/players/:id/export` - and the payload
+covers core's tables only. Extensions do not contribute to it, and that is a
+decision rather than a gap.
+
+`erase_player/1` earns its keep because the foreign key forces you to answer:
+skip it and the player row physically cannot be deleted. An export callback has
+no such forcing function, so an extension that skipped it would produce a
+silently incomplete export and nothing would fail - a worse contract than no
+contract. If one ever ships, core will have to name in the payload which
+installed extensions contributed and which did not.
 
 ## Counters
 

@@ -1,9 +1,10 @@
 -module(asobi_lua_match_shared).
 -moduledoc """
 Variant of `asobi_lua_match` for matches where every player sees the same
-world state. The match server calls `get_state/1` once per tick and
-broadcasts a single pre-encoded payload to every subscriber, instead of
-re-encoding once per player.
+world state. The match server calls `get_state/1` once per tick and encodes
+the result once for the whole roster, instead of re-encoding once per player.
+`asobi_presence:send_match_state/3` then hands each connected session that
+one binary and each bot the payload behind it as a term.
 
 Selected by declaring `state_strategy = "shared"` in the match script's
 config globals. The Lua script must define `get_state(state)` (one

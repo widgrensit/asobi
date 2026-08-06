@@ -754,13 +754,17 @@ broadcast_state(#{players := Players, game_module := Mod, game_state := GS}) ->
             broadcast_per_player_state(Mod, GS, Players)
     end.
 
+%% One get_state/1 call and one encode per tick, whatever the roster is
+%% (ADR 0001). Both forms go to asobi_presence because only it knows which
+%% roster entries are bots: a bot reads the state as a term and would
+%% otherwise have to decode the frame it was handed, once per tick each.
 broadcast_shared_state(Mod, GS, Players) ->
     SharedState = Mod:get_state(GS),
     Payload = #{~"type" => ~"match.state", ~"payload" => SharedState},
     PreEncoded = iolist_to_binary(json:encode(Payload)),
     maps:foreach(
         fun(PlayerId, _Meta) ->
-            asobi_presence:send(PlayerId, {match_state_raw, PreEncoded})
+            asobi_presence:send_match_state(PlayerId, SharedState, PreEncoded)
         end,
         Players
     ).

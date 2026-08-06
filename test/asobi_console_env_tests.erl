@@ -8,7 +8,7 @@
 %% pass looks like it works.
 
 setup() ->
-    Keys = [console, ops_secret, console_label, console_production],
+    Keys = [console, ops_secret, ops_token_secret, env_id, console_label, console_production],
     Saved = [{K, application:get_env(asobi, K)} || K <- Keys],
     Vars = [
         "ASOBI_CONSOLE",
@@ -64,6 +64,42 @@ enabling_with_a_secret_turns_it_on_test_() ->
         asobi_console_env:apply(),
         ?assertEqual(true, env(console)),
         ?assertEqual(~"a-secret-long-enough-to-be-real", env(ops_secret))
+    end).
+
+%% A managed environment configures no ops_secret on purpose: the only
+%% credential its console accepts is a token the control plane minted, verified
+%% against `ops_token_secret` + `env_id`. Turning the console off there would
+%% take the whole cloud handoff with it.
+a_minted_token_is_a_credential_too_test_() ->
+    with_env(fun() ->
+        application:set_env(asobi, console, true),
+        application:set_env(asobi, ops_token_secret, binary:copy(~"k", 32)),
+        application:set_env(asobi, env_id, ~"11111111-2222-3333-4444-555555555555"),
+        asobi_console_env:apply(),
+        ?assertEqual(true, env(console)),
+        ?assertEqual(undefined, env(ops_secret))
+    end).
+
+%% The same pair asobi_ops_token:verify/1 refuses: a placeholder short enough to
+%% be a leftover, or a key with no environment to check a token's `env` against.
+a_half_configured_token_path_does_not_count_test_() ->
+    with_env(fun() ->
+        [
+            begin
+                application:unset_env(asobi, ops_token_secret),
+                application:unset_env(asobi, env_id),
+                [application:set_env(asobi, K, V) || {K, V} <- Configured],
+                application:set_env(asobi, console, true),
+                asobi_console_env:apply(),
+                ?assertEqual(false, env(console))
+            end
+         || Configured <- [
+                [{ops_token_secret, binary:copy(~"k", 32)}],
+                [{env_id, ~"env-1"}],
+                [{ops_token_secret, ~"too-short"}, {env_id, ~"env-1"}],
+                [{ops_token_secret, binary:copy(~"k", 32)}, {env_id, ~""}]
+            ]
+        ]
     end).
 
 %% A typo must close the surface, not open it.

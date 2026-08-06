@@ -11,9 +11,16 @@ A bot is tracked through `asobi_presence:track_bot/2`, so it is a delivery
 target for `asobi_presence:send/2` like any player session but is never
 counted by `asobi_presence:online_count/0`. The messages it consumes are the
 public `t:asobi_presence:message/0` contract, not an ad-hoc shape.
+
+Both state strategies arrive as `{match_state, map()}`. Under
+`state_strategy = "shared"` the match server still encodes once for the whole
+roster, and `asobi_presence:send_match_state/3` hands the bot the term behind
+that frame rather than the frame, so a bot decodes nothing per tick.
 """.
 
 -behaviour(gen_server).
+
+-include_lib("kernel/include/logger.hrl").
 
 -export([start_link/3]).
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, terminate/2]).
@@ -95,6 +102,18 @@ handle_presence_message({match_event, vote_start, VotePayload}, State) when
     handle_vote_start(VotePayload, State);
 handle_presence_message({match_event, finished, _}, State) ->
     {stop, normal, State};
+handle_presence_message(Message, #{bot_id := BotId} = State) when is_tuple(Message) ->
+    %% A bot ignores most of what a match broadcasts, so this is debug and
+    %% not a warning. It exists because a delivery shape no clause here
+    %% matches is otherwise indistinguishable from a bot with nothing to
+    %% do: turn debug on for this module to see what a stalled bot is
+    %% being sent. Only the tag is logged, never the payload.
+    ?LOG_DEBUG(#{
+        msg => ~"bot_unhandled_presence_message",
+        bot_id => BotId,
+        message => element(1, Message)
+    }),
+    {noreply, State};
 handle_presence_message(_, State) ->
     {noreply, State}.
 

@@ -86,7 +86,13 @@ nothing useful even if the identity table is dumped.
   longer resume the claimed account.
 - Reaping is safe. The optional `asobi_guest_reaper` (off unless
   `guest_reap_after` is set) re-checks that a guest is still unclaimed inside
-  its delete transaction, so a concurrent upgrade wins the race.
+  its delete transaction, so a concurrent upgrade wins the race. It targets
+  guests that have not resumed for the configured window, not guests whose
+  accounts are simply old - a device that keeps playing is never reaped. It
+  deletes
+  through `asobi_player_erase`, the same code an operator-initiated erasure
+  runs, so a reaped guest leaves nothing behind and its cached access token
+  stops resolving immediately rather than at the next cache expiry.
 
 Treat guest accounts as low assurance until they are upgraded. Anything
 valuable - purchases, competitive ranking, cross-device identity - should

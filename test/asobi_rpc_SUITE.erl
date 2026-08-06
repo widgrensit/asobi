@@ -183,9 +183,12 @@ rpc_call(Conn, Cid, Method, Params) ->
     ),
     Reply.
 
+%% asobi#357: `erlang:unique_integer/1` is unique per runtime instance, not
+%% across runs, while `players` persists - so a later run re-mints a username an
+%% earlier one registered and hits the unique index. The name must stay inside
+%% the 32-character username limit, hence a short tag plus 8 hex.
 register_player(Suffix, Config) ->
-    N = integer_to_binary(erlang:unique_integer([positive])),
-    Username = <<"rpcprobe_", N/binary, "_", Suffix/binary>>,
+    Username = <<"rpc_", Suffix/binary, "_", (asobi_id:rand_suffix(4))/binary>>,
     {ok, Resp} = nova_test:post(
         "/api/v1/auth/register",
         #{json => #{~"username" => Username, ~"password" => ~"testpass123"}},

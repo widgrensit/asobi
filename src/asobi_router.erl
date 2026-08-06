@@ -211,12 +211,26 @@ api_routes() ->
 %% Ops - the game-operations plane. Its own group because it is its own
 %% identity: the operator capability check (ADR 0007), never the player-scoped
 %% one. Every route here must carry a class in `asobi_ops_caps:classes/0`.
+%%
+%% The plane is a read plane plus exactly two account-lifecycle routes. Erasure
+%% is a POST with a server-verified confirmation rather than a DELETE, and it
+%% sits in its own `erasure` class rather than in `player_data`, because it is
+%% the one action here no follow-up call can undo.
 ops_routes() ->
     #{
         prefix => ~"/api/v1/ops",
         security => fun asobi_ops_auth:verify/1,
         routes => [
             {~"/players", fun asobi_ops_controller:players/1, #{methods => [get, options]}},
+            %% Before `/players/:id`, the asobi#326 ordering trap the match
+            %% routes carry a comment about: routing_tree prepends on insert
+            %% and returns on the first matching sibling.
+            {~"/players/:id/erase", fun asobi_ops_controller:erase_player/1, #{
+                methods => [post, options]
+            }},
+            {~"/players/:id/export", fun asobi_ops_controller:export_player/1, #{
+                methods => [get, options]
+            }},
             {~"/players/:id", fun asobi_ops_controller:player/1, #{methods => [get, options]}},
             {~"/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
             {~"/matches/:id", fun asobi_ops_controller:match/1, #{methods => [get, options]}},

@@ -52,8 +52,8 @@ By default the match server calls `get_state(player_id, state)` once per player
 per tick and encodes each result separately. For games where every player sees
 the same world (free-for-all shooters, racing, party games), opt into a single
 shared encode: the server calls the state function once per tick, encodes once,
-and broadcasts the same binary to everyone. At 200 players and 10 ticks/sec
-that is 10 encodes/sec instead of 2000.
+and sends that one binary to every connected session. At 200 players and 10
+ticks/sec that is 10 encodes/sec instead of 2000.
 
 Opt in from your match script by declaring `state_strategy = "shared"` and
 defining a one-argument state function. Games that need per-player filtering
@@ -73,10 +73,12 @@ end
 A shared script is routed through `asobi_lua_match_shared`, which exports
 `get_state/1`.
 
-Lua bots do not work in a shared-state mode: they receive the pre-encoded
-broadcast and cannot decode it, so `think` is called with an empty table and
-never sees the match. Keep the two-argument form in any mode you fill with bots
-- see [Lua bots](lua-bots.md#what-a-bot-script-gets).
+Bot fill works under either strategy and does not cost the shared path its
+encode: the one encode per tick is for the connected sessions, and each bot
+is handed the state as a term instead of the frame, so no bot decodes JSON.
+What you give up under `"shared"` is per-player filtering, for bots as much as
+for clients - `think` sees exactly what a client sees. See
+[Lua bots](lua-bots.md#what-a-bot-script-gets).
 
 In Erlang, export exactly one of `get_state/1` or `get_state/2`; the match
 server detects which is exported and switches broadcast strategy accordingly.

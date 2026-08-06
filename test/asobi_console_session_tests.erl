@@ -37,9 +37,39 @@ session_test_() ->
             {"an unknown cookie resolves to nothing", fun unknown/0},
             {"a non-binary cookie resolves to nothing", fun malformed/0},
             {"a hostile label is replaced, not stored", fun label/0},
-            {"the ttl is clamped", fun ttl/0}
+            {"the ttl is clamped", fun ttl/0},
+            {"a browser session cannot erase by default", fun no_erasure_by_default/0},
+            {"one config key opts the console in", fun erasure_opt_in/0},
+            {"a minted token's caps are inherited whole", fun minted_caps_are_untouched/0}
         ]
     end).
+
+%% The same operator secret buys every class over a bearer header and every
+%% class but `erasure` through a browser. That is not about what the secret
+%% proves - it proves all of them - but about the medium: a session cookie can
+%% be clickjacked, and an erasure is the one ops action nothing can undo.
+no_erasure_by_default() ->
+    application:unset_env(asobi, console_erasure),
+    {ok, #{caps := Caps}} = asobi_console_session:create(~"kaito"),
+    ?assertNot(lists:member(erasure, Caps)),
+    ?assertEqual(asobi_ops_caps:class_names() -- [erasure], Caps).
+
+erasure_opt_in() ->
+    application:set_env(asobi, console_erasure, true),
+    try
+        {ok, #{caps := Caps}} = asobi_console_session:create(~"kaito"),
+        ?assert(lists:member(erasure, Caps))
+    after
+        application:unset_env(asobi, console_erasure)
+    end.
+
+%% The exchange must not second-guess the control plane: a minted token carries
+%% exactly the classes it was minted with, and clamping here would put the
+%% decision in two places.
+minted_caps_are_untouched() ->
+    NotAfter = erlang:system_time(second) + 60,
+    {ok, #{caps := Caps}} = asobi_console_session:create(~"kaito", [read, erasure], NotAfter),
+    ?assertEqual([read, erasure], Caps).
 
 resolves() ->
     {ok, #{id := Id, csrf := Csrf, label := Label}} = asobi_console_session:create(~"kaito"),

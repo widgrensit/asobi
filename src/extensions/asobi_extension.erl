@@ -260,11 +260,32 @@ deleting a remote object, calling a third party - must be idempotent, because a
 later extension's failure will roll back everything around it and the whole
 deletion will be retried.
 
-Core deletes a player in one place today, `asobi_guest_reaper`, so that is
-where this runs. (`asobi_guest_controller` also deletes, but only a player row
-it inserted microseconds earlier and lost a race on, which no extension has
-been told about yet.) `m:asobi_extension_erase` is the seam, and a future
-operator-facing erasure calls the same function.
+Idempotence is not reversibility, and the difference is the one hole in this
+contract. Extensions run first, so by the time a later extension refuses, or
+core's own audit insert fails, a remote delete has already happened and no
+rollback reaches it. The reachable end state is a player who still exists and
+whose remote data does not - and because a rolled-back attempt writes no audit
+row, nothing durable records that it happened. Ordering does not fix it: order
+between extensions is not promised, and core's audit insert follows all of
+them.
+
+If you hold data outside this database, write the *intent* to erase it as a row
+in your own tables inside the transaction, and let a `m:shigoto` worker perform
+the remote call once that row has committed. Then the rollback takes the intent
+with it, and the irreversible step only ever runs after the erasure is final.
+
+Core deletes a player in exactly one place, `m:asobi_player_erase`, so that is
+where this runs. `asobi_guest_reaper` is one caller of it and the ops route
+`POST /api/v1/ops/players/:id/erase` is another; both reach this callback
+through the same function, in the same position, under the same transaction.
+(`asobi_guest_controller` also deletes, but only a player row it inserted
+microseconds earlier and lost a race on, which no extension has been told about
+yet.) `m:asobi_extension_erase` is the seam.
+
+Core's own foreign keys are all `no_action` and its erasure enumerates its
+children in code. A blanket `ON DELETE CASCADE` across core would fire below
+the transaction's control flow, so this callback would never run - which is
+the same reason the guide gives an extension author for not reaching for one.
 """.
 -callback erase_player(PlayerId :: binary()) -> ok | {error, term()}.
 
@@ -275,10 +296,15 @@ operator-facing erasure calls the same function.
 One operator action: the method it answers, the target, and its capability
 class.
 
-`class` is `read | player_data | config` (ADR 0007), the same vocabulary core's
-own ops routes carry, and it is the only thing that authorises the call. An
-action with no class is not reachable, because `asobi_ops_caps` denies a route
-it cannot tag.
+`class` is `read | player_data | config | erasure` (ADR 0007), the same
+vocabulary core's own ops routes carry, and it is the only thing that
+authorises the call. An action with no class is not reachable, because
+`asobi_ops_caps` denies a route it cannot tag.
+
+`erasure` means one thing: the action cannot be undone by a later call. It is
+not "extra sensitive" - it is held apart from `player_data` because an operator
+console is granted every other class by default and this one only on request.
+Declare it for an action that destroys data and for nothing else.
 
 `mfa` is applied as `Module:Function(Params, Ctx)` - the same shape as `rpc/0`,
 for the same reason - where `Params` is the decoded JSON body for a write and
@@ -300,7 +326,7 @@ out of, which is why the method is declared here rather than inferred.
 The operator actions this extension serves, as `Action => t:ops_entry/0`.
 
 `rpc/0` is player-scoped by construction: the caller is the authenticated
-player on that socket, and `read | player_data | config` is an operator
+player on that socket, and `read | player_data | config | erasure` is an operator
 vocabulary no player ever holds. So an extension with an admin surface - the
 first one hit it immediately with `quests.define` - had nowhere to put it.
 This is that home.

@@ -169,6 +169,20 @@ working and a new one reads one place: see `legacy/2`.
     {~"ops.unknown_sort_order", 400, ~"`order` must be \"asc\" or \"desc\"."},
     {~"ops.query_failed", 500, ~"The ops query failed."},
 
+    %% Account lifecycle. The confirmation codes are what stop an erasure from
+    %% being a single click a page can be tricked into making.
+    {
+        ~"ops.confirmation_required",
+        400,
+        ~"An erasure must echo the player's username in the request body."
+    },
+    {
+        ~"ops.confirmation_mismatch",
+        400,
+        ~"The username in the request body is not this player's username."
+    },
+    {~"ops.erase_failed", 500, ~"The erasure was rolled back and nothing was deleted."},
+
     %% Operator console. One 404 covers both "this node does not serve the
     %% console" and "no such asset", so a caller cannot tell a deployment that
     %% has the console switched off from one that has it on.

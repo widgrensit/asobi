@@ -393,8 +393,9 @@ guest_auth = true
     {guest_unlinked_cap, 100000},        %% max unclaimed guests, or `infinity`
 
     %% Optional retention. Unset = permanent guests (never reaped). A number of
-    %% seconds deletes unclaimed guests older than that.
-    {guest_reap_after, 2592000}          %% e.g. 30 days
+    %% seconds deletes unclaimed guests not seen for that long. Inactivity, not
+    %% account age: a device that keeps resuming keeps its player forever.
+    {guest_reap_after, 2592000}          %% e.g. 30 days since last resume
 ]}
 ```
 

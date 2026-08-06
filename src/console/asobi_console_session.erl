@@ -76,20 +76,38 @@ Open a session for an operator who has already proved the secret.
 the credential is a shared secret, so nothing here attests who typed it - and
 it is held to the same shape `asobi_ops_auth:display/1` holds the
 `x-asobi-operator` header to.
+
+**Every capability class but `erasure`.** The secret proves all of them, so
+this is not about what was proved; it is about the medium the credential
+arrived on. A bearer secret in a config file is a script an operator wrote. A
+session cookie is a browser, which can be XSS'd or clickjacked into posting
+somewhere the operator never meant to - and an erasure is the one ops action
+no follow-up call can undo. Same secret, different blast radius, different
+default. Set `console_erasure` to `true` to erase from the console anyway.
 """.
 -spec create(binary()) -> {ok, session()}.
 create(Label) ->
-    create(Label, asobi_ops_caps:class_names(), erlang:system_time(second) + ttl_seconds()).
+    create(Label, console_caps(), erlang:system_time(second) + ttl_seconds()).
+
+-spec console_caps() -> [asobi_ops_caps:class()].
+console_caps() ->
+    case application:get_env(asobi, console_erasure, false) of
+        true -> asobi_ops_caps:class_names();
+        _ -> asobi_ops_caps:class_names() -- [erasure]
+    end.
 
 -doc """
 Open a session carrying `Caps` and expiring no later than `NotAfter`.
 
-The operator secret proves every capability, so `create/1` grants all three.
 A **minted** token proves only the classes it carries and expires in minutes,
 so exchanging one for a session must not widen either: the session inherits
 the token's capabilities, and its expiry is clamped to the token's. Otherwise
 a fifteen-minute credential with two classes would buy a twelve-hour session
 with three, which is the whole point of the token undone by the exchange.
+
+Nothing is subtracted here, unlike `create/1`: a minted token carries exactly
+the classes the control plane decided to mint, and second-guessing that would
+put the decision in two places.
 """.
 -spec create(binary(), [asobi_ops_caps:class()], integer()) -> {ok, session()}.
 create(Label, Caps, NotAfter) ->

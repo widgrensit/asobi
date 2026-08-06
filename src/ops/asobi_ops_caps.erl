@@ -3,15 +3,23 @@
 Capability classes for the ops plane, and the table that tags every route with
 exactly one of them (ADR 0007).
 
-`read` is everything non-mutating, `player_data` is ban, grant, broadcast and
-roster edits, `config` is economy definitions, credentials and deploy-adjacent
-settings. The only authorisation decision anywhere in the plane is membership
-of a route's class in the actor's `caps`.
+`read` is everything non-mutating, `player_data` acts on one identified
+player's data (ban, grant, broadcast, roster edits, and the full export of
+one account), `config` is economy definitions, credentials and deploy-adjacent
+settings. `erasure` is player erasure and nothing else. The only
+authorisation decision anywhere in the plane is membership of a route's class
+in the actor's `caps`.
+
+`erasure` is its own class for one reason, and it is not sensitivity: it is
+the only irreversible one. An erased account cannot be un-erased by a second
+call the way a ban can be lifted, so it does not belong in the same grant as
+"give this player 100 coins" - and `asobi_console_session` hands a browser
+every other class by default.
 
 Role names are deliberately absent. They are not stable wire surface -
-capability classes are, and adding a fourth class later is additive.
-`asobi_saas` maps its own roles onto these classes once, at token-mint time,
-so the string "owner" never reaches this plane.
+capability classes are, and a further class later is additive the same way
+`erasure` was. `asobi_saas` maps its own roles onto these classes once, at
+token-mint time, so the string "owner" never reaches this plane.
 
 A route with no entry in `classes/0` has no class and `authorised/2` denies
 it, so an untagged or mis-mounted route is closed rather than open.
@@ -19,7 +27,7 @@ it, so an untagged or mis-mounted route is closed rather than open.
 
 -export([classes/0, class/2, authorised/2, class_names/0]).
 
--type class() :: read | player_data | config.
+-type class() :: read | player_data | config | erasure.
 -type segment() :: binary() | '_'.
 -type route() :: {atom(), [segment()], class()}.
 
@@ -51,7 +59,11 @@ classes() ->
         {get, [~"chat", ~"channels", '_', ~"messages"], read},
         {get, [~"tournaments"], read},
         {get, [~"tournaments", '_'], read},
-        {get, [~"notifications"], read}
+        {get, [~"notifications"], read},
+        %% Not `read`. `read` grants a leaderboard view; this grants
+        %% everything the deployment holds about one identified person.
+        {get, [~"players", '_', ~"export"], player_data},
+        {post, [~"players", '_', ~"erase"], erasure}
     ].
 
 -doc """
@@ -77,7 +89,7 @@ authorised(Class, Caps) -> lists:member(Class, Caps).
 -doc "Every class, for validating one declared in an extension manifest.".
 -spec class_names() -> [class()].
 class_names() ->
-    [read, player_data, config].
+    [read, player_data, config, erasure].
 
 -spec lookup(atom(), [binary()]) -> class() | undefined.
 lookup(undefined, _Segments) ->

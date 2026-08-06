@@ -202,9 +202,9 @@ registration = "closed"                   -- optional: signup posture
 spelling yourself.
 
 `state_strategy = "shared"` routes the mode to a different bridge, one that
-calls `get_state` **once per tick with one argument** and broadcasts a single
-pre-encoded payload to every subscriber. It is the right choice when every
-player sees the same world, and it changes the signature you must write:
+calls `get_state` **once per tick with one argument** and sends a single
+pre-encoded payload to every connected session. It is the right choice when
+every player sees the same world, and it changes the signature you must write:
 
 ```lua
 state_strategy = "shared"
@@ -215,8 +215,9 @@ end
 ```
 
 A script written against the two-argument `get_state(player_id, state)` will
-not work under `"shared"`, and vice versa. Bots do not work under `"shared"`
-either - see [Lua bots](lua-bots.md#what-a-bot-script-gets).
+not work under `"shared"`, and vice versa. Bots work under either strategy;
+under `"shared"` a bot's `think` sees exactly what a client sees, because
+there is one payload - see [Lua bots](lua-bots.md#what-a-bot-script-gets).
 
 World mode adds its own globals (`tick_rate`, `grid_size`, `zone_size`,
 `view_radius`, `player_ttl_ms` and more). They live in

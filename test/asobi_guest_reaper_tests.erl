@@ -86,7 +86,11 @@ refusing_extension_aborts_reap() ->
     application:set_env(asobi, guest_auth, true),
     ?assertEqual({ok, 0}, asobi_guest_reaper:sweep_now()),
     ?assertEqual(0, meck:num_calls(asobi_repo, delete, '_')),
-    ?assertEqual(0, meck:num_calls(asobi_repo, delete_all, '_')).
+    ?assertEqual(0, meck:num_calls(asobi_repo, delete_all, '_')),
+    %% Including the two sever steps: an extension that refuses must not leave
+    %% `iap_transactions` or `groups.creator_id` nulled on a player who then
+    %% survives.
+    ?assertEqual(0, meck:num_calls(asobi_repo, update_all, '_')).
 
 install_quests() ->
     ok = asobi_fixture_app:install(
@@ -95,6 +99,11 @@ install_quests() ->
 
 %% One unclaimed guest identity, and a transaction that runs its fun inline so
 %% the assertion inside it is the thing under test.
+%%
+%% These stubs cannot see a missing child delete - that is the whole reason
+%% `asobi_guest_SUITE:reaper_erases_a_guest_with_a_row_in_every_child_table/1`
+%% exists and runs against a real database. What they do cover is the ordering
+%% and the abort, which need no schema.
 expect_one_reapable_guest() ->
     meck:expect(asobi_repo, all, fun(_Q) ->
         {ok, [#{player_id => ~"p-1", provider => ~"guest"}]}
@@ -102,6 +111,7 @@ expect_one_reapable_guest() ->
     meck:expect(asobi_repo, get, fun(asobi_player, ~"p-1") ->
         {ok, #{id => ~"p-1", hashed_password => undefined}}
     end),
+    meck:expect(asobi_repo, update_all, fun(_Q, _Updates) -> {ok, 0} end),
     meck:expect(asobi_repo, delete_all, fun(_Q) -> {ok, 1} end),
     meck:expect(asobi_repo, delete, fun(asobi_player, _Player) -> {ok, #{}} end),
     meck:expect(asobi_repo, transaction, fun(Fun) -> Fun() end).

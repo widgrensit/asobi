@@ -89,3 +89,17 @@ to a separate bridge module `asobi_lua_match_shared` (see
   (the architecture-guardian's "fix #2"); orthogonal to the encode-once
   question because deltas still need to be encoded per recipient unless
   ALSO shared. Punted.
+
+## Amendment (2026-08-06)
+
+"Every subscriber" was wrong for one kind of subscriber. `asobi_bot` reads
+match state as an Erlang term and had no clause for `match_state_raw`, so
+under a shared strategy a bot's state stayed empty for the life of the match,
+with no error and no log line.
+
+Fan-out now goes through `asobi_presence:send_match_state/3`: a session gets
+the pre-encoded binary, a bot gets the `get_state/1` result as a term. The
+decision above is unchanged - `get_state/1` is still called once and encoded
+once per tick, and a bot adds neither a call nor an encode nor a decode. Only
+the delivery is recipient-aware, and only `asobi_presence` decides that,
+because it is what knows which ids are bots.

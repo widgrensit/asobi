@@ -8,6 +8,12 @@ production on infrastructure you control.
 It is opinionated about how Lua scripts get onto disk and when they reload,
 because that is the question every operator hits in the first week.
 
+**On asobi Cloud none of this applies.** A managed environment has no
+`/app/game` to mount, no `sys.config` you can write and no image you choose:
+scripts arrive as a bundle the `asobi` CLI uploads and the engine fetches at
+boot. Read [Cloud](cloud.md) instead, which also lists what a managed
+environment cannot configure and when to come back here.
+
 ## Requirements
 
 - **Erlang/OTP 29.** The image is built on `erlang:29.0.4-slim`, and 29 is the
@@ -53,7 +59,10 @@ ticks the runtime calls `filelib:last_modified/1` on the script; if the mtime
 moves, it re-executes the script body against the existing Luerl state. See
 `asobi_lua_reload` for the primitive.
 
-You have four ways to put scripts there. Two of them exist.
+You have four ways to put scripts there. Two of them exist. All four are
+self-hosting patterns: a cloud environment gets its scripts from
+[a bundle](cloud.md#how-lua-reaches-an-environment) and none of the four is
+available there.
 
 ### Pattern 1: bake into the image (immutable)
 
@@ -398,3 +407,5 @@ you do.
   complete list of what is per node.
 - Multi-tenant hosting. This image is single-tenant.
 - Payments. asobi ships the IAP receipt-validation primitive and nothing else.
+- Managed hosting. See [Cloud](cloud.md), where the deployment model is a CLI
+  bundle rather than anything on this page.

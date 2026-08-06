@@ -12,6 +12,8 @@
     upgrade_rejected_for_non_guest/1,
     upgrade_clears_stale_auth_cache_entries/1,
     reaper_removes_unclaimed_guest_and_children/1,
+    reaper_erases_a_guest_with_a_row_in_every_child_table/1,
+    reaper_spares_an_old_guest_that_still_plays/1,
     create_retries_on_username_collision/1,
     create_no_retry_on_non_unique_username_error/1
 ]).
@@ -25,16 +27,30 @@ all() ->
         upgrade_rejected_for_non_guest,
         upgrade_clears_stale_auth_cache_entries,
         reaper_removes_unclaimed_guest_and_children,
+        reaper_erases_a_guest_with_a_row_in_every_child_table,
+        reaper_spares_an_old_guest_that_still_plays,
         create_retries_on_username_collision,
         create_no_retry_on_non_unique_username_error
     ].
 
-init_per_suite(Config) ->
-    %% Set before the app starts so the sup starts the reaper and guest is on.
+%% Set AFTER the app starts, not before. Booting asobi runs
+%% `asobi_lua_config:maybe_load_game_config/0`, and a node with no game bundle
+%% takes the `error` branch of `declared_config/1`, which writes
+%% `{guest_auth, false}` unconditionally - by design, so a stale `true` from a
+%% previous bundle cannot survive a reload. A `set_env` before the start is
+%% therefore overwritten during it, guest auth is off for the whole suite, and
+%% every create returns 403 `guest.disabled`.
+%%
+%% Setting it afterwards is safe because nothing here is read at boot:
+%% `asobi_guest_controller:guest_enabled/0` reads both keys per request, and the
+%% reaper is an unconditional child that reads `guest_reap_after` at sweep time
+%% (asobi#327).
+init_per_suite(Config0) ->
+    Config = asobi_test_helpers:start(Config0),
     application:set_env(asobi, guest_auth, true),
     application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
     application:set_env(asobi, guest_reap_after, 1),
-    asobi_test_helpers:start(Config).
+    Config.
 
 end_per_suite(Config) ->
     Config.
@@ -181,13 +197,301 @@ reaper_removes_unclaimed_guest_and_children(Config) ->
     ?assert(is_pid(whereis(asobi_guest_reaper))),
     {ok, R1} = create(device_id(), secret(), Config),
     #{~"player_id" := Pid} = nova_test:json(R1),
-    %% guest_reap_after is 1s and the cutoff is computed at whole-second
-    %% granularity (erlang:universaltime/0), so a guest created late in a second
-    %% needs >2s to be strictly older than (sweep_second - 1). Sleep past two
-    %% second-boundaries to make the reap deterministic.
-    timer:sleep(2500),
+    %% Age the identity rather than sleeping past the cutoff, for the reason
+    %% `reaper_erases_a_guest_with_a_row_in_every_child_table/1` states: the
+    %% reaper compares whole seconds of `erlang:universaltime/0`, so a sleep
+    %% makes this a wall-clock race. A host correcting its clock under the test
+    %% advances less than the sleep did, the row ends up newer than the cutoff,
+    %% and the sweep skips it - observed failing roughly one run in six, with
+    %% `inserted_at` two seconds ahead of the timestamp taken at create.
+    age_identity(Pid),
     {ok, _} = asobi_guest_reaper:sweep_now(),
     ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, Pid)),
+    Config.
+
+%% asobi#369 part two. All 15 core foreign keys into `players.id` are ON DELETE
+%% NO ACTION, and the reaper used to delete four tables: player_stats,
+%% player_tokens, player_identities, players. A guest who earned one coin, wrote
+%% one cloud save or sent one chat message therefore hit a constraint violation
+%% on the players delete, the transaction rolled back, and the sweep retried it
+%% forever - permanently unreapable, and invisible because the eunit tests meck
+%% asobi_repo:delete_all/1 to {ok, 1}. Constraint enforcement is a property of
+%% the schema, so this needs a real database and a row in EVERY referencing
+%% table. Run it against the old reaper and it fails on the first assertion.
+%%
+%% It also pins the two tables that are severed rather than deleted: a purchase
+%% record survives its player, and so does a group other people are in.
+reaper_erases_a_guest_with_a_row_in_every_child_table(Config) ->
+    {ok, R} = create(device_id(), secret(), Config),
+    #{~"player_id" := PlayerId} = nova_test:json(R),
+
+    Other = insert_player(),
+    ItemDef = insert_item_def(),
+    OwnGroup = insert_group(PlayerId),
+    OtherGroup = insert_group(Other),
+    Wallet = insert_wallet(PlayerId),
+    Transaction = insert_transaction(Wallet),
+    Item = insert_player_item(PlayerId, ItemDef),
+    Storage = insert_storage(PlayerId),
+    Save = insert_cloud_save(PlayerId),
+    Notification = insert_notification(PlayerId),
+    Entry = insert_leaderboard_entry(PlayerId),
+    Message = insert_chat_message(PlayerId),
+    Membership = insert_group_member(OtherGroup, PlayerId),
+    %% Both friendship columns: one table, two foreign keys, and a delete
+    %% keyed only on `player_id` leaves the other half holding the player down.
+    Outgoing = insert_friendship(PlayerId, Other),
+    Incoming = insert_friendship(Other, PlayerId),
+    Receipt = insert_iap_transaction(PlayerId),
+    Match = insert_match_record(PlayerId),
+    Vote = insert_vote(PlayerId, Other),
+    %% The guest create path writes these two itself, so they are asserted
+    %% present rather than inserted - a table with nothing in it would make the
+    %% delete that clears it untestable.
+    ?assertEqual({ok, 1}, count(asobi_player_stats, player_id, PlayerId)),
+    ?assertEqual({ok, 1}, count(asobi_player_identity, player_id, PlayerId)),
+
+    %% Export the same footprint before erasing it. Three of its queries are SQL
+    %% a mocked repo cannot check: the wallet-ledger subquery, the jsonb
+    %% containment that finds a match record with no foreign key at all, and the
+    %% `jsonb_exists` key probe that finds a vote. All three would return an
+    %% empty list rather than fail if Postgres rejected them.
+    {ok, Export} = asobi_player_export:run(PlayerId),
+    ?assertEqual([Match], [Id || #{id := Id} <- maps:get(match_records, Export)]),
+    ?assertEqual([Vote], [Id || #{id := Id} <- maps:get(votes, Export)]),
+    %% One row, several people. The requester gets their own choice and no trace
+    %% of the other voter - a data-subject request must not become a disclosure.
+    [ExportedVote] = maps:get(votes, Export),
+    ?assertEqual(~"yes", maps:get(choice, ExportedVote)),
+    ?assertNot(maps:is_key(votes_cast, ExportedVote)),
+    ?assertEqual(
+        nomatch, binary:match(iolist_to_binary(io_lib:format("~p", [ExportedVote])), Other)
+    ),
+    ?assertEqual([Transaction], [Id || #{id := Id} <- maps:get(transactions, Export)]),
+    ?assertEqual([Wallet], [Id || #{id := Id} <- maps:get(wallets, Export)]),
+    ?assertEqual(
+        lists:sort([Outgoing, Incoming]),
+        lists:sort([Id || #{id := Id} <- maps:get(friendships, Export)])
+    ),
+    ?assertEqual([Receipt], [Id || #{id := Id} <- maps:get(iap_transactions, Export)]),
+    ?assertNot(maps:is_key(hashed_password, maps:get(player, Export))),
+    ?assertEqual([], [T || T <- maps:get(tokens, Export), maps:is_key(token, T)]),
+
+    age_identity(PlayerId),
+    {ok, Reaped} = asobi_guest_reaper:sweep_now(),
+    ?assert(Reaped >= 1),
+
+    ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, PlayerId)),
+    [
+        ?assertEqual({error, not_found}, asobi_repo:get(Schema, Id))
+     || {Schema, Id} <- [
+            {asobi_transaction, Transaction},
+            {asobi_wallet, Wallet},
+            {asobi_player_item, Item},
+            {asobi_storage, Storage},
+            {asobi_cloud_save, Save},
+            {asobi_notification, Notification},
+            {asobi_leaderboard_entry, Entry},
+            {asobi_chat_message, Message},
+            {asobi_group_member, Membership},
+            {asobi_friendship, Outgoing},
+            {asobi_friendship, Incoming}
+        ]
+    ],
+    ?assertEqual({ok, 0}, count(asobi_player_stats, player_id, PlayerId)),
+    ?assertEqual({ok, 0}, count(asobi_player_identity, player_id, PlayerId)),
+    ?assertEqual({ok, 0}, count(asobi_player_token, user_id, PlayerId)),
+
+    %% Severed, not destroyed. The receipt is a real-money record a chargeback
+    %% still needs; the group is other people's data.
+    ?assertMatch({ok, #{player_id := undefined}}, asobi_repo:get(asobi_iap_transaction, Receipt)),
+    ?assertMatch({ok, #{creator_id := undefined}}, asobi_repo:get(asobi_group, OwnGroup)),
+    ?assertMatch({ok, #{creator_id := Other}}, asobi_repo:get(asobi_group, OtherGroup)),
+    Config.
+
+%% --- Row fixtures for the erasure test ---
+%%
+%% Built through changesets on an unmocked asobi_repo, so every constraint the
+%% migrations declare is live.
+
+insert(Schema, Params) ->
+    CS = kura_changeset:cast(Schema, #{}, Params, maps:keys(Params)),
+    {ok, Row} = asobi_repo:insert(CS),
+    Row.
+
+insert_player() ->
+    #{id := Id} = insert(asobi_player, #{
+        username => asobi_test_helpers:unique_username(~"erasee")
+    }),
+    Id.
+
+insert_item_def() ->
+    #{id := Id} = insert(asobi_item_def, #{
+        slug => asobi_test_helpers:unique_id(~"slug"),
+        name => ~"Torch",
+        category => ~"tool"
+    }),
+    Id.
+
+insert_group(CreatorId) ->
+    #{id := Id} = insert(asobi_group, #{
+        name => asobi_test_helpers:unique_id(~"guild"), creator_id => CreatorId
+    }),
+    Id.
+
+insert_wallet(PlayerId) ->
+    #{id := Id} = insert(asobi_wallet, #{
+        player_id => PlayerId, currency => ~"gold", balance => 1
+    }),
+    Id.
+
+insert_transaction(WalletId) ->
+    #{id := Id} = insert(asobi_transaction, #{
+        wallet_id => WalletId, amount => 1, balance_after => 1, reason => ~"test"
+    }),
+    Id.
+
+insert_player_item(PlayerId, ItemDefId) ->
+    #{id := Id} = insert(asobi_player_item, #{
+        player_id => PlayerId, item_def_id => ItemDefId, acquired_at => calendar:universal_time()
+    }),
+    Id.
+
+insert_storage(PlayerId) ->
+    #{id := Id} = insert(asobi_storage, #{
+        collection => ~"inventory",
+        key => asobi_test_helpers:unique_id(~"key"),
+        player_id =>
+            PlayerId
+    }),
+    Id.
+
+insert_cloud_save(PlayerId) ->
+    #{id := Id} = insert(asobi_cloud_save, #{player_id => PlayerId, slot => ~"1"}),
+    Id.
+
+insert_notification(PlayerId) ->
+    #{id := Id} = insert(asobi_notification, #{
+        player_id => PlayerId,
+        type => ~"system",
+        subject => ~"hello",
+        sent_at => calendar:universal_time()
+    }),
+    Id.
+
+insert_leaderboard_entry(PlayerId) ->
+    #{id := Id} = insert(asobi_leaderboard_entry, #{
+        leaderboard_id => asobi_test_helpers:unique_id(~"board"), player_id => PlayerId, score => 1
+    }),
+    Id.
+
+insert_chat_message(PlayerId) ->
+    #{id := Id} = insert(asobi_chat_message, #{
+        channel_type => ~"global",
+        channel_id => ~"global",
+        sender_id => PlayerId,
+        content => ~"hi",
+        sent_at => calendar:universal_time()
+    }),
+    Id.
+
+insert_group_member(GroupId, PlayerId) ->
+    #{id := Id} = insert(asobi_group_member, #{
+        group_id => GroupId, player_id => PlayerId, joined_at => calendar:universal_time()
+    }),
+    Id.
+
+insert_friendship(PlayerId, FriendId) ->
+    #{id := Id} = insert(asobi_friendship, #{player_id => PlayerId, friend_id => FriendId}),
+    Id.
+
+%% No foreign key: `players` is a jsonb array of ids, exactly as
+%% `asobi_match_server` writes it.
+insert_match_record(PlayerId) ->
+    #{id := Id} = insert(asobi_match_record, #{
+        status => ~"finished", players => [PlayerId, asobi_id:generate()]
+    }),
+    Id.
+
+%% `votes_cast` is keyed by voter id, so this row carries a second voter whose
+%% choice must not come back in the first player's export.
+insert_vote(PlayerId, OtherVoter) ->
+    #{id := Id} = insert(asobi_vote, #{
+        match_id => asobi_id:generate(),
+        template => ~"kick",
+        method => ~"majority",
+        options => [~"yes", ~"no"],
+        votes_cast => #{PlayerId => ~"yes", OtherVoter => ~"no"},
+        window_ms => 30000
+    }),
+    Id.
+
+insert_iap_transaction(PlayerId) ->
+    #{id := Id} = insert(asobi_iap_transaction, #{
+        player_id => PlayerId,
+        provider => ~"apple",
+        transaction_id => asobi_test_helpers:unique_id(~"txn")
+    }),
+    Id.
+
+count(Schema, Field, Value) ->
+    asobi_repo:aggregate(kura_query:where(kura_query:from(Schema), {Field, Value}), count).
+
+%% Push the identity's timestamps far behind any cutoff, so a reap is a property
+%% of the row rather than of how much wall clock passed during the test. The
+%% reaper's predicate is `updated_at < universaltime() - reap_after` at
+%% whole-second granularity, which a sleep can only race with.
+%%
+%% Both columns, though only `updated_at` is the predicate: a row aged on one
+%% but not the other is a state the application never produces, and pinning the
+%% predicate to whichever column is stale would make the test agree with the
+%% reaper for the wrong reason.
+age_identity(PlayerId) ->
+    Ancient = {{2020, 1, 1}, {0, 0, 0}},
+    {ok, 1} = asobi_repo:update_all(
+        kura_query:where(kura_query:from(asobi_player_identity), {player_id, PlayerId}),
+        #{inserted_at => Ancient, updated_at => Ancient}
+    ),
+    ok.
+
+%% The reap predicate is inactivity, not account age. A device that keeps
+%% resuming is a player who is still here, however long ago they first launched
+%% the game - and under device auth they stay "unclaimed" forever, because
+%% there is no password to set and no provider to link. Keyed on `inserted_at`
+%% this test deletes the player: the identity is aged past the cutoff and
+%% nothing on the resume path moved it back.
+%%
+%% This is the case that made the erasure change dangerous rather than merely
+%% wrong. While the cascade was broken any such guest hit an FK violation and
+%% was logged skipped, so the predicate never got to finish the job; completing
+%% the cascade is what turned it into permanent, unaudited deletion of the
+%% active player base, at ?REAP_BATCH per sweep.
+reaper_spares_an_old_guest_that_still_plays(Config) ->
+    Dev = device_id(),
+    Secret = secret(),
+    {ok, R1} = create(Dev, Secret, Config),
+    ?assertStatus(200, R1),
+    #{~"player_id" := PlayerId} = nova_test:json(R1),
+
+    %% An account created long ago...
+    age_identity(PlayerId),
+
+    %% ...whose owner just opened the game. Same device, same secret: a resume,
+    %% not a create - assert that, or a regression that silently created a
+    %% second player would still pass the survival check below.
+    {ok, R2} = create(Dev, Secret, Config),
+    ?assertStatus(200, R2),
+    ?assertEqual(#{~"player_id" => PlayerId}, maps:with([~"player_id"], nova_test:json(R2))),
+
+    {ok, _} = asobi_guest_reaper:sweep_now(),
+    ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
+    ?assertEqual({ok, 1}, count(asobi_player_identity, player_id, PlayerId)),
+
+    %% And the sweep still works: the same account goes when it does fall idle,
+    %% so this test cannot pass by the reaper being broken outright.
+    age_identity(PlayerId),
+    {ok, _} = asobi_guest_reaper:sweep_now(),
+    ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, PlayerId)),
     Config.
 
 %% A generated username colliding with an existing one (previously: any two

@@ -27,6 +27,9 @@ presence_tracking_test_() ->
         {"a live bot is tracked, uncounted, and found by the match server",
             fun bot_tracked_and_uncounted/0},
         {"match state reaches the bot through presence", fun bot_receives_match_state/0},
+        {"shared-state match: the bot reads the state, the session gets the frame",
+            fun bot_receives_shared_match_state/0},
+        {"send_match_state/3 splits by recipient kind", fun send_match_state_splits/0},
         {"a vote_start match event reaches the bot", fun bot_receives_vote_start/0},
         {"a finished bot leaves the delivery group", fun finished_bot_untracked/0}
     ]}.
@@ -78,6 +81,7 @@ untrack_bot_drops_target() ->
     ok = asobi_presence:track_bot(~"bot_Blitz", Pid),
     ok = asobi_presence:untrack_bot(~"bot_Blitz", Pid),
     ?assertEqual(offline, asobi_presence:get_status(~"bot_Blitz")),
+    ?assertEqual([], pg:get_members(nova_scope, {bot, ~"bot_Blitz"})),
     ?assertEqual(Before, asobi_presence:online_count()),
     stop_relay(Pid).
 
@@ -103,6 +107,44 @@ bot_receives_match_state() ->
     ?assertEqual(#{score => 0}, maps:get(game_state, bot_state(BotPid))),
     stop_process(BotPid),
     stop_process(MatchPid).
+
+%% A mode whose game module exports get_state/1 broadcasts one pre-encoded
+%% frame per tick. A bot has no clause for that frame, so before
+%% asobi_presence:send_match_state/3 existed its game_state stayed empty for
+%% its whole life with no error and no log. The session must still get the
+%% pre-encoded frame: bots must not cost the encode-once path.
+bot_receives_shared_match_state() ->
+    MatchPid = start_match(#{game_module => asobi_test_game_shared, min_players => 1}),
+    Session = relay(),
+    ok = asobi_presence:track(~"shared_human", Session),
+    ok = asobi_match_server:join(MatchPid, ~"shared_human"),
+    BotPid = start_bot(MatchPid, ~"bot_Shard"),
+    %% after, not a tail of stop calls: a failing assertion here must not
+    %% leave a ticking match behind for the next test module to trip over.
+    try
+        wait_until(fun() -> maps:get(game_state, bot_state(BotPid)) =/= #{} end),
+        ?assertMatch(
+            #{~"world" := #{npcs := 0}, ~"tick" := _},
+            maps:get(game_state, bot_state(BotPid))
+        ),
+        ?assertMatch(#{~"type" := ~"match.state"}, json:decode(next_raw_frame()))
+    after
+        stop_relay(Session),
+        stop_process(BotPid),
+        stop_process(MatchPid)
+    end.
+
+send_match_state_splits() ->
+    Session = relay(),
+    ok = asobi_presence:track(~"split_human", Session),
+    ok = asobi_presence:send_match_state(~"split_human", #{~"tick" => 7}, ~"frame"),
+    ?assertEqual({asobi_message, {match_state_raw, ~"frame"}}, next_relayed()),
+    stop_relay(Session),
+    Bot = relay(),
+    ok = asobi_presence:track_bot(~"bot_Split", Bot),
+    ok = asobi_presence:send_match_state(~"bot_Split", #{~"tick" => 7}, ~"frame"),
+    ?assertEqual({asobi_message, {match_state, #{~"tick" => 7}}}, next_relayed()),
+    stop_relay(Bot).
 
 bot_receives_vote_start() ->
     %% min_players 2 keeps the match in `waiting`, so no state broadcast
@@ -176,6 +218,14 @@ next_relayed() ->
         {relayed, Msg} -> Msg
     after 2000 ->
         error(no_message_delivered)
+    end.
+
+next_raw_frame() ->
+    receive
+        {relayed, {asobi_message, {match_state_raw, Frame}}} -> Frame;
+        {relayed, _} -> next_raw_frame()
+    after 2000 ->
+        error(no_raw_frame_delivered)
     end.
 
 stop_process(Pid) ->

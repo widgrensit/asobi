@@ -54,7 +54,7 @@ depend on the Hex package and write Erlang. Same node either way.
 | RPC endpoints | Extension RPC over the WebSocket | Frame `rpc.call` with `{protocol: 1, method, params}`; replies `rpc.ok` `{result}` or `rpc.error` `{error: {code, message, details}}`, correlated by `cid`. All seven client SDKs support it. See [Extensions](extensions.md). |
 | Hooks (`before_authenticate`, `after_friendAdd`) | Nova plugins and match lifecycle callbacks | Pre- and post-request middleware in Nova. |
 | Runtime Lua / TS / Go | Lua for game logic, Erlang/OTP for the engine | One scripting language. |
-| Nakama Console | Built-in operator console at `/console` | Off by default, and read-only. See the note below the table. |
+| Nakama Console | Built-in operator console at `/console` | Off by default, and reads plus player erasure/export. See the note below the table. |
 | Session token | `access_token` plus `refresh_token` | Register and login return `player_id`, `access_token`, `refresh_token` and `username`. There is no `session_token` field. |
 | WebSocket | `/ws`, `session.connect` first frame | See the Hathora guide's [WebSocket handshake](migrate-from-hathora.md#websocket-handshake). |
 
@@ -64,8 +64,8 @@ one missing and `POST /api/v1/auth/guest` answers `guest.disabled`. See
 [Authentication](authentication.md).
 
 A stock node serves neither the console nor the ops API; you turn them on - see
-[Operator console](console.md). When you do, the plane is read-only apart from
-actions an extension declares. If you run Nakama Console to ban and kick, budget
+[Operator console](console.md). When you do, the plane is reads plus player
+erasure and export, apart from actions an extension declares. If you run Nakama Console to ban and kick, budget
 for building that yourself.
 
 ## Migration path
@@ -233,8 +233,9 @@ Nakama server down.
   [`asobi_seasons`](https://github.com/widgrensit/asobi_seasons) extension, but
   nothing as opinionated.
 - Go and TypeScript runtimes. asobi is Lua or Erlang.
-- A mutating operator console. asobi's ops plane is read-only, so moderation is
-  a database write, a Lua handler or an extension action.
+- A mutating operator console. asobi's ops plane erases and exports a player
+  and nothing else, so moderation is a database write, a Lua handler or an
+  extension action.
 - Published case studies from large studios. asobi is newer.
 
 ## What asobi has that Nakama does not

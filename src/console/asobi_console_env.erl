@@ -26,13 +26,19 @@ The database password cannot work this way - it is substituted into
 `sys.config` before any of this runs - so `ASOBI_DB_PASSWORD_FILE` is not a
 thing, whatever the deployment guide used to imply.
 
-## Enabled without a secret
+## Enabled with nothing to sign in with
 
 The console stays off and says so at error level. It does not stop the node:
 the game is the product and the console is an accessory, so taking players
 offline because an operator surface is misconfigured is the wrong trade. A
 console that renders a sign-in nothing can pass is the worse failure, because
 it looks like it works.
+
+`ops_secret` is not the only credential that counts. A managed environment
+configures none on purpose - the only thing its console accepts is a token
+`console.asobi.dev` minted for someone it authenticated, verified against
+`ops_token_secret` and `env_id` (`m:asobi_ops_token`). Either credential being
+configured is enough; neither is what turns the console off.
 """.
 
 -export([apply/0]).
@@ -47,17 +53,16 @@ apply() ->
     ok = set_boolean(console, "ASOBI_CONSOLE"),
     ok = resolve().
 
-%% The two keys have to agree, and only one of the four combinations is a
-%% problem: asked for, with nothing to authenticate against.
+%% Asked for, with nothing that can sign in, is the only bad combination.
 -spec resolve() -> ok.
 resolve() ->
-    case {application:get_env(asobi, console, false), secret_configured()} of
+    case {application:get_env(asobi, console, false), credential_configured()} of
         {true, false} ->
             application:set_env(asobi, console, false),
             ?LOG_ERROR(#{
-                msg => ~"console_disabled_without_secret",
+                msg => ~"console_disabled_without_credential",
                 detail =>
-                    ~"enabled but no ops_secret is set, so nothing could sign in - set ASOBI_OPS_SECRET_FILE (preferred) or ASOBI_OPS_SECRET",
+                    ~"enabled but nothing could sign in - set ASOBI_OPS_SECRET_FILE (preferred) or ASOBI_OPS_SECRET, or provision ASOBI_OPS_TOKEN_SECRET and GAME_ID for the managed minted-token path",
                 effect => ~"the console stays off; the node is unaffected"
             });
         {true, true} ->
@@ -69,6 +74,13 @@ resolve() ->
         _ ->
             ok
     end.
+
+%% A self-hoster configures `ops_secret`. A managed environment configures none
+%% and accepts only minted tokens, so asking about the secret alone switched the
+%% console off underneath the whole cloud handoff.
+-spec credential_configured() -> boolean().
+credential_configured() ->
+    secret_configured() orelse asobi_ops_token:configured().
 
 -spec secret_configured() -> boolean().
 secret_configured() ->

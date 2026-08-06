@@ -99,9 +99,12 @@ register_player(Suffix, Config) ->
     #{~"player_id" := PlayerId, ~"access_token" := Token} = nova_test:json(Resp),
     {PlayerId, Token}.
 
+%% asobi#357: `erlang:unique_integer/1` is unique per runtime instance, not
+%% across runs, while `players` persists - so a later run re-mints a username an
+%% earlier one registered and hits the unique index. The name must stay inside
+%% the 32-character username limit, hence a short tag plus 8 hex.
 unique_name(Suffix) ->
-    N = integer_to_binary(erlang:unique_integer([positive])),
-    <<"chatprobe_", N/binary, "_", Suffix/binary>>.
+    <<"chat_", Suffix/binary, "_", (asobi_id:rand_suffix(4))/binary>>.
 
 ws_connect_authed(Token, Config) ->
     {ok, Conn} = nova_test_ws:connect("/ws", Config),

@@ -378,10 +378,17 @@ routes are always mounted and reject everything until an `ops_secret` is
 configured, so a stock node serves neither. [Operator console](console.md) owns
 the detail.
 
-Core's ops routes are all reads. Every route carries a capability class -
-`read`, `player_data` or `config` (`src/ops/asobi_ops_caps.erl:22`) - and the
-only route that mutates is `/api/v1/ops/ext/:extension/:action`, whose
-behaviour comes from an installed extension.
+Every ops route carries a capability class - `read`, `player_data`, `config`
+or `erasure` (`src/ops/asobi_ops_caps.erl`) - and the class is the only thing
+that authorises the call. Core's routes are reads apart from two:
+`GET /api/v1/ops/players/:id/export` (`player_data`) and
+`POST /api/v1/ops/players/:id/erase` (`erasure`). The third mutating route is
+`/api/v1/ops/ext/:extension/:action`, whose behaviour comes from an installed
+extension.
+
+`erasure` is its own class because it is the only irreversible one, and a
+console session is granted every class but that one by default
+(`src/console/asobi_console_session.erl`).
 
 The console holds no privileged path into the database. It reads the ops plane
 over HTTP like any other client. It was previously a separate project,

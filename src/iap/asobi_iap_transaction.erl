@@ -12,7 +12,12 @@ table() -> ~"iap_transactions".
 fields() ->
     [
         #kura_field{name = id, type = uuid, primary_key = true, nullable = false},
-        #kura_field{name = player_id, type = uuid, nullable = false},
+        %% Nullable so `m:asobi_player_erase` can sever the receipt from the
+        %% player without destroying it. A purchase record outlives the account:
+        %% a refund or chargeback dispute needs the provider transaction id long
+        %% after an erasure request has been honoured. `changeset/2` still
+        %% requires it, so nothing can write a receipt with no player.
+        #kura_field{name = player_id, type = uuid},
         #kura_field{name = provider, type = string, nullable = false},
         #kura_field{name = transaction_id, type = string, nullable = false},
         #kura_field{name = original_transaction_id, type = string},

@@ -102,6 +102,35 @@ insert fails - or raises - the row is emitted at error level with the same
 field names, so the record degrades from queryable to greppable rather than
 disappearing.
 
+### 4. Erasure is the one stated exception (amended 2026-08-06)
+
+Audit-after is the rule. Player erasure is the exception, and it is the only
+one.
+
+The rule holds because a mutation leaves something behind that a degraded log
+line can still describe, and because the change cannot be undone by refusing
+to record it. Erasure breaks both halves. The data it describes is gone by
+definition, so the audit row is not a second record of the change - it is the
+**only** surviving evidence the request was honoured, which is the
+accountability half of a deletion obligation rather than bureaucracy around
+it. And "the change already happened" stops being a reason not to fail,
+because the change *can* still be refused: it is one transaction, and the row
+can commit inside it.
+
+So `asobi_player_erase` writes its row through
+`asobi_ops_audit:record_strict/4` inside the erasure transaction. A failed
+insert rolls the erasure back, and the player survives with nothing deleted.
+"Erased" and "recorded as erased" are the same commit or neither happened.
+
+`ops_audit_entries.actor_id` and `target_id` are plain strings with no foreign
+key to `players`, so the row already outlives its own subject by construction
+- which is what makes this possible at all.
+
+An automated retention sweep is not an operator action and writes no rows:
+`asobi_guest_reaper` erases up to 500 accounts per pass and logs a count. A
+row per reaped guest would bury the operator actions this table exists for
+under the machine's own housekeeping.
+
 ## Consequences
 
 - **Attribution survives the request.** Every mutation is answerable months
@@ -111,8 +140,18 @@ disappearing.
   console's mutation moves onto (widgrensit/asobi_admin#6). Until it does,
   the console keeps its own copy and keeps lying; core cannot fix that from
   here.
-- **No ops write routes were added.** The plane stays read-only. This is the
-  mechanism plus the one mutation that already existed, not a write surface.
+- **No ops write routes were added by this ADR.** It shipped the mechanism
+  plus the one mutation that already existed. That sentence used to read "the
+  plane stays read-only", and it stopped being true when player erasure
+  landed: `POST /api/v1/ops/players/:id/erase` and
+  `GET /api/v1/ops/players/:id/export` are routed. Read-only was never the
+  load-bearing property - the caps vocabulary already named `player_data` and
+  `config` as mutation classes, `asobi_ops_auth` already granted all three to
+  a static secret, and `asobi_ops_notifications:broadcast/5` was already a
+  complete audited mutation sitting unrouted. What is load-bearing is that a
+  mutation be capability-classed and audited, and erasure is both. It also
+  added the fourth class the vocabulary said would be additive: `erasure`,
+  discriminated by irreversibility rather than sensitivity.
 - **An audit row is a new failure mode with a documented outcome.** A
   deployment whose database is degraded loses queryable audit rows and keeps
   error-level log lines. That is a stated trade, not a silent one.

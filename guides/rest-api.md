@@ -314,6 +314,9 @@ GET /api/v1/ops/tournaments                  Paginated tournament list
 GET /api/v1/ops/tournaments/:id              One tournament
 GET /api/v1/ops/notifications                Paginated sent notifications
 
+GET  /api/v1/ops/players/:id/export          Everything held about one player
+POST /api/v1/ops/players/:id/erase           Delete one player. Irreversible.
+
 GET|POST|PUT|DELETE
     /api/v1/ops/ext/:extension/:action       Dispatch to an installed extension
 ```
@@ -322,9 +325,10 @@ The game-operations plane, for a console rather than a game client. The lists
 differ from the ones above in three ways: they report a total, they accept a
 sort, and they page by offset.
 
-Core's ops routes are all reads. The only route that mutates is
-`/api/v1/ops/ext/:extension/:action`, and its behaviour comes from an
-installed extension.
+Everything here is a read except two account-lifecycle routes - see
+[Erasing and exporting a player](#erasing-and-exporting-a-player) - and
+`/api/v1/ops/ext/:extension/:action`, whose behaviour comes from an installed
+extension.
 
 These routes do **not** accept player tokens. They are their own auth plane -
 see [Ops authentication](#ops-authentication) below. For turning the console
@@ -474,9 +478,8 @@ and `rewards` do.
 `player_id`, `type` and `read`, and searches the subject. It answers the
 question a broadcast raises: who received it, and how many have opened it.
 
-Core's ops routes are all reads, so there is no broadcast route here. The
-broadcast is an in-process entry point that writes an audit row - see
-[Ops audit](#ops-audit).
+There is no broadcast route here. The broadcast is an in-process entry point
+that writes an audit row - see [Ops audit](#ops-audit).
 
 ### Leaderboards
 
@@ -688,10 +691,83 @@ indistinguishable to the caller, deliberately.
 
 A bearer token wins when both it and a console cookie are present.
 
-Each route carries exactly one capability class - `read`, `player_data` or
-`config` - and a request is admitted only if the credential holds that class.
-Every core route is `read`; an extension action's class comes from its
-manifest. Role names never appear on the wire.
+Each route carries exactly one capability class - `read`, `player_data`,
+`config` or `erasure` - and a request is admitted only if the credential holds
+that class. Every core route is `read` except the two account-lifecycle ones;
+an extension action's class comes from its manifest. Role names never appear
+on the wire.
+
+`erasure` is separate from `player_data` for one reason, and it is not
+sensitivity: it is the only class whose actions cannot be undone by a later
+call. The operator secret sent as a bearer token holds all four. A console
+session holds every class **but** `erasure` unless `console_erasure` is set to
+`true` - same secret, different transport, different blast radius.
+
+### Erasing and exporting a player
+
+```
+GET  /api/v1/ops/players/:id/export
+POST /api/v1/ops/players/:id/erase
+```
+
+`export` returns everything core holds about one player, keyed by table, each
+row through a positive allowlist. Credentials are never in it: no
+`hashed_password`, and a session is reported as having existed without its
+bearer token. Class `player_data`, not `read` - a leaderboard view is one
+thing, and the whole of one identified person's record is another.
+
+`erase` deletes the player and every row core holds for them, in one
+transaction, and it cannot be undone. The body must echo the player's username
+and the server checks it against the row:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $ASOBI_OPS_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "kaito"}' \
+  https://game.example.com/api/v1/ops/players/019f.../erase
+```
+
+```json
+{"data": {"player_id": "019f...", "erased": true}}
+```
+
+A missing echo is `ops.confirmation_required` and a wrong one is
+`ops.confirmation_mismatch`, both 400. Neither reaches the deletion.
+
+Two tables survive with the player reference set to `NULL` rather than being
+deleted: `iap_transactions`, because a refund or chargeback dispute needs the
+real-money receipt, and `groups.creator_id`, because deleting the group would
+destroy every other member's data. Everything else goes, including the wallet,
+its ledger, saves, storage, chat messages, friendships and identities.
+
+Three columns hold player ids with no foreign key, and they keep them:
+`match_records.players`, `votes.votes_cast` and `zone_snapshots.entities`. The
+ids no longer resolve to anybody - the schema stores bare uuids and nothing
+else about the person, so deleting `players` and `player_identities` *is* the
+anonymisation. `zone_snapshots.entities` is opaque game-defined state, so a
+game that puts personal data in it owns erasing that itself; see
+[Extensions](extensions.md).
+
+The erasure writes its own audit row inside the same transaction, so "erased"
+and "recorded as erased" are one commit (ADR 0007). Installed extensions erase
+first, in that transaction; one refusing aborts the whole deletion and the
+player survives intact.
+
+You do not need the ops plane for this. A self-hoster with a release and a
+remote shell can call the same function, and it is the same code path:
+
+```erlang
+1> asobi_player_erase:run(~"019f...").
+{ok,#{player_id => <<"019f...">>,erased => true}}
+2> asobi_player_export:run(~"019f...").
+{ok,#{player => #{...}, wallets => [...], ...}}
+```
+
+There is no player-facing self-delete. Whether players may erase themselves is
+a support-load and abuse decision belonging to the game - it turns an account
+takeover into an account destruction - so asobi gives the operator the
+primitive and the game decides whether to expose it.
 
 ### Console session
 
@@ -773,10 +849,10 @@ carrying the acting operator (`actor_id`, `actor_display`, `actor_source`,
 `actor_attested`), the action, its subject, and when it happened. Reads are
 not audited.
 
-Core's own routes are all reads, so none of them writes a row. Two things go
-through the audit path: an extension action reached over
-`/api/v1/ops/ext/:extension/:action`, and the in-process notification
-broadcast entry point.
+Three things go through the audit path: player erasure, an extension action
+reached over `/api/v1/ops/ext/:extension/:action`, and the in-process
+notification broadcast entry point. The player export is a read and is not
+audited.
 
 `actor_attested` is the important column. A name that came from
 `x-asobi-operator` is self-declared, so it is stored `false`; only a verified
@@ -794,8 +870,18 @@ other index is on `target_id`. A delete scoped to time alone therefore scans
 the table. Prune in batches, off-peak, or add an index on `occurred_at` if you
 intend to prune by time on a schedule.
 
-Nothing cascades into the table, so deleting a player does not erase the
-record of what was done to them.
+Nothing cascades into the table, so erasing a player does not erase the record
+of what was done to them - `actor_id` and `target_id` are plain strings with no
+foreign key. That is what lets an erasure's own row outlive its subject.
+
+Erasure is the one exception to "the audit never fails the operation". Its row
+is written **inside** the erasure transaction, so a failed audit insert rolls
+the deletion back: the data is gone by definition, so the row is the only
+surviving evidence the request was honoured. Every other mutation audits after
+the fact and cannot be failed by it (ADR 0007).
+
+A guest-retention sweep writes no rows. It is the machine's own housekeeping
+over up to 500 accounts a pass, and it logs a count instead.
 
 An audit write never fails the operation it describes. It runs after the
 change has already happened, so refusing the response could only invite a

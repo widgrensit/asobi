@@ -46,15 +46,18 @@ and demos in the [README](../README.md#client-sdks).
 
 ## The commercial layer
 
-**asobi.dev Cloud** - managed hosting, running the same node described above.
-Invite-only today, opening more widely toward the end of 2026.
-[asobi.dev/cloud](https://asobi.dev/cloud).
+**asobi.dev Cloud** - managed hosting, running the same core as the node
+described above. **Invite-only**: an account is created only from an operator
+allowlist or an approved waitlist request. Join the waitlist at
+[console.asobi.dev](https://console.asobi.dev).
 
 The differences are operational, not functional. A cloud environment is created
 and fed Lua through the `asobi` CLI rather than a mounted `/app/game`, its
 console is reached from the dashboard rather than by holding an operator secret,
-and the environment's `sys.config` is not yours to write. Everything about the
-game itself - callbacks, protocol, error codes - is identical.
+and the environment's `sys.config` is not yours to write - which rules out
+platform sign-in, IAP receipt verification, extensions and runtime tuning.
+Everything about the game itself - callbacks, protocol, error codes - is
+identical. [Cloud](cloud.md) has the full list of what each side gets.
 
 If it disappears, the open-source node above is enough to run your game
 forever. See [exit.md](exit.md).
@@ -87,10 +90,14 @@ Vocabulary you will meet throughout the docs.
 - **Console** - the operator UI this node serves at `/console`. Off until
   `console` is set. See [Operator console](console.md).
 - **Ops plane** - the HTTP API at `/api/v1/ops/*` that the console reads. Its
-  own credential, separate from the console flag, and read-only apart from
-  extension actions.
+  own credential, separate from the console flag, and reads apart from player
+  erasure, player export and extension actions.
 - **Capability class** - what an ops route is allowed to touch: `read`,
-  `player_data` or `config`. Every core ops route carries one.
+  `player_data`, `config` or `erasure`. Every core ops route carries one.
+  `erasure` is separate because it is the only one that cannot be undone.
+- **Erasure** - deleting a player and everything core holds about them, in one
+  transaction. `asobi_player_erase:run/1` from a shell, or
+  `POST /api/v1/ops/players/:id/erase`. See [REST API](rest-api.md).
 - **Extension** - an OTP application that depends on asobi, added to your
   release, declaring a manifest. It can add RPC methods, workers, schemas and
   ops actions without forking asobi. See [Extensions](extensions.md).
@@ -98,7 +105,10 @@ Vocabulary you will meet throughout the docs.
   `rpc.call` in with a `method` and `params`, `rpc.ok` or `rpc.error` back,
   paired by `cid`.
 - **Tenant** - a studio or account in the managed cloud. Not a concept when
-  self-hosting.
+  self-hosting. See [Cloud](cloud.md).
+- **Bundle** - the zip of `.lua` files the CLI uploads to a cloud environment,
+  which the engine fetches and extracts at boot. The cloud equivalent of a
+  mounted `/app/game`. Not a concept when self-hosting.
 - **Game** - the product you are shipping. One game may have many match modes
   and worlds.
 

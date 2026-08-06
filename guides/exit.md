@@ -13,8 +13,12 @@ you should not have to trust us.
    change we will fork our own project under a new name rather than take
    Apache-2.0 away from you.
 2. **No closed core.** Every feature in the public repository is the feature
-   you run. Our commercial cloud runs the same image you can pull from
-   `ghcr.io/widgrensit/asobi:latest`.
+   you run. Our commercial cloud runs the same `asobi` library published here.
+   It is a different release build - `ghcr.io/widgrensit/asobi_engine`, which
+   fetches its Lua as a bundle rather than reading a mounted directory - so the
+   artefact is not byte-identical to `ghcr.io/widgrensit/asobi:latest`, but the
+   game code behind it is the code in this repository. There is no feature the
+   cloud has and this repository does not. See [Cloud](cloud.md).
 3. **Public images mirrored.** Published to GitHub Container Registry under
    `ghcr.io/widgrensit/*`. GHCR is free to pull without authentication, and you
    can mirror to your own registry.
@@ -128,7 +132,8 @@ If we go dark, someone is likely to pick up maintenance. Watch:
 ## What is not covered here
 
 This page covers the open-source node. The commercial `asobi.dev` cloud is a
-separate layer. If we shut the managed service down, we commit to:
+separate layer, described in [Cloud](cloud.md). If we shut the managed service
+down, we commit to:
 
 - 60 days' notice minimum, in writing
 - an export of your data, your scripts and your PostgreSQL dump in a form you

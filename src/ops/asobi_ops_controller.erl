@@ -1,6 +1,7 @@
 -module(asobi_ops_controller).
 -moduledoc """
-HTTP surface of the ops read plane.
+HTTP surface of the ops plane: every read, plus the two account-lifecycle
+routes.
 
 Every list endpoint here returns the same envelope, clamps its own paging, and
 rejects a sort field it does not recognise with 400 rather than ordering by
@@ -9,14 +10,22 @@ something the caller did not ask for.
 These routes are mounted behind `asobi_ops_auth:verify/1`, the operator
 capability check (ADR 0007) - never the player-scoped bearer check the rest of
 `/api/v1` uses, which would let any authenticated player, guest included,
-enumerate the deployment. Every projection here is still held to exactly what
-the equivalent public endpoint already exposes.
+enumerate the deployment. Every read projection here is still held to exactly
+what the equivalent public endpoint already exposes.
+
+`erase_player/1` and `export_player/1` are the exceptions to that last
+sentence, deliberately: an operator answering a deletion or access request
+needs more than a player's own profile view. They are the only two routes on
+this plane that are not reads, they carry their own capability classes
+(`erasure` and `player_data`), and the erasure is audited inside its own
+transaction. See `m:asobi_player_erase`.
 """.
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kura/include/kura.hrl").
 
--export([players/1, player/1, matches/1, match/1, features/1, stats/1]).
+-export([players/1, player/1, erase_player/1, export_player/1]).
+-export([matches/1, match/1, features/1, stats/1]).
 -export([leaderboards/1, leaderboard_entries/1, matchmaker/1]).
 -export([economy_items/1, economy_item/1, economy_listings/1, economy_listing/1]).
 -export([chat_channels/1, chat_messages/1]).
@@ -42,6 +51,68 @@ players(Req) ->
 -spec player(cowboy_req:req()) -> response().
 player(Req) ->
     lookup(Req, asobi_player, fun asobi_ops_players:project/1).
+
+-doc """
+Erase one player and everything core holds about them. Irreversible.
+
+The body must echo the player's `username`, and the echo is checked against
+the row server-side. That guard is not distribution-shaped - the limitation it
+answers is a human clicking the wrong row, or a page being clickjacked into
+posting on the operator's behalf - so OTP does not dissolve it. It costs one
+comparison and makes an unattended POST insufficient.
+""".
+-spec erase_player(cowboy_req:req()) -> response().
+erase_player(#{bindings := #{~"id" := Id}, auth_data := #{ops_actor := Actor}} = Req) ->
+    case asobi_ops_params:uuid(Id) of
+        true -> confirmed_erase(Id, echoed_username(Req), Actor);
+        false -> {asobi_error, ~"ops.invalid_id"}
+    end.
+
+-doc """
+Everything core holds about one player, as one JSON object.
+
+`player_data`, not `read`: a leaderboard view is one thing, and the whole of
+one identified person's record is another.
+""".
+-spec export_player(cowboy_req:req()) -> response().
+export_player(#{bindings := #{~"id" := Id}}) ->
+    case asobi_ops_params:uuid(Id) of
+        true -> exported(asobi_player_export:run(Id));
+        false -> {asobi_error, ~"ops.invalid_id"}
+    end.
+
+-spec exported({ok, map()} | {error, not_found}) -> response().
+exported({ok, Payload}) -> {json, #{data => Payload}};
+exported({error, not_found}) -> {asobi_error, ~"ops.not_found"}.
+
+-spec confirmed_erase(binary(), binary() | undefined, asobi_ops_auth:actor()) -> response().
+confirmed_erase(_Id, undefined, _Actor) ->
+    {asobi_error, ~"ops.confirmation_required"};
+confirmed_erase(Id, Echoed, Actor) ->
+    case asobi_repo:get(asobi_player, Id) of
+        {ok, #{username := Echoed}} -> erased(asobi_player_erase:run(Id, Actor), Id);
+        {ok, _Other} -> {asobi_error, ~"ops.confirmation_mismatch"};
+        {error, not_found} -> {asobi_error, ~"ops.not_found"};
+        {error, Reason} -> error_response({query_failed, Reason})
+    end.
+
+-spec erased({ok, map()} | {error, term()}, binary()) -> response().
+erased({ok, Summary}, _Id) ->
+    {json, #{data => Summary}};
+erased({error, forbidden}, _Id) ->
+    {asobi_error, ~"forbidden"};
+erased({error, not_found}, _Id) ->
+    {asobi_error, ~"ops.not_found"};
+erased({error, Reason}, Id) ->
+    ?LOG_ERROR(#{msg => ~"ops player erase failed", player_id => Id, reason => Reason}),
+    {asobi_error, ~"ops.erase_failed"}.
+
+%% `undefined` is "no confirmation sent", which is a different answer from a
+%% confirmation that did not match - an operator who typed the wrong name
+%% should be told so.
+-spec echoed_username(cowboy_req:req()) -> binary() | undefined.
+echoed_username(#{json := #{~"username" := Username}}) when is_binary(Username) -> Username;
+echoed_username(_Req) -> undefined.
 
 -spec matches(cowboy_req:req()) -> response().
 matches(Req) ->

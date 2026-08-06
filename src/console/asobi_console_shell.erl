@@ -124,13 +124,14 @@ title() ->
 %% Marks a deployment an operator should be careful in. Today the console only
 %% colours the label with it.
 %%
-%% Core ops is read-only, but `/ext/:extension/:action` already accepts POST,
-%% PUT and DELETE, so an installed extension can expose a destructive action
-%% right now. Those are what the flag is ultimately for: confirm before
-%% anything in the `player_data` or `config` classes. Shipping the declaration
-%% ahead of the guard means a deployment that says it is production already
-%% does so when the guard arrives, rather than every operator having to go back
-%% and set it afterwards.
+%% Core ops mutates in two places - player erasure, and `/ext/:extension/:action`
+%% where an installed extension can expose a destructive action. Those are what
+%% the flag is ultimately for: confirm before anything in the `player_data`,
+%% `config` or `erasure` classes. Shipping the declaration ahead of the guard
+%% means a deployment that says it is production already does so when the guard
+%% arrives, rather than every operator having to go back and set it afterwards.
+%% Erasure carries its own server-verified username echo regardless, which is a
+%% guard rather than a confirmation dialogue.
 %%
 %% Acting on prod while believing you are in staging is the failure mode of
 %% running several consoles at once, and it is the same risk for a self-hoster

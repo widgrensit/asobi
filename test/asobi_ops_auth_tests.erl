@@ -86,7 +86,7 @@ every_shipped_route_carries_exactly_one_class_test() ->
     Routes = [{M, S} || {M, S, _Class} <- asobi_ops_caps:classes()],
     ?assertEqual(lists:usort(Routes), lists:sort(Routes)),
     [
-        ?assert(lists:member(Class, [read, player_data, config]))
+        ?assert(lists:member(Class, asobi_ops_caps:class_names()))
      || {_M, _S, Class} <- asobi_ops_caps:classes()
     ].
 
@@ -210,7 +210,10 @@ admitted_actor_has_the_adr_shape() ->
     {true, #{ops_actor := Actor}} = asobi_ops_auth:verify(ops_req(?SECRET)),
     ?assertEqual([attested, caps, display, id, source], lists:sort(maps:keys(Actor))),
     ?assertEqual(static_secret, maps:get(source, Actor)),
-    ?assertEqual([read, player_data, config], maps:get(caps, Actor)),
+    %% Including `erasure`: a secret in a config file is a script an operator
+    %% wrote, not a browser session. `asobi_console_session:create/1` is where
+    %% the same secret buys less.
+    ?assertEqual([read, player_data, config, erasure], maps:get(caps, Actor)),
     ?assertEqual(false, maps:get(attested, Actor)),
     ?assertEqual(~"operator", maps:get(display, Actor)).
 

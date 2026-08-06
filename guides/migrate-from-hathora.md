@@ -166,7 +166,7 @@ mutation, which is well within the scope of one Lua file.
 | Custom room messages | Extension RPC | Frame `rpc.call` with `{protocol: 1, method, params}`; replies `rpc.ok` `{result}` or `rpc.error` `{error: {code, message, details}}`, correlated by `cid`. All seven client SDKs support it. See [Extensions](extensions.md). |
 | `ping` region API | None | Probe each deployment endpoint yourself if you need client-side region selection. |
 | Hathora SDK | asobi SDKs | [Unity](https://github.com/widgrensit/asobi-unity), [Unreal](https://github.com/widgrensit/asobi-unreal), [JS/TS](https://github.com/widgrensit/asobi-js), [Godot](https://github.com/widgrensit/asobi-godot), [Defold](https://github.com/widgrensit/asobi-defold), [LÖVE](https://github.com/widgrensit/asobi-love2d), [Dart](https://github.com/widgrensit/asobi-dart), [Flame](https://github.com/widgrensit/flame_asobi). |
-| Hathora Console | Built-in operator console at `/console` | Off by default, and read-only. See the note below the table. |
+| Hathora Console | Built-in operator console at `/console` | Off by default, and reads plus player erasure/export. See the note below the table. |
 | `hathora.yml` | `docker-compose.yml` | Plain Compose, no proprietary spec. |
 
 Guest auth is off until two things are true: the game declares `guest_auth` in
@@ -175,8 +175,8 @@ one missing and `POST /api/v1/auth/guest` answers `guest.disabled`. See
 [Authentication](authentication.md).
 
 A stock node serves neither the console nor the ops API; you turn them on - see
-[Operator console](console.md). When you do, the plane is read-only apart from
-actions an extension declares. Coming from the Hathora console you will look for
+[Operator console](console.md). When you do, the plane is reads plus player
+erasure and export, apart from actions an extension declares. Coming from the Hathora console you will look for
 a restart-this-process button; there is not one, because there is no process per
 match to restart.
 

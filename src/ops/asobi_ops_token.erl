@@ -50,7 +50,7 @@ Nothing here is stateful: there is no revocation list, which is exactly why
 the lifetime is capped rather than merely checked.
 """.
 
--export([verify/1, sign/2, max_ttl/0]).
+-export([verify/1, sign/2, max_ttl/0, configured/0]).
 
 -define(VERSION, ~"v1").
 %% Fifteen minutes. Long enough that an operator is not re-minting mid-task,
@@ -74,6 +74,17 @@ the lifetime is capped rather than merely checked.
 -doc "The longest lifetime this node will honour, in seconds.".
 -spec max_ttl() -> pos_integer().
 max_ttl() -> ?MAX_TTL_SECONDS.
+
+-doc """
+Whether this node can verify a minted token at all.
+
+Exported so `m:asobi_console_env`'s enable decision reads the same pair
+`verify/1` does. A managed environment configures no `ops_secret`, so without
+this the console would be switched off underneath the one credential it
+accepts.
+""".
+-spec configured() -> boolean().
+configured() -> config() =/= error.
 
 -doc """
 Mint a token for `Claims`.

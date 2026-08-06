@@ -37,7 +37,11 @@ persistence_test_() ->
             fun shutdown_flushes_pending_scores/0},
         {"a flush writes only the players that changed", fun flush_writes_only_changed_players/0},
         {"a board whose hydrate fails still starts and deletes nothing",
-            fun hydrate_failure_starts_empty/0}
+            fun hydrate_failure_starts_empty/0},
+        {"an erased player stops being served by a live board",
+            fun evict_removes_a_player_from_a_live_board/0},
+        {"an erased player's pending score cannot retry forever",
+            fun evict_drops_the_pending_score/0}
     ]}.
 
 restart_reloads_scores() ->
@@ -104,6 +108,53 @@ hydrate_failure_starts_empty() ->
     %% upserts per player and never deletes.
     meck:expect(asobi_repo, all, fun fake_all/1),
     ?assertEqual(100, db_score(BoardId, Alice)).
+
+%% `asobi_player_erase` deletes the player's `leaderboard_entries` rows, but ETS
+%% is what reads are served from and `hydrate/1` only runs at init - so without
+%% an eviction an erased player keeps appearing in `top/2`, `rank/2` and
+%% `around/3` for as long as the board process lives, which is indefinitely.
+evict_removes_a_player_from_a_live_board() ->
+    BoardId = board_id(),
+    Erased = asobi_id:generate(),
+    Kept = asobi_id:generate(),
+    Pid = start_board(BoardId),
+    ok = asobi_leaderboard_server:submit(BoardId, Erased, 200),
+    ok = asobi_leaderboard_server:submit(BoardId, Kept, 100),
+    ?assertEqual([{Erased, 200, 1}, {Kept, 100, 2}], asobi_leaderboard_server:top(BoardId, 10)),
+
+    ok = asobi_leaderboard_server:evict_player(Erased),
+
+    %% Gone from the ordered table, the player index, and every read path.
+    ?assertEqual([{Kept, 100, 1}], asobi_leaderboard_server:top(BoardId, 10)),
+    ?assertEqual({error, not_found}, asobi_leaderboard_server:rank(BoardId, Erased)),
+    ?assertEqual([], asobi_leaderboard_server:around(BoardId, Erased, 5)),
+    %% The player who was not erased keeps their entry and re-ranks.
+    ?assertEqual({ok, 1}, asobi_leaderboard_server:rank(BoardId, Kept)),
+    stop_board(BoardId, Pid).
+
+%% The damaging half. A score still pending for a player who has just been
+%% erased is an INSERT that violates `leaderboard_entries.player_id` ->
+%% `players.id`; `flush_players/4` puts a failed write straight back into
+%% `dirty`, so the board retries it every 30 seconds - and logs it - for the
+%% rest of its life. Eviction has to clear `dirty`, not just the tables.
+evict_drops_the_pending_score() ->
+    BoardId = board_id(),
+    Erased = asobi_id:generate(),
+    Pid = start_board(BoardId),
+    ok = asobi_leaderboard_server:submit(BoardId, Erased, 100),
+    %% Still pending: the persist timer is 30s away, so nothing is written yet.
+    ?assertEqual(not_found, db_score(BoardId, Erased)),
+
+    ok = asobi_leaderboard_server:evict_player(Erased),
+    _ = asobi_leaderboard_server:top(BoardId, 1),
+    ets:insert(?DB, {writes, 0}),
+
+    %% Shutdown flushes whatever is still dirty - the same call the 30s tick
+    %% makes. `shutdown_flushes_pending_scores/0` proves this path does write a
+    %% pending score, so a write here would be the retry that never stops.
+    stop_board(BoardId, Pid),
+    ?assertEqual(0, writes()),
+    ?assertEqual(not_found, db_score(BoardId, Erased)).
 
 %% --- Board lifecycle ---
 

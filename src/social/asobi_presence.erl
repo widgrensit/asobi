@@ -25,6 +25,10 @@ servers that produce those terms (`asobi_match_server`, `asobi_world_server`,
 `asobi_zone`, `asobi_matchmaker`, the Lua runtime) and the processes that
 pattern-match them (`asobi_ws_handler`, `asobi_player_session`, `asobi_bot`).
 
+Shared match state is the one shape whose form depends on the recipient:
+`send_match_state/3` hands a session the pre-encoded frame and a bot the
+same payload as a term. Both are `message/0` shapes; see that function.
+
 It is a public type on purpose. `send/2` is spec'd with it, so a producer
 that invents a shape fails dialyzer instead of quietly emitting a term no
 consumer handles, and a consumer (`asobi_bot` does this) can spec its own
@@ -34,12 +38,14 @@ clauses against the same named type rather than an ad-hoc guess.
 
 -export([start_link/0]).
 -export([track/2, track_bot/2, untrack/1, untrack_bot/2, update/2, get_status/1, send/2]).
+-export([send_match_state/3]).
 -export([online_count/0]).
 -export([disconnect/2, revoke_session/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(PRESENCE_GROUP, asobi_online).
 -define(PG_SCOPE, nova_scope).
+-define(BOT_GROUP(Id), {bot, Id}).
 
 -type event_name() :: atom() | binary().
 -type message() ::
@@ -84,6 +90,7 @@ broadcast. See the module docs for why.
 -spec track_bot(binary(), pid()) -> ok.
 track_bot(BotId, Pid) ->
     join_delivery_group(BotId, Pid),
+    pg:join(?PG_SCOPE, ?BOT_GROUP(BotId), Pid),
     ok.
 
 -spec untrack(binary()) -> ok.
@@ -94,6 +101,7 @@ untrack(PlayerId) ->
 -spec untrack_bot(binary(), pid()) -> ok.
 untrack_bot(BotId, Pid) ->
     pg:leave(?PG_SCOPE, {player, BotId}, Pid),
+    pg:leave(?PG_SCOPE, ?BOT_GROUP(BotId), Pid),
     ok.
 
 -spec join_delivery_group(binary(), pid()) -> ok.
@@ -116,6 +124,30 @@ get_status(PlayerId) ->
 send(PlayerId, Message) ->
     Members = pg:get_members(?PG_SCOPE, {player, PlayerId}),
     lists:foreach(fun(Pid) when is_pid(Pid) -> Pid ! {asobi_message, Message} end, Members),
+    ok.
+
+-doc """
+Deliver one tick of shared match state to a roster entry.
+
+Sessions get `PreEncoded`, the wire frame the caller encoded once for the
+whole match (ADR 0001). Bots get `SharedState`, the same payload as a term,
+because a bot reads the state in Erlang and has no use for a JSON binary:
+routing it here keeps the one encode per tick and costs a bot no decode.
+""".
+-spec send_match_state(binary(), map(), binary()) -> ok.
+send_match_state(PlayerId, SharedState, PreEncoded) ->
+    Bots = pg:get_members(?PG_SCOPE, ?BOT_GROUP(PlayerId)),
+    lists:foreach(
+        fun(Pid) when is_pid(Pid) ->
+            Message =
+                case lists:member(Pid, Bots) of
+                    true -> {match_state, SharedState};
+                    false -> {match_state_raw, PreEncoded}
+                end,
+            Pid ! {asobi_message, Message}
+        end,
+        pg:get_members(?PG_SCOPE, {player, PlayerId})
+    ),
     ok.
 
 -spec revoke_session(binary(), binary()) -> ok.

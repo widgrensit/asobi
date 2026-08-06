@@ -40,7 +40,7 @@ surprising moments without ending the bearer access that matters.
   its own ownership check, presented as a bearer token and verified by
   `m:asobi_ops_token`. The tenant's role is mapped onto capability classes at
   mint time, so the string "owner" never reaches this plane, and the token
-  carries only the classes it was minted with rather than all three.
+  carries only the classes it was minted with rather than every class.
 
 A bearer token is tried as the operator secret first and as a minted token
 second. The two cannot be confused: a minted token is three dot-separated
@@ -62,7 +62,11 @@ for this class".
 -define(LABEL_MAX_BYTES, 64).
 -define(DEFAULT_DISPLAY, ~"operator").
 
--type source() :: static_secret | cloud | local_user.
+%% `shell` is not a credential and never resolves from a request. It is the
+%% actor `asobi_player_erase:run/1` audits an in-shell erasure as, so a row
+%% written from the node itself is not indistinguishable from one written by
+%% somebody holding the operator secret.
+-type source() :: static_secret | cloud | local_user | shell.
 -type actor() :: #{
     id := binary(),
     display := binary(),
@@ -208,7 +212,7 @@ session_actor(#{id := Id, label := Label, caps := Caps}) ->
         display => Label,
         source => local_user,
         %% Whatever the credential behind this session proved. The operator
-        %% secret proves all three; a minted token proves only what it carried,
+        %% secret proves every class; a minted token proves only what it carried,
         %% and the session must not widen it.
         caps => Caps,
         attested => false
@@ -280,7 +284,11 @@ actor(Req) ->
         id => ~"static_secret",
         display => display(Req),
         source => static_secret,
-        caps => [read, player_data, config],
+        %% Including `erasure`. A secret in a config file is a deliberate
+        %% server-side credential a script holds, not a browser session that
+        %% can be clickjacked - `m:asobi_console_session` is where that
+        %% distinction is drawn.
+        caps => [read, player_data, config, erasure],
         attested => false
     }.
 

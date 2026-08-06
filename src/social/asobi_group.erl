@@ -17,7 +17,11 @@ fields() ->
         #kura_field{name = description, type = string},
         #kura_field{name = max_members, type = integer, default = 50},
         #kura_field{name = open, type = boolean, default = false, nullable = false},
-        #kura_field{name = creator_id, type = uuid, nullable = false},
+        %% Nullable so `m:asobi_player_erase` can sever the group from its
+        %% creator. Deleting the group instead would destroy every other
+        %% member's data to free one foreign key. `changeset/2` still requires
+        %% it, so a group cannot be created without a creator.
+        #kura_field{name = creator_id, type = uuid},
         #kura_field{name = metadata, type = jsonb, default = #{}},
         #kura_field{name = inserted_at, type = utc_datetime, nullable = false},
         #kura_field{name = updated_at, type = utc_datetime, nullable = false}
