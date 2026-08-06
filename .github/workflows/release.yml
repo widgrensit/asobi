@@ -18,28 +18,3 @@ jobs:
     uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.4
     permissions:
       contents: write
-
-  # Downstream asobi_lua pins asobi by git ref and only refreshes that pin on
-  # its nightly schedule, so a fix released here can sit unpublished for a day
-  # (asobi_lua#103). Push the news instead of waiting for the poll.
-  #
-  # A separate job, not a step: the release itself is a reusable workflow this
-  # repo cannot add steps to. It also reports success when git-cliff decided no
-  # bump was due, so `needs.release.result` alone would dispatch on every merge
-  # to main - the script gates on a tag actually pointing at HEAD.
-  notify-asobi-lua:
-    needs: release
-    if: needs.release.result == 'success'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Trigger asobi_lua's pin bump
-        env:
-          # Cross-repo dispatch; the default GITHUB_TOKEN cannot do it.
-          GH_TOKEN: ${{ secrets.ASOBI_LUA_DISPATCH_TOKEN }}
-        run: scripts/dispatch-asobi-lua-pin-bump.sh
