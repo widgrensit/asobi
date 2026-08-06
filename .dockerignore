@@ -1,9 +1,12 @@
+# The build needs rebar.config, rebar.lock, config/, include/, src/ and priv/.
+# Everything else is weight in the context, and _build is both large and
+# poisonous: host-built artefacts for a different glibc must never leak into
+# an image built on a different base.
 _build/
-_checkouts/
-.git/
-.github/
-test/
+doc/
 docs/
-*.md
-erl_crash.dump
-rebar3.crashdump
+guides/
+examples/
+scripts/
+console/node_modules/
+.git/
