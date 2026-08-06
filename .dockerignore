@@ -1,12 +1,23 @@
 # The build needs rebar.config, rebar.lock, config/, include/, src/ and priv/.
-# Everything else is weight in the context, and _build is both large and
-# poisonous: host-built artefacts for a different glibc must never leak into
-# an image built on a different base.
+# Everything else is weight in the build context.
+#
+# Two of these are correctness, not size:
+#   _build/     host-built artefacts, linked against the host's glibc. Leaking
+#               them into an image on a different base is the "built last week,
+#               broken now" class of bug.
+#   _checkouts/ local dependency overrides. An image must be built from the
+#               locked deps, never from whatever someone happens to be editing.
 _build/
+_checkouts/
+.git/
+.github/
+test/
 doc/
 docs/
 guides/
 examples/
 scripts/
 console/node_modules/
-.git/
+*.md
+erl_crash.dump
+rebar3.crashdump
