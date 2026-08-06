@@ -16,6 +16,11 @@ Capabilities report what is *configured*, not what is compiled in: a console
 needs to know whether Steam auth will work on this deployment, and "the module
 exists" does not answer that. Each entry is a name and a boolean only - never
 the configured value, which is usually a secret.
+
+`lua` is the exception and is a module check, because since the runtime merged
+into asobi there is nothing to configure: it is present in every stock release.
+It stays in the list so a console rendering against a stripped custom release
+still gets an answer rather than an absent key.
 """.
 
 -export([features/0, extensions/0, capabilities/0]).

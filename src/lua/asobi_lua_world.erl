@@ -16,7 +16,6 @@ function post_tick(tick, state)              -- return state (or state + vote/fi
 -- Optional:
 function generate_world(seed, config)        -- return zone_states table
 function get_state(player_id, state)         -- return state visible to player
-function vote_resolved(template, result, state) -- return updated state
 function phases(config)                      -- return list of phase definitions
 function on_phase_started(phase_name, state) -- return updated state
 function on_phase_ended(phase_name, state)   -- return updated state
@@ -27,11 +26,17 @@ function on_zone_loaded(cx, cy, state)       -- return zone_state, state
 function on_zone_unloaded(cx, cy, state)     -- return state
 ```
 
-asobi#253: after a hot reload (`ASOBI_LUA_RELOAD`/`reload_mode`), `spawn_templates_hint/1`
-tells the running zone to re-fetch `spawn_templates(config)` so an edited script's new
-templates become spawnable without restarting the zone. asobi_lua#110's `game.zone.spawn`
-guard reads that live set from a per-zone ETS table rather than a value snapshotted once
-into Ctx, so this stays correct across any number of hot reloads.
+`vote_resolved` is deliberately absent. `asobi_world_server` reaches it through
+`erlang:function_exported/3` and this module does not export it, so a Lua world
+script defining `vote_resolved` is never called. Match scripts are unaffected;
+see `guides/voting.md`.
+
+After a hot reload (`ASOBI_LUA_RELOAD`/`reload_mode`), `spawn_templates_hint/1`
+tells the running zone to re-fetch `spawn_templates(config)` so an edited
+script's new templates become spawnable without restarting the zone. The
+`game.zone.spawn` guard reads that live set from a per-zone ETS table rather
+than a value snapshotted once into Ctx, so this stays correct across any number
+of hot reloads.
 """.
 
 -behaviour(asobi_world).

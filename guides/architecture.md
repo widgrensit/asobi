@@ -1,341 +1,432 @@
 # Architecture
 
-## Overview
+## What a node is
 
-Asobi is an Erlang/OTP game backend built on Nova. This document covers the
-runtime architecture, session lifecycle, how services communicate, and the
-trade-offs for single-node, distributed Erlang, and cloud-native deployments.
+An asobi node is a single Erlang/OTP release holding the game backend, the Lua
+runtime and the operator console. There is no separate scripting service and no
+separate admin service. The image is `ghcr.io/widgrensit/asobi` and the release
+binary inside it is `bin/asobi` (`Dockerfile:75`).
 
-## Supervision Tree
+Two front doors onto the same node:
+
+- Run the image and write Lua. `match.lua` or a `config.lua` manifest is loaded
+  at boot and drives matches, worlds and bots.
+- Depend on the Hex package and write Erlang. Implement the `asobi_match`
+  behaviour and register the module under `game_modes`.
+
+Both reach the same processes, the same database and the same console.
+
+## Supervision tree
+
+`asobi_sup` is `one_for_one`, 10 restarts in 60 seconds
+(`src/asobi_sup.erl:16-20`). Nineteen children, in this order
+(`src/asobi_sup.erl:21-41`):
 
 ```
 asobi_sup (one_for_one)
-├── asobi_rate_limit_server     — per-node ETS rate limiter
-├── asobi_cluster               — node discovery (DNS/EPMD)
-├── asobi_player_session_sup    — dynamic simple_one_for_one
-│   └── asobi_player_session    — one per connected player
-├── asobi_match_sup             — dynamic simple_one_for_one
-│   └── asobi_match_server      — one per active match (gen_statem)
-├── asobi_matchmaker            — matching algorithm, tick-based
-├── asobi_leaderboard_sup       — one child per leaderboard
-│   └── asobi_leaderboard_server — in-memory buffer, periodic DB flush
-├── asobi_chat_sup              — chat channel processes
-├── asobi_tournament_sup        — tournament processes
-└── asobi_presence              — tracks online players via pg
+├── asobi_rate_limits             temporary; registers the seki limiter buckets
+├── asobi_oidc_providers          temporary; starts OIDC workers only if providers are configured
+├── asobi_auth_cache              per-node bearer-token cache
+├── asobi_cluster                 node discovery; returns `ignore` unless `cluster` is set
+├── asobi_player_session_sup      simple_one_for_one
+│   └── asobi_player_session      one per connected socket
+├── asobi_match_sup               simple_one_for_one; owns the asobi_match_state table
+│   └── asobi_match_server        one per match (gen_statem)
+├── asobi_world_sup               owns asobi_world_state and asobi_player_worlds
+│   ├── asobi_zone_snapshotter
+│   ├── asobi_world_registry
+│   └── asobi_world_instance_sup  simple_one_for_one
+│       └── asobi_world_instance  one_for_all: zone sup, zone manager, ticker, world server
+├── asobi_world_lobby_server      serialises asobi_world_lobby:find_or_create/1
+├── asobi_vote_sup                simple_one_for_one
+│   └── asobi_vote_server         one per open vote
+├── asobi_matchmaker              the queue; ticks itself
+├── asobi_leaderboard_sup         simple_one_for_one
+│   └── asobi_leaderboard_server  one per board
+├── asobi_chat_sup                simple_one_for_one; owns the channel registry table
+│   └── asobi_chat_channel        one per live channel
+├── asobi_tournament_sup          simple_one_for_one
+│   └── asobi_tournament_server   registered under `global`
+├── asobi_presence                online set and delivery targets, over pg
+├── asobi_guest_reaper            opt-in sweep of unclaimed guest accounts
+├── asobi_console_session         console session table; started whether or not the console is on
+├── asobi_lua_config              temporary; loads the game config
+├── asobi_lua_sup
+│   ├── asobi_lua_rate_limits     temporary; `game.log` budgets
+│   ├── asobi_bot_sup
+│   ├── asobi_bot_spawner
+│   └── asobi_lua_config_watcher
+└── asobi_extension_sup           one child group per installed extension
 ```
 
-## Session Lifecycle
+The last three entries are ordered deliberately and the order is load-bearing:
+core children, then the Lua config load, then the Lua children, then extensions
+(`src/asobi_sup.erl:44-52`). The Lua runtime used to be its own OTP
+application, which started after `asobi` and therefore loaded the game config
+after every `asobi_sup` child was already up. Moving the load earlier changes
+what a core child that reads configuration at `start_link/0` sees at boot, so
+it stays here and the old order is preserved exactly.
+
+A game config that fails to load aborts the boot. `load_lua_game_config/0`
+raises, which arrives as a supervisor `failed_to_start_child` and takes the
+already-started core children down with it (`src/asobi_sup.erl:60-72`). A node
+with an unloadable game config has nothing useful to serve.
+
+`asobi_extension_sup` is last so an extension's processes start after every
+core service they might call. With no extensions installed it is one idle
+supervisor with no children (`src/asobi_sup.erl:81-89`).
+
+`asobi_rate_limits` is a temporary registration child, not a server: it calls
+`seki:new_limiter/2` once per bucket and returns `ignore`
+(`src/asobi_sup.erl:217-305`). The buckets themselves live in seki, in memory,
+per node - ten of them, covering auth, register, iap, api, ws_connect, join,
+guest_global, script_log, rehome and rehome_global.
+
+## Session lifecycle
+
+One `asobi_player_session` process per connection, started when the socket
+sends `session.connect` and stopped when the socket closes
+(`src/ws/asobi_ws_handler.erl:356-370`). A session does not survive the
+connection. A client that reconnects presents the same token and gets a new
+session process.
 
 ```
-Client                    WS Handler              Session              Presence (pg)
-  │                          │                       │                      │
-  │── WS connect ───────────►│                       │                      │
-  │── session.connect ──────►│                       │                      │
-  │                          │── authenticate(token) │                      │
-  │                          │   (DB lookup)         │                      │
-  │                          │── start_session ─────►│                      │
-  │                          │                       │── track(id, self) ──►│
-  │                          │                       │   pg:join(player,id) │
-  │◄── session.connected ───│                       │                      │
-  │                          │                       │                      │
-  │   ... gameplay ...       │                       │                      │
-  │                          │                       │                      │
-  │── disconnect ───────────►│                       │                      │
-  │                          │── stop(session) ─────►│                      │
-  │                          │                       │── untrack(id) ──────►│
-  │                          │                       │   pg:leave           │
+Client              WS handler           Session              pg
+  │                     │                   │                  │
+  │─ WS connect ───────►│                   │                  │
+  │─ session.connect ──►│                   │                  │
+  │                     │ resolve_token     │                  │
+  │                     │─ start_session ──►│                  │
+  │                     │                   │─ join {player,Id}►│
+  │◄ session.connected ─│                   │                  │
+  │     ... play ...    │                   │                  │
+  │─ disconnect ───────►│                   │                  │
+  │                     │─ stop ───────────►│                  │
+  │                     │                   │─ leave ─────────►│
 ```
 
-**Key points:**
-- Token is validated **once** at `session.connect` via DB lookup
-- After authentication, `player_id` lives in process state — no further DB checks
-- The session process monitors the WS process; if WS dies, session cleans up
-- WS terminate calls `session:stop/1` for the reverse direction
+The token is resolved once, at `session.connect`. After that the `player_id`
+lives in process state and no further lookup happens on the hot path. The
+session monitors the WebSocket process, and `terminate/3` calls
+`asobi_player_session:stop/1` for the other direction.
 
-## Session Revocation
+### The auth cache
 
-When a player is banned, deleted, or their token is revoked:
+Bearer tokens are opaque 32 random bytes issued by `nova_auth` and stored in
+`player_tokens` (`src/asobi_auth.erl:6-18`,
+`src/migrations/m20260329095708_update_schema.erl:185`). They are not JWTs, so
+resolving one is a database read, and both the HTTP plugin and the WebSocket
+handler go through a per-node ETS cache to avoid doing it per request
+(`src/plugins/asobi_auth_plugin.erl:11`, `src/ws/asobi_ws_handler.erl:914`).
+
+Entries expire after `auth_cache_ttl_ms`, default 60000 ms; negative results
+expire after `auth_cache_negative_ttl_ms`, default 5000 ms
+(`src/auth/asobi_auth_cache.erl:94-95`). That TTL is the bound on revocation
+latency: a token revoked through `asobi_auth_tokens` or
+`asobi_auth_cache:revoke_player/1` is invalidated immediately on the node that
+did it, and everywhere else within the TTL. Access tokens are valid for 60
+minutes and refresh tokens for 30 days, both `nova_auth` defaults
+(`src/asobi_auth.erl:15`).
+
+The cache is per node. Nothing replicates it.
+
+## Session revocation
 
 ```erlang
 asobi_presence:revoke_session(PlayerId, ~"banned").
 ```
 
-**Flow:**
-1. `revoke_session/2` enqueues a job on the `broadcast` fanout queue via Shigoto
-2. All nodes poll the fanout queue and pick up the job
-3. Each node calls `asobi_presence:disconnect/2` locally
-4. `disconnect/2` looks up session processes in the local `pg` group
-5. Sends `{session_revoked, Reason}` to each session process
-6. Session forwards to WS process, then stops
-7. WS handler logs and returns `{stop, State}`
+`revoke_session/2` enqueues a job on the `broadcast` fanout queue
+(`src/social/asobi_presence.erl:121-123`). Every node consumes the fanout
+queue, and `asobi_broadcast_worker:perform/1` calls
+`asobi_presence:disconnect/2` locally, which looks the player up in the local
+`pg` group and sends `{session_revoked, Reason}` to each session process
+(`src/workers/asobi_broadcast_worker.erl:24-25`).
 
-This uses Shigoto's fanout queue mode — every node processes every broadcast
-job. Jobs are ephemeral (120s window, auto-pruned). Workers are idempotent.
-The source of truth is always the database.
+`asobi_broadcast_worker` is the only worker asobi ships, and it handles exactly
+three job types: `session_revoked`, `notification` and `chat`. Anything else
+logs `unknown_broadcast_type` and returns ok.
 
-**Two-layer API:**
-- `asobi_presence:revoke_session/2` — public API, enqueues broadcast job (cross-node)
-- `asobi_presence:disconnect/2` — local delivery mechanism, called by the broadcast worker
+Fanout jobs are ephemeral - a 120 second window in the dev config
+(`config/dev_sys.config.src`), auto-pruned. The database is the source of
+truth; the fanout is a best-effort push.
 
-## Match Lifecycle
+## Match lifecycle
 
-```
-Matchmaker              Match Sup            Match Server          Players (via pg)
-  │                        │                      │                     │
-  │── start_match(Config)─►│                      │                     │
-  │                        │── start_link ────────►│ (waiting state)     │
-  │                        │                      │                     │
-  │── join(Pid, Player1) ─────────────────────────►│                     │
-  │── join(Pid, Player2) ─────────────────────────►│ (min_players met)   │
-  │                        │                      │── enter running ───►│
-  │                        │                      │                     │
-  │                        │                      │◄── {input, ...} ────│
-  │                        │                      │── tick ──────────── │
-  │                        │                      │── broadcast_state ─►│
-  │                        │                      │   (10 Hz loop)      │
-  │                        │                      │                     │
-  │                        │                      │── enter finished    │
-  │                        │                      │── persist_result ──►DB
-  │                        │                      │── notify_players ──►│
-  │                        │                      │── cleanup (5s) ────►stop
-```
-
-**Match states:** `waiting → running → finished` (also `paused`)
-
-**Server-authoritative:** The match process owns all game state. Clients send
-inputs, the server applies them each tick, and broadcasts the resulting state.
-The game module (`asobi_match` behaviour) provides `init/1`, `join/2`,
-`handle_input/3`, `tick/1`, and either `get_state/2` (per-player) or
-`get_state/1` (shared, broadcast-once — see [Performance Tuning](performance-tuning.md)).
-
-## Database & Migrations
-
-Each node runs its own PGO connection pool. Migrations run automatically at
-application startup via `kura_migrator:migrate(asobi_repo)`.
-
-**Migration rules:**
-- The initial schema uses `create_table` operations
-- Kura topologically sorts tables by FK dependencies — order in the migration
-  file doesn't matter
-- All operations run in a single PostgreSQL transaction with an advisory lock
-- **Never delete or modify an applied migration** — add new `alter_table`
-  migrations instead
-- If migration fails, the app logs the error and continues starting (by design,
-  to allow the app to serve health checks even with a stale schema)
-
-**Multi-node consideration:** The advisory lock ensures only one node runs
-migrations at a time. Other nodes wait. This is safe for rolling deploys.
-
-## Deployment Models
-
-### Single Node (Current)
-
-Everything runs on one BEAM node. All process communication is local.
-This is the simplest model and works for small-to-medium scale.
+`asobi_match_server` is a `gen_statem` under `asobi_match_sup`
+(`src/matches/asobi_match_server.erl:60-62`,
+`src/matches/asobi_match_sup.erl:22-33`). States are `waiting`, `running`,
+`paused` and `finished`; a cancellation is a transition to `finished` with a
+`cancelled` result, not a state of its own.
 
 ```
-┌─────────────────────────────────┐
-│           BEAM Node             │
-│  ┌──────────┐  ┌─────────────┐ │
-│  │ WS/HTTP  │  │ Matchmaker  │ │
-│  │ Handlers │  │ (local)     │ │
-│  └──────────┘  └─────────────┘ │
-│  ┌──────────┐  ┌─────────────┐ │
-│  │ Sessions │  │ Matches     │ │
-│  │ (local)  │  │ (local)     │ │
-│  └──────────┘  └─────────────┘ │
-│  ┌──────────────────────────┐  │
-│  │ pg (presence, chat)      │  │
-│  └──────────────────────────┘  │
-└──────────────┬──────────────────┘
-               │
-         ┌─────▼─────┐
-         │ PostgreSQL │
-         └───────────┘
+Matchmaker           Match sup         Match server        Players (pg)
+  │                     │                   │                   │
+  │─ start_match(Cfg)──►│                   │                   │
+  │                     │─ start_link ─────►│ waiting           │
+  │─ join(Pid, P1) ────────────────────────►│                   │
+  │─ join(Pid, P2) ────────────────────────►│ running           │
+  │                     │                   │◄─ {input, ...} ───│
+  │                     │                   │── tick ───────────│
+  │                     │                   │── broadcast ─────►│
+  │                     │                   │ finished          │
+  │                     │                   │── persist ───────►DB
 ```
 
-**Migrations:** Always run at startup. One node, no contention.
+Server-authoritative: the match process owns all game state, clients send
+inputs, the server applies them on the tick and broadcasts the result. The tick
+is a `state_timeout`, default 100 ms
+(`src/matches/asobi_match_server.erl:47,200`).
 
-**Scale limit:** A single BEAM node can handle tens of thousands of concurrent
-WebSocket connections and hundreds of active matches. The bottleneck is usually
-the game tick loop CPU cost, not connection count.
+The game module implements the `asobi_match` behaviour. Only `init/1` and
+exactly one of `get_state/2` (per player) or `get_state/1` (shared,
+broadcast-once) are required; everything else is optional, including
+`join/2`, `join/3`, `leave/2`, `handle_input/3`, `tick/1`, `vote_requested/1`,
+`vote_resolved/3`, `phases/1`, `on_phase_started/2` and `on_phase_ended/2`
+(`src/matches/asobi_match.erl:30-128`). See
+[Performance tuning](performance-tuning.md) for when the shared form pays.
 
-### Distributed Erlang (Multi-Node)
+### Finding a match
 
-Multiple BEAM nodes connected via distributed Erlang. The `pg` module
-automatically replicates group membership across all connected nodes.
+A match joins the `pg` group `{asobi_match_server, MatchId}` in `nova_scope`
+when it starts, and `asobi_match_server:whereis/1` resolves through that group
+(`src/matches/asobi_match_server.erl:152-156,167`). Because `pg` replicates
+within a scope across connected nodes, a match pid is resolvable from any node
+in the cluster. The process itself does not move, and its 10 Hz broadcast stays
+where it is. Nothing registers matches under `global`. Tournament
+servers do: `asobi_tournament_server` starts as
+`{global, {asobi_tournament_server, TournamentId}}`
+(`src/tournaments/asobi_tournament_server.erl:10`).
 
+`asobi_match_state` is a separate thing and is often misread as the registry.
+It is a node-local public ETS table owned by `asobi_match_sup`
+(`src/matches/asobi_match_sup.erl:12`) into which a match writes a
+pid-stripped snapshot of its state, so a crashed match restarted by its
+supervisor on the same node resumes rather than starting empty
+(`src/matches/asobi_match_server.erl:948-968`). It is a crash-recovery buffer,
+it is per node, and it does not survive the node.
+
+## Matchmaker
+
+One `asobi_matchmaker` gen_server per node. It ticks itself with
+`erlang:send_after/3` - once in `init/1` and once at the end of every tick
+handler (`src/matches/asobi_matchmaker.erl:217,342`). The default interval is
+1000 ms and the default wait before a ticket expires is 60 seconds, both under
+the `matchmaker` key as `tick_interval` and `max_wait_seconds`.
+
+Tickets are a plain map in the gen_server's own state
+(`src/matches/asobi_matchmaker.erl:229,236-270`). There is no ticket table, no
+ticket schema and nothing persisted: the queue dies with the node, and a
+player queued against one node can never be matched with a player queued
+against another. Plan for that before you run more than one node - see
+[Clustering](clustering.md).
+
+One live ticket per player *per mode*. Re-adding while already queued for the
+same mode returns the existing ticket rather than minting a second, so a
+double-tapped "find match" cannot fill one player into a self-match
+(`src/matches/asobi_matchmaker.erl:246-252`). A player may hold tickets in two
+different modes at once.
+
+Grouping is a strategy module - `fill` (first-come, first-served) and
+`skill_based` (expanding window) ship. There is no query language and no region
+concept; filtering beyond `mode` happens inside your strategy against the
+ticket's `properties` map. When a group fills, the matchmaker starts the match
+through `asobi_match_sup` on its own node.
+
+## Lua subsystem
+
+The Lua runtime is fifteen modules under `src/lua/` plus the bot modules. It is
+not a wrapper around asobi; it is part of it.
+
+**Registration.** `asobi_app:start/2` calls
+`asobi_lua_sup:register_game_modes/0` before the supervision tree comes up,
+which registers `asobi_lua_match`, `asobi_lua_match_shared` and
+`asobi_lua_world` as the providers for the three Lua mode kinds
+(`src/asobi_app.erl:14,41-42`, `src/lua/asobi_lua_sup.erl:16-20`). Without that
+registration every `{lua, Script}` mode resolves to
+`{error, lua_runtime_unavailable}` (`src/asobi_game_modes.erl:92-100`). This is
+what makes a Lua mode resolvable at all, and it happens ahead of every
+`asobi_sup` child including the matchmaker.
+
+**Config load.** `asobi_lua_config:maybe_load_game_config/0` reads either a
+single `match.lua` or a `config.lua` manifest mapping mode names to script
+paths (`src/lua/asobi_lua_config.erl:5-20`). If neither file exists it is a
+no-op, so an Erlang project that configures modes in `sys.config` is
+unaffected. If a file exists and is broken, the boot fails - fail-closed, as
+described under the supervision tree above.
+
+**Loader and sandbox.** `asobi_lua_loader` builds the Luerl state and clears
+every dangerous standard-library entry point: `os.execute`, `os.exit`,
+`os.getenv`, `os.remove`, `os.rename`, `os.tmpname`, the whole of `io`,
+`dofile`, `loadfile`, `load`, `loadstring`, and the whole of `package`
+(`src/lua/asobi_lua_loader.erl:1-31`). `package` is replaced by a controlled
+`require/1` that resolves names relative to the loaded script's directory and
+rejects parent traversal and absolute paths. `init_sandboxed/0` gives a
+hardened state with no script attached, used for evaluating a `config.lua`
+manifest; `new/1` loads a script and pins its base directory. The API surface a
+script sees is `asobi_lua_api` and `asobi_lua_surface`; see
+[Lua API](lua-api.md).
+
+**Configuration keys.** The runtime's own keys go through
+`asobi_lua_env:get_env/2` (`src/lua/asobi_lua_env.erl:22-32`), which reads
+`asobi_lua` before `asobi` so a `sys.config` written against the old separate
+application did not become dead config at the merge. See
+[Which application key](configuration.md#which-application-key).
+
+## World and zone subsystem
+
+Twenty-two modules under `src/world/`. A world is long-lived, partitioned into
+zones on a grid, and ticked by its own process.
+
+`asobi_world_instance` is a `one_for_all` supervisor per world holding a zone
+supervisor, a zone manager, a ticker and the world server, started in that
+order because the world server discovers the others through the supervisor
+(`src/world/asobi_world_instance.erl:30-78`). One world therefore lives entirely
+on one node: its server, its ticker and every one of its zone processes are
+children of one supervisor tree on one BEAM. Worlds do not migrate.
+
+The world server joins the `pg` group `{asobi_world_server, WorldId}` so a
+world is discoverable from any connected node
+(`src/world/asobi_world_server.erl:174,187`). Two node-local public ETS tables
+back it: `asobi_world_state`, holding zone entity snapshots, and
+`asobi_player_worlds`, mapping a player to the world they are in
+(`src/world/asobi_world_sup.erl:26-36`). Both are node-local, and both are
+`public`, which is an explicit trust boundary - anything running in the same
+BEAM can read and write them, and a sandboxed runtime layered on top must keep
+its sandbox out of them.
+
+See [World server](world-server.md) and [Large worlds](large-worlds.md).
+
+## Leaderboards
+
+One `asobi_leaderboard_server` per board, hydrating its ETS tables from
+`leaderboard_entries` before it accepts reads
+(`src/leaderboards/asobi_leaderboard_server.erl:120-122`).
+
+The ETS table is an `ordered_set` keyed on `{-Score, PlayerId}`, so iteration
+order is rank order (`src/leaderboards/asobi_leaderboard_server.erl:138-168`).
+`sub_score` is written to the database as 0 and takes no part in ordering
+(`src/leaderboards/asobi_leaderboard_server.erl:362`); it exists as a column,
+not as a tiebreak.
+
+A 30 second timer inside the board process flushes dirty players to Postgres
+(`src/leaderboards/asobi_leaderboard_server.erl:123,177,180`). Each flush
+upserts only the players that changed since the last one; a player whose write
+fails stays pending and is retried. `terminate/2` flushes, so a clean restart
+does not lose scores.
+
+The exported API is `submit/3`, `top/2`, `rank/2`, `around/3` and
+`live_boards/0` (`src/leaderboards/asobi_leaderboard_server.erl:6`). There is
+no `reset/0`, no archive table and no scheduled reset. Time-scoped boards are
+something you build with separate board ids.
+
+## Chat
+
+One `asobi_chat_channel` process per live channel, members tracked in the `pg`
+group `{chat, ChannelId}`. A send fans out to the group's members and then
+inserts the row inline, in the same `handle_cast`
+(`src/social/asobi_chat_channel.erl:131-137,204-219`). There is no batching job
+and no async persist queue. Channel types and who may reach them are in
+`asobi_chat_acl`.
+
+## Presence
+
+`asobi_presence` records two separate things: the delivery target for a player
+and membership of the online set. `track/2` records both; `track_bot/2` records
+only the delivery target, so bots receive broadcasts without counting toward
+`online_count/0` (`src/social/asobi_presence.erl:15`). Status changes go out
+over `nova_pubsub`, not the fanout queue.
+
+Everything `asobi_presence:send/2` delivers is one of the shapes in
+`t:asobi_presence:message/0`.
+
+## Extensions and the RPC seam
+
+An extension is an OTP application listed in the release that declares a
+manifest. `asobi_extension_sup` starts one child group per installed extension,
+last in the tree. Extensions contribute no routes.
+
+Clients reach an extension over the WebSocket, through one frame type:
+
+```json
+{"type": "rpc.call", "cid": "c-1",
+ "payload": {"protocol": 1, "method": "shop.buy", "params": {"sku": "hat"}}}
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│    Node A     │    │    Node B     │    │    Node C     │
-│  WS/HTTP     │    │  WS/HTTP     │    │  WS/HTTP     │
-│  Sessions    │◄──►│  Sessions    │◄──►│  Sessions    │
-│  Matches     │    │  Matches     │    │  Matches     │
-│  Matchmaker  │    │  Matchmaker  │    │  Matchmaker  │
-│  pg (shared) │    │  pg (shared) │    │  pg (shared) │
-└──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-       │                   │                   │
-       └───────────────────┼───────────────────┘
-                     ┌─────▼─────┐
-                     │ PostgreSQL │
-                     └───────────┘
+
+The reply is `rpc.ok` with a `result`, or `rpc.error` with the standard error
+object:
+
+```json
+{"type": "rpc.ok",    "cid": "c-1", "payload": {"result": {"reward": 100}}}
+{"type": "rpc.error", "cid": "c-1", "payload": {"error": {"code": "...", "message": "...", "details": {}}}}
 ```
 
-**What works across nodes today:**
-- **Presence** — `pg:get_members(nova_scope, {player, Id})` returns pids on all
-  nodes. Sending messages to those pids works transparently. Delivery targets
-  and the online set are separate: `asobi_presence:track/2` records both,
-  `track_bot/2` records only the delivery target, so bots receive broadcasts
-  without ever counting toward `online_count/0`. Everything `send/2` delivers
-  is one of the shapes in `t:asobi_presence:message/0`.
-- **Session revocation** — `asobi_presence:disconnect/2` reaches sessions on any
-  node.
-- **Chat** — `nova_pubsub` uses `pg` underneath, so chat messages cross nodes.
-- **Match state broadcasts** — `broadcast_state` uses `asobi_presence:send/2`
-  which goes through `pg`, so a match process on Node A can send state to a
-  player session on Node B.
+`cid` is required on `rpc.call` and validated, unlike the rest of the socket
+where it is optional - it is the only way a client pairs a reply with the call
+it made, and it is bounded and checked rather than reflected unchanged. A
+rejected `cid` is not echoed back (`src/extensions/asobi_rpc.erl:12-25,118-128`).
+Every client SDK speaks this. See [Extensions](extensions.md).
 
-**What does NOT work today:**
-- **Matchmaker** — Each node runs its own `asobi_matchmaker` (local registration).
-  A player on Node A and a player on Node B won't be matched together.
-- **Match lookup by ID** — `global:whereis_name({asobi_match_server, MatchId})`
-  fails because matches don't register globally.
-- **Rate limiting** — Per-node ETS, not shared.
+## Ops plane and console
 
-**Migrations:** The Kura advisory lock ensures only one node migrates at a
-time. Safe for rolling deploys, but you should NOT run migrations on every node
-simultaneously — let the first node apply, others will see the version already
-recorded and skip.
+The node serves an operator console at `/console` and an ops HTTP API at
+`/api/v1/ops/*`, on the same listener as the game
+(`src/asobi_router.erl:25-26,214,282`).
 
-**When to use:** Small clusters (2-5 nodes) on the same network. Full mesh
-topology. Good for HA and moderate scale. Not suitable for large clusters or
-multi-region.
+The two are gated separately. `/console` needs `console` to be true; the ops
+routes are always mounted and reject everything until an `ops_secret` is
+configured, so a stock node serves neither. [Operator console](console.md) owns
+the detail.
 
-### Cloud-Native (No Distributed Erlang)
+Core's ops routes are all reads. Every route carries a capability class -
+`read`, `player_data` or `config` (`src/ops/asobi_ops_caps.erl:22`) - and the
+only route that mutates is `/api/v1/ops/ext/:extension/:action`, whose
+behaviour comes from an installed extension.
 
-In Kubernetes, Fly.io, or similar platforms, distributed Erlang is often
-impractical:
-- Dynamic IPs and pod churn make node discovery fragile
-- Full mesh doesn't scale beyond ~50 nodes
-- The distribution protocol has a large security surface
-- Stateless horizontal scaling is the expected model
+The console holds no privileged path into the database. It reads the ops plane
+over HTTP like any other client. It was previously a separate project,
+`asobi_admin`, which read the same database directly; that is archived, because
+a second deployment to secure and keep in step was the wrong shape for
+something an operator opens during an incident.
 
-In this model, each BEAM node is independent. Cross-node communication goes
-through PostgreSQL (which you already have) and Shigoto (which you already have).
-No Redis, no NATS, no additional infrastructure.
+## Database and migrations
 
-#### The Shigoto Broadcast Pattern
+Each node runs its own pgo pool through Kura. Migrations are Erlang modules in
+`src/migrations/` and run at application start, before the supervision tree,
+via `kura_migrator:migrate(asobi_repo)` (`src/asobi_app.erl:16-22`).
 
-The core idea: **every cross-node event is a Shigoto fanout job**. All nodes
-consume the fanout queue. When a node picks up a job, it broadcasts locally
-via `pg` to the affected sessions, which push to clients via WebSocket.
+- All operations in one migration run in a single PostgreSQL transaction under
+  an advisory lock, so only one node migrates at a time and the rest wait. Safe
+  for a rolling deploy.
+- Kura topologically sorts `create_table` operations by foreign-key dependency,
+  so ordering within a migration file does not matter.
+- Never edit or delete an applied migration. Add an `alter_table` migration.
+- A failed migration logs `migration_failed` and the node carries on starting,
+  but `asobi_readiness:mark_ready/0` is not called - the node comes up and
+  reports itself unready rather than dying.
 
-```
-Producer Node                 PostgreSQL              All Consumer Nodes
-     │                            │                         │
-     │── shigoto:insert(...)────►│                         │
-     │   (broadcast queue)        │                         │
-     │                            │── fanout poll ─────────►│
-     │                            │   (no locking,          │── local pg lookup
-     │                            │    time-window)         │── broadcast to sessions
-     │                            │                         │── WS push to clients
-```
+## Running more than one node
 
-Fanout jobs are ephemeral — they live in the database for a configurable
-window (default 120s), then are automatically pruned. Workers must be
-idempotent. If a node misses a broadcast (e.g. during restart), the client
-catches up from the database on reconnect. The database is always the
-source of truth; fanout is best-effort push.
+Everything above describes one node, which is the shape asobi is designed
+around: a match lives on one node, a world lives on one node, and neither
+migrates.
 
-#### Architecture Diagram
+[Clustering](clustering.md) is the single source of truth for what is and is
+not cluster-safe, and holds the complete list of per-node state. Do not infer
+it from this page. Before you go further, four facts about a node that shape
+every clustering decision:
 
-```
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│      Pod A       │  │      Pod B       │  │      Pod C       │
-│  WS/HTTP         │  │  WS/HTTP         │  │  WS/HTTP         │
-│  Sessions (pg)   │  │  Sessions (pg)   │  │  Sessions (pg)   │
-│  Matches (local) │  │  Matches (local) │  │  Matches (local) │
-│  Shigoto worker  │  │  Shigoto worker  │  │  Shigoto worker  │
-└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
-         │                     │                     │
-         └─────────────────────┼─────────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │     PostgreSQL      │
-                    │  ┌───────────────┐  │
-                    │  │ shigoto_jobs  │  │  ← shared job queue
-                    │  │ asobi tables  │  │  ← application state
-                    │  └───────────────┘  │
-                    └─────────────────────┘
-```
+- The matchmaker queue and its tickets are in one gen_server's state, per node,
+  never persisted.
+- The console session store and its CSRF secret are per node and per boot.
+- Rate-limit buckets and the auth cache are per node.
+- Matches and worlds are pinned to the node that started them.
 
-No Redis. No NATS. No distributed Erlang. Just PostgreSQL.
+Postgres is shared, so everything persistent is consistent across nodes.
+`pg`-scoped lookups - presence, chat, match and world `whereis` - resolve
+across connected nodes.
 
-#### What Goes Through the Fanout Queue
-
-| Event | Producer | Consumer Behavior |
-|-------|----------|-------------------|
-| Session revocation (ban/delete) | Admin action | All nodes: `asobi_presence:disconnect/2` locally |
-| Chat message (cross-pod) | Sender's pod | All nodes: deliver to local `pg` chat group members |
-| Notification | Any service | All nodes: push to player's local session if connected |
-| Presence update | Any pod | All nodes: update local presence state |
-| Matchmaker ticket | Player's pod | One node (matchmaker leader): process ticket |
-
-#### What Does NOT Go Through the Fanout Queue
-
-| Event | Why | Mechanism |
-|-------|-----|-----------|
-| Match state (10 Hz) | Too fast, must be local | Local `pg` on same pod (sticky placement) |
-| Match input | Same pod as match | Direct `gen_statem:cast` |
-| Leaderboard flush | Already DB-backed | Local buffer → periodic `asobi_repo:insert` |
-
-#### Sticky Match Placement
-
-The matchmaker assigns a pod for each match. All matched players connect (or
-get routed) to that pod. The match process, player sessions, and game tick
-loop stay local — no cross-pod communication at 10 Hz.
-
-The load balancer routes by match ID or a session cookie set during the
-matchmaker flow.
-
-#### Migrations
-
-Run as a separate Kubernetes Job or init container before the deployment rolls
-out. Do not race migrations across pods — use a single job with Kura's
-advisory lock as a safety net.
-
-## Match Placement: Same Node vs Distributed
-
-**Should all players in a match be on the same node?**
-
-Yes, for real-time games. The match server ticks at 10 Hz and broadcasts state
-to all players. If players are on different nodes:
-
-- **Distributed Erlang:** Works, but adds ~0.1-1ms per message hop. At 10 Hz
-  with 10 players on 3 nodes, that's 100 cross-node messages/second. Tolerable
-  for small clusters, but adds jitter.
-- **Cloud-native:** Unacceptable without distributed Erlang. You'd need to
-  serialize state to Redis/NATS per tick, which adds latency and complexity.
-
-**Recommendation:** Use sticky match placement. The matchmaker assigns a node,
-all matched players connect (or get routed) to that node for the duration of the
-match. This keeps the tight game loop local.
-
-**For non-real-time features** (leaderboards, chat, social, inventory): these
-are request/response or low-frequency pub/sub. Cross-node or cross-pod
-communication via the Shigoto fanout queue is fine.
-
-## Summary: Which Model When
-
-| Scale | Model | Notes |
-|-------|-------|-------|
-| Dev / small prod | Single node | Simplest. Up to ~10K concurrent connections. |
-| Medium (HA needed) | Distributed Erlang, 2-5 nodes | Add global matchmaker, global match registration. Sticky match placement. |
-| Large / cloud-native | Independent pods + Shigoto/PG | Cross-pod events via Shigoto fanout queue. Sticky match placement. No Redis/NATS needed. Migration via job. |
-
-The current codebase is designed for single-node. Moving to distributed Erlang
-requires making the matchmaker cluster-aware (global registration or a shared
-queue via `pg`). Moving to cloud-native requires only PostgreSQL — Shigoto
-provides the durable fanout queue for cross-pod broadcast, and `pg` handles
-local-node session routing. No additional infrastructure beyond what you
-already have.
+Sticky routing, where you need it, is a load-balancer configuration you own.
+asobi does not implement placement, does not assign nodes, and sets no cookie
+for it; the only cookies in the codebase are the console's
+(`src/console/asobi_console_session.erl`).

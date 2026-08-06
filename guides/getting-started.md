@@ -1,21 +1,20 @@
-# Getting Started
+# Getting started
 
-This guide walks you through setting up Asobi and creating your first game backend.
+asobi is one Erlang/OTP node holding the game backend, the Lua runtime and the
+operator console. There are two front doors onto it:
 
-> **Shells**: command blocks that differ per OS are shown for both bash (Linux,
-> macOS, Git Bash, or WSL on Windows) and PowerShell (Windows). Docker and rebar3
-> commands are identical on every platform and are shown once.
+- **[Lua + Docker](#lua--docker)** - run the image, write game logic in Lua. The default path.
+- **[Erlang OTP](#erlang-otp)** - depend on the Hex package and write game logic in Erlang.
 
-Choose your path:
-
-- **[Lua + Docker](#lua--docker)** -- write game logic in Lua, no Erlang needed
-- **[Erlang OTP](#erlang-otp)** -- add asobi as a dependency to your Erlang project
+Command blocks that differ per OS are shown for both bash (Linux, macOS, Git
+Bash, or WSL on Windows) and PowerShell (Windows). Docker and rebar3 commands
+are identical on every platform and are shown once.
 
 ## Lua + Docker
 
-The fastest way to start. You need [Docker](https://docs.docker.com/get-docker/) and
-nothing else. On Windows and macOS that is Docker Desktop; on Windows enable the
-WSL2 backend. `localhost` reaches the server the same way on all three.
+You need [Docker](https://docs.docker.com/get-docker/) and nothing else. On
+Windows and macOS that is Docker Desktop; on Windows enable the WSL2 backend.
+`localhost` reaches the server the same way on all three.
 
 ### 1. Create your project
 
@@ -111,7 +110,7 @@ services:
       retries: 5
 
   asobi:
-    image: ghcr.io/widgrensit/asobi_lua:latest
+    image: ghcr.io/widgrensit/asobi:latest
     depends_on:
       postgres: { condition: service_healthy }
     ports:
@@ -121,7 +120,16 @@ services:
     environment:
       ASOBI_DB_HOST: postgres
       ASOBI_DB_NAME: my_game_dev
+      ASOBI_CORS_ORIGINS: "*"
 ```
+
+The image was renamed from `ghcr.io/widgrensit/asobi_lua`; the old name still
+publishes for now, so change your compose file when convenient.
+
+`ASOBI_CORS_ORIGINS` has no default. Left unset, the node answers with an empty
+`Access-Control-Allow-Origin` and every browser request fails with nothing in
+the logs to explain it. `*` is right for local development; narrow it to your
+game's origins in production.
 
 ### 5. Start it
 
@@ -129,8 +137,8 @@ services:
 docker compose up -d
 ```
 
-Your game backend is running. Asobi reads your Lua scripts, sets up the
-database, and starts listening for WebSocket connections on port 8084.
+The node reads your Lua scripts, runs the database migrations, and listens for
+REST and WebSocket traffic on port 8084.
 
 ### 6. Verify it works
 
@@ -141,10 +149,10 @@ bash (Linux, macOS, Git Bash, WSL):
 ```bash
 curl -s localhost:8084/api/v1/auth/register \
   -H 'content-type: application/json' \
-  -d '{"username":"alice","password":"hunter2"}' | jq
+  -d '{"username":"alice","password":"hunter2"}'
 ```
 
-PowerShell (Windows) - no `curl`/`jq` install needed, `Invoke-RestMethod` parses the response:
+PowerShell (Windows), no `curl` install needed, `Invoke-RestMethod` parses the response:
 
 ```powershell
 Invoke-RestMethod -Uri http://localhost:8084/api/v1/auth/register `
@@ -152,46 +160,74 @@ Invoke-RestMethod -Uri http://localhost:8084/api/v1/auth/register `
   -Body '{"username":"alice","password":"hunter2"}'
 ```
 
-Expected response:
+A 200 with:
 
 ```json
 {
-  "player_id": "01HX...",
-  "session_token": "eyJ...",
+  "player_id": "550e8400-e29b-41d4-a716-446655440000",
+  "access_token": "...",
+  "refresh_token": "...",
   "username": "alice"
 }
 ```
 
-If you see that, everything is wired up — auth, database, REST, and the
-Lua runtime are all live. Save the `session_token` for the WebSocket
-handshake (see [WebSocket Protocol](websocket-protocol.md)).
+That means auth, the database, REST and the Lua runtime are all live.
 
-Common error responses:
+`access_token` is what the WebSocket handshake sends (see
+[Connect via WebSocket](#connect-via-websocket)) and what goes in the
+`Authorization: Bearer` header on REST calls. It is valid for 60 minutes.
+`refresh_token` buys a new pair from `POST /api/v1/auth/refresh` and is valid
+for 30 days. Neither TTL is configurable today.
 
-- `{"error": "missing_required_fields"}` — check your JSON shape.
-- Connection refused — the server hasn't finished booting; give it 10s
-  and retry, or check `docker compose logs asobi` for migration errors.
+Failures use one error object throughout:
+
+```json
+{"error": {"code": "missing_field", "message": "...", "details": {}}}
+```
+
+Branch on `code`, never on `message`. The ones you are likely to hit:
+
+- `missing_field` (400) - `username` or `password` absent, or not a string.
+- `auth.username_taken` (409) - a second run of the same command hits this.
+- `validation_failed` (422) - the username or password failed a field rule; `details.fields` names them.
+
+Connection refused means the node has not finished booting. Give it 10s, then
+check `docker compose logs asobi` for migration errors.
+
+### 7. Turn on the operator console (optional)
+
+Set `ASOBI_CONSOLE: "true"` and `ASOBI_OPS_SECRET_FILE` (pointing at a mounted
+secret file) on the `asobi` service, then browse to <http://localhost:8084/console>.
+Enabled without a secret, the console stays off and logs an error; the node
+still starts. See [Operator console](console.md).
 
 ### Hot-reloading Lua
 
-Edit any `.lua` file under `./lua/` and save. Asobi picks up the change
-**live** — in-flight matches keep running on the old code until they
-finish, new matches bind the new code. No restart, no reconnect.
+Edit `lua/match.lua`, a world script, or anything they `require`, and save. A
+running match re-executes the new script body on its next tick, in place: only
+globals and functions are reassigned, so players, counters and every other
+table already in the Lua state survive. A syntax error logs a warning and the
+match keeps running the old code until you fix the file.
 
-See the [Lua Scripting](lua-scripting.md) guide for the full callback
-reference and advanced patterns.
+Two things behave differently:
+
+- Mode-shape config (`match_size`, `max_players`, `strategy`, `bots`) is
+  re-read by a config watcher and applies to matches formed after the edit.
+  Matches already running consumed those values at formation.
+- A bot script is loaded when the bot process starts, so an edit reaches bots
+  spawned after it, not bots already in a match.
+
+See [Lua scripting](lua-scripting.md) for the full callback reference and
+[Lua API](lua-api.md) for the host functions available inside a script.
 
 ## Erlang OTP
 
-For Erlang developers who want full control.
-
 ### Prerequisites
 
-- Erlang/OTP 27+
-- PostgreSQL 15+
-- [rebar3](https://rebar3.org)
+rebar3, Erlang/OTP 28 or later, and PostgreSQL 16 or later. CI builds on OTP
+29.0.2 against Postgres 17.
 
-### 1. Create a New Project
+### 1. Create a new project
 
 ```bash
 rebar3 new app my_game
@@ -202,7 +238,7 @@ Add asobi to your dependencies in `rebar.config`:
 
 ```erlang
 {deps, [
-    {asobi, "~> 0.25"}
+    {asobi, "~> 0.68"}
 ]}.
 ```
 
@@ -212,7 +248,7 @@ Point rebar3 at a `sys.config` for the shell (added below):
 {shell, [{config, "./config/sys.config"}]}.
 ```
 
-### 2. Configure the Database
+### 2. Configure the database
 
 Create a PostgreSQL database:
 
@@ -220,10 +256,15 @@ Create a PostgreSQL database:
 createdb my_game_dev
 ```
 
-Create `config/sys.config`. Asobi is hosted by Nova, so Nova needs to be
-told to bootstrap the `asobi` application, which plugins to run, and
-which `pg` scopes to register. `shigoto` (background jobs) needs to know
-which DB pool to use, and `kura` needs the connection details:
+Create `config/sys.config`. asobi is hosted by Nova, so Nova needs to be told
+to bootstrap the `asobi` application, which plugins to run, and which `pg`
+scopes to register. `shigoto` (background jobs) needs to know which DB pool to
+use, and `kura` needs the connection details and its dialect.
+
+The plugin list below mirrors the one the shipped release uses
+(`config/prod_sys.config.src`). The order matters: the body cap runs before
+anything buffers a body, and the rate limiter runs before the client gate so
+a flood is shed before any external call.
 
 ```erlang
 [
@@ -234,16 +275,24 @@ which DB pool to use, and `kura` needs the connection details:
         {json_lib, json},
         {cowboy_configuration, #{port => 8084}},
         {plugins, [
+            {pre_request, asobi_body_cap_plugin, #{
+                max_body => 1048576,
+                require_content_length => true
+            }},
             {pre_request, nova_request_plugin, #{
                 decode_json_body => true,
                 parse_qs => true
             }},
-            {pre_request, nova_cors_plugin, #{allow_origins => <<"*">>}},
-            {pre_request, nova_correlation_plugin, #{}}
+            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
+            {pre_request, nova_correlation_plugin, #{}},
+            {pre_request, asobi_rate_limit_plugin, #{}},
+            {pre_request, asobi_client_gate_plugin, #{}},
+            {post_request, asobi_security_headers_plugin, #{}}
         ]}
     ]},
     {kura, [
         {repo, asobi_repo},
+        {backend, kura_backend_postgres},
         {host, "localhost"},
         {port, 5432},
         {database, "my_game_dev"},
@@ -263,31 +312,31 @@ which DB pool to use, and `kura` needs the connection details:
         {matchmaker, #{
             tick_interval => 1000,
             max_wait_seconds => 60
-        }},
-        {session, #{
-            token_ttl => 900,
-            refresh_ttl => 2592000
         }}
     ]},
     {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].
 ```
 
-> **Why `{bootstrap_application, asobi}`?** Nova is a web framework that
-> hosts one or more applications. Without this key Nova doesn't know
-> which app owns its router, and the release dies at boot with
-> `{error, no_nova_app_defined}`.
+Two keys people leave out and then debug for an hour:
 
-### 3. Start the Server
+`{bootstrap_application, asobi}` tells Nova which application owns the router.
+Without it the release dies at boot with `{error, no_nova_app_defined}`.
+
+`{backend, kura_backend_postgres}` tells kura which SQL dialect to compile to.
+Without it the node boots fine and then dies on its first query with
+`{no_dialect_configured, asobi_repo}`.
+
+### 3. Start the server
 
 ```bash
 rebar3 shell
 ```
 
-Asobi runs all database migrations automatically on startup. The server
-is now listening on the configured port.
+Database migrations run automatically on startup. The server is now listening
+on the configured port.
 
-## Register a Player
+## Register a player
 
 bash (Linux, macOS, Git Bash, WSL):
 
@@ -310,25 +359,29 @@ Response:
 ```json
 {
   "player_id": "550e8400-e29b-41d4-a716-446655440000",
-  "session_token": "SFMyNTY...",
+  "access_token": "...",
+  "refresh_token": "...",
   "username": "player1"
 }
 ```
 
 ## Connect via WebSocket
 
-Connect to `ws://localhost:8084/ws` and authenticate:
+Connect to `ws://localhost:8084/ws` and send the `access_token`:
 
 ```json
 {
   "type": "session.connect",
   "payload": {
-    "token": "SFMyNTY..."
+    "token": "..."
   }
 }
 ```
 
-## Implement Your Game
+A connection that never sends `session.connect` is closed by the idle-auth
+timer (1008, `idle_auth_timeout`).
+
+## Implement your game
 
 Create a module implementing the `asobi_match` behaviour:
 
@@ -352,7 +405,7 @@ handle_input(PlayerId, #{~"type" := ~"move", ~"x" := X, ~"y" := Y}, State) ->
     {ok, State#{players => Players#{PlayerId => #{x => X, y => Y}}}}.
 
 tick(State) ->
-    %% Called every tick -- advance your simulation
+    %% Called every tick - advance your simulation
     {ok, State}.
 
 get_state(_PlayerId, State) ->
@@ -368,12 +421,14 @@ Register it in your config:
 ]}
 ```
 
-## Next Steps
+## Next steps
 
-- [Lua Scripting](lua-scripting.md) -- write game logic in Lua (Docker or Erlang)
-- [Bots](lua-bots.md) -- add AI-controlled players
-- [Configuration](configuration.md) -- all configuration options
-- [REST API](rest-api.md) -- full API reference
-- [WebSocket Protocol](websocket-protocol.md) -- real-time message types
-- [Matchmaking](matchmaking.md) -- query-based player matching
-- [Economy](economy.md) -- wallets, items, and store
+- [Lua scripting](lua-scripting.md) - write game logic in Lua (Docker or Erlang)
+- [Lua API](lua-api.md) - the host functions a script can call
+- [Bots](lua-bots.md) - add AI-controlled players
+- [Configuration](configuration.md) - all configuration options
+- [Self-hosting](self-hosting.md) - requirements, production compose, operating notes
+- [REST API](rest-api.md) - full API reference
+- [WebSocket protocol](websocket-protocol.md) - real-time message types
+- [Matchmaking](matchmaking.md) - query-based player matching
+- [Economy](economy.md) - wallets, items, and store

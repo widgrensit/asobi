@@ -1,86 +1,78 @@
 # Migrating from Nakama self-host to asobi
 
-You're running Nakama self-hosted on your own infra. It works. But maybe:
+You run Nakama self-hosted on your own infrastructure. It works. Migrate only
+if one of these applies:
 
-- You're tired of Nakama requiring **CockroachDB** (vs plain PostgreSQL
-  everywhere else in your stack)
-- You want **hot-reload of Lua** that doesn't drop sessions on deploy
-  (Nakama issue [#192](https://github.com/heroiclabs/nakama/issues/192) has
-  been open since 2018)
-- You're bumping into **spatial / MMO** use cases Nakama wasn't designed
-  for
-- You prefer **BEAM's fault-tolerance** over Go's recovery-from-panic
-  model for a stateful realtime server
-- You want **Apache-2** without the BSL-adjacent ambiguity in some
-  Heroic Cloud components
+- You want hot-reload of Lua that does not drop sessions on deploy. Editing a
+  Nakama runtime module means restarting the server.
+- You are hitting spatial or large-world use cases. asobi has zones, terrain
+  chunks and adaptive tick rates as first-class primitives; Nakama's match
+  handler is room-centric.
+- You prefer the BEAM's supervision model over recovering from panics in a
+  stateful realtime server.
+- You want a single Apache-2.0 codebase with no commercial-only companions.
 
-This guide walks you from a working Nakama deployment to an equivalent
-asobi deployment. It's the most straightforward of the three migration
-guides — Nakama and asobi are structurally the closest cousins in the
-OSS backend space.
+If none of those apply, stay on Nakama. Nakama and asobi are structurally the
+closest cousins in this space, which makes the port straightforward and also
+makes it pointless without a reason.
 
-> **Draft notice.** This guide is a starting point, not a playbook —
-> nobody has yet migrated a shipped Nakama title to asobi. The asobi-side
-> endpoints and events below are verified against the current code.
-> Nakama-side method names come from Nakama's public docs. **Pair with us
-> in the [Discord](https://discord.gg/vYSfYYyXpu) `#migrations` channel
-> if you hit an API gap.**
+Nobody has migrated a shipped Nakama title to asobi yet. The asobi-side
+endpoints and events below are verified against this repository; the
+Nakama-side names come from Nakama's public documentation. Pair with us in the
+[Discord](https://discord.gg/vYSfYYyXpu) `#migrations` channel if you hit a
+gap.
 
-## Why migrate at all
+## What asobi is
 
-Nakama is a fine product. We respect Heroic Labs. You should only migrate
-if one of these reasons applies to you:
-
-- **You need hot-reload.** Editing a Lua runtime module in Nakama requires
-  a full server restart, which drops connections. asobi does it live via
-  Luerl module swap.
-- **Your infra is Postgres-only.** Moving CockroachDB off your ops plate
-  is worth real money.
-- **You're building an MMO / large-world game.** asobi has spatial zones,
-  lazy-zone loading, terrain chunks, and adaptive tick rates as first-class
-  primitives. Nakama's match handler is room-centric.
-- **You want truly-free OSS.** Nakama is Apache-2 at the core but Heroic
-  Cloud has commercial-only components (Satori, Hiro) that ease adoption.
-  If you're committed to OSS-only, asobi is structurally simpler.
-
-If none of those apply, stay on Nakama. Honestly.
+One Erlang/OTP node containing the game backend, the Lua runtime and the
+operator console. Two ways in: run `ghcr.io/widgrensit/asobi` and write Lua, or
+depend on the Hex package and write Erlang. Same node either way.
 
 ## Concept map
 
-Nakama and asobi agree on most of the vocabulary:
-
 | Nakama | asobi | Notes |
 |---|---|---|
-| **Match** (authoritative) | Match | Same: a BEAM/goroutine process owning state. |
-| **Match handler** (Lua / TS / Go) | `asobi_match` behaviour / `match.lua` | Callbacks: init, join, leave, handle_input, tick, get_state. |
-| **Match Handler's LoopTick** | `tick(state)` | Same cadence (configurable). |
-| **Parties** | Not supported | No matchmaker party grouping. Play with friends by sharing a match/world id or a join code and joining directly; gate entry in `join/3`. |
-| **MatchmakerAdd** | `POST /api/v1/matchmaker` | Body: `{mode, properties}`. |
-| **Storage Engine** | `/api/v1/storage/:collection/:key` | Collection+key+owner model is the same. Public/Owner/None permissions. |
-| **Leaderboards** | Leaderboards (`/api/v1/leaderboards/:id`) | Submit/top/around queries. |
-| **Tournaments** | Tournaments (`/api/v1/tournaments`) | Scheduled, entry fees, rewards. |
-| **Friends** | Friends (`/api/v1/friends`) | Request/approve/block. |
-| **Groups** | Groups (`/api/v1/groups`) | Roles, join/leave/kick. |
-| **Chat channels** | Chat channels + WS `chat.send` / `chat.join` | Per-channel history. |
-| **Notifications** | Notifications (`/api/v1/notifications`) | Plus WS push. |
-| **Wallets** | Economy wallets (`/api/v1/wallets`) | Multi-currency ledgers. |
-| **Purchases** | Economy store (`/api/v1/store/purchase`) | Integrates with IAP verification. |
-| **Authentication (Device / Custom)** | `/api/v1/auth/guest` | Create-or-resume anonymous accounts from a device-held secret; upgrade later with `/auth/guest/upgrade`. Maps directly to `AuthenticateDevice`/`AuthenticateCustom`. |
-| **Authentication (Email)** | `/api/v1/auth/register` + `/login` | Username + password. |
-| **Authentication (Google / Apple / Steam / ...)** | `/api/v1/auth/oauth` | OAuth/OIDC. |
-| **RPC endpoints** | Nova controllers (Erlang) or Lua callbacks | For per-match logic, use Lua in `match.lua`. For cross-match workflows, write a Nova controller. |
-| **Hooks (`before_authenticate`, `after_friendAdd`)** | Nova plugins + match lifecycle callbacks | Pre- and post-request middleware in Nova. |
-| **Runtime Lua / TS / Go** | Luerl Lua (for match logic), Erlang/OTP (for the engine) | One scripting language (Lua); the engine is all OTP. |
-| **Nakama Console** | Built-in operator console at `/console` | Ships in asobi. Set `{console, true}` and an `ops_secret`. |
-| **`sessiontoken`** | `session_token` | Same concept, returned from `/register` or `/login`. |
-| **WebSocket** | `/ws` with `session.connect` first frame | See the Hathora guide's [WebSocket handshake](migrate-from-hathora.md#websocket-handshake) section for the protocol. |
+| Match (authoritative) | Match | A process owning state, one per match. |
+| Match handler | `match.lua`, or the `asobi_match` behaviour | Callbacks: `init`, `join`, `leave`, `handle_input`, `tick`, `get_state`. |
+| Match handler loop tick | `tick(state)` | Matches tick every 100ms and that is fixed. `tick_rate` is a world-mode global; worlds default to 50ms. |
+| Parties | Not supported | No matchmaker party grouping. Share a match or world id, or a join code, and join directly; gate entry in `join(player_id, state, ctx)`. |
+| MatchmakerAdd | `POST /api/v1/matchmaker` | Body `{"mode": "...", "properties": {}}`. Returns `{"ticket_id": "...", "status": "pending"}`. |
+| Storage engine | `GET/PUT/DELETE /api/v1/storage/:collection/:key` | Collection, key and owner, same model. Permissions are `read_perm` and `write_perm`, each `public` or `owner`. There is no `none`. |
+| Storage, shared/global rows | Lua `game.storage.get/set` | The HTTP routes only ever touch per-player rows. The global namespace (no owner) is reachable from Lua only. |
+| Leaderboards | `/api/v1/leaderboards/:id` | Submit, top, around. |
+| Tournaments | `/api/v1/tournaments` | Scheduled, entry fees, rewards. |
+| Friends | `/api/v1/friends` | Request, approve, block. |
+| Groups | `/api/v1/groups` | Roles, join, leave, kick. |
+| Chat channels | Chat channels plus WS `chat.send` / `chat.join` | Per-channel history. |
+| Notifications | `/api/v1/notifications` | Plus the `notification.new` WebSocket push. |
+| Wallets | Economy wallets (`/api/v1/wallets`) | Multi-currency ledgers. |
+| Purchases | Economy store (`/api/v1/store/purchase`) | Spends an in-game wallet balance. |
+| IAP receipts | `POST /api/v1/iap/apple`, `/api/v1/iap/google` | Verifies the receipt and records it once per transaction. It grants nothing: turning a verified receipt into currency or items is your game's job, via the economy or inventory API. |
+| Authentication (device / custom) | `POST /api/v1/auth/guest` | Create-or-resume from a device-held secret; claim later with `/api/v1/auth/guest/upgrade`. Opt-in - see the note below the table. |
+| Authentication (email) | `POST /api/v1/auth/register` and `/login` | Username plus password. |
+| Authentication (Google / Apple / Steam) | `POST /api/v1/auth/oauth` | OAuth/OIDC. |
+| RPC endpoints | Extension RPC over the WebSocket | Frame `rpc.call` with `{protocol: 1, method, params}`; replies `rpc.ok` `{result}` or `rpc.error` `{error: {code, message, details}}`, correlated by `cid`. All seven client SDKs support it. See [Extensions](extensions.md). |
+| Hooks (`before_authenticate`, `after_friendAdd`) | Nova plugins and match lifecycle callbacks | Pre- and post-request middleware in Nova. |
+| Runtime Lua / TS / Go | Lua for game logic, Erlang/OTP for the engine | One scripting language. |
+| Nakama Console | Built-in operator console at `/console` | Off by default, and read-only. See the note below the table. |
+| Session token | `access_token` plus `refresh_token` | Register and login return `player_id`, `access_token`, `refresh_token` and `username`. There is no `session_token` field. |
+| WebSocket | `/ws`, `session.connect` first frame | See the Hathora guide's [WebSocket handshake](migrate-from-hathora.md#websocket-handshake). |
+
+Guest auth is off until two things are true: the game declares `guest_auth` in
+its Lua config, and the operator supplies a pepper of at least 32 bytes. Either
+one missing and `POST /api/v1/auth/guest` answers `guest.disabled`. See
+[Authentication](authentication.md).
+
+A stock node serves neither the console nor the ops API; you turn them on - see
+[Operator console](console.md). When you do, the plane is read-only apart from
+actions an extension declares. If you run Nakama Console to ban and kick, budget
+for building that yourself.
 
 ## Migration path
 
-### Phase 1 — stand up asobi alongside Nakama (0.5 days)
+### Phase 1 - stand up asobi alongside Nakama (0.5 days)
 
 ```yaml
-# docker-compose.yml
 services:
   postgres:
     image: postgres:17
@@ -88,24 +80,43 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: my_game
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
 
   asobi:
-    image: ghcr.io/widgrensit/asobi_lua:latest
-    depends_on: [postgres]
+    image: ghcr.io/widgrensit/asobi:latest
+    depends_on:
+      postgres: { condition: service_healthy }
     ports: ["8084:8084"]
     volumes: ["./lua:/app/game:ro"]
     environment:
       ASOBI_DB_HOST: postgres
       ASOBI_DB_NAME: my_game
+      ASOBI_CORS_ORIGINS: "http://localhost:5173"
+      ASOBI_CONSOLE: "true"
+      ASOBI_OPS_SECRET_FILE: /run/secrets/ops_secret
+    secrets: [ops_secret]
+
+secrets:
+  ops_secret:
+    file: ./ops_secret.txt
 ```
 
-Note: plain PostgreSQL, no CockroachDB. If you currently run Nakama
-against Postgres-compatible Cockroach, you already have a backup strategy
-that works here.
+`./lua` must contain a `match.lua` before the matchmaker has anything to match
+on - see Phase 2 below, or [Getting started](getting-started.md) for a complete
+one. Without it, `POST /api/v1/matchmaker` answers `matchmaker.unknown_mode`.
 
-### Phase 2 — port the Lua runtime (1-3 days)
+`ASOBI_CORS_ORIGINS` is not optional for a browser client: unset, the node
+sends an empty `Access-Control-Allow-Origin` and every fetch from a page is
+blocked.
 
-Nakama's Lua API:
+Requirements and the production compose are in
+[Self-hosting](self-hosting.md).
+
+### Phase 2 - port the runtime (1-3 days)
+
+Nakama's Lua API is RPC-first:
 
 ```lua
 local nk = require("nakama")
@@ -117,11 +128,9 @@ end
 nk.register_rpc(foo, "my_rpc")
 ```
 
-asobi's Lua API differs in key ways — the match is the first-class unit,
-not an RPC:
+asobi's is match-first. The match is the unit; the file is `match.lua`:
 
 ```lua
--- match.lua
 match_size = 2
 
 function init(_config)
@@ -143,37 +152,45 @@ function handle_input(player_id, input, state)
 end
 ```
 
-For cross-match logic (leaderboards, global state, scheduled jobs):
+Cross-match logic has three homes:
 
-- `game.leaderboard.submit("global", player_id, score)` in Lua
-- Shigoto background jobs in Erlang for scheduled cross-match workflows
-- Nova controllers in Erlang for custom REST endpoints (equivalent to
-  Nakama RPCs)
+- `game.leaderboard.submit`, `game.economy.*`, `game.storage.*` and
+  `game.notify` are callable from any match script. See the
+  [Lua API](lua-api.md).
+- Anything a client must call by name, that is not tied to a match, becomes an
+  extension RPC method. That is the direct replacement for
+  `nk.register_rpc`, and it reaches the client as `rpc.call` on the same
+  WebSocket. See [Extensions](extensions.md).
+- Scheduled work runs as a Shigoto job in Erlang.
 
-If you have a lot of RPC-shaped logic (not per-match), budget Phase 2 for
-closer to a week.
+If most of your Nakama logic is RPC-shaped rather than per-match, budget closer
+to a week and expect to write an extension.
 
-### Phase 3 — migrate the storage schema (1-2 days)
+### Phase 3 - migrate the storage schema (1-2 days)
+
+asobi's table is `storage`, not `asobi_storage`. Permissions are two columns,
+`read_perm` and `write_perm`, each `public` or `owner`. `id` and `updated_at`
+have no database default, so the insert must supply them.
 
 ```bash
-# Export from Nakama's Postgres (or CockroachDB):
 pg_dump -U nakama -t storage -d nakama > storage-export.sql
-
-# Transform storage rows to asobi's asobi_storage schema
-psql -U postgres -d my_game -c "
-  INSERT INTO asobi_storage (player_id, collection, key, value, permissions)
-  SELECT user_id::uuid, collection, key, value::jsonb, 'owner'
-  FROM old_nakama_storage;
-"
 ```
 
-The same pattern applies to leaderboards, friends, groups, and wallets.
-Column names differ slightly (see the [Kura schemas](https://hexdocs.pm/asobi)
-for the target shape) but the data is 1:1 translatable.
+Load that dump into a staging table, then:
 
-### Phase 4 — port the client (2-5 days)
+```sql
+INSERT INTO storage (id, collection, key, player_id, value, version, read_perm, write_perm, updated_at)
+SELECT gen_random_uuid(), collection, key, user_id::uuid, value::jsonb, 1, 'owner', 'owner', now()
+FROM nakama_storage_import;
+```
 
-Nakama client SDKs and asobi client SDKs map cleanly:
+asobi mints UUIDv7 for rows it creates; `gen_random_uuid()` gives v4, which is
+fine for imported rows because nothing reads ordering off a storage id.
+
+The same one-off-script pattern applies to leaderboards, friends, groups and
+wallets. Column names differ; the schemas are in `src/` alongside each domain.
+
+### Phase 4 - port the client (2-5 days)
 
 | Nakama SDK | asobi SDK |
 |---|---|
@@ -182,87 +199,81 @@ Nakama client SDKs and asobi client SDKs map cleanly:
 | `nakama-defold` | [asobi-defold](https://github.com/widgrensit/asobi-defold) |
 | `nakama-unreal` | [asobi-unreal](https://github.com/widgrensit/asobi-unreal) |
 | `nakama-js` | [asobi-js](https://github.com/widgrensit/asobi-js) |
+| (none) | [asobi-love2d](https://github.com/widgrensit/asobi-love2d) |
+| (none) | [asobi-dart](https://github.com/widgrensit/asobi-dart) |
+| (none) | [flame_asobi](https://github.com/widgrensit/flame_asobi) |
 
-The Unity example:
+`AuthenticateCustom` and `AuthenticateDevice` both become guest auth. On the
+wire that is one POST and one WebSocket frame:
 
-```csharp
-// Before (Nakama)
-var client = new Client("defaultkey", "127.0.0.1", 7350, false);
-var session = await client.AuthenticateCustomAsync(deviceId);
-var socket = client.NewSocket();
-await socket.ConnectAsync(session);
-
-// After (asobi) - guest auth is the direct AuthenticateCustom/Device equivalent
-var client = new AsobiClient("https://api.my-game.com");
-await client.Auth.GuestAsync(deviceId, deviceSecret);   // POST /auth/guest, create-or-resume
-await client.WebSocket.ConnectAsync();
-client.WebSocket.SendSessionConnect(client.Session.Token);
+```bash
+curl -s localhost:8084/api/v1/auth/guest \
+  -H 'content-type: application/json' \
+  -d '{"device_id":"<stable device id>","device_secret":"<base64 of >= 32 random bytes>"}'
+# { "player_id": "019de3...", "access_token": "...", "refresh_token": "...",
+#   "username": "...", "guest": true, "created": true }
 ```
 
-### Phase 5 — cut over (1 day)
+```json
+{"type":"session.connect","payload":{"token":"<access_token>"}}
+```
 
-Flip the client's base URL via a feature flag. Monitor for 24h. Shut
-down the Nakama server.
+Your SDK wraps both. Each SDK's own README carries the call names; this guide
+does not restate them because they differ per language.
 
-## Things Nakama has that asobi doesn't (yet)
+### Phase 5 - cut over (1 day)
 
-- **Satori** (LiveOps platform). asobi's LiveOps story is rougher.
-- **Hiro** (progression system). asobi has tournaments and phases, plus
-  seasons and quests as extensions, but nothing as opinionated as Hiro.
-- **Go and TypeScript runtimes** as alternatives to Lua. asobi is Lua or
-  Erlang — no JS/TS runtime.
-- **Nakama Console** is further along than asobi's console today: asobi's ops
-  plane is read-only, so moderation still means a database write or a Lua
-  handler, not a button.
-- **Published case studies from AAA studios.** asobi is newer.
+Flip the client's base URL behind a feature flag. Monitor for 24h. Shut the
+Nakama server down.
 
-If you're deeply reliant on Satori, you'll need to build the equivalent
-in asobi or accept the feature loss.
+## What Nakama has that asobi does not
 
-## Things asobi has that Nakama doesn't
+- Satori. asobi's LiveOps story is rougher.
+- Hiro. asobi has tournaments and phases, and seasons ship as the
+  [`asobi_seasons`](https://github.com/widgrensit/asobi_seasons) extension, but
+  nothing as opinionated.
+- Go and TypeScript runtimes. asobi is Lua or Erlang.
+- A mutating operator console. asobi's ops plane is read-only, so moderation is
+  a database write, a Lua handler or an extension action.
+- Published case studies from large studios. asobi is newer.
 
-- **Hot-reload Lua** — the [Nakama issue #192](https://github.com/heroiclabs/nakama/issues/192)
-  that's been open since 2018
-- **Plain PostgreSQL** — no CockroachDB requirement
-- **Spatial zones / terrain** — purpose-built for large-world games
-- **Built-in voting** (plurality / ranked / approval / weighted)
-- **Phases** as a first-class primitive, and seasons as an extension
-- **Per-match process isolation** via OTP supervision — crashes never
-  leak between matches, no shared GC pauses
+## What asobi has that Nakama does not
 
-## Cost comparison
+- Live Lua reload without dropping players.
+- Spatial zones and terrain, purpose-built for large-world games.
+- Built-in voting (plurality, ranked, approval, weighted).
+- Phases as a first-class primitive.
+- Per-match process isolation under OTP supervision: a crash in one match does
+  not leak into another, and there is no shared stop-the-world GC.
 
-Self-hosted Nakama and self-hosted asobi have similar infrastructure
-costs at the low end. The main operational difference:
+## Cost
 
-| | Nakama self-host | asobi self-host |
-|---|---|---|
-| Database | CockroachDB (3-node recommended) | PostgreSQL (1 node is fine) |
-| Hot ops | Restart on deploy | Live module swap |
-| Clustering | Nakama's cluster mode + Consul | OTP `pg` / distributed Erlang |
-| Typical idle cost | €30-60/mo (Cockroach is memory-hungry) | €5-15/mo |
+Self-hosted Nakama and self-hosted asobi have similar infrastructure costs.
+Both run on PostgreSQL. The operational differences that show up in a bill are
+node count and how you deploy game-logic changes.
 
-If you're already running Postgres for other services, consolidating onto
-one DB flavour is a meaningful win.
+Node count is where asobi's clustering behaviour matters: the matchmaker queue
+is per node, so players queuing against different nodes never match each other,
+and rate limits are per node. Adding nodes is not free of design consequences.
+[Clustering](clustering.md) has the full list.
 
 ## Do this today
 
-- [ ] `git clone` [asobi_lua](https://github.com/widgrensit/asobi_lua),
-  `docker compose up`, register a test player.
-- [ ] Port one Nakama RPC or match handler to `match.lua`. Compare the
-  feel.
-- [ ] Join the [Discord](https://discord.gg/vYSfYYyXpu) `#migrations`
-  channel — tell us what your Lua runtime does and we'll sketch the port.
+- Run the Phase 1 compose locally and register a test player.
+- Port one Nakama match handler to `match.lua`. Compare the feel.
+- Join the [Discord](https://discord.gg/vYSfYYyXpu) `#migrations` channel and
+  tell us what your runtime modules do.
 
 ## Getting help
 
-- **Discord**: [#migrations](https://discord.gg/vYSfYYyXpu) channel
-- **Email**: hello@asobi.dev
-- **GitHub Discussions**: [widgrensit/asobi_lua/discussions](https://github.com/widgrensit/asobi_lua/discussions)
+- Discord: [#migrations](https://discord.gg/vYSfYYyXpu)
+- Email: hello@asobi.dev
+- GitHub Discussions:
+  [widgrensit/asobi/discussions](https://github.com/widgrensit/asobi/discussions)
 
 ## See also
 
 - [Migrating from Hathora](migrate-from-hathora.md)
 - [Migrating from PlayFab](migrate-from-playfab.md)
 - [Exit guarantee](exit.md)
-- [Comparison vs Nakama, Colyseus, SpacetimeDB](comparison.md)
+- [Comparison](comparison.md)

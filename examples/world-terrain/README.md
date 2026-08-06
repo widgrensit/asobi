@@ -69,7 +69,7 @@ function terrain_provider(config)
 end
 ```
 
-The module must be listed in `asobi_lua`'s `terrain_providers` env, or it is
+The module must be listed in the `terrain_providers` application env, or it is
 rejected with `terrain_provider_not_allowed`.
 
 ## Run it

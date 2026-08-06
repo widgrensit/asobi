@@ -1,146 +1,168 @@
-# Self-hosting asobi_lua
+# Self-hosting asobi
 
-This guide covers running asobi_lua in production on infrastructure you
-control. It is opinionated about how Lua game scripts get onto disk and
-when they reload, because that is the question every operator hits in
-the first week.
+asobi is one Erlang/OTP node containing the game backend, the Lua runtime and
+the operator console. Run the image and write Lua, or depend on the Hex package
+and write Erlang: same node, two surfaces. This guide covers running it in
+production on infrastructure you control.
 
-If you are evaluating asobi_lua locally, follow the
-[quickstart](../README.md#try-it-in-60-seconds) first — this guide assumes you
-have something working and now want it deployed.
+It is opinionated about how Lua scripts get onto disk and when they reload,
+because that is the question every operator hits in the first week.
+
+## Requirements
+
+- **Erlang/OTP 29.** The image is built on `erlang:29.0.4-slim`, and 29 is the
+  only entry in the CI test matrix (`.github/workflows/ci.yml`). Nothing older
+  is tested.
+- **PostgreSQL 17.** Every compose file in this repository runs `postgres:17`.
+- **linux/amd64.** The publish workflow declares no `platforms`, so the image
+  is built for the runner's architecture only. There is no arm64 image; on
+  Apple silicon it runs under emulation.
+- **One TCP port**, `8084` by default. Game clients, the REST API, the
+  WebSocket and the console all answer on it.
+
+Other guides link here rather than restating a floor.
 
 ## What ships in the container
 
-`ghcr.io/widgrensit/asobi_lua` is a Debian-trixie-slim runtime image
-built on top of Erlang/OTP 28.x. It expects:
+`ghcr.io/widgrensit/asobi` is a Debian-trixie-slim runtime image. It expects:
 
-- A Postgres 17+ database it can read and write (sessions, world
-  snapshots, leaderboards, IAP receipts).
+- A Postgres 17 database it can read and write.
 - A directory mounted at `/app/game/` containing your Lua scripts.
-- TCP `:8084` reachable by your matchmaker / game clients.
+- TCP `:8084` reachable by your clients.
 
-That's it. No sidecars, no message bus, no Redis. The container is
-stateless apart from `/app/game/`; restarting it loses no game state
-beyond what was kept only in memory.
+No sidecars, no message bus, no Redis. The container is stateless apart from
+`/app/game/`.
+
+It runs as the unprivileged user `asobi` (uid 999), so the mounted game
+directory and any secret file you mount have to be readable by that user. A
+secret mounted `0600` owned by root produces `ops_secret_file_unreadable` and a
+console that stays off.
+
+The script directory is the `game_dir` key, `/app/game` in the image. Mount
+somewhere else and set it in a `sys.config`; nothing reads it from the
+environment.
+
+The image fixes the Postgres port at `5432` (`config/prod_sys.config.src`). A
+database on a different port means supplying your own `sys.config`.
 
 ## Where Lua scripts live
 
-`/app/game/` is the search path for `require()` and the source of every
-Lua callback the runtime invokes (match handlers, world tick, bots).
-The runtime calls `filelib:last_modified/1` on these files between game
-ticks; if the mtime moves, it re-executes the script body against the
-existing Luerl state. See `asobi_lua_reload` for the primitive.
+`/app/game/` is the search path for `require()` and the source of every Lua
+callback the runtime invokes (match handlers, world tick, bots). Between game
+ticks the runtime calls `filelib:last_modified/1` on the script; if the mtime
+moves, it re-executes the script body against the existing Luerl state. See
+`asobi_lua_reload` for the primitive.
 
-You have four ways to put scripts there in production. Pick the one
-that matches how you ship code.
+You have four ways to put scripts there. Two of them exist.
 
-### Pattern 1 — Bake into the image (immutable)
+### Pattern 1: bake into the image (immutable)
 
-**When:** you treat game-script changes as deploys. Each release of
-your game is a new container image, rolled out via your existing
-container orchestrator (Kubernetes, Nomad, Fly, plain `docker compose
-up -d`).
-
-**How:** extend the asobi_lua image and `COPY` your scripts into
-`/app/game/`:
+You treat game-script changes as deploys. Each release of your game is a new
+container image, rolled out by whatever already rolls out your services.
 
 ```Dockerfile
-FROM ghcr.io/widgrensit/asobi_lua:latest
+FROM ghcr.io/widgrensit/asobi:latest
 COPY game/ /app/game/
 ```
 
-Build, push to your registry, and deploy as you would any service.
-mtime never changes inside a running container, so the per-tick
-`stat()` cost is essentially free, but no live reload happens —
-you ship code by shipping a container.
+mtime never changes inside a running container, so the per-tick `stat()` costs
+nothing and no live reload happens: you ship code by shipping a container.
 
-This is the safest model and the one we recommend by default. If you
-are not sure which pattern you want, start here.
+This is the safest model and the default recommendation. If you are not sure
+which pattern you want, start here.
 
-### Pattern 2 — Volume mount + atomic rename (live updates)
+### Pattern 2: volume mount plus atomic rename (live updates)
 
-**When:** you want to update scripts without rolling the runtime —
-e.g. during a live event, or because your design team iterates on
-balance numbers faster than your release train moves.
-
-**How:** mount a host directory (or a network volume your CI can
-write to) at `/app/game/`:
+You want to update scripts without rolling the node, during a live event or
+because balance numbers move faster than your release train.
 
 ```yaml
 services:
-  asobi_lua:
-    image: ghcr.io/widgrensit/asobi_lua:latest
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
     volumes:
       - /srv/asobi/game:/app/game:ro
 ```
 
-When you ship new code, **always write the file under a temp name and
-`mv` it into place**. POSIX `rename(2)` is atomic; an editor's "save"
-that truncates and re-writes the file is not, and the runtime can
-observe a half-written file and crash the load.
+Always write the file under a temp name and `mv` it into place. POSIX
+`rename(2)` is atomic; an editor's save that truncates and rewrites is not, and
+the runtime can observe a half-written file.
 
 ```bash
-# Wrong — runtime may stat() while the file is empty
+# Wrong: the runtime may stat() while the file is empty
 cp build/match.lua /srv/asobi/game/match.lua
 
-# Right — atomic swap, runtime never sees a partial file
+# Right: atomic swap, the runtime never sees a partial file
 cp build/match.lua /srv/asobi/game/match.lua.tmp
 mv /srv/asobi/game/match.lua.tmp /srv/asobi/game/match.lua
 ```
 
-The next match/world tick picks up the new mtime and reloads. In-flight
-match state survives the reload because the script body re-declares
-globals and functions in place; existing locals and table fields are
-not touched unless the script explicitly re-runs `init()`.
+The next match or world tick picks up the new mtime and reloads. In-flight
+state survives, because the script body re-declares globals and functions in
+place; existing locals and table fields are untouched unless the script
+explicitly re-runs `init()`.
 
-For world zones, a reload that adds or changes `spawn_templates` also
-takes effect immediately: an already-running zone re-fetches its spawn
-template set on the tick right after the reload, so new templates
-become spawnable without restarting the zone. If the reloaded
-`spawn_templates` itself fails, the zone's existing templates are left
-untouched rather than cleared.
+For world zones, a reload that changes `spawn_templates` also takes effect
+immediately: a running zone re-fetches its template set on the reload tick
+itself, so new templates become spawnable without restarting the zone. If the
+reloaded `spawn_templates` itself fails, the zone keeps the templates it had
+rather than clearing them.
 
-If a new script has a syntax error, the runtime keeps running the old
-code, logs a warning, and remembers the new mtime so it does not retry
-the same broken file every tick. Fix the file, save again, and the
-next tick reloads. The same per-script rate limiting applies to any
-callback that starts failing on every tick (not just syntax errors) —
-the failure is logged at most a few times per window, not once per
-tick forever.
+A new script with a syntax error leaves the old code running, logs a warning,
+and records the new mtime so the same broken file is not retried every tick.
+Fix it, save again, and the next tick reloads. A callback that fails on every
+tick is logged under the `script_log` limiter, 3 lines per 10 seconds per
+script and callback, so a broken script does not drown the log.
 
-### Pattern 3 — Signal-driven reload (planned)
+### Pattern 3: signal-driven reload (planned, not shipped)
 
-A future `ASOBI_LUA_RELOAD=signal` mode and admin RPC will let you skip
-the per-tick `stat()` entirely and reload only when explicitly
-triggered (e.g. by your CI/CD pipeline, after the file is in place).
-This is the right model for very-high-zone-count deployments where the
-mtime-poll overhead becomes measurable. Tracked in
-[#TBD]; until it ships, use pattern 2.
+A `ASOBI_LUA_RELOAD=signal` mode that skips the per-tick `stat()` and reloads
+only when explicitly triggered does not exist. Until it does, use pattern 2 or
+turn reload off entirely.
 
-### Pattern 4 — Custom script source (planned)
+### Pattern 4: custom script source (planned, not shipped)
 
-If your scripts live somewhere other than a filesystem — Postgres, S3,
-git tags, a CMS — you will eventually want the planned
-`asobi_lua_source` behaviour, which dispatches to either the
-filesystem implementation or a custom loader. Until that lands, the
-practical workaround is a small sidecar that pulls from your source
-and writes to `/app/game/` using pattern 2. Tracked in [#TBD].
+If your scripts live in Postgres, S3, git tags or a CMS, the eventual answer is
+an `asobi_lua_source` behaviour dispatching to a custom loader. It does not
+exist. The workaround is a sidecar that pulls from your source and writes into
+`/app/game/` using pattern 2.
+
+## Mode-shape changes reload separately
+
+Hot reload re-executes a script body inside servers that already exist, so it
+cannot change how a match is *formed*. `match_size`, `strategy`, `max_players`
+and the `config.lua` mode manifest are read at formation time.
+
+A second poller handles those. `asobi_lua_config_watcher` stats `config.lua`,
+`match.lua` and every registered mode's script every 1500 ms and re-runs the
+config loader when an mtime moves, so new matches pick up the change. Running
+matches keep the values they formed with.
+
+`config_watch_interval` changes the interval. The watcher shares the hot-reload
+dial: with reload off it never scans at all. A failed reload keeps the
+last-good mode set and adopts the new mtimes anyway, so a broken file waits for
+your next edit rather than being retried forever.
 
 ## A minimal production compose
 
 Two files sit next to it, neither of which belongs in git:
 
 ```bash
-echo "ASOBI_DB_PASSWORD=$(openssl rand -hex 24)" > .env
+{
+  echo "ASOBI_DB_PASSWORD=$(openssl rand -hex 24)"
+  echo "ERLANG_COOKIE=$(openssl rand -hex 24)"
+} > .env
 openssl rand -hex 32 > ops_secret.txt
 printf '.env\nops_secret.txt\n' >> .gitignore
 ```
 
 `.env` is read by compose automatically and is the single source for the
-database password - Postgres and asobi both take it from there, so it cannot
-drift between them. `ops_secret.txt` is mounted as a file rather than passed as
-a variable, which keeps it out of `docker inspect` and out of the process
-environment.
+database password, so Postgres and asobi cannot drift apart. `ops_secret.txt`
+is mounted as a file rather than passed as a variable, which keeps it out of
+`docker inspect` and out of the process environment.
+
+The image was renamed from `ghcr.io/widgrensit/asobi_lua`; the old name still
+publishes for now, so change your compose file when convenient.
 
 ```yaml
 services:
@@ -159,8 +181,8 @@ services:
       retries: 5
     restart: unless-stopped
 
-  asobi_lua:
-    image: ghcr.io/widgrensit/asobi_lua:latest
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
     depends_on:
       postgres:
         condition: service_healthy
@@ -173,7 +195,11 @@ services:
       # the password is substituted into sys.config before the VM starts, so
       # unlike the ops secret below it cannot be read from a file.
       ASOBI_DB_PASSWORD: ${ASOBI_DB_PASSWORD:?set ASOBI_DB_PASSWORD in .env}
-      ASOBI_NODE_HOST: 0.0.0.0
+      # No default. Unset renders an empty Access-Control-Allow-Origin, which
+      # no browser accepts, so put this deployment's real origin here.
+      ASOBI_CORS_ORIGINS: https://play.yourgame.com
+      # Distribution cookie. The image default is the literal `asobi`.
+      ERLANG_COOKIE: ${ERLANG_COOKIE:?set ERLANG_COOKIE in .env}
       # The operator console, on the game port. Drop these two lines to run
       # without it.
       ASOBI_CONSOLE: "true"
@@ -181,6 +207,11 @@ services:
     volumes:
       - /srv/asobi/game:/app/game:ro
     secrets: [ops_secret]
+    healthcheck:
+      test: ["CMD", "bin/asobi", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
     ports:
       - "8084:8084"
     restart: unless-stopped
@@ -193,50 +224,73 @@ volumes:
   pgdata:
 ```
 
-Put this behind a TLS-terminating reverse proxy (Caddy, nginx,
-Traefik) — asobi speaks plain HTTP/WebSocket and expects the proxy
-to handle certificates.
+Put this behind a TLS-terminating reverse proxy (Caddy, nginx, Traefik). asobi
+speaks plain HTTP and WebSocket and expects the proxy to handle certificates.
 
-### Opening the console
+`ASOBI_NODE_HOST` is not in that compose on purpose. It names the Erlang node
+(`-name asobi@${ASOBI_NODE_HOST}` in `config/vm.args.src`), not a bind address;
+the port asobi listens on is `ASOBI_PORT`. The image default `127.0.0.1` is
+what you want for a single-node deploy.
 
-Browse to `/console` on the same host and port your game uses, and paste the
-contents of `ops_secret.txt`. That is the whole sign-in: the secret is
-exchanged once for an `HttpOnly` cookie plus a CSRF token, and the browser
-never holds it again.
+For a single node, also close distribution off. The shipped `vm.args` carries
+the line commented out:
 
-You get players, matches, the matchmaker, leaderboards, economy, chat,
-tournaments, notifications, and live runtime stats — the same console the
-managed cloud uses, because it ships in asobi itself.
-
-The console is on the **game port**, so anyone who can reach your game can
-reach `/console`. Restrict it at the proxy: allowlist your own address, or
-require an extra layer in front of `/console` and `/api/v1/ops`. If it did not
-come up, the node logs why at boot — `console_disabled_without_secret` means
-the secret file was missing, unreadable or empty.
-
-Name it if you run more than one:
-
-```yaml
-      ASOBI_CONSOLE_LABEL: prod
-      ASOBI_CONSOLE_PRODUCTION: "true"
+```
+-kernel inet_dist_use_interface "{127,0,0,1}"
 ```
 
-The label shows in the tab title, which is what tells two open consoles apart.
+Uncomment it in your own `vm.args` and the distribution port stops listening on
+anything but loopback, which is what makes a leaked cookie a local problem
+rather than a lateral-movement one. [Clustering](clustering.md) covers the
+multi-node case, where you need distribution and every node needs the same
+cookie.
+
+### Health endpoints
+
+The node serves three, unauthenticated, on the game port:
+
+| Path | Answers |
+| --- | --- |
+| `/live` | `200 {"status":"alive"}` as long as the VM responds. Liveness probe |
+| `/ready` | `200 {"status":"ready"}` once the critical database dependency has passed a health check, `503 {"status":"not_ready"}` before that. Readiness probe |
+| `/health` | The full report: dependency status, circuit-breaker and bulkhead state, and VM gauges |
+
+`/ready` is the one an orchestrator should gate traffic on. Kubernetes reads it
+with an `httpGet` probe.
+
+The compose healthcheck above uses `bin/asobi ping` instead, because the image
+carries no HTTP client: there is no `curl` and no `wget` in it.
+
+### The operator console
+
+A stock node serves neither: `/console` needs `console` to be true, and the ops
+routes reject everything until an `ops_secret` is configured. The two lines in
+the compose above set both. [Operator console](console.md) covers signing in,
+what the screens show, what the plane cannot do, and the cluster caveats.
+
+The plane is read-only apart from extension actions, so it is not where you ban
+a player or refund a purchase.
+
+Both share the game port, so anyone who can reach your game can reach
+`/console`. Restrict it at the proxy.
 
 ## Tuning knobs
 
-These are read at start time from your `sys.config`.
+All four go under `{asobi, [...]}`; an existing `{asobi_lua, [...]}` block also
+still works, see
+[Which application key](configuration.md#which-application-key).
 
 | Key | Default | What it does |
-|---|---|---|
-| `asobi_lua.max_heap_words` | `5_000_000` | Per-eval heap cap (in Erlang words) for every Lua callback the runtime invokes. If a single eval allocates past this, the eval process is killed by the VM and the runtime returns `{error, heap_exhausted}`. Persistent state held by the gen_server is not touched — only the runaway eval. Raise only if a single tick legitimately constructs a very large local structure; long-lived tables belong in the persistent Luerl state and cost nothing per eval. |
-| `asobi_lua.max_reductions_per_ms` | `50_000` | Per-eval CPU cap, as BEAM reductions allowed per millisecond of that callback's own wall-clock budget — so `tick` (500 ms) gets 25,000,000 and a bot's `think` (50 ms) gets 2,500,000. The timeout bounds latency but not work: without this, a script that spins is killed at its deadline and does it again next tick, holding a scheduler indefinitely. Overrun returns `{error, reductions_exhausted}`; the callback's result is discarded and the previous Lua state kept, exactly as for a timeout, so the match or zone survives. Sampled every 10 ms, so overshoot is bounded by one interval. Set to `0` to disable. |
-| `asobi_lua.reload_mode` (or env `ASOBI_LUA_RELOAD`) | `auto` | `auto` mtime-polls the script on every tick. `off` skips the poll entirely — appropriate for sealed-bundle prod where new code is a container restart, not a file change. Anything we don't recognise falls back to `auto` so a typo doesn't silently disable reload. |
+| --- | --- | --- |
+| `max_heap_words` | `5_000_000` | Per-eval heap cap, in Erlang words, for every Lua callback. An eval that allocates past it is killed by the VM and the runtime returns `{error, heap_exhausted}`; persistent state held by the gen_server is untouched. Raise it only if a single tick legitimately builds a very large local structure. Long-lived tables belong in the persistent Luerl state and cost nothing per eval |
+| `max_reductions_per_ms` | `50_000` | Per-eval CPU cap, as BEAM reductions per millisecond of that callback's own budget, so `tick` (500 ms) gets 25,000,000 and a bot's `think` (50 ms) gets 2,500,000. A timeout bounds latency but not work: without this, a script that spins is killed at its deadline and does it again next tick. Overrun returns `{error, reductions_exhausted}`, the result is discarded and the previous Lua state kept, so the match or zone survives. Sampled every 10 ms. `0` disables it |
+| `reload_mode` (or `ASOBI_LUA_RELOAD`) | `auto` | `auto` mtime-polls the script on every tick. `off` skips the poll entirely, which is right for a sealed bundle where new code is a container restart. Anything unrecognised falls back to `auto`, so a typo cannot silently disable reload |
+| `config_watch_interval` | `1500` | Milliseconds between mode-shape scans (above) |
 
 ```erlang
 %% sys.config
 [
-  {asobi_lua, [
+  {asobi, [
     {max_heap_words, 10_000_000},
     {max_reductions_per_ms, 50_000},
     {reload_mode, off}
@@ -244,54 +298,103 @@ These are read at start time from your `sys.config`.
 ].
 ```
 
-Or, in a Docker deploy, just set `ASOBI_LUA_RELOAD=off` in the container env.
+The first three are read per call, not at boot, so changing one through
+`application:set_env/3` takes effect without a restart.
+`config_watch_interval` is read once, when the watcher starts. In a Docker
+deploy, `ASOBI_LUA_RELOAD=off` in the container environment is the usual route.
 
 ## Validating Lua scripts in CI
 
-Before deploying a new `match.lua` or `world.lua`, run it through the
-loader in CI to catch syntax errors and sandbox violations without
-booting a full runtime:
+Load a script through the loader to catch syntax errors and sandbox violations
+without a database or a running node:
 
 ```bash
-docker run --rm -v "$PWD/lua:/g" ghcr.io/widgrensit/asobi_lua \
-  bin/asobi_lua eval 'asobi_lua_validate:cli(["/g/match.lua"]).'
+docker run --rm -v "$PWD/lua:/g" ghcr.io/widgrensit/asobi sh -c \
+  'erts-*/bin/erl -noshell -boot no_dot_erlang -pa lib/*/ebin \
+     -eval "asobi_lua_validate:cli([\"/g/match.lua\"])."'
 ```
 
 Exits 0 on a clean script, 1 with the loader's error reason on stderr
-otherwise. Pass multiple paths to validate them sequentially; the run
-exits on the first failure.
+otherwise. Pass more paths to validate them in sequence; it stops at the first
+failure.
+
+This runs a throwaway VM inside the image. Do not reach for `bin/asobi eval`:
+that evaluates on a *running* node, and `asobi_lua_validate:cli/1` ends in
+`halt/1`, which would stop your server.
+
+## Before you go to production
+
+- **The console is off** unless you turned it on. Leave it off if nobody needs
+  it; if you turn it on, put it behind the proxy restriction above.
+- **Guest auth is off** until the game declares `guest_auth = true` in its Lua
+  *and* the operator configures a pepper of at least 32 bytes. Both halves are
+  required (ADR 0004), and the operator half currently needs a `sys.config`:
+  `ASOBI_GUEST_VERIFIER_PEPPER` is declared in the image but never substituted,
+  so setting it alone does nothing.
+- **Hot reload is on** unless `ASOBI_LUA_RELOAD=off`. On a sealed image that is
+  a wasted `stat()` per tick; on a mounted volume it is the feature.
+- **Rate limits are per node.** A 5/s bucket is 5 x N across a cluster. The
+  development config loosens `auth`, `register`, `iap` and `api` to 1000/s for
+  the test suite; the production config does not.
+- **CORS is empty by default.** Set `ASOBI_CORS_ORIGINS` to your real origin or
+  every browser client fails preflight.
+- **`ERLANG_COOKIE` defaults to the literal `asobi`.** Change it, in every
+  node, before you expose distribution to anything.
+- **The database port is fixed at 5432** in the image. A different port needs
+  your own `sys.config`.
+
+## Upgrading
+
+### Which tag to run
+
+Every compose file in these guides says `:latest`, which is right for trying
+asobi and wrong for running it. `latest` follows the default branch, so a
+`docker compose pull` can move you across a schema change you did not choose.
+
+Pin a digest. It is the only tag on this image that cannot move under you:
+
+```yaml
+image: ghcr.io/widgrensit/asobi@sha256:<digest>
+```
+
+`docker pull ghcr.io/widgrensit/asobi:latest` prints the digest it resolved, and
+that is the value to paste. Move it when you have decided to upgrade, with a
+backup taken.
+
+Do not pin a version number on this image yet. `ghcr.io/widgrensit/asobi`
+carries a `0.13`-`0.23` semver series left over from an earlier publishing
+workflow: those are real but from April 2026, and they predate the Lua merge and
+the console. Version tags resume from the next release; until one exists, the
+only current tags are `latest`, `main` and the long commit SHA.
+
+### Rolling a new version
+
+Migrations run at boot, from `asobi_app:start/2`. A failure logs
+`migration_failed` and the node **starts anyway**, so a bad roll leaves a
+running node serving an old schema and answering requests. Extension routes
+answer `503 not_ready` in that state; core does not.
+
+Back up before you roll, and grep the boot log for `migrations_applied` after
+you do.
 
 ## Operating notes
 
-- **Database backups.** Postgres holds session tokens, world
-  snapshots, and leaderboards. Use `pg_dump` or `pg_basebackup` on
-  whatever cadence your data loss tolerance requires; nothing in
-  asobi_lua is recoverable from the runtime alone.
-- **Logs.** asobi_lua emits structured JSON via `nova_jsonlogger`.
-  Ingest them as JSON lines from container stdout.
-- **Crash dumps.** Erlang writes `erl_crash.dump` to the working
-  directory on a VM crash. In a container that means it is lost on
-  restart unless you mount a writable volume — we recommend leaving
-  it ephemeral; if you need post-mortem capability, mount a
-  short-retention volume at `/app`.
-- **Restarts are cheap.** The container takes single-digit seconds to
-  boot. In-flight matches are not preserved across restarts (they
-  rely on in-memory state); design clients to reconnect.
-- **The operator console.** Set `console` and `ops_secret` and the node
-  serves a browser console at `/console` (see
-  [Configuration](configuration.md#operator-console)). It shares the game
-  port, because Nova starts one listener, so treat `/console` and
-  `/api/v1/ops` as one thing when you decide what the internet can reach.
-  Both are off until configured. Console sessions are in memory and end with
-  the restart above.
+- **Database backups.** Postgres holds players, tokens, cloud saves,
+  leaderboards, economy, chat history, tournaments and IAP transactions.
+  `pg_dump` or `pg_basebackup` on whatever cadence your loss tolerance needs;
+  nothing in asobi is recoverable from the runtime alone.
+- **Logs.** Structured JSON via `nova_jsonlogger`, on container stdout. Ingest
+  them as JSON lines.
+- **Crash dumps.** Erlang writes `erl_crash.dump` to the working directory on a
+  VM crash, which in a container means it is lost on restart unless you mount a
+  writable volume. Leaving it ephemeral is fine; if you want post-mortems,
+  mount a short-retention volume at `/app`.
+- **Restarts.** In-flight matches and worlds live in memory and are not
+  preserved. Design clients to reconnect.
 
 ## What this guide does not cover
 
-- Multi-tenant hosting. The asobi managed cloud (and the private
-  `asobi_engine` image behind it) handles tenant isolation; the public
-  `asobi_lua` image is single-tenant.
-- Horizontal scaling beyond one node. Asobi clusters via standard
-  Erlang distribution; multi-node ops is its own topic and lives in
-  the `asobi` library docs.
-- Stripe / IAP / payments. Those are part of the managed cloud; the
-  open-source runtime ships only the IAP-receipt-validation primitive.
+- Multi-node operation. See [Clustering](clustering.md), which also holds the
+  complete list of what is per node.
+- Multi-tenant hosting. This image is single-tenant.
+- Payments. asobi ships the IAP receipt-validation primitive and nothing else.

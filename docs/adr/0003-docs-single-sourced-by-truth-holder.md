@@ -4,7 +4,16 @@ Date: 2026-07-17
 
 ## Status
 
-Accepted.
+Accepted, and partly overtaken by events. The principle stands; two rows of the
+ownership table no longer name repositories that exist.
+
+`asobi_lua` was merged into this repository (`src/lua/`) and retired, and
+`asobi_admin` was archived on 2026-08-06 when its console moved here. asobi is
+now the truth-holder for the Lua and console pages it once delegated, so the
+corollary below that says "asobi drops its Lua guides" is inverted: those guides
+live here, alongside the code whose CI can verify them. The decision that
+located them - ownership follows the code that can be wrong - is what put them
+here. A superseding ADR should restate the table against today's repositories.
 
 ## Context
 

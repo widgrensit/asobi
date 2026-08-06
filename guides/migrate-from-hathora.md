@@ -1,148 +1,67 @@
 # Migrating from Hathora to asobi
 
-**Hathora's game-hosting service shuts down on 2026-05-05.** If you're reading
-this with a running game on `hathora.dev` or `hathora.cloud`, this guide walks
-you from "we need a new backend by May" to "we're running on asobi and we
-never have to do this again."
+Hathora's game-hosting service shut down on 2026-05-05. This guide takes you
+from "we need a new backend" to a running asobi deployment.
+
+Nobody has migrated a Hathora game to asobi end to end yet. The asobi-side
+endpoints and events below are verified against this repository; the
+Hathora-side method names are from memory of the pre-shutdown SDK and may have
+drifted. The fastest route is pairing with us in the
+[Discord](https://discord.gg/vYSfYYyXpu) `#migrations` channel.
+
+This guide targets studios on Hathora's managed service. Self-hosted
+`hathora-core` users have a different problem - skip to
+[Self-hosted Hathora users](#self-hosted-hathora-users).
+
+## What asobi is
+
+One Erlang/OTP node containing the game backend, the Lua runtime and the
+operator console. Two ways in: run `ghcr.io/widgrensit/asobi` and write Lua, or
+depend on the Hex package and write Erlang. Same node either way.
 
 ## Today, in 15 minutes
 
-Before you read the rest of this guide, do these five things in this order.
-They get you unblocked even if the full port takes a week:
+Four steps. They unblock you even if the full port takes a week.
 
-1. **Stand up a local asobi backend.** Drop this `docker-compose.yml` into an
-   empty directory:
-   ```yaml
-   services:
-     postgres:
-       image: postgres:17
-       environment: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: my_game }
-       healthcheck: { test: ["CMD-SHELL", "pg_isready -U postgres"], interval: 5s }
-     asobi:
-       image: ghcr.io/widgrensit/asobi_lua:latest
-       depends_on: { postgres: { condition: service_healthy } }
-       ports: ["8084:8084"]
-       environment: { ASOBI_DB_HOST: postgres, ASOBI_DB_NAME: my_game }
-   ```
-   Then `docker compose up -d`. HTTP is on `:8084`, WebSocket is on `/ws`.
-2. **Register one player** — the asobi equivalent of `HathoraClient.loginAnonymous`:
-   ```bash
-   curl -s localhost:8084/api/v1/auth/register \
-     -H 'content-type: application/json' \
-     -d '{"username":"test","password":"test1234"}'
-   # → { "username": "test", "player_id": "019de3...", "session_token": "wRqvop92/..." }
-   ```
-   That `session_token` is what your client passes in `Authorization: Bearer …`
-   from here on, in place of any Hathora auth token.
-3. **Queue for matchmaking** to confirm the matchmaker works end-to-end:
-   ```bash
-   curl -s localhost:8084/api/v1/matchmaker \
-     -H 'content-type: application/json' \
-     -H 'authorization: Bearer wRqvop92/...' \
-     -d '{"mode":"default","properties":{}}'
-   # → { "status": "pending", "ticket_id": "019de3..." }
-   ```
-4. **Join the Discord** [`#migrations` channel](https://discord.gg/vYSfYYyXpu).
-   Drop your Hathora setup (engine, language, lobby vs matchmaker,
-   server-authoritative vs P2P) — we will tell you which sections of this
-   guide actually apply to you and which to skip.
-5. **Open a tracking issue** at
-   [github.com/widgrensit/asobi/issues](https://github.com/widgrensit/asobi/issues)
-   so we know you exist. We are prioritising migration help over feature work
-   until 2026-05-05.
+**1. Write a minimal game.** asobi loads Lua from `/app/game`, and without a
+mode declared there the matchmaker has nothing to match on. In an empty
+directory:
 
-That is the panic checklist. You are no longer locked out as of step 1.
-Everything below is the full port.
+```lua
+-- lua/match.lua
 
-> **Draft notice.** This guide is a starting point, not a battle-tested
-> playbook — nobody has yet migrated a Hathora game to asobi end-to-end.
-> The asobi-side endpoint and event names below are **verified against the
-> current code**. The Hathora-side method names come from our memory of the
-> pre-shutdown SDK and may have drifted. **The fastest path to a working
-> migration is pairing with us in the
-> [Discord](https://discord.gg/vYSfYYyXpu) `#migrations` channel** — we'll
-> walk through your specific setup rather than you fighting this doc in the
-> dark.
+match_size = 2
 
-> This guide targets studios on Hathora's *managed* service. If you're a
-> self-hosted `hathora-core` user your situation is different — skip to
-> [§ Self-hosted Hathora users](#self-hosted-hathora-users).
+function init(_config)
+    return { players = {} }
+end
 
-## TL;DR
+function join(player_id, state)
+    state.players[player_id] = { score = 0 }
+    return state
+end
 
-1. Your game-server logic (C#, Go, Node, whatever it is today) **keeps
-   running in its own process** while you migrate.
-2. You bring up an asobi_lua container. Your game-server talks to it over
-   WebSocket like it would any other auth/matchmaker/leaderboard service.
-3. You port the Hathora-specific calls — `createLobby`, `getRoomInfo`,
-   `listActivePublicLobbies`, `HathoraClient.loginAnonymous`, etc. — to the
-   asobi equivalents in the table below.
-4. Once asobi is doing auth/matchmaking/lobbies, you drop Hathora entirely
-   and either (a) keep running your existing server code in a plain
-   container on Hetzner / Fly / Scaleway or (b) fold your game logic into an
-   asobi Lua script and let asobi host that too.
+function leave(player_id, state)
+    state.players[player_id] = nil
+    return state
+end
 
-Option (b) is more work up front, but it means no game-server container at
-all. For most Hathora games the game-server is a few hundred lines of
-state-mutation code — well within the scope of a `match.lua` file.
+function handle_input(_player_id, _input, state)
+    return state
+end
 
-## Why asobi specifically
+function tick(state)
+    return state
+end
 
-The reason you're reading this is that Hathora pivoted to AI. We don't want
-that to be you again.
+function get_state(_player_id, state)
+    return { players = state.players }
+end
+```
 
-- **Apache-2.0, open-source, self-hostable.** The engine is at
-  [github.com/widgrensit/asobi](https://github.com/widgrensit/asobi) and the
-  Docker runtime is at
-  [github.com/widgrensit/asobi_lua](https://github.com/widgrensit/asobi_lua).
-  Fork it. Mirror it. Run it on your own hardware. Our [exit
-  guide](exit.md) is a 1-page runbook for keeping your game alive if we
-  vanish tomorrow.
-- **No CCU billing.** Managed asobi cloud (opening later in 2026) is flat
-  per-container. Self-host is free.
-- **Hot-reload Lua.** Edit your match logic, save, connected matches pick it
-  up — no rebuild, no redeploy, no kicked players.
-- **One container, one Postgres.** No CockroachDB. No Redis. No Kubernetes.
-- **Matchmaking, lobbies, rooms, leaderboards, economy, chat, friends,
-  tournaments, voting, phases, reconnection** are all already there
-  — see the [feature list](../README.md#features). Seasons ship as an
-  extension.
-- **Godot and Defold SDKs are first-class**, alongside Unity/Unreal/JS/Flutter.
-- **EU-hosted, GDPR-ready, NIS2-aware** if that matters to you.
-
-## Concept map
-
-| Hathora | asobi | Notes |
-|---|---|---|
-| Application | asobi deployment | One container per environment (dev/live). |
-| Room | Match | An OTP process per match, state kept in the process heap with ETS backup. |
-| Process | *(no equivalent)* | asobi doesn't spin a container per match. One container hosts thousands of matches as BEAM processes. Simpler ops. |
-| Lobby | Matchmaker ticket + Match in "waiting" phase | Players hit `/matchmaker/tickets`; when `match_size` is reached the match transitions to "running". |
-| Region | Deployment location | Deploy one container per region. No region abstraction baked in — you pick where to run the container. |
-| Matchmaker (2.0) | `asobi_matchmaker` | Pluggable strategies (`fill`, `skill_based`); custom via `asobi_matchmaker_strategy` behaviour. |
-| `HathoraClient.loginAnonymous` | `POST /api/v1/auth/guest` | Device-backed anonymous auth: pass `device_id` + `device_secret`, get a real player back. Opt-in - the game declares `guest_auth` and the operator sets a pepper. Claim the account later with `POST /api/v1/auth/guest/upgrade`. See [Authentication](authentication.md). |
-| `HathoraClient.loginGoogle` | `POST /api/v1/auth/oauth` | OAuth/OIDC flow. |
-| `createLobby` / `createRoom` / queue | `POST /api/v1/matchmaker` body `{"mode":"default","properties":{}}` | Response: `{"ticket_id":"...","status":"pending"}`. |
-| Ticket poll | `GET /api/v1/matchmaker/:ticket_id` | |
-| Cancel | `DELETE /api/v1/matchmaker/:ticket_id` | |
-| `listActivePublicLobbies` | `GET /api/v1/matches/live` | Live, joinable matches. Filter with `mode` and `has_capacity`. Matches are **unlisted by default** - a mode opts in with `listed => true`. Not to be confused with `GET /api/v1/matches`, which reads the match record table (finished matches, an audit trail). |
-| `getConnectionInfo(roomId)` | WebSocket upgrade on `GET /ws` | See [§ WebSocket handshake](#websocket-handshake) — first frame must authenticate. |
-| `ping` region API | *(none)* | If you need client-side region selection, probe each deployment endpoint yourself. |
-| Hathora SDK | asobi SDKs | [asobi-unity](https://github.com/widgrensit/asobi-unity), [asobi-unreal](https://github.com/widgrensit/asobi-unreal), [asobi-js](https://github.com/widgrensit/asobi-js), [asobi-godot](https://github.com/widgrensit/asobi-godot), [asobi-defold](https://github.com/widgrensit/asobi-defold), [asobi-dart](https://github.com/widgrensit/asobi-dart), [flame_asobi](https://github.com/widgrensit/flame_asobi). |
-| Hathora Console | Built-in operator console at `/console` | Match and player inspection. Tenants, games and API keys are an [asobi cloud](https://asobi.dev) concern, not a self-hosted one. |
-| `hathora.yml` | `docker-compose.yml` | Plain Compose, no proprietary spec. |
-| Process-hour billing | Flat per-container | No surprise invoices. |
-
-## Migration path
-
-### Phase 1 — stand up asobi alongside Hathora (1 day)
-
-Run asobi on the same cloud (or locally) without touching the Hathora
-deployment. Goal: verify auth, a lobby, and a match work end-to-end from
-your client.
+**2. Stand the backend up.** Next to `lua/`:
 
 ```yaml
-# docker-compose.yml
 services:
   postgres:
     image: postgres:17
@@ -150,202 +69,274 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: my_game
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
 
   asobi:
-    image: ghcr.io/widgrensit/asobi_lua:latest
-    depends_on: [postgres]
+    image: ghcr.io/widgrensit/asobi:latest
+    depends_on:
+      postgres: { condition: service_healthy }
     ports: ["8084:8084"]
     volumes: ["./lua:/app/game:ro"]
     environment:
       ASOBI_DB_HOST: postgres
       ASOBI_DB_NAME: my_game
+      ASOBI_CORS_ORIGINS: "http://localhost:5173"
+      ASOBI_CONSOLE: "true"
+      ASOBI_OPS_SECRET_FILE: /run/secrets/ops_secret
+    secrets: [ops_secret]
+
+secrets:
+  ops_secret:
+    file: ./ops_secret.txt
 ```
 
-Put a minimal `lua/match.lua` in place (see the [asobi_lua
-README](https://github.com/widgrensit/asobi_lua#quick-start)) and bring it
-up:
+`openssl rand -hex 32 > ops_secret.txt`, then `docker compose up -d`. HTTP is on
+`:8084`, the WebSocket is on `/ws`, the console is on `/console`.
+
+`ASOBI_CORS_ORIGINS` is not optional for a browser client: unset, the node
+sends an empty `Access-Control-Allow-Origin` and every fetch from a page is
+blocked.
+
+**3. Register one player.**
 
 ```bash
-docker compose up -d
-curl localhost:8084/api/v1/auth/register \
+curl -s localhost:8084/api/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"username":"test","password":"test1234"}'
-# → { "player_id": "01HX...", "session_token": "...", "username": "test" }
+# { "player_id": "019de3...", "access_token": "...", "refresh_token": "...", "username": "test" }
 ```
 
-### Phase 2 — port the client SDK calls (2–5 days)
+`access_token` is what the client passes as `Authorization: Bearer ...` from
+here on. `refresh_token` buys a new pair from `POST /api/v1/auth/refresh`.
+There is no `session_token` anywhere in asobi.
 
-In your Unity / Unreal / JS / Godot client, replace the Hathora SDK with the
-asobi one for the same engine. The call shape is close but not identical:
+**4. Queue for matchmaking.**
 
-**Unity — before (Hathora):**
-```csharp
-var client = new HathoraClient("my-app-id");
-await client.LoginAnonymousAsync();
-var lobby = await client.CreateLobbyAsync(Visibility.Public, …);
-var info = await client.GetConnectionInfoAsync(lobby.RoomId);
-// then open a websocket to info.ExposedPort.Host:Port
+```bash
+curl -s localhost:8084/api/v1/matchmaker \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer <access_token>' \
+  -d '{"mode":"default","properties":{}}'
+# { "ticket_id": "019de3...", "status": "pending" }
 ```
 
-**Unity — after (asobi):**
-```csharp
-var client = new AsobiClient("https://api.my-game.com");
-await client.Auth.RegisterAsync("alice", "hunter2");     // or LoginAsync
-await client.WebSocket.ConnectAsync();                    // /ws
-client.WebSocket.SendSessionConnect(sessionToken);        // first frame
-client.WebSocket.On("match.matched", OnMatched);          // payload: { match_id, players }
-await client.Matchmaker.QueueAsync(mode: "default");      // POST /api/v1/matchmaker
-```
+A 400 with `matchmaker.unknown_mode` means the node found no mode called
+`default`, which almost always means `lua/match.lua` is not mounted where step
+2 puts it.
 
-Matchmaker tickets resolve asynchronously over the WebSocket via the
-`match.matched` event (payload `{match_id, players}`). You can poll
-`GET /api/v1/matchmaker/:ticket_id` if you prefer.
+Then open a tracking issue at
+[github.com/widgrensit/asobi/issues](https://github.com/widgrensit/asobi/issues)
+and say hello in the [Discord](https://discord.gg/vYSfYYyXpu) `#migrations`
+channel with your setup: engine, language, lobby versus matchmaker,
+server-authoritative versus P2P. We will tell you which sections below apply to
+you.
 
-Do this one feature at a time: **auth first, then WebSocket handshake, then
-matchmaking, then the game-session messages**. Hathora and asobi can
-coexist in the client during this phase (different base URLs).
+## The full port, in outline
+
+1. Your game-server logic keeps running in its own process while you migrate.
+2. asobi comes up alongside it. Your game server talks to it over WebSocket
+   like any other auth, matchmaker or leaderboard service.
+3. You port the Hathora-specific calls to the equivalents in the concept map.
+4. Once asobi owns auth, matchmaking and lobbies, you drop Hathora and either
+   keep your game server in a plain container, or fold its logic into a
+   `match.lua` and delete the container.
+
+For most Hathora games the game server is a few hundred lines of state
+mutation, which is well within the scope of one Lua file.
+
+## Concept map
+
+| Hathora | asobi | Notes |
+|---|---|---|
+| Application | asobi deployment | One container per environment. |
+| Room | Match | One process per match; state lives in the process heap. |
+| Process | No equivalent | asobi does not spin a container per match. One container hosts thousands of matches as BEAM processes. |
+| Lobby | Matchmaker ticket plus a match in its waiting phase | `POST /api/v1/matchmaker`; when `match_size` is reached the match starts. |
+| Region | Deployment location | One container per region, chosen by you. There is no region abstraction. |
+| Matchmaker 2.0 | `asobi_matchmaker` | Strategies `fill` and `skill_based`, or your own via the `asobi_matchmaker_strategy` behaviour. |
+| `HathoraClient.loginAnonymous` | `POST /api/v1/auth/guest` | Device-backed anonymous auth: `device_id` plus `device_secret`, and you get a real player back. Claim it later with `POST /api/v1/auth/guest/upgrade`. Opt-in - see the note below the table. |
+| `HathoraClient.loginGoogle` | `POST /api/v1/auth/oauth` | OAuth/OIDC. |
+| `createLobby`, `createRoom`, queue | `POST /api/v1/matchmaker` | Body `{"mode": "...", "properties": {}}`, response `{"ticket_id": "...", "status": "pending"}`. |
+| Ticket poll | `GET /api/v1/matchmaker/:ticket_id` | |
+| Cancel | `DELETE /api/v1/matchmaker/:ticket_id` | |
+| `listActivePublicLobbies` | `GET /api/v1/matches/live` | Live, joinable matches; filter with `mode` and `has_capacity`. Matches are unlisted by default and a mode opts in with `listed => true` in the operator's `game_modes` config; the Lua config reader does not pick up a `listed` global. Not `GET /api/v1/matches`, which is the finished-match record table. |
+| `getConnectionInfo(roomId)` | WebSocket upgrade on `GET /ws` | See [WebSocket handshake](#websocket-handshake). The first frame must authenticate. |
+| Custom room messages | Extension RPC | Frame `rpc.call` with `{protocol: 1, method, params}`; replies `rpc.ok` `{result}` or `rpc.error` `{error: {code, message, details}}`, correlated by `cid`. All seven client SDKs support it. See [Extensions](extensions.md). |
+| `ping` region API | None | Probe each deployment endpoint yourself if you need client-side region selection. |
+| Hathora SDK | asobi SDKs | [Unity](https://github.com/widgrensit/asobi-unity), [Unreal](https://github.com/widgrensit/asobi-unreal), [JS/TS](https://github.com/widgrensit/asobi-js), [Godot](https://github.com/widgrensit/asobi-godot), [Defold](https://github.com/widgrensit/asobi-defold), [LÖVE](https://github.com/widgrensit/asobi-love2d), [Dart](https://github.com/widgrensit/asobi-dart), [Flame](https://github.com/widgrensit/flame_asobi). |
+| Hathora Console | Built-in operator console at `/console` | Off by default, and read-only. See the note below the table. |
+| `hathora.yml` | `docker-compose.yml` | Plain Compose, no proprietary spec. |
+
+Guest auth is off until two things are true: the game declares `guest_auth` in
+its Lua config, and the operator supplies a pepper of at least 32 bytes. Either
+one missing and `POST /api/v1/auth/guest` answers `guest.disabled`. See
+[Authentication](authentication.md).
+
+A stock node serves neither the console nor the ops API; you turn them on - see
+[Operator console](console.md). When you do, the plane is read-only apart from
+actions an extension declares. Coming from the Hathora console you will look for
+a restart-this-process button; there is not one, because there is no process per
+match to restart.
+
+## Migration path
+
+### Phase 1 - stand up asobi alongside Hathora (1 day)
+
+Use the compose file from step 2 above, on the same cloud or locally, without
+touching the Hathora deployment. Goal: auth, a lobby and a match working end to
+end from your client. Requirements and the production compose are in
+[Self-hosting](self-hosting.md).
+
+### Phase 2 - port the client SDK calls (2 to 5 days)
+
+Swap the Hathora SDK for the asobi SDK for the same engine. Do it one feature
+at a time: auth first, then the WebSocket handshake, then matchmaking, then the
+game-session messages. Hathora and asobi coexist in the client during this
+phase behind different base URLs.
+
+Matchmaker tickets resolve asynchronously over the WebSocket as `match.matched`
+with payload `{match_id, players}`. Polling
+`GET /api/v1/matchmaker/:ticket_id` works too.
+
+Each SDK's README carries its own call names; this guide does not restate them
+because they differ per language.
 
 ### WebSocket handshake
 
-Asobi expects every WebSocket client to authenticate with a `session.connect`
-frame *before* it can use any other WS message type. The payload field is
-**`token`** (the value of the `session_token` you got from register/login):
+asobi expects every WebSocket client to authenticate with a `session.connect`
+frame before any other message type is accepted. The payload field is `token`,
+carrying the `access_token` from register, login or guest:
 
 ```json
-{"type":"session.connect","payload":{"token":"eyJ..."}}
+{"type":"session.connect","payload":{"token":"<access_token>"}}
 ```
 
-The server replies `{"type":"session.connected","payload":{"player_id":"..."}}`
-when the token is accepted, or `{"type":"error","payload":{"reason":"invalid_payload"}}`
-if the field name is wrong. After successful auth the server routes
-match/matchmaker/chat/world events to this player. Other message types the server handles: `matchmaker.add`,
-`matchmaker.remove`, `match.input`, `match.join`, `match.leave`, `chat.send`,
-`chat.join`, `chat.leave`, `dm.send`, `presence.update`, `vote.cast`,
-`vote.veto`, `world.list`, `world.create`, `world.find_or_create`,
-`world.join`, `world.leave`, `session.heartbeat`.
+The server replies:
 
-Server-pushed event types follow the pattern `{domain}.{event}` — notably:
-`match.matched` (matched into a game), `match.state` (full state push),
-`match.finished`, `world.tick`, `world.terrain`, `chat.message`,
-`dm.message`, `error`.
-
-### Phase 3 — port the game logic (2 days – 2 weeks)
-
-You have two choices here.
-
-**Option A — keep your existing game server.** If you've got a lot of C#/Go
-server code you'd rather not rewrite, keep running it in its own container
-on Hetzner / Fly / Scaleway. Use asobi for auth, matchmaking, lobbies,
-leaderboards, and persistence. When the matchmaker fires `match.matched`,
-the client has a `session_token` from asobi — pass it (plus `player_id` and
-`match_id`) to your game server over your own connection, and have your
-game server validate the token with asobi before accepting input.
-
-> **Reality check:** the public asobi library does not ship a built-in
-> "server-to-server token validation" endpoint today — token verification
-> on your own server means calling `POST /api/v1/auth/refresh` with the
-> token, or adding a small validation route yourself. If this is a blocker
-> for you, ping us in Discord — it's a natural library addition and we'll
-> prioritise it.
-
-**Option B — fold the game logic into Lua.** Rewrite your tick / input /
-state logic as a `match.lua` file. The callbacks are:
-
-```lua
-function init(config)         -- once per match
-function join(player_id, state)
-function leave(player_id, state)
-function handle_input(player_id, input, state)
-function tick(state)           -- default 10Hz, configurable
-function get_state(player_id, state)   -- per-player view
+```json
+{"type":"session.connected","payload":{"player_id":"019de3..."}}
 ```
 
-For most Hathora games this is a few hundred lines of Lua. You get hot
-reload for free (edit + save + live matches update) and you delete a
-container.
+A missing or misspelled `token` field is not a shape error - it is treated as a
+token that did not resolve, so the reply is an error frame carrying the wire
+code `unauthenticated`:
 
-### Phase 4 — cut over (1 day)
+```json
+{"type":"error","payload":{"reason":"invalid_token","error":{"code":"unauthenticated","message":"The credentials are missing, expired, or invalid.","details":{}}}}
+```
 
-Flip a feature flag in the client to point at the asobi endpoint. Monitor
-for 24h. Shut Hathora down.
+After a successful handshake the server routes match, matchmaker, chat and
+world events to this player. The message types a client may send are:
+
+`session.connect`, `session.heartbeat`, `matchmaker.add`, `matchmaker.remove`,
+`match.join`, `match.leave`, `match.input`, `match.list`, `world.create`,
+`world.find_or_create`, `world.join`, `world.leave`, `world.input`,
+`world.list`, `chat.send`, `chat.join`, `chat.leave`, `dm.send`,
+`presence.update`, `vote.cast`, `vote.veto`, `rpc.call`.
+
+Server-pushed types follow `{domain}.{event}`: `match.matched`, `match.state`,
+`match.finished`, `world.tick`, `world.terrain`, `chat.message`, `dm.message`,
+`notification.new`, `error`, plus any leaf name your script broadcasts under
+`match.` or `world.`. The full reference is
+[WebSocket protocol](websocket-protocol.md).
+
+### Phase 3 - port the game logic (2 days to 2 weeks)
+
+**Option A - keep your existing game server.** If you have a lot of C# or Go
+server code you would rather not rewrite, keep running it in its own container.
+Use asobi for auth, matchmaking, lobbies, leaderboards and persistence. When
+the matchmaker fires `match.matched`, the client has an `access_token` from
+asobi; pass it, plus `player_id` and `match_id`, to your game server over your
+own connection, and have your game server check the token with asobi before
+accepting input.
+
+There is no dedicated server-to-server token-introspection route. Check a token
+by calling any authenticated GET with it (`GET /api/v1/friends` is a cheap one)
+and treating 200 as accepted, 401 as not. Two caveats before you build on it:
+no core route reliably reports the caller's own `player_id` - a friends,
+notifications or saves response carries it only on rows the player already has,
+and is empty otherwise - so a 200 proves the token is valid, not whose it is.
+And do not use `POST /api/v1/auth/refresh` for the check. That endpoint takes a
+`refresh_token`, not an access token, so an access token simply fails there;
+and a refresh token rotates the pair, with a second presentation of a rotated
+token revoking the whole token family and logging the player out. If you
+need real introspection, an extension can add it: an RPC handler receives the
+caller's `player_id` in its context. See [Extensions](extensions.md).
+
+**Option B - fold the game logic into Lua.** Rewrite your tick, input and state
+logic as a `match.lua`, using the six callbacks from step 1:
+
+- `init(config)` - once per match, returns the initial state
+- `join(player_id, state)` and `leave(player_id, state)`
+- `handle_input(player_id, input, state)` - one client `match.input` frame
+- `tick(state)` - every 100ms
+- `get_state(player_id, state)` - the per-player view
+
+Matches tick every 100ms and that is fixed; `tick_rate` is a world-mode
+setting. You get live reload for free - edit, save, and the next tick
+re-evaluates the file against the running state - and you delete a container.
+See [Lua scripting](lua-scripting.md).
+
+### Phase 4 - cut over (1 day)
+
+Point the client at the asobi endpoint behind a feature flag. Monitor for 24h.
+Shut Hathora down.
 
 ## Deploy story
 
-You can run asobi anywhere Docker runs. Common choices:
+asobi runs anywhere Docker runs. The managed version is
+[asobi.dev/cloud](https://asobi.dev/cloud), the same open-source core.
 
-| Host | Fit | Rough cost |
-|---|---|---|
-| **Hetzner Cloud** (CX22–CX42) | Best price/perf. EU-only if that matters. | €4–15 / month |
-| **Scaleway Serverless** | Auto-scale for dev / low traffic | Free tier → pay per req |
-| **Fly.io** | Multi-region one-liner | $5+/month/region |
-| **Clever Cloud** | git-push deploy, EU | €10+/month |
-| **Your laptop** | Development / LAN party | — |
+A single node holds 3,000-7,000 concurrent WebSocket connections in
+measurement, at 4.4ms p50 round-trip with 3,500 of them - see
+[Benchmarks](benchmarks.md). Most games' first deployment is one small machine
+plus a Postgres, which is where the saving against process-hour billing comes
+from.
 
-Typical Hathora cost for a small-indie game was **$200–800 / month** on
-process-hours. The same game on asobi at Hetzner is **€5–20 / month**,
-often 10–40× cheaper.
-
-## Pricing comparison
-
-| | Hathora (pre-shutdown) | asobi self-host | asobi managed (soon) |
-|---|---|---|---|
-| Pricing model | Process-hours ($0.03–0.15/hr) + bandwidth | Flat infra cost you choose | Flat per-container |
-| Free tier | Small credit | Unlimited | TBD |
-| 100 CCU | ~$50–150/mo | €5–15/mo infra | ~€9/mo |
-| 1,000 CCU | ~$300–800/mo | €15–50/mo infra | ~€29/mo |
-| Bandwidth surcharges | Yes | No (infra cost) | No |
-| Multi-region | First-class, auto | DIY (one container per region) | Per-region tier |
+If you plan on more than one node, read [Clustering](clustering.md) first: the
+matchmaker queue is per node, so players queuing against different nodes never
+match each other, rate limits are per node, and the console needs a sticky
+route.
 
 ## Self-hosted Hathora users
 
-If you run `hathora-core` on your own infra, your situation is better: you
-still own the stack. You can keep running it as long as it works. But the
-same migration strategy applies when you decide to move — asobi's single
-container + Postgres is operationally simpler than Hathora's Go monolith +
-Redis + Cockroach.
+If you run `hathora-core` on your own infrastructure you still own the stack
+and can keep running it as long as it works. The same migration strategy
+applies when you decide to move.
 
-## Things asobi does NOT do (yet)
+## Things asobi does not do
 
-Be honest with yourself before committing:
-
-- **No UDP transport.** WebSocket/TCP only. If you're a twitch FPS /
-  fighting game / racing game that needs sub-3ms physics, pair asobi with a
-  UDP relay (Photon, ENet server, custom). Use asobi for auth / matchmaker
-  / economy / leaderboard / social.
-- **No anonymous-login shortcut.** Auth is `username+password` or OAuth.
-  If your Hathora game used `loginAnonymous`, you'll generate a random
-  username/password in the client and persist it locally, or wire OAuth.
-- **No server-to-server token validation endpoint** in the public library
-  (see Option A note above).
-- **No auto multi-region.** Deploy one container per region yourself.
-- **No client-side prediction / rollback netcode primitives.** On the
-  roadmap.
-- **Pre-1.0 API.** Minor breaking changes possible until 1.0.
-- **Managed cloud opens later in 2026** — today, self-host.
+- **No UDP transport.** WebSocket over TCP only. A twitch FPS, fighting game or
+  racer that needs sub-3ms physics should pair asobi with a UDP relay and use
+  asobi for auth, matchmaking, economy, leaderboards and social.
+- **Guest auth is opt-in and off by default.** It exists and it is device-backed
+  rather than a throwaway username, but it stays off until the game declares
+  `guest_auth` and the operator supplies a pepper of at least 32 bytes.
+- **No server-to-server token introspection route.** See Option A above.
+- **No automatic multi-region.** One container per region, deployed by you.
+- **No client-side prediction or rollback netcode primitives.**
+- **Pre-1.0 API.** Minor breaking changes are possible until 1.0.
 
 ## Do this today
 
-- [ ] `git clone` [asobi_lua](https://github.com/widgrensit/asobi_lua) and
-  bring up `docker compose up` locally. Register a player. Confirm it works.
-- [ ] Pick a single SDK call in your client to port first (usually
-  `loginAnonymous`). Get it compiling against asobi.
-- [ ] Join the [Discord](https://discord.gg/vYSfYYyXpu). We'll help you debug.
-- [ ] Decide Option A (keep game server) vs Option B (Lua rewrite). Open
-  a thread in [Discussions](https://github.com/widgrensit/asobi_lua/discussions)
-  and we'll sanity-check.
-- [ ] Set a cutover date before 2026-05-05.
+- Run the compose from step 2 locally and register a player.
+- Pick one SDK call in your client to port first, usually `loginAnonymous`.
+- Join the [Discord](https://discord.gg/vYSfYYyXpu).
+- Decide Option A or Option B and open a thread in
+  [Discussions](https://github.com/widgrensit/asobi/discussions).
 
 ## Getting help
 
-- **Discord**: [#migrations](https://discord.gg/vYSfYYyXpu) channel
-- **Email**: hello@asobi.dev
-- **GitHub Discussions**: [widgrensit/asobi_lua/discussions](https://github.com/widgrensit/asobi_lua/discussions)
-
-We'll prioritise Hathora-migration support through May 2026.
+- Discord: [#migrations](https://discord.gg/vYSfYYyXpu)
+- Email: hello@asobi.dev
+- GitHub Discussions:
+  [widgrensit/asobi/discussions](https://github.com/widgrensit/asobi/discussions)
 
 ## See also
 
 - [Migrating from PlayFab](migrate-from-playfab.md)
 - [Migrating from Nakama self-host](migrate-from-nakama.md)
-- [Exit guarantee](exit.md) — if asobi disappears tomorrow
-- [Comparison vs Nakama, Colyseus, SpacetimeDB](comparison.md)
+- [Exit guarantee](exit.md)
+- [Comparison](comparison.md)

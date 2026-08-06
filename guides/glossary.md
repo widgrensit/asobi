@@ -1,74 +1,108 @@
 # Project glossary
 
-You'll see several "asobi" names in docs, repos, and the Discord. Here's what
-each one is and when to reach for it. Read this page first if you're new —
-the names look interchangeable and aren't.
+Names you will meet across the docs, the repos and the Discord. Read this first
+if they blur together.
 
-## The open-source pieces
+## asobi
 
-**asobi** — the public Erlang library published on
-[Hex](https://hex.pm/packages/asobi). Depend on it in `rebar.config` if
-you're writing your game backend directly in Erlang/OTP and want match,
-matchmaking, world-server, voting, economy, and the rest as composable
-OTP behaviours. This is the library underneath everything.
+One project with two front doors.
 
-**asobi_lua** — the batteries-included runtime that wraps the `asobi`
-library with a [Luerl](https://github.com/rvirding/luerl) VM so you can
-write game logic in Lua without knowing Erlang. Ships as a Docker image at
-`ghcr.io/widgrensit/asobi_lua`. Most people start here.
+**As a runnable node.** The image `ghcr.io/widgrensit/asobi` is a complete
+game backend: the match and world servers, matchmaking, economy, social, chat,
+leaderboards, the Lua runtime and the operator console, in one Erlang/OTP
+release. The binary inside it is `bin/asobi`. Write `match.lua`, point the node
+at it, `docker compose up`.
 
-**Arena Shooter** — the flagship end-to-end sample: a full multiplayer game
-(server-authoritative movement and combat, matchmaking with bots, boons,
-round voting, a leaderboard), not a snippet.
+**As a Hex library.** [`asobi` on Hex](https://hex.pm/packages/asobi) is the
+same code as a dependency. Add `{asobi, "~> 0.68"}` to `rebar.config` and
+implement the `asobi_match` behaviour when you want a callback in Erlang rather
+than Lua.
+
+Lua is not a wrapper, an add-on or a separate runtime. It ships in the node.
+The `asobi_lua` repo is retired and its code lives here, under `src/lua/`.
+
+`asobi_lua` still appears in three places that are correct and must not be
+renamed: module names (`asobi_lua_config`, `asobi_lua_api`, `asobi_lua_loader`
+and friends), the `ASOBI_LUA_RELOAD` variable, and `{asobi_lua, [...]}` config
+blocks, which are still read - see
+[Which application key](configuration.md#which-application-key).
+
+The one stale `asobi_lua` is the image name. `ghcr.io/widgrensit/asobi_lua`
+still publishes, so an existing compose file keeps working; change it to
+`ghcr.io/widgrensit/asobi` when convenient.
 
 ## Client SDKs
 
-**asobi-godot, asobi-defold, asobi-unity, asobi-unreal, asobi-js,
-asobi-dart, flame_asobi** — one per engine, all talking to asobi over
-WebSocket + REST. See the [SDK table in the
-README](../README.md#client-sdks).
+One per engine, all speaking the same WebSocket and REST protocol:
+[asobi-love2d](https://github.com/widgrensit/asobi-love2d) (LÖVE),
+[asobi-defold](https://github.com/widgrensit/asobi-defold),
+[asobi-godot](https://github.com/widgrensit/asobi-godot),
+[asobi-unity](https://github.com/widgrensit/asobi-unity),
+[asobi-unreal](https://github.com/widgrensit/asobi-unreal),
+[asobi-js](https://github.com/widgrensit/asobi-js),
+[asobi-dart](https://github.com/widgrensit/asobi-dart) and
+[flame_asobi](https://github.com/widgrensit/flame_asobi). Full table with docs
+and demos in the [README](../README.md#client-sdks).
 
 ## The commercial layer
 
-**asobi.dev Cloud** — managed hosting, opening later in 2026. Same binary
-you can self-host today, with opinionated ops and flat per-container
-pricing. Join the waitlist at [asobi.dev/cloud](https://asobi.dev/cloud).
+**asobi.dev Cloud** - managed hosting, running the same node described above.
+Invite-only today, opening more widely toward the end of 2026.
+[asobi.dev/cloud](https://asobi.dev/cloud).
 
-If we disappear, the open-source pieces above are enough to run your game
-forever. See [exit.md](exit.md) for the runbook.
+The differences are operational, not functional. A cloud environment is created
+and fed Lua through the `asobi` CLI rather than a mounted `/app/game`, its
+console is reached from the dashboard rather than by holding an operator secret,
+and the environment's `sys.config` is not yours to write. Everything about the
+game itself - callbacks, protocol, error codes - is identical.
+
+If it disappears, the open-source node above is enough to run your game
+forever. See [exit.md](exit.md).
 
 ## Which one do I start with?
 
-- **"I want to write Lua."** → `asobi_lua`. Pull the Docker image, write
-  `match.lua`, `docker compose up`.
-- **"I want to write Erlang."** → `asobi`. Add it to `rebar.config`,
-  implement the `asobi_match` behaviour.
-- **"I want both."** → `asobi_lua` hosts your Lua code and is itself built
-  on the `asobi` library. You can drop from Lua into an Erlang behaviour
-  for a hot loop without leaving the process.
-- **"I just want hosting."** → self-host `asobi_lua` today, or join the
-  `asobi.dev/cloud` waitlist.
+Run the image and write Lua. That is the default path and it needs no Erlang.
+
+Depend on the Hex package if you are writing Erlang callbacks - a hot loop, a
+custom matchmaking strategy, an extension.
+
+You do not choose between them. The same node serves both, plus the console.
 
 ## Concepts, not projects
 
-These are vocabulary, not repositories. You'll see them throughout the
-docs:
+Vocabulary you will meet throughout the docs.
 
-- **Match** — a short-lived gameplay session. 2 to N players, finite
-  duration, result persisted. Runs as a `gen_server` under a supervisor.
-- **World** — a long-lived persistent environment. Players come and go,
-  state persists across disconnects. Think MMO zone, town, dungeon.
-- **Zone** — a spatial partition inside a world. Used for sharding large
-  worlds into loadable chunks.
-- **Session** — a player's authenticated connection. Survives
-  reconnection with a session token.
-- **Tenant** — a studio or account in the managed cloud. You don't see
-  this when self-hosting.
-- **Game** — the product you're shipping. One game may have many match
-  modes, worlds, and tenants.
+- **Match** - a short-lived gameplay session. 2 to N players, finite duration,
+  result persisted. One `gen_statem` under `asobi_match_sup`, ticking on a
+  state timeout.
+- **World** - a long-lived environment. Players come and go, state persists
+  across disconnects. Think MMO zone, town, dungeon. One world lives entirely
+  on one node.
+- **Zone** - a spatial partition inside a world, used to shard a large world
+  into separately ticked chunks.
+- **Session** - one process per connection, started when the socket sends
+  `session.connect` and ended when the socket closes. It does not survive the
+  connection: a reconnecting client presents the same token and gets a new
+  session.
+- **Console** - the operator UI this node serves at `/console`. Off until
+  `console` is set. See [Operator console](console.md).
+- **Ops plane** - the HTTP API at `/api/v1/ops/*` that the console reads. Its
+  own credential, separate from the console flag, and read-only apart from
+  extension actions.
+- **Capability class** - what an ops route is allowed to touch: `read`,
+  `player_data` or `config`. Every core ops route carries one.
+- **Extension** - an OTP application that depends on asobi, added to your
+  release, declaring a manifest. It can add RPC methods, workers, schemas and
+  ops actions without forking asobi. See [Extensions](extensions.md).
+- **RPC method** - how a client calls an extension. One WebSocket frame type:
+  `rpc.call` in with a `method` and `params`, `rpc.ok` or `rpc.error` back,
+  paired by `cid`.
+- **Tenant** - a studio or account in the managed cloud. Not a concept when
+  self-hosting.
+- **Game** - the product you are shipping. One game may have many match modes
+  and worlds.
 
-When two words compete (e.g. *match* vs *room*, *world* vs *realm*),
-asobi uses the first one. The [Nakama migration
-guide](migrate-from-nakama.md) and [Hathora migration
-guide](migrate-from-hathora.md) include mapping tables from competitor
-vocab to asobi vocab.
+When two words compete (*match* against *room*, *world* against *realm*),
+asobi uses the first. The [Nakama](migrate-from-nakama.md),
+[PlayFab](migrate-from-playfab.md) and [Hathora](migrate-from-hathora.md)
+migration guides carry mapping tables from competitor vocabulary.

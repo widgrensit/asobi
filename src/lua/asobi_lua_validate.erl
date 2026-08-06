@@ -7,12 +7,16 @@ non-zero exit. Designed for CI use.
 
 ## Usage
 
-In a CI step running against the asobi_lua release image:
+In a CI step running against the release image:
 
 ```bash
-docker run --rm -v $(pwd)/lua:/g ghcr.io/widgrensit/asobi_lua \
-  bin/asobi_lua eval 'asobi_lua_validate:cli(["/g/match.lua"]).'
+docker run --rm -v "$PWD/lua:/g" ghcr.io/widgrensit/asobi sh -c \
+  'erts-*/bin/erl -noshell -boot no_dot_erlang -pa lib/*/ebin \
+     -eval "asobi_lua_validate:cli([\"/g/match.lua\"])."'
 ```
+
+A throwaway VM inside the image, not `bin/asobi eval`: `cli/1` ends in
+`halt/1`, so running it on a live node would stop the server.
 
 Exits 0 if the script loads clean, 1 with the loader's error reason
 on stderr otherwise. Multiple paths can be passed; they are validated

@@ -13,8 +13,8 @@ docker compose up -d
 
 Open <http://localhost:3000> in a browser.
 
-That's it. Compose brings up three containers — Postgres, asobi_lua, and
-an nginx proxy — so the browser hits everything on `localhost:3000` with
+That's it. Compose brings up three containers - Postgres, asobi, and
+an nginx proxy - so the browser hits everything on `localhost:3000` with
 no CORS to worry about. nginx proxies `/api/*` and `/ws` to asobi; the
 client HTML is served from `./client/`.
 
@@ -45,8 +45,8 @@ no reconnect, no reload, no message loss. Try:
 
 ## How it works
 
-asobi_lua runs your `match.lua` inside [Luerl](https://github.com/rvirding/luerl)
-— a pure-Erlang Lua 5.3 interpreter. When the mounted `.lua` file changes,
+asobi runs your `match.lua` inside [Luerl](https://github.com/rvirding/luerl) -
+a pure-Erlang Lua 5.3 interpreter. When the mounted `.lua` file changes,
 the Luerl VM re-loads the module. In-flight match state is kept in the
 BEAM process heap, so reloading the script doesn't reset the game.
 

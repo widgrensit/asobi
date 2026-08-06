@@ -2,13 +2,13 @@
 -moduledoc """
 Top-level world supervisor.
 
-**Public ETS trust assumption (F-33)**: `asobi_world_state` and
+**Public ETS trust assumption**: `asobi_world_state` and
 `asobi_player_worlds` are `public` named ETS tables. Anything running
-in the same BEAM (game callbacks, plugins, etc.) can read and mutate
-them. asobi is single-tenant and the loaded code is trusted, so this
-is acceptable — but it's an explicit trust boundary worth surfacing
-in the threat model. Any sandboxed runtime layered on top of asobi
-(e.g. `asobi_lua`) MUST keep its sandbox out of these tables.
+in the same BEAM (game callbacks, plugins, extensions) can read and
+mutate them. asobi is single-tenant and the loaded code is trusted, so
+this is acceptable, but it is an explicit trust boundary. The Lua
+runtime in `src/lua/` runs in this same BEAM and its sandbox has to
+stay out of these tables; so does any other sandboxed runtime.
 """.
 -behaviour(supervisor).
 

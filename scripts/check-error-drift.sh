@@ -21,20 +21,30 @@ fail=0
 # shared error object landed (plan item 1b) a controller names a code and never
 # a status, so the status a client sees is asobi_error's business, not the call
 # site's - and this guard has to resolve it the same way.
+#
+# Newlines are flattened first, as in src_pairs below: erlfmt reflows a long
+# entry across three lines, and a per-line regex missed those and fell through
+# to the 500 default - which is how the guide came to document a 403 as a 500.
 code_status() {
-	grep -oE '^\s*\{~"[a-z_.]+", ?[0-9]{3},' "$repo_root/src/asobi_error.erl" |
-		sed -E 's/^\s*\{~"([a-z_.]+)", ?([0-9]{3}),/\1 \2/'
+	tr '\n' ' ' <"$repo_root/src/asobi_error.erl" | tr -s ' ' |
+		grep -oE '\{ ?~"[a-z_.]+", ?[0-9]{3},' |
+		sed -E 's/\{ ?~"([a-z_.]+)", ?([0-9]{3}),/\1 \2/'
 }
 
 # Every "<status> <code>" pair a module returns. Newlines are flattened and runs
 # of spaces squeezed first, so erlfmt reflowing a return across lines can never
 # hide it from the regex. Both {asobi_error, Code} and {asobi_error, Code,
 # Details} are matched; the status comes from the table above.
+#
+# `asobi_error:legacy(Code, Details)` is matched too. It returns a rendered
+# `{json, ...}` rather than an {asobi_error, Code} tuple, so the tuple regex
+# alone missed every code raised through it - which is how the guest table came
+# to omit the 422 the upgrade path returns on a bad username or password.
 src_pairs() {
 	local codes
 	codes=$(
 		tr '\n' ' ' <"$1" | tr -s ' ' |
-			grep -oE '\{asobi_error, ?~"[a-z_.]+"' |
+			grep -oE '\{asobi_error, ?~"[a-z_.]+"|asobi_error:legacy\( ?~"[a-z_.]+"' |
 			sed -E 's/.*~"([a-z_.]+)"/\1/' | sort -u
 	)
 	[ -z "$codes" ] && return 0

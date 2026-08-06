@@ -94,9 +94,7 @@ See the callback reference for the full callback list.
 
 ### What the client sees on the wire
 
-A **world** pushes `world.phase_changed` on every transition and again
-roughly every three seconds while a phase runs. The payload is the phase
-info block:
+A **world** pushes `world.phase_changed` on every transition:
 
 ```json
 {
@@ -106,16 +104,33 @@ info block:
     "phase": "combat",
     "remaining_ms": 118400,
     "config": {},
+    "timers": {},
     "world_id": "..."
   }
 }
 ```
 
-A **match** does not push a phase event. The match server runs the phase
-clock and your callbacks, but the client learns the phase by reading the
-`phase` block on the listing and join reply - `status`, `phase`,
-`remaining_ms` and the pending `start_condition`. Broadcast anything richer
-yourself from `on_phase_started`.
+It also re-sends the phase info periodically, and what a client actually
+receives is a **burst of identical frames**, not one frame every three seconds.
+The gate is a wall-clock check evaluated inside the tick loop, so it passes on
+every tick that falls in a qualifying second: at the default 20 Hz that is
+roughly twenty copies, once every three seconds. A slower `tick_rate` sends
+fewer, a faster one more.
+
+Dedupe on the client. Keep the last `(phase, status)` you rendered and ignore a
+frame that repeats it; use `remaining_ms` for the countdown rather than
+counting frames.
+
+Two other differences in the periodic frames worth handling: they carry no
+`world_id` (only the transition frame merges it in), and a world whose phases
+have all completed sends `{"status": "complete", "phase": "undefined"}` on
+repeat - the string, not `null`.
+
+A **match** does not push a phase event at all. The match server runs the phase
+clock and your callbacks, but the client learns the phase by reading the `phase`
+block on the listing and join reply - `status`, `phase`, `remaining_ms` and the
+pending `start_condition`. Broadcast anything richer yourself from
+`on_phase_started`.
 
 See [WebSocket protocol](websocket-protocol.md#worldphase_changed-server-push)
 for the frame envelope and [Lobbies](lobbies.md) for `game.broadcast`.
@@ -150,6 +165,23 @@ function, or the `players_ratio` and `event` start conditions - those need
 an Erlang game module. If a phase needs a timer, drive it from your own tick
 logic and `game.broadcast`, or move that game to Erlang.
 
+### Three ways a phase list fails quietly
+
+The decoder is forgiving, and three mistakes cost you a warning you will never
+see:
+
+- **A non-numeric `duration` becomes 0.** `duration = "10000"` is a string, so
+  the phase starts and ends in the same tick. Only a Lua number works.
+- **An unrecognised `start` falls back to `prev_ended`.** `start = "all-ready"`
+  or `start = "players"` is not rejected; the phase simply begins when the
+  previous one ends. The accepted values are exactly the table above.
+- **A phase table with no `name` is dropped from the list.** The rest of the
+  list still runs, so a three-phase game silently becomes a two-phase one.
+
+Only a non-list return from `phases()` logs anything. Check the phase names on
+the wire (`world.phase_changed`) or in the `phase` block on a listing before
+concluding a phase never fired.
+
 ## Seasons
 
 Seasons live in [`asobi_seasons`][seasons], an extension. asobi still creates
@@ -169,13 +201,16 @@ Phases, with a Lua world game running locally:
    world script.
 2. Join the world over the WebSocket and watch the frames. Within a few
    seconds you see `world.phase_changed` with `"phase": "warmup"`, then
-   after five seconds another with `"phase": "active"`.
+   after five seconds another with `"phase": "active"`. Expect repeats of the
+   same frame in between; that is the periodic re-send, not a second
+   transition.
 3. Call `world.list`; the entry carries a `phase` block with the live
    `phase` and `remaining_ms`.
 
-If the phase frames never arrive, confirm the game is a **world** (matches
-run phases but do not push them) and that `phases()` returns a list. A
-non-list logs a warning and is ignored.
+If the phase frames never arrive, confirm the game is a **world** (matches run
+phases but do not push them) and that `phases()` returns a list. A non-list
+logs a warning and is ignored. If some phases arrive and others do not, check
+the [three silent decoder failures](#three-ways-a-phase-list-fails-quietly).
 
 ## Next
 

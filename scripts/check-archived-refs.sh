@@ -17,13 +17,18 @@ set -euo pipefail
 # Repositories that are archived, and what to say instead. Add a row when you
 # archive something, in the same PR.
 ARCHIVED=(
-  "asobi_admin|the operator console ships in asobi - see guides/self-hosting.md"
+  "asobi_admin|the operator console ships in asobi - see guides/console.md"
+  "asobi_lua|the Lua runtime ships in asobi (src/lua/) - link this repo, and use the ghcr.io/widgrensit/asobi image"
 )
 
 # Docs a reader follows. Deliberately excludes docs/adr/: an ADR records a
 # decision as it stood, and rewriting that history to keep a linter quiet is
 # worse than the stale name.
-PATHS=(guides README.md docs/ARCHITECTURE.md)
+#
+# examples/ is in scope because a reader who runs an example is following it as
+# closely as a guide, and its READMEs are where a stale "install X too" line
+# survives longest.
+PATHS=(guides README.md docs/ARCHITECTURE.md examples CONTRIBUTING.md)
 
 fails=0
 for entry in "${ARCHIVED[@]}"; do

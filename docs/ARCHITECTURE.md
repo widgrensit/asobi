@@ -1,14 +1,14 @@
 # Architecture
 
-This document describes Asobi's internal architecture, supervision trees,
-data model, and protocol design.
+An internal design note. It is not published to HexDocs and it is not the API
+reference.
 
-> This is an internal design document. It is not published to HexDocs and is not
-> the API reference. For the canonical, maintained references see the
-> [Architecture guide](../guides/architecture.md) (supervision, lifecycles,
-> deployment models), the [REST API guide](../guides/rest-api.md) (every HTTP
-> endpoint and status code), and the
-> [WebSocket protocol guide](../guides/websocket-protocol.md) (the message catalogue).
+The maintained references are the [Architecture guide](../guides/architecture.md)
+(what a node is, the supervision tree, lifecycles, per-subsystem detail), the
+[REST API guide](../guides/rest-api.md) (every HTTP endpoint and status code),
+the [WebSocket protocol guide](../guides/websocket-protocol.md) (the message
+catalogue) and [Clustering](../guides/clustering.md) (what is and is not
+cluster-safe). Where this file and a guide disagree, the guide wins.
 
 ## Stack
 
@@ -16,347 +16,167 @@ data model, and protocol design.
 |-------|-----------|
 | HTTP / REST | Nova (Cowboy) |
 | WebSocket | Nova WebSocket (Cowboy) |
-| Database / ORM | Kura (PostgreSQL via pgo) |
-| Authentication | nova_auth |
-| Background Jobs | Shigoto |
-| Pub/Sub / Presence | `pg` module + Nova PubSub |
-| Telemetry | OpenTelemetry (opentelemetry_kura) |
+| Database | Kura with `kura_backend_postgres`, over pgo |
+| Authentication | nova_auth, nova_auth_oidc |
+| Rate limiting / resilience | seki, nova_resilience |
+| Lua runtime | Luerl |
+| Background jobs | Shigoto |
+| Pub/sub and presence | `pg` plus Nova PubSub |
+| Telemetry | plain `telemetry` events |
 | JSON | OTP `json` module |
 
-## Architecture Overview
+Telemetry is `telemetry:execute/3` and nothing else. asobi attaches no
+exporter, depends on no OpenTelemetry package, and holds the event surface in
+one list in `asobi_telemetry:events/0`, asserted against the module's own
+`execute` calls by `asobi_telemetry_tests`. Consumers - an OpenTelemetry
+bridge, a Prometheus scraper, your own handler - attach out of tree. See
+`docs/adr/0005-telemetry-event-surface.md`.
+
+## Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Mobile Game Clients                    │
-│              (Unity, Unreal, Godot, Native)              │
+│                     Game clients                        │
+│    (Godot, Defold, LÖVE, Unity, Unreal, JS, Dart)       │
 └────────────┬──────────────────────┬─────────────────────┘
              │ REST (JSON)          │ WebSocket (JSON)
              ▼                      ▼
 ┌────────────────────────────────────────────────────────┐
-│                      Nova Router                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │ REST API     │  │ WebSocket    │  │ Admin        │ │
-│  │ Controllers  │  │ Handler      │  │ (ext. repo)  │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
+│                      Nova router                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ REST         │  │ WebSocket    │  │ Console +    │  │
+│  │ controllers  │  │ handler      │  │ ops plane    │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
 └─────────┼─────────────────┼─────────────────┼──────────┘
-          │                 │                 │
           ▼                 ▼                 ▼
 ┌────────────────────────────────────────────────────────┐
-│                   Asobi Core Services                   │
-│                                                         │
-│  ┌─────────┐ ┌──────────┐ ┌────────┐ ┌─────────────┐  │
-│  │ Players │ │ Matches  │ │ Social │ │ Economy     │  │
-│  │         │ │          │ │        │ │             │  │
-│  │ Session │ │ Match    │ │ Chat   │ │ Wallet      │  │
-│  │ Profile │ │ Maker    │ │ Groups │ │ Inventory   │  │
-│  │ Stats   │ │ Boards   │ │ Friends│ │ Store       │  │
-│  └────┬────┘ └────┬─────┘ └───┬────┘ └──────┬──────┘  │
-│       │           │           │              │          │
-│       ▼           ▼           ▼              ▼          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │           pg (Pub/Sub + Presence)                │   │
-│  │           ETS (Hot State + Leaderboards)         │   │
-│  │           Shigoto (Background Jobs)              │   │
-│  └──────────────────────────────────────────────────┘   │
-└─────────────────────────┬───────────────────────────────┘
-                          │
+│                     Core services                      │
+│                                                        │
+│  ┌─────────┐ ┌──────────┐ ┌────────┐ ┌─────────────┐   │
+│  │ Players │ │ Matches  │ │ Social │ │ Economy     │   │
+│  │ Session │ │ Worlds   │ │ Chat   │ │ Wallet      │   │
+│  │ Profile │ │ Maker    │ │ Groups │ │ Inventory   │   │
+│  │ Stats   │ │ Boards   │ │ Friends│ │ Store       │   │
+│  └────┬────┘ └────┬─────┘ └───┬────┘ └──────┬──────┘   │
+│       ▼           ▼           ▼             ▼          │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  pg (pub/sub + presence)                         │  │
+│  │  ETS (match backup, boards, caches, registries)  │  │
+│  │  Luerl (game scripts)                            │  │
+│  │  Shigoto (the broadcast fanout queue)            │  │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────┬──────────────────────────────┘
                           ▼
               ┌───────────────────────┐
               │   PostgreSQL (Kura)   │
               └───────────────────────┘
 ```
 
-## Supervision Tree
+The console and the ops plane are part of this node, not a second deployment.
 
-```
-asobi_sup (one_for_one)
-├── asobi_repo                          # Kura repo worker (pgo pool)
-├── asobi_registry                      # global process registry (via pg)
-├── asobi_presence                      # gen_server — online status via pg
-│
-├── asobi_player_sup (simple_one_for_one)
-│   └── asobi_player_session            # gen_server per connected player
-│
-├── asobi_match_sup (one_for_one)
-│   ├── asobi_matchmaker                # gen_server — periodic tick via Shigoto
-│   └── asobi_match_runner_sup (simple_one_for_one)
-│       └── asobi_match_server          # gen_statem per active match
-│
-├── asobi_leaderboard_sup (simple_one_for_one)
-│   └── asobi_leaderboard_server        # gen_server per leaderboard (ETS-backed)
-│
-├── asobi_chat_sup (simple_one_for_one)
-│   └── asobi_chat_channel              # gen_server per active channel
-│
-└── asobi_tournament_sup (simple_one_for_one)
-    └── asobi_tournament_server         # gen_server per active tournament
-```
+## Supervision tree
 
-### Key Design Decisions
+Regenerated from `src/asobi_sup.erl` in the
+[Architecture guide](../guides/architecture.md#supervision-tree), including the
+boot order the merge made load-bearing. It is not duplicated here; two copies
+is how the last one drifted.
 
-- **simple_one_for_one** for dynamic processes (players, matches, channels) — efficient for thousands of children
-- **one_for_one** at the top level — services are independent, one crash doesn't take down others
-- **gen_statem for matches** — match lifecycle is inherently a state machine (waiting → running → paused → finished)
-- **gen_server for everything else** — player sessions, leaderboards, chat channels are simpler request/response
+Design decisions worth stating once:
 
-## Data Model (Kura Schemas)
+- `simple_one_for_one` for dynamic children - sessions, matches, world
+  instances, boards, chat channels, votes, tournaments.
+- `one_for_one` at the top: services are independent and one crash does not
+  take the others down.
+- `gen_statem` for matches, because a match is a state machine.
+- `one_for_all` inside a world instance, because its zone supervisor, zone
+  manager, ticker and world server are meaningless without each other.
 
-### Players
+## Data model
 
-```
-┌─────────────────────┐     ┌──────────────────────────┐
-│ asobi_player        │     │ asobi_player_auth        │
-├─────────────────────┤     ├──────────────────────────┤
-│ id         uuid PK  │◄────│ player_id  uuid FK       │
-│ username   string   │     │ id         uuid PK       │
-│ display_name string │     │ provider   enum          │
-│ avatar_url string   │     │ provider_id string       │
-│ metadata   jsonb    │     │ credentials_hash string  │
-│ banned_at  datetime │     │ inserted_at datetime     │
-│ inserted_at datetime│     │ updated_at  datetime     │
-│ updated_at datetime │     └──────────────────────────┘
-└─────────────────────┘
-         │
-         │ has_one
-         ▼
-┌─────────────────────┐
-│ asobi_player_stats  │
-├─────────────────────┤
-│ player_id  uuid FK  │
-│ games_played integer│
-│ wins       integer  │
-│ losses     integer  │
-│ rating     float    │
-│ rating_dev float    │
-│ metadata   jsonb    │
-│ updated_at datetime │
-└─────────────────────┘
-```
+23 Kura schemas. Each module carries its own `table/0` and `fields/0`; read
+those rather than a diagram, which is what went stale here before.
 
-### Economy
+| Area | Schema module | Table |
+|---|---|---|
+| Players | `asobi_player` | `players` |
+| | `asobi_player_stats` | `player_stats` |
+| | `asobi_player_identity` | `player_identities` |
+| | `asobi_player_token` | `player_tokens` |
+| Matches | `asobi_match_record` | `match_records` |
+| | `asobi_vote` | `votes` |
+| Worlds | `asobi_zone_snapshot` | `zone_snapshots` |
+| Leaderboards | `asobi_leaderboard_entry` | `leaderboard_entries` |
+| Tournaments | `asobi_tournament` | `tournaments` |
+| Economy | `asobi_wallet` | `wallets` |
+| | `asobi_transaction` | `transactions` |
+| | `asobi_item_def` | `item_defs` |
+| | `asobi_player_item` | `player_items` |
+| | `asobi_store_listing` | `store_listings` |
+| | `asobi_iap_transaction` | `iap_transactions` |
+| Social | `asobi_friendship` | `friendships` |
+| | `asobi_group` | `groups` |
+| | `asobi_group_member` | `group_members` |
+| | `asobi_chat_message` | `chat_messages` |
+| | `asobi_notification` | `notifications` |
+| Storage | `asobi_cloud_save` | `cloud_saves` |
+| | `asobi_storage` | `storage` |
+| Ops | `asobi_ops_audit_entry` | `ops_audit_entries` |
 
-```
-┌─────────────────────┐     ┌──────────────────────────┐
-│ asobi_wallet        │     │ asobi_transaction        │
-├─────────────────────┤     ├──────────────────────────┤
-│ id         uuid PK  │     │ id           uuid PK     │
-│ player_id  uuid FK  │     │ wallet_id    uuid FK     │
-│ currency   enum     │     │ amount       integer     │
-│ balance    integer  │     │ balance_after integer    │
-│ inserted_at datetime│     │ reason       enum        │
-│ updated_at datetime │     │ reference_type string    │
-└─────────────────────┘     │ reference_id   string    │
-                            │ metadata     jsonb       │
-                            │ inserted_at  datetime    │
-                            └──────────────────────────┘
+Enum-looking columns (`provider`, `currency`, `reason`, `category`, `rarity`,
+`status`, `channel_type`, read and write permissions) are `string` in Kura, not
+PostgreSQL enums. Validation is in the changeset, not the column type.
 
-┌─────────────────────┐     ┌──────────────────────────┐
-│ asobi_item_def      │     │ asobi_player_item        │
-├─────────────────────┤     ├──────────────────────────┤
-│ id         uuid PK  │     │ id           uuid PK     │
-│ slug       string   │◄────│ item_def_id  uuid FK     │
-│ name       string   │     │ player_id    uuid FK     │
-│ category   enum     │     │ quantity     integer     │
-│ rarity     enum     │     │ metadata     jsonb       │
-│ stackable  boolean  │     │ acquired_at  datetime    │
-│ metadata   jsonb    │     │ updated_at   datetime    │
-│ inserted_at datetime│     └──────────────────────────┘
-└─────────────────────┘
+## Process architecture
 
-┌─────────────────────┐
-│ asobi_store_listing │
-├─────────────────────┤
-│ id         uuid PK  │
-│ item_def_id uuid FK │
-│ currency   enum     │
-│ price      integer  │
-│ active     boolean  │
-│ valid_from datetime │
-│ valid_until datetime│
-│ metadata   jsonb    │
-└─────────────────────┘
-```
+### Player session (`asobi_player_session`, gen_server)
 
-### Social
+One process per connection. It holds the authenticated `player_id`, monitors
+the WebSocket process, tracks the player's current match, world, zone and chat
+channels, and routes to them.
 
-```
-┌─────────────────────┐     ┌──────────────────────────┐
-│ asobi_friendship    │     │ asobi_group              │
-├─────────────────────┤     ├──────────────────────────┤
-│ id         uuid PK  │     │ id           uuid PK     │
-│ player_id  uuid FK  │     │ name         string      │
-│ friend_id  uuid FK  │     │ description  string      │
-│ status     enum     │     │ max_members  integer     │
-│ inserted_at datetime│     │ open         boolean     │
-│ updated_at datetime │     │ metadata     jsonb       │
-└─────────────────────┘     │ creator_id   uuid FK     │
- (pending/accepted/blocked) │ inserted_at  datetime    │
-                            │ updated_at   datetime    │
-                            └──────────────────────────┘
-                                       │
-                            ┌──────────┴───────────────┐
-                            │ asobi_group_member       │
-                            ├──────────────────────────┤
-                            │ group_id   uuid FK       │
-                            │ player_id  uuid FK       │
-                            │ role       enum          │
-                            │ joined_at  datetime      │
-                            └──────────────────────────┘
-                             (owner/admin/member)
-```
-
-### Chat & Notifications
-
-```
-┌─────────────────────┐     ┌──────────────────────────┐
-│ asobi_chat_message  │     │ asobi_notification       │
-├─────────────────────┤     ├──────────────────────────┤
-│ id         uuid PK  │     │ id           uuid PK     │
-│ channel_type enum   │     │ player_id    uuid FK     │
-│ channel_id string   │     │ type         enum        │
-│ sender_id  uuid FK  │     │ subject      string      │
-│ content    string   │     │ content      jsonb       │
-│ metadata   jsonb    │     │ read         boolean     │
-│ sent_at    datetime │     │ sent_at      datetime    │
-└─────────────────────┘     └──────────────────────────┘
- (room/group/direct)
-```
-
-### Matches, Leaderboards & Tournaments
-
-```
-┌─────────────────────┐     ┌──────────────────────────┐
-│ asobi_match_record  │     │ asobi_leaderboard_entry  │
-├─────────────────────┤     ├──────────────────────────┤
-│ id         uuid PK  │     │ leaderboard_id string    │
-│ mode       string   │     │ player_id    uuid FK     │
-│ status     enum     │     │ score        bigint      │
-│ players    jsonb    │     │ sub_score    bigint      │
-│ result     jsonb    │     │ metadata     jsonb       │
-│ metadata   jsonb    │     │ updated_at   datetime    │
-│ started_at datetime │     └──────────────────────────┘
-│ finished_at datetime│
-│ inserted_at datetime│     ┌──────────────────────────┐
-└─────────────────────┘     │ asobi_tournament         │
-                            ├──────────────────────────┤
-┌─────────────────────┐     │ id           uuid PK     │
-│ asobi_cloud_save    │     │ name         string      │
-├─────────────────────┤     │ leaderboard_id string    │
-│ player_id  uuid FK  │     │ max_entries   integer    │
-│ slot       string   │     │ entry_fee    jsonb       │
-│ data       jsonb    │     │ rewards      jsonb       │
-│ version    integer  │     │ start_at     datetime    │
-│ updated_at datetime │     │ end_at       datetime    │
-└─────────────────────┘     │ metadata     jsonb       │
-                            │ inserted_at  datetime    │
-                            └──────────────────────────┘
-
-┌─────────────────────┐
-│ asobi_storage       │
-├─────────────────────┤
-│ collection string   │
-│ key        string   │
-│ player_id  uuid FK  │  (nullable — global objects have no owner)
-│ value      jsonb    │
-│ version    integer  │
-│ read_perm  enum     │
-│ write_perm enum     │
-│ updated_at datetime │
-└─────────────────────┘
- (public/owner/none)
-```
-
-## Process Architecture
-
-### Player Session (`asobi_player_session` — gen_server)
-
-One process per connected player. Manages WebSocket state, presence, and acts as a message router.
-
-```
-Client ←→ WebSocket Handler ←→ Player Session Process
-                                    │
-                                    ├── pg groups: presence, player-specific topics
-                                    ├── Tracks: current match, world, chat channels
-                                    └── Handles: heartbeat, disconnect cleanup
-```
-
-**State:**
 ```erlang
 #{
-    player_id => uuid(),
-    ws_pid => pid(),                    %% WebSocket handler process
-    match_pid => pid() | undefined,     %% current match process
-    channels => [binary()],             %% joined chat channels
-    presence => #{status => binary(), metadata => map()},
+    player_id => binary(),
+    ws_pid => pid(),
+    match_pid => pid() | undefined,
+    channels => [binary()],
+    presence => #{status := binary()},
     connected_at => integer()
+    %% world_pid and zone_pid are added by set_zone/3 on a world join
 }
 ```
 
-**Lifecycle:**
-1. WebSocket connects → auth validated → `asobi_player_session:start_link/2`
-2. Joins `pg` groups for presence tracking
-3. Routes incoming WebSocket messages to appropriate service
-4. On disconnect → leaves all groups, notifies match/chat, cleans up
+It dies with the socket. Reconnection presents the same token and produces a
+new process.
 
-### Match Server (`asobi_match_server` — gen_statem)
+### Match server (`asobi_match_server`, gen_statem)
 
-One process per active match. Runs the game loop with configurable tick rate.
+One process per match.
 
 ```
-State Machine:
-  waiting ──[enough players]──→ running ──[game over]──→ finished
-     │                            │                         │
-     │ ←──[player leaves]        │ ←──[pause]──→ paused   │
-     │                            │                         │
-     └──[timeout]──→ cancelled   └──[error]──→ crashed    done
+waiting ──[min players]──► running ──[game over]──► finished
+   │                          │  ▲                     ▲
+   │                          ▼  │                     │
+   │                        paused                     │
+   └────────────────[cancel or timeout]────────────────┘
 ```
 
-**States:**
-- `waiting` — accepting players, waiting for minimum count
-- `running` — game loop active, ticking at configured rate
-- `paused` — game loop suspended (all players disconnected, admin pause)
-- `finished` — game over, results calculated, persisting to DB
-- `cancelled` — not enough players, timeout
+`cancelled` is a result value on the `finished` state, not a state.
 
-**Game Logic Behaviour:**
+The game module implements the `asobi_match` behaviour. `init/1` plus exactly
+one of `get_state/2` or `get_state/1` is the required minimum; the rest -
+`join/2`, `join/3`, `leave/2`, `handle_input/3`, `tick/1`, `vote_requested/1`,
+`vote_resolved/3`, `phases/1`, `on_phase_started/2`, `on_phase_ended/2` - are
+optional. Each tick drains queued inputs, calls `tick/1`, then broadcasts
+either one shared payload or one payload per player. Default tick is 100 ms.
 
-Game developers implement the `asobi_match` behaviour to define their game:
+### Matchmaker (`asobi_matchmaker`, gen_server)
 
-```erlang
--module(asobi_match).
+One per node. It schedules its own tick with `erlang:send_after/3`; nothing
+external drives it and no job queue is involved.
 
--callback init(Config :: map()) ->
-    {ok, GameState :: term()}.
+Tickets are entries in a map in the process's own state:
 
--callback join(PlayerId :: binary(), GameState :: term()) ->
-    {ok, GameState1 :: term()} | {error, Reason :: term()}.
-
--callback leave(PlayerId :: binary(), GameState :: term()) ->
-    {ok, GameState1 :: term()}.
-
--callback handle_input(PlayerId :: binary(), Input :: map(), GameState :: term()) ->
-    {ok, GameState1 :: term()}.
-
--callback tick(GameState :: term()) ->
-    {ok, GameState1 :: term()} |
-    {finished, Result :: map(), GameState1 :: term()}.
-
--callback get_state(PlayerId :: binary(), GameState :: term()) ->
-    StateForPlayer :: map().
-```
-
-**Tick loop** runs at a configurable rate (default 10/sec). Each tick:
-1. Collect queued player inputs
-2. Call `Mod:tick(GameState)` with accumulated inputs
-3. Compute state diff per player via `Mod:get_state/2`
-4. Broadcast diffs over WebSocket
-
-### Matchmaker (`asobi_matchmaker` — gen_server)
-
-Runs periodic matching ticks. Strategy modules group tickets; the shipped
-strategies are `fill` (FCFS) and `skill_based` (expanding window).
-
-**Ticket** (`asobi_matchmaker:add/2`):
 ```erlang
 #{
     id => binary(),
@@ -364,426 +184,300 @@ strategies are `fill` (FCFS) and `skill_based` (expanding window).
     mode => binary(),
     properties => map(),        %% game-defined, read by your strategy
     submitted_at => integer(),
-    status => pending
+    status => pending,
+    attempts => 0
 }
 ```
 
-There is no query expression and no party field. Ticket filtering beyond
-`mode` happens inside your strategy module against `properties`. See
-[Matchmaking](../guides/matchmaking.md).
+There is no ticket table and no ticket schema. The queue dies with the node.
 
-**Algorithm (each tick):**
-1. Load all active tickets from ETS
-2. Group by mode/region
-3. Within each group, find mutually compatible tickets (both match each other's query)
-4. Form matches from compatible pools (fill to min/max player count)
-5. For unfilled tickets, increment `expansion_level` (widens skill range)
-6. Tickets past max wait time → return error to player
-7. Matched tickets → spawn `asobi_match_server`, notify players
+One live ticket per player *per mode*: re-adding while already queued for the
+same mode returns the existing ticket. A player may hold tickets in different
+modes at the same time.
 
-**Query language:**
-```
-+region:eu-west mode:ranked skill:>=800 skill:<=1200
-```
+Each tick: group the tickets by mode, hand each group to the configured
+strategy (`fill` or `skill_based`), start a match through `asobi_match_sup` for
+each filled group on this node, expire anything past `max_wait_seconds`, keep
+the rest. There is no query parser, no party field and no region concept.
+Filtering beyond `mode` belongs in your strategy module, against `properties`.
+See [Matchmaking](../guides/matchmaking.md).
 
-### Leaderboard Server (`asobi_leaderboard_server` — gen_server)
+### Leaderboard server (`asobi_leaderboard_server`, gen_server)
 
-Hybrid ETS + PostgreSQL. ETS for hot reads, Kura for persistence.
+One per board. ETS for reads, PostgreSQL for the truth.
 
-**ETS table** per leaderboard: `ordered_set` keyed by `{-Score, -SubScore, PlayerId}` for automatic ordering.
+The table is an `ordered_set` keyed `{-Score, PlayerId}`, so iteration is rank
+order. `sub_score` is persisted as 0 and plays no part in ordering.
 
-**Operations:**
-- `submit(BoardId, PlayerId, Score)` — insert/update in ETS, async persist via Shigoto
-- `top(BoardId, N)` — read top N from ETS (microsecond response)
-- `around(BoardId, PlayerId, N)` — player's rank ± N entries from ETS
-- `rank(BoardId, PlayerId)` — player's rank via ETS position
-- `reset(BoardId)` — snapshot to archive table, clear ETS, Shigoto job
+- `submit/3` - update ETS, mark the player dirty
+- `top/2`, `around/3`, `rank/2` - read from ETS
+- `live_boards/0` - the boards with scores in memory
 
-**Lifecycle:** a board hydrates its ETS tables from `leaderboard_entries` before it accepts reads, and flushes pending scores on shutdown, so a restart does not reset the board. Each flush writes only the players that changed since the previous flush; a player whose write fails stays pending and is retried on the next tick.
+A 30 second timer in the board process flushes dirty players, upserting only
+what changed; a failed write stays pending for the next flush. `terminate/2`
+flushes. A board hydrates from `leaderboard_entries` before serving reads.
 
-**Time-scoped boards:** Shigoto schedules resets (daily/weekly/monthly). On reset, current entries archived to `asobi_leaderboard_archive` with period metadata.
+There is no `reset/0`, no archive table and no scheduled reset. A "weekly
+board" is a separate board id.
 
-### Chat Channel (`asobi_chat_channel` — gen_server)
+### Chat channel (`asobi_chat_channel`, gen_server)
 
-One process per active channel. Uses `pg` for member management.
+One per live channel. Members are a `pg` group `{chat, ChannelId}`. A send
+fans out to the group, then inserts the `chat_messages` row inline in the same
+callback - there is no batching worker. A bounded in-process buffer keeps
+recent messages for a fast history read; older history comes from Postgres.
 
-**Channel types:**
-- `room` — named persistent channel (e.g., `~"chat:lobby"`)
-- `group` — tied to a group/guild
-- `direct` — between two players
-- `match` — ephemeral, tied to a match lifetime
+Channel naming and who may reach which channel are in `asobi_chat_acl`.
 
-**Flow:**
-1. Player joins channel → process joins `pg` group `{chat, ChannelId}`
-2. Send message → broadcast to all members via `pg`
-3. Messages persisted to `asobi_chat_message` via Shigoto (async)
-4. History loaded from Kura on join (paginated)
+### Presence (`asobi_presence`, gen_server)
 
-### Presence (`asobi_presence` — gen_server)
+Delivery target and online-set membership are recorded separately: `track/2`
+records both, `track_bot/2` records only the delivery target, so bots receive
+broadcasts without inflating `online_count/0`. `pg` cleans up when a process
+dies, so there is no stale presence to sweep. Status changes broadcast over
+Nova PubSub.
 
-Tracks online players and their status using `pg`.
+## WebSocket protocol
 
-**Design:**
-- Player session joins `pg` group `{presence, PlayerId}` on connect
-- Status updates broadcast via Nova PubSub on channel `presence`
-- Friends receive presence updates by subscribing to their friends' presence topics
-- `pg` automatically cleans up when processes die — no stale presence
-
-## WebSocket Protocol
-
-Single WebSocket connection per client. JSON message envelope:
-
-### Client → Server
+One connection per client, JSON envelope both ways:
 
 ```json
-{
-    "cid": "optional-correlation-id",
-    "type": "message.type",
-    "payload": {}
-}
+{"cid": "optional-correlation-id", "type": "message.type", "payload": {}}
 ```
 
-### Server → Client
+`cid` is echoed on a reply to a request. It is optional everywhere except
+`rpc.call`, where it is required and validated.
+
+The message catalogue is the
+[WebSocket protocol guide](../guides/websocket-protocol.md). `asobi_ws_handler`
+routes each `type` to the owning service; the client sends input, the server
+decides and broadcasts.
+
+Errors are always the wire object, never an internal reason atom:
 
 ```json
-{
-    "cid": "correlation-id-if-request-response",
-    "type": "message.type",
-    "payload": {}
-}
+{"error": {"code": "matchmaker.unknown_mode", "message": "...", "details": {}}}
 ```
 
-### Message Types
-
-The authoritative message catalogue is the
-[WebSocket protocol guide](../guides/websocket-protocol.md). The handler
-(`asobi_ws_handler`) routes each `type` to the owning service; the client sends
-input, the server decides and broadcasts state deltas.
-
-### WebSocket Handler (`asobi_ws_handler`)
-
-Implements `nova_websocket` behaviour. Routes messages to the appropriate service:
-
-```erlang
-websocket_handle({text, Raw}, State) ->
-    #{~"type" := Type, ~"payload" := Payload} = json:decode(Raw),
-    Cid = maps:get(~"cid", json:decode(Raw), undefined),
-    Result = route_message(Type, Payload, State),
-    reply_if_needed(Cid, Result, State).
-
-route_message(~"match.input", Payload, #{match_pid := Pid} = _State) ->
-    asobi_match_server:handle_input(Pid, Payload);
-route_message(~"chat.send", Payload, State) ->
-    asobi_chat:send_message(Payload, State);
-%% ...etc
-```
+Codes and their HTTP statuses live in one list in `src/asobi_error.erl`.
 
 ## REST API
 
-The HTTP endpoint reference is the [REST API guide](../guides/rest-api.md). It is
-the single source of truth for paths, methods, and status codes; this document does
-not repeat it. All endpoints sit under `/api/v1` and exchange JSON. Routing lives in
-`asobi_router.erl`; the controllers are the `*_controller` modules under
-[Project Structure](#project-structure).
+Paths, methods and status codes are the
+[REST API guide](../guides/rest-api.md). Routing is `src/asobi_router.erl`;
+controllers are the `*_controller` modules under `src/controllers/`.
 
-The client sends intent over these endpoints, the server decides, and the server
-persists and broadcasts the result.
+## Console and ops plane
 
-## Admin
+The node serves an operator console at `/console` and an ops HTTP API at
+`/api/v1/ops/*`, on the same listener as the game.
 
-This node serves its own operator console at `/console`, off unless
-`{console, true}` and an `ops_secret` are configured. It reads the ops plane at
-`/api/v1/ops` over HTTP like any other client - it holds no privileged path
-into the database of its own.
+The two are gated separately. `/console` needs `console` to be true; the ops
+routes are always mounted and reject everything until an `ops_secret` is
+configured, so a stock node serves neither.
+[Operator console](../guides/console.md) owns the detail.
 
-The console was previously a separate project, `asobi_admin`, which read the
-same database directly. That is archived: a second deployment to run, secure
-and keep in step was the wrong shape for something an operator opens during an
-incident.
+Core's ops routes are all reads. Every core route carries a capability class -
+`read`, `player_data` or `config` (`src/ops/asobi_ops_caps.erl`) - and the only
+route that mutates is `/api/v1/ops/ext/:extension/:action`, whose behaviour
+comes from an installed extension.
 
-## Background Jobs (Shigoto)
+The console holds no privileged path into the database; it reads the ops plane
+over HTTP like any other client. It used to be a separate project,
+`asobi_admin`, reading the same database directly. That is archived: a second
+deployment to run, secure and keep in step was the wrong shape for something an
+operator opens during an incident.
 
-| Job | Schedule | Description |
-|-----|----------|-------------|
-| `matchmaker_tick` | Every 1s | Run matchmaking algorithm |
-| `leaderboard_persist` | Every 30s | Flush ETS leaderboard changes to PostgreSQL |
-| `leaderboard_reset` | Cron-based | Reset time-scoped leaderboards, archive entries |
-| `tournament_lifecycle` | Every 1m | Start/end tournaments based on schedule |
-| `chat_persist` | Every 5s | Batch-persist chat messages from memory to DB |
-| `notification_push` | On-demand | Send push notifications via APNs/FCM |
-| `iap_reconcile` | Every 1h | Reconcile IAP receipts with store APIs |
-| `presence_cleanup` | Every 5m | Safety net for stale presence (pg handles most) |
-| `analytics_flush` | Every 1m | Flush telemetry events to analytics pipeline |
+## Background jobs
 
-Player stats are not a background job: `asobi_match_server` folds a finished
-match into `player_stats` in the same transaction that writes the match
-record, so the counters and the match history can never disagree.
+One worker: `asobi_broadcast_worker`, on the `broadcast` fanout queue. Every
+node consumes the queue, so every node sees every job. Three job types:
+
+| Type | Effect on each node |
+|---|---|
+| `session_revoked` | `asobi_presence:disconnect/2` for the player, locally |
+| `notification` | push to the player's local session if connected |
+| `chat` | deliver to local members of the channel |
+
+Anything else logs `unknown_broadcast_type`. `max_attempts` is 1 and jobs are
+pruned after their window, so the queue is a best-effort push and the database
+is the source of truth.
+
+Everything else that could look like a job is not one. The matchmaker ticks
+itself. Leaderboards flush on their own 30 second timer. Chat rows are inserted
+inline by the channel process. Player stats are folded into `player_stats` by
+`asobi_match_server` inside the same transaction that writes the match record,
+so the counters and the match history cannot disagree.
 
 ## Security
 
-### Authentication Flow
+### Authentication
 
-1. Client authenticates via REST (email/password, device ID, or platform provider)
-2. Server returns JWT session token (short-lived, 15min) + refresh token (long-lived, 30 days)
-3. REST requests include token in `Authorization: Bearer <token>` header
-4. WebSocket authenticates via `session.connect` message with token
-5. Server validates token, starts player session process
+1. The client registers or logs in over REST (password, device, guest, or an
+   OAuth/OIDC provider).
+2. The server returns `player_id`, `access_token`, `refresh_token` and
+   `username`. Both tokens are opaque 32 random bytes issued by `nova_auth` and
+   stored in `player_tokens`. They are not JWTs and carry no claims. Access is
+   valid 60 minutes, refresh 30 days.
+3. REST requests carry `Authorization: Bearer <access_token>`.
+4. The WebSocket authenticates with `session.connect` carrying the same token.
+5. Both paths resolve the token through `asobi_auth_cache`, a per-node ETS
+   cache with a 60 second TTL (5 seconds for negatives). That TTL bounds
+   revocation latency across a cluster.
 
-### Server-Authoritative Design
+`asobi_auth_plugin` is the Nova plugin that does step 3. It resolves a bearer
+token; it does not validate a JWT.
 
-- All game state mutations go through `asobi_match_server`
-- Economy operations are ACID transactions via Kura Multi
-- Client never directly modifies server state
-- Leaderboard submissions validated against match results
-- Purchase receipts validated server-side with Apple/Google APIs
+### Server-authoritative design
 
-### Rate Limiting
+- All match state mutations go through `asobi_match_server`.
+- Each economy operation is one `asobi_repo:transaction/1`, serialised by a
+  Postgres advisory transaction lock on `(player_id, currency)`. That is what
+  makes concurrent debits on the same wallet safe; it is not Kura `Multi`.
+- Client score submission is refused by default. `POST /leaderboards/:id`
+  answers `leaderboard.client_submit_disabled` unless the board id is listed in
+  `leaderboard_client_submit`; the intended path is server code calling
+  `asobi_leaderboard_server:submit/3` from a finished match.
+- IAP receipts are verified server-side: Apple's signed transaction against
+  Apple's root certificates locally, Google's purchase token against the Play
+  Android Publisher API. Both refuse with `*_iap_not_configured` until the
+  bundle id or package name is set.
 
-Nova plugin for per-player rate limiting:
-- REST: token bucket per endpoint per player
-- WebSocket: message rate limit per type
-- Matchmaking: one active ticket per player
+### Rate limiting
 
-## Scaling Strategy
+`asobi_rate_limit_plugin` selects a bucket per path (auth, register, iap, api)
+and `asobi_ws_handler` gates the socket upgrade. Buckets are seki limiters
+registered at boot and held in memory, per node - a 5/s bucket in a
+three-node cluster is 15/s in aggregate. Matchmaking allows one active ticket
+per player per mode.
 
-### Single Node (Phase 1)
+## Scaling
 
-One BEAM node handles everything. Target: 50K concurrent players.
+One node is the design point: a match lives on one node, a world lives on one
+node, and neither migrates. [Clustering](../guides/clustering.md) is the single
+source of truth for what a second node does and does not buy you, and holds the
+complete list of per-node state. Measured numbers are in
+[Benchmarks](../guides/benchmarks.md); do not put a target here.
 
-```
-Single Node
-├── Nova (HTTP + WS)
-├── All game processes
-├── ETS tables
-└── PostgreSQL connection pool
-```
+Migrations run under a Kura advisory lock, so a rolling deploy is safe: the
+first node to start applies them and the rest wait, then see the version
+already recorded.
 
-### Clustered (Phase 2)
+## Project layout
 
-Multiple BEAM nodes with distributed Erlang. `pg` handles cross-node pub/sub.
+`src/` is one directory per subsystem, compiled recursively
+(`{src_dirs, [{"src", [{recursive, true}]}]}`).
 
-```
-                    Load Balancer (sticky sessions for WS)
-                    ┌───────────┬───────────┐
-                    ▼           ▼           ▼
-                 Node A      Node B      Node C
-                    │           │           │
-                    └─────── pg ────────────┘  (cluster-wide pub/sub)
-                              │
-                         PostgreSQL
-```
+| Directory | Holds |
+|---|---|
+| `src/` (top level) | application, supervisor, router, repo, error codes, telemetry, game-mode registry, cluster discovery |
+| `src/auth/` | token issue and cache, OIDC config, Steam, IAP verification |
+| `src/console/` | the operator console: shell, assets, session, CSP, environment |
+| `src/controllers/` | REST controllers |
+| `src/economy/` | wallets, transactions, items, listings |
+| `src/extensions/` | extension resolution, supervision, the RPC dispatcher, `rebar3 asobi check` |
+| `src/iap/` | IAP transaction schema |
+| `src/leaderboards/` | board processes and entries |
+| `src/lua/` | the Lua runtime: loader, sandbox, bridges, config, reload |
+| `src/matches/` | match behaviour, match server, matchmaker and strategies |
+| `src/migrations/` | Erlang migration modules |
+| `src/notifications/` | notification schema and delivery |
+| `src/ops/` | the ops plane: auth, capabilities, per-area readers, audit |
+| `src/players/` | player, stats, identity, token, session |
+| `src/plugins/` | Nova plugins: auth, rate limit, body cap, client gate, security headers |
+| `src/social/` | presence, chat, DMs, friends, groups |
+| `src/storage/` | cloud saves and generic key-value storage |
+| `src/timers/` | phases, entity timers, reconnect windows |
+| `src/tournaments/` | tournament server and schema |
+| `src/votes/` | vote server and schema |
+| `src/workers/` | `asobi_broadcast_worker` |
+| `src/world/` | world instances, zones, terrain, spatial index, lobby |
+| `src/ws/` | WebSocket handler and binary framing |
 
-- Player session lives on the node the WebSocket connected to
-- Match processes can spawn on any node (least-loaded selection)
-- Leaderboard ETS replicated across nodes or centralized on dedicated node
-- Matchmaker runs on one node (elected leader) or partitioned by mode/region
-- `pg` handles all cross-node messaging transparently
-
-### Database Scaling (Phase 3)
-
-- Read replicas for leaderboard persistence and analytics queries
-- Connection pooling per node via pgo
-- Table partitioning for high-volume tables (transactions, chat messages, analytics)
-
-## Project Structure
-
-```
-asobi/
-├── src/
-│   ├── asobi_app.erl                    # OTP application
-│   ├── asobi_sup.erl                    # Top-level supervisor
-│   ├── asobi_router.erl                 # Nova router
-│   ├── asobi_repo.erl                   # Kura repo
-│   │
-│   ├── asobi_ws_handler.erl             # WebSocket handler + message routing
-│   │
-│   ├── asobi_player.erl                 # Player schema
-│   ├── asobi_player_auth.erl            # Player auth schema
-│   ├── asobi_player_stats.erl           # Player stats schema
-│   ├── asobi_player_session.erl         # gen_server per player
-│   ├── asobi_player_controller.erl      # REST controller
-│   │
-│   ├── asobi_match.erl                  # Match behaviour (game devs implement)
-│   ├── asobi_match_server.erl           # gen_statem per match
-│   ├── asobi_match_record.erl           # Match record schema
-│   ├── asobi_match_controller.erl       # REST controller
-│   │
-│   ├── asobi_matchmaker.erl             # Matchmaking gen_server
-│   ├── asobi_matchmaker_query.erl       # Query parser/evaluator
-│   ├── asobi_matchmaker_controller.erl  # REST controller
-│   │
-│   ├── asobi_leaderboard_server.erl     # gen_server per board (ETS)
-│   ├── asobi_leaderboard_entry.erl      # Leaderboard entry schema
-│   ├── asobi_leaderboard_controller.erl # REST controller
-│   │
-│   ├── asobi_wallet.erl                 # Wallet schema
-│   ├── asobi_transaction.erl            # Transaction ledger schema
-│   ├── asobi_item_def.erl               # Item definition schema
-│   ├── asobi_player_item.erl            # Player item instance schema
-│   ├── asobi_store_listing.erl          # Store listing schema
-│   ├── asobi_economy.erl               # Economy operations (Multi transactions)
-│   ├── asobi_iap.erl                    # IAP receipt validation
-│   ├── asobi_economy_controller.erl     # REST controller
-│   ├── asobi_inventory_controller.erl   # REST controller
-│   │
-│   ├── asobi_friendship.erl             # Friendship schema
-│   ├── asobi_group.erl                  # Group schema
-│   ├── asobi_group_member.erl           # Group member schema
-│   ├── asobi_social_controller.erl      # REST controller
-│   │
-│   ├── asobi_chat_channel.erl           # gen_server per channel
-│   ├── asobi_chat_message.erl           # Chat message schema
-│   ├── asobi_chat_controller.erl        # REST (history endpoint)
-│   │
-│   ├── asobi_tournament.erl             # Tournament schema
-│   ├── asobi_tournament_server.erl      # gen_server per tournament
-│   ├── asobi_tournament_controller.erl  # REST controller
-│   │
-│   ├── asobi_notification.erl           # Notification schema
-│   ├── asobi_notification_controller.erl # REST controller
-│   │
-│   ├── asobi_cloud_save.erl             # Cloud save schema
-│   ├── asobi_storage.erl                # Generic storage schema
-│   ├── asobi_storage_controller.erl     # REST controller
-│   │
-│   ├── asobi_presence.erl               # Presence tracking via pg
-│   ├── asobi_auth_plugin.erl            # Nova plugin — JWT validation
-│   ├── asobi_rate_limit_plugin.erl      # Nova plugin — rate limiting
-│   └── asobi_telemetry.erl              # Telemetry setup
-│
-├── include/
-│   └── asobi.hrl                        # Shared records/macros
-│
-├── priv/
-│   ├── migrations/                      # Kura migrations
-│   └── static/                          # Admin dashboard assets
-│
-├── test/
-│   ├── asobi_match_SUITE.erl
-│   ├── asobi_matchmaker_SUITE.erl
-│   ├── asobi_leaderboard_SUITE.erl
-│   ├── asobi_economy_SUITE.erl
-│   ├── asobi_social_SUITE.erl
-│   ├── asobi_chat_SUITE.erl
-│   ├── asobi_ws_SUITE.erl
-│   └── asobi_api_SUITE.erl
-│
-├── docs/
-│   └── ARCHITECTURE.md                  # This file
-│
-├── config/
-│   ├── sys.config
-│   └── vm.args
-│
-├── docker-compose.yml                   # PostgreSQL
-├── rebar.config
-├── rebar.lock
-└── .github/
-    └── workflows/
-        └── ci.yml                       # erlang-ci
-```
+`priv/` holds two things: `priv/console/` (the built console bundle and its
+manifest) and `priv/protocol/` (protocol fixtures and their README).
 
 ## Configuration
 
-### sys.config
+`config/dev_sys.config.src` is the worked example. Abridged:
 
 ```erlang
 [
     {nova, [
-        {bootstrap_application, asobi_arena},
+        {bootstrap_application, asobi},
         {environment, dev},
-        {cowboy_configuration, #{
-            port => 8084
-        }},
-        {json_lib, json}
+        {cowboy_configuration, #{port => 8082}},
+        {json_lib, json},
+        {plugins, [
+            {pre_request, asobi_body_cap_plugin, #{
+                max_body => 1048576,
+                require_content_length => true
+            }},
+            {pre_request, nova_request_plugin, #{
+                decode_json_body => true,
+                parse_qs => true
+            }},
+            {pre_request, nova_cors_plugin, #{allow_origins => ~"*"}},
+            {pre_request, nova_correlation_plugin, #{}},
+            {pre_request, asobi_rate_limit_plugin, #{}},
+            {pre_request, asobi_client_gate_plugin, #{}},
+            {post_request, asobi_security_headers_plugin, #{}}
+        ]}
     ]},
     {kura, [
         {repo, asobi_repo},
+        {backend, kura_backend_postgres},
         {host, "localhost"},
         {port, 5432},
         {database, "asobi_dev"},
         {user, "postgres"},
         {password, "postgres"},
-        {pool_size, 10}
+        {pool_size, 200}
     ]},
     {shigoto, [
-        {pool, asobi_repo}
+        {pool, asobi_repo},
+        {poll_interval, 500},
+        {queues, [{~"default", 10}]},
+        {fanout_queues, [{~"broadcast", 5, #{window => 120}}]}
     ]},
     {asobi, [
-        {plugins, [
-            {pre_request, nova_request_plugin, #{
-                decode_json_body => true,
-                parse_qs => true
-            }},
-            {pre_request, nova_cors_plugin, #{
-                allow_origins => <<"*">>
-            }},
-            {pre_request, nova_correlation_plugin, #{}}
-        ]},
-        {game_modes, #{
-            ~"arena" => asobi_arena_game
-        }},
-        {matchmaker, #{
-            tick_interval => 1000,
-            max_wait_seconds => 60
-        }},
-        {session, #{
-            token_ttl => 900,
-            refresh_ttl => 2592000
-        }}
+        {game_modes, #{~"arena" => my_arena_game}},
+        {matchmaker, #{tick_interval => 1000, max_wait_seconds => 60}}
     ]},
-    {pg, [{scope, [nova_scope, arizona_pubsub]}]}
+    {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].
 ```
 
+Notes that bite people:
+
+- The plugin chain belongs under `{nova, [...]}`, not `{asobi, [...]}`, and the
+  listed order is the order they run in. The body cap has to precede
+  `nova_request_plugin`, which is what buffers the body into the heap, and the
+  rate limiter has to precede `asobi_client_gate_plugin` so the cheap in-memory
+  check sheds a flood before any external verification. `asobi_client_gate_plugin`
+  is a no-op until `client_gate` is configured.
+- `{backend, kura_backend_postgres}` is required in the `kura` block. Without
+  it Kura has no dialect.
+- `nova_scope` is the only scope asobi joins - matches, worlds, zones, chat
+  channels, boards, presence and per-player groups all live in it. The
+  `asobi_presence` and `asobi_chat` scopes in both shipped configs are started
+  by the `pg` application and nothing joins them; they are inert. Left in the
+  snippet because that is what the shipped config says.
+- Access and refresh token lifetimes are not configurable here. They are
+  `nova_auth` defaults, 60 minutes and 30 days.
+
+Full reference: [Configuration](../guides/configuration.md).
+
 ## Dependencies
 
-`rebar.config` is the authoritative list. asobi builds on Nova, Kura (with
-kura_postgres), nova_auth, nova_auth_oidc, nova_resilience, seki, and Shigoto. It
-does not depend on Arizona.
+`rebar.config` is the authoritative list. asobi builds on Nova, Kura with
+`kura_postgres`, nova_auth, nova_auth_oidc, nova_resilience, seki, luerl and
+Shigoto. It does not depend on Arizona and it does not depend on any
+OpenTelemetry package.
 
-## Build Phases
-
-### Phase 1 — Foundation
-- Project scaffold (rebar3 nova)
-- PostgreSQL + Docker Compose
-- Kura repo + initial migrations
-- Player schema + CRUD
-- nova_auth integration (register, login, JWT)
-- REST API skeleton with auth plugin
-- CI setup (erlang-ci)
-
-### Phase 2 — Real-Time
-- WebSocket handler with message routing
-- Player session process (gen_server)
-- Presence tracking via pg
-- Chat system (channels, messaging, persistence)
-
-### Phase 3 — Game Infrastructure
-- Match behaviour definition
-- Match server (gen_statem) with tick loop
-- Matchmaker with query-based matching
-- Leaderboard server (ETS + Kura hybrid)
-- Example game implementation (simple card game or trivia)
-
-### Phase 4 — Economy
-- Wallet + transaction ledger
-- Item definitions + player inventory
-- Store catalog + purchase flow
-- IAP receipt validation (Apple + Google)
-
-### Phase 5 — Social & Live Ops
-- Friends system
-- Groups/guilds
-- Tournaments
-- Cloud saves
-- Push notifications (via Hikyaku)
-- Generic key-value storage
-
-### Phase 6 — Admin & Polish
-- Arizona admin dashboard
-- Telemetry + observability
-- Rate limiting plugin
-- Security hardening
-- Documentation + guides
-
+Two pins are deliberate. `cowboy` is pinned to `~> 2.16` to force the patched
+release (CVE-2026-43966 / GHSA-w4f7-4cxr-rv3c, which affects versions below
+2.16.0). `nova` is on a git ref rather than Hex until the fix for
+novaframework/nova#400 releases - a websocket controller replying with a list
+of frames crashes the connection process on Hex nova 0.15.1, which is why
+`asobi_ws_handler` emits exactly one frame per `websocket_info/2` return.

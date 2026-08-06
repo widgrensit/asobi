@@ -1,78 +1,130 @@
 # Comparison
 
-How Asobi compares to other open-source game backend platforms.
+How asobi compares to other game backend platforms.
 
-## Feature Matrix
+asobi is one Erlang/OTP node containing the game backend, the Lua runtime and
+the operator console. There are two front doors into it: run the image
+(`ghcr.io/widgrensit/asobi`) and write Lua, or depend on the Hex package and
+write Erlang. Same node, same features, different surface.
 
-| Feature | Asobi | Nakama | Colyseus | PlayFab |
+The asobi column is checked against this repository. The other columns are
+summarised from each vendor's own public documentation
+([Nakama](https://heroiclabs.com/docs/nakama/),
+[Colyseus](https://docs.colyseus.io/),
+[PlayFab](https://learn.microsoft.com/en-us/gaming/playfab/)) and were last
+read on 2026-08-06. Check them against the vendor before you make a decision
+on one.
+
+## Feature matrix
+
+| Feature | asobi | Nakama | Colyseus | PlayFab |
 |---------|:-----:|:------:|:--------:|:-------:|
-| **Runtime** | BEAM (Erlang/OTP) | Go | Node.js | Cloud |
-| **Authentication** | Built-in | Built-in | Plugin | Built-in |
-| **Anonymous / Guest Auth** | Built-in (upgradeable) | Built-in | Manual | Built-in |
-| **Player Management** | Built-in | Built-in | Manual | Built-in |
-| **Real-Time Multiplayer** | WebSocket | WebSocket | WebSocket | WebSocket |
-| **Server-Authoritative Game Loop** | Built-in (tick-based) | Lua scripting | Room-based | CloudScript |
-| **Matchmaking** | Query-based | Query-based | Manual | Built-in |
-| **Leaderboards** | ETS + PostgreSQL | Built-in | Manual | Built-in |
-| **Virtual Economy** | Wallets, store, inventory | IAP validation | Manual | Built-in |
-| **Friends / Groups** | Built-in | Built-in | Manual | Built-in |
-| **Chat** | Built-in (channels) | Built-in | Manual | Manual |
-| **Tournaments** | Built-in | Built-in | Manual | Manual |
-| **Cloud Saves** | Built-in | Storage API | Manual | Built-in |
-| **Notifications** | Built-in | Built-in | Manual | Built-in |
-| **Background Jobs** | Shigoto (built-in) | Manual | Manual | Scheduled tasks |
-| **Admin Dashboard** | Arizona LiveView | Built-in | Monitor | Portal |
-| **Database** | PostgreSQL (Kura ORM) | CockroachDB | MongoDB / custom | Managed |
-| **Self-Hosted** | Yes | Yes | Yes | No |
+| Runtime | BEAM (Erlang/OTP) | Go | Node.js | Cloud |
+| Authentication | Built-in | Built-in | Plugin | Built-in |
+| Anonymous / guest auth | Built-in, upgradeable, opt-in | Built-in | Manual | Built-in |
+| Player management | Built-in | Built-in | Manual | Built-in |
+| Real-time multiplayer | WebSocket | WebSocket | WebSocket | WebSocket |
+| Server-authoritative game loop | Built-in, tick-based | Lua / Go / TS runtime | Room-based | CloudScript |
+| Matchmaking | Modes plus pluggable strategies | Query-based | Manual | Built-in |
+| Leaderboards | ETS reads, PostgreSQL persistence | Built-in | Manual | Built-in |
+| Virtual economy | Wallets, store, inventory | IAP validation | Manual | Built-in |
+| Friends / groups | Built-in | Built-in | Manual | Built-in |
+| Chat | Built-in, channels plus DMs | Built-in | Manual | Manual |
+| Tournaments | Built-in | Built-in | Manual | Manual |
+| Cloud saves | Built-in | Storage API | Manual | Built-in |
+| Notifications | Built-in | Built-in | Manual | Built-in |
+| Background jobs | Shigoto, built-in | Manual | Manual | Scheduled tasks |
+| Custom server-side logic | Lua callbacks plus extension RPC | Runtime modules and RPCs | Room handlers | CloudScript |
+| Operator console | Built-in, read-only | Nakama Console, mutating | Monitor | Game Manager |
+| Database | PostgreSQL, Kura ORM | PostgreSQL or CockroachDB | MongoDB / custom | Managed |
+| Self-hosted | Yes | Yes | Yes | No |
 
-## Runtime Characteristics
+Two rows are worth reading twice.
 
-| Concern | Asobi (BEAM) | Nakama (Go) | Colyseus (Node.js) |
+The console is a React SPA served from `priv/console` by the same node that
+serves the game. Every core ops route is a read. The only route that mutates is
+`/api/v1/ops/ext/:extension/:action`, and its behaviour comes from an installed
+extension - so there is no ban, kick, grant, refund or match-end button. Nakama
+Console and PlayFab Game Manager both mutate; if you are moving from one of
+those, that is a real gap. See [Operator console](console.md).
+
+Custom server-side logic that is not per-match goes over the WebSocket as
+`rpc.call` with `{protocol: 1, method, params}`, answered by `rpc.ok` or
+`rpc.error` and correlated by `cid`. All seven client SDKs speak it. That is
+the replacement for a Nakama RPC, a PlayFab CloudScript function and a Hathora
+custom message. See [Extensions](extensions.md).
+
+## Runtime characteristics
+
+| Concern | asobi (BEAM) | Nakama (Go) | Colyseus (Node.js) |
 |---------|-------------|-------------|-------------------|
-| **Garbage Collection** | Per-process -- isolated per match | Stop-the-world -- affects all matches | Stop-the-world -- affects all rooms |
-| **Fault Tolerance** | OTP supervision -- crashed matches restart | Panic recovery -- manual | Process crash -- manual |
-| **Hot Code Upgrade** | Native -- zero-downtime deploys | Restart required | Restart required |
-| **Pub/Sub** | `pg` module -- cluster-native | Built-in + optional Redis | Built-in (single node) |
-| **In-Memory State** | ETS -- zero serialization | In-process maps | In-process objects |
-| **Clustering** | Distributed Erlang -- built in | etcd / Consul | Redis (presence only) |
-| **Scheduling** | Preemptive -- fair across all processes | Cooperative goroutines | Single-threaded event loop |
-| **Connection Density** | ~500K+ per node | ~100K per node | ~10K per node |
+| Garbage collection | Per-process, isolated per match | Stop-the-world | Stop-the-world |
+| Fault tolerance | OTP supervision, crashed matches restart | Panic recovery, manual | Process crash, manual |
+| Live game-logic reload | Lua re-evaluated in place on the next tick | Restart required | Restart required |
+| Pub/sub | `pg`, cluster-native | Built-in plus optional Redis | Built-in, single node |
+| In-memory state | ETS and process heaps | In-process maps | In-process objects |
+| Clustering | Distributed Erlang, built in | etcd / Consul | Redis, presence only |
+| Scheduling | Pre-emptive, fair across all processes | Cooperative goroutines | Single-threaded event loop |
 
-## When to Choose Asobi
+Live reload is a Lua mechanism, not an OTP release upgrade: the runtime stats
+the script file each tick, and a changed mtime re-executes the script body
+against the running Luerl state, re-declaring globals and functions while
+in-flight game state survives. It needs the game directory to be a live mount.
+asobi ships no `appup` or `relup`, so upgrading the node itself is a restart.
 
-- You want a **single deployable** with auth, matchmaking, economy, social, and real-time multiplayer
-- You need **fault-tolerant game sessions** that survive crashes without losing state
-- You want **hot-reloadable Lua** so bug-fixes ship without kicking players
-- You want **zero-downtime deploys** for game logic updates
-- You're building for **high concurrency** (many simultaneous matches/rooms)
-- You prefer **self-hosted Apache-2** over closed managed clouds, with a real exit guarantee (see [exit.md](exit.md))
-- You want a **PostgreSQL-backed** system with a proper ORM
+Connection density on a single node is **3,000-7,000 concurrent WebSocket
+connections** measured on 8 cores, at 4.4ms p50 round-trip with 3,500
+connections. Each connection costs ~13-20KB, so at that concurrency the ceiling
+is CPU spent on message processing, not memory. Figures and method are in
+[Benchmarks](benchmarks.md).
 
-## Don't know Erlang?
+## When to choose asobi
 
-You don't need to. Use [**asobi_lua**](https://github.com/widgrensit/asobi_lua) — the
-same engine packaged as a Docker image with Lua scripting. Write your match
-logic in a `.lua` file, `docker compose up`, you're running. The Erlang is
-underneath but you never touch it.
+- You want a single deployable with auth, matchmaking, economy, social and
+  real-time multiplayer.
+- You need fault-tolerant game sessions that survive crashes without losing
+  state.
+- You want hot-reloadable Lua so bug fixes ship without kicking players.
+- You are building for many simultaneous matches or worlds.
+- You prefer self-hosted Apache-2.0 over a closed managed cloud, with a real
+  exit runbook (see [Exit guarantee](exit.md)).
+- You want a PostgreSQL-backed system with a proper ORM.
 
-The Erlang-library path (depending on `asobi` directly via rebar.config) is
-for teams that already write OTP and want to compose asobi with the rest of
-their release.
+## When to choose something else
 
-## When to Choose Something Else
+- You need sub-3ms UDP latency for a twitch FPS, fighting game or racer. Pair
+  asobi with a UDP relay, or use a physics-first product for the simulation.
+- You need deep LiveOps tooling (A/B testing, segmentation, push campaigns)
+  today.
+- You need a fully managed cloud at hyperscaler breadth. asobi's managed
+  version is [asobi.dev/cloud](https://asobi.dev/cloud), which is the same
+  open-source core rather than a different product.
+- You are building a single-player game that only needs analytics and IAP.
+  Analytics plus a store validator is cheaper than any backend here.
 
-- You need **sub-3ms UDP latency** for a twitch FPS / fighting game / racer. Pair asobi with a UDP relay, or use Photon Fusion / Quantum for the physics.
-- You need **deep LiveOps tooling** (A/B testing, segmentation, push campaigns) today. PlayFab still leads here, though it's an operational/trust trade-off post-v2 migration.
-- You need a **fully managed cloud** and are willing to pay cloud-scale prices. Our managed tier opens later in 2026; until then, self-host.
-- You're building a **single-player** game that only needs analytics and IAP. Firebase Analytics + a simple store validator is cheaper than any backend here.
+## Clustering
+
+Multiple nodes share Postgres and `pg`-scoped presence, chat and process
+lookups. Three things stay node-local and change how you deploy: the matchmaker
+queue, the rate-limit buckets and the console session store, so the console
+needs a sticky route and players queuing against different nodes never match
+each other. [Clustering](clustering.md) has the full list.
 
 ## Client SDKs
 
-First-class SDKs for **Godot, Defold, Unity, Unreal, JavaScript/TypeScript, Dart/Flutter, Flame**
-— see the [asobi_lua README](https://github.com/widgrensit/asobi_lua#client-sdks) for the table.
+Seven first-class SDKs: [Godot](https://github.com/widgrensit/asobi-godot),
+[Defold](https://github.com/widgrensit/asobi-defold),
+[LÖVE](https://github.com/widgrensit/asobi-love2d),
+[Unity](https://github.com/widgrensit/asobi-unity),
+[Unreal](https://github.com/widgrensit/asobi-unreal),
+[JavaScript/TypeScript](https://github.com/widgrensit/asobi-js) and
+[Dart/Flutter](https://github.com/widgrensit/asobi-dart).
+[flame_asobi](https://github.com/widgrensit/flame_asobi) is a Flame bridge on
+top of the Dart SDK rather than an eighth protocol implementation. The table
+with guides and demos is in the [README](../README.md#client-sdks).
 
-## Migrating from another backend?
+## Migrating from another backend
 
-- [**from Hathora**](migrate-from-hathora.md) — shutdown 2026-05-05
-- [**from PlayFab**](migrate-from-playfab.md)
-- [**from Nakama self-host**](migrate-from-nakama.md)
+- [From Hathora](migrate-from-hathora.md) - shutdown 2026-05-05
+- [From PlayFab](migrate-from-playfab.md)
+- [From Nakama self-host](migrate-from-nakama.md)

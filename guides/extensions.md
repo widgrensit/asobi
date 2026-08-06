@@ -6,16 +6,16 @@ it cannot discover.
 
 No new packaging concept, no new lifecycle, nothing to learn beyond OTP.
 
-> This contract is **experimental**. The wire freezes, because SDK users vendor
-> by copying source. This module does not, until a real second consumer has
-> said what it is missing.
+This contract is experimental. The wire freezes, because SDK users vendor by
+copying source. The manifest does not, until a real second consumer has said
+what it is missing.
 
 ## Installing one
 
 ```erlang
 %% your_game_app/rebar.config
 {deps, [
-    {asobi,        {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.50.0"}}},
+    {asobi, "~> 0.68"},
     {asobi_quests, {git, "https://github.com/you/asobi_quests.git", {tag, "v1.0.0"}}}
 ]}.
 
@@ -27,27 +27,33 @@ Two lines. Removing an extension is deleting them; its tables survive until
 deliberately purged, because destroying player progress on a dependency change
 is the wrong default.
 
-`asobi_quests` depends on `asobi`. Your app depends on both. asobi never
-depends on an extension: every extension depends on asobi, so the reverse edge
-is a cycle relx sorts into a build failure and Hex rejects outright.
+`asobi_quests` depends on `asobi` and your app depends on both. asobi never
+depends on an extension, so the reverse edge is a cycle relx sorts into a build
+failure and Hex rejects outright.
 
 Validate the set before you boot it:
 
 ```erlang
-{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.50.0"}}}]}.
+{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.68.2"}}}]}.
 ```
 
 ```sh
 rebar3 asobi check
 ```
 
+Pin the plugin to the same tag as the dependency. Core's reserved names come
+from the plugin's own copy of asobi, so a skewed pin validates against the
+wrong reserved set.
+
 This is the gate. asobi validates the same set again at boot, but a boot-time
 failure is raised from inside Nova's route compilation and surfaces with Nova's
 crash context rather than a legible asobi error.
 
-## Who calls an extension
+The published image `ghcr.io/widgrensit/asobi` runs a release built from a
+fixed application set at image build time, so installing a third-party
+extension means building your own release from the Hex package.
 
-Two consumption paths, and an extension wants both.
+## Who calls an extension
 
 | Caller | Path | For |
 |---|---|---|
@@ -76,11 +82,7 @@ lua()  -> #{~"quests" =>
               #{~"progress" => #{mfa     => {asobi_quests_lua, progress, 2},
                                  args    => [binary, integer],
                                  effects => write,
-                                 vms     => [match, world]},
-                ~"status"   => #{mfa     => {asobi_quests_lua, status, 1},
-                                 args    => [binary],
-                                 effects => none,
-                                 vms     => [match, world, zone]}}}.
+                                 vms     => [match, world]}}}.
 
 sup()  -> [#{id    => asobi_quests_tracker,
              start => {asobi_quests_tracker, start_link, []}}].
@@ -96,32 +98,32 @@ codes() -> #{~"quests.already_claimed" =>
 ops()  -> #{~"define" => #{method => post,
                            mfa    => {asobi_quests_ops, define, 2},
                            class  => config}}.
-
-erase_player(PlayerId) ->
-    {ok, _} = asobi_repo:delete_all(by_player(asobi_quest_progress, PlayerId)),
-    ok.
 ```
+
+Discovery looks for a module literally named `<app>_extension` in the
+application's own module list (`application:get_key(App, modules)`). The
+`-behaviour` attribute is not what makes it found; the name is. Depending on
+asobi is not the filter either, or every game embedding asobi would be an
+extension.
 
 Only `info/0` is required. The rest default to nothing.
 
 - `rpc/0` - core cannot guess that `quests.claim` is `{asobi_quests_rpc, claim, 2}`.
   The arity is always 2; see [Writing an RPC handler](#writing-an-rpc-handler).
-- `lua/0` - the `game.<ns>.*` surface a Lua game calls. `effects` is not
-  decoration: probe VMs re-run the whole script body to ask `phases()` and swap
-  every `write` function for an inert stub, so a `write` declared `none` fires
-  twice on every match creation. `vms` may name `match`, `world` or `zone`;
-  `bot` is refused. See [Writing a Lua binding](#writing-a-lua-binding).
+- `lua/0` - the `game.<ns>.*` surface a Lua game calls. See
+  [Writing a Lua binding](#writing-a-lua-binding).
 - `sup/0` - child specs, if you want asobi supervising them.
-- `owns/0` - the closed statement of what this extension claims. Every kind is
-  derived from your own code as well, so `owns/0` is an assertion over the
-  derivation rather than its source.
-- `codes/0` - the error codes this extension mints. Core's set is closed, so
-  an undeclared code answers 500 and logs as a core defect.
+- `owns/0` - the closed statement of what this extension claims. See
+  [Namespaces](#namespaces).
+- `codes/0` - the error codes this extension mints. See
+  [Error codes](#error-codes).
 - `ops/0` - operator actions, reached on the ops plane rather than by a player.
   See [Writing an operator action](#writing-an-operator-action).
 - `erase_player/1` - how to erase one player, when your rows do not cascade.
-- `info/0` - the contract version, distinct from the package version, because a
-  minor release can change an experimental contract.
+  See [Deleting a player](#deleting-a-player).
+- `info/0` - `name` is the extension's identity and the root of everything it
+  owns. `extension_version` is recorded in the registry and printed by
+  `rebar3 asobi check`; nothing enforces it, and no behaviour changes with it.
 
 ## Writing an RPC handler
 
@@ -139,10 +141,43 @@ and gets back one of:
 {"type": "rpc.error", "cid": "c-1", "payload": {"error": {"code": "quests.already_claimed", "message": "...", "details": {}}}}
 ```
 
-`cid` is required here and validated server-side (1-64 printable ASCII bytes),
-unlike the optional echo the rest of the socket takes: it is the only way a
-client pairs a reply with the call it made. `params` and `result` are always
-objects, so either can grow a field without breaking a shipped client.
+See [WebSocket protocol](websocket-protocol.md) for the frames either side of
+this one. `cid` is required here and validated server-side (1-64 printable
+ASCII bytes), unlike the optional echo the rest of the socket takes: it is the
+only way a client pairs a reply with the call it made. `params` and `result`
+are always objects, so either can grow a field without breaking a shipped
+client.
+
+`protocol` is core's RPC payload version, currently `1`, and is unrelated to
+your `extension_version`. Any other value answers `rpc.unsupported_protocol`
+with `details.supported` listing what this node speaks. A node reports its own
+from `asobi_rpc:protocol/0`.
+
+You rarely build that frame by hand. Every client SDK wraps it, generates the
+`cid` and correlates the reply for you:
+
+```js
+// asobi-js: resolves with `result`, rejects with an AsobiRpcError
+try {
+  const { reward } = await ws.rpc("quests.claim", { quest_id: "q-1" });
+} catch (e) {
+  if (e.code === "quests.already_claimed") { /* domain outcome */ }
+}
+```
+
+```gdscript
+# asobi-godot: the reply arrives on the callable, keyed by the returned cid
+realtime.rpc_call("quests.claim", {"quest_id": "q-1"}, func(ok, data):
+    if ok: print(data["reward"])
+    else:  print(data["code"]))
+```
+
+Branch on `code`, never on `message`. The shape is the same in every SDK - a
+method name, a params object, and a reply that is either a result object or the
+shared error object - so a method you declare here is callable from all of them
+without a per-engine server change. `flame_asobi` is a Flame bridge over the
+Dart SDK rather than a protocol implementation of its own, so it inherits
+`rpc` from it.
 
 The handler is `(Params, Ctx)`, which is why the arity in `rpc/0` is always 2:
 
@@ -158,7 +193,7 @@ claim(#{~"quest_id" := QuestId}, #{player_id := PlayerId}) ->
 
 `{ok, map()} | {error, Code} | {error, Code, Details}`.
 
-The failure half is a **code**, never a status and never an object you build
+The failure half is a code, never a status and never an object you build
 yourself. Both are derived from the code - `asobi_error:status/1` and
 `asobi_error:object/2` - so two call sites cannot answer the same code
 differently, and a code you declared in `codes/0` reaches the client as
@@ -172,32 +207,55 @@ Everything else is a defect and answers `internal` with one logged line naming
 the method: a handler that raises, one that returns outside the contract, one
 declared at an arity other than 2, a result that cannot be JSON-encoded, and a
 code you did not declare in `codes/0`. The last one is how the closed code set
-survives this surface - every other call site's code is a binary literal
-checked at build time, and a handler's is a runtime term it could have built
-out of `params`.
+survives a surface where the code is a runtime term the handler could have
+built out of `params`.
 
-**Every declared method is player-scoped.** The caller is the authenticated
-player on that socket; an unauthenticated socket is refused before the method
-is looked up. There is deliberately no per-method capability class:
-`read | player_data | config` (ADR 0007) is an operator vocabulary that a
-player never holds, so tagging a socket method with one would make it deniable
-for every caller the dispatcher has. An operator-only method goes in `ops/0`
-instead - see [Writing an operator action](#writing-an-operator-action).
+### What the seam answers
 
-### Readiness
+| Code | Status | When |
+|---|---|---|
+| `rpc.unknown_method` | 404 | no installed extension declares that method, or `method` is not a string |
+| `rpc.invalid_cid` | 400 | `cid` missing, empty, over 64 bytes, or not printable ASCII |
+| `rpc.invalid_params` | 400 | `params` is not a JSON object |
+| `invalid_payload` | 400 | `payload` is not a JSON object |
+| `rpc.unsupported_protocol` | 400 | `protocol` is not this node's version |
+| `unauthenticated` | 401 | the socket has not completed `session.connect` |
+| `not_ready` | 503 | migrations have not finished on this node |
+| `internal` | 500 | the handler is at fault; see above |
 
-The route table compiles during Nova's boot; migrations run afterwards, from
-`asobi_app:start/2`. An extension endpoint is therefore reachable before its
-tables exist, so the dispatcher fails closed until migrations finish: every
-call answers `not_ready` (503) until then. You get this for free - there is
-nothing to call.
+A rejected `cid` comes back on a frame carrying no `cid` at all, because there
+is nothing trustworthy to echo. That one reply cannot be correlated: a client
+that sends a malformed `cid` gets an answer it must match by shape, not by id.
+
+### Before dispatch
+
+The socket applies two limits ahead of any of the above, so a chatty method has
+to be sized against them:
+
+- 64 KiB per text frame. A larger frame answers `payload_too_large`.
+- 60 messages per second per connection, in a fixed one-second window. Over it
+  answers `rate_limited`.
+
+Both answer on the legacy `error` frame with no `cid`, so neither is
+correlatable either. The budget is per connection, held in the socket's own
+state: it counts every frame the socket carries, not just `rpc.call`, and
+adding nodes does not widen it. The buckets that are counted per node are the
+HTTP and connect limiters - see [Clustering](clustering.md).
+
+### Every declared method is player-scoped
+
+The caller is the authenticated player on that socket; an unauthenticated
+socket is refused before the method is looked up. There is deliberately no
+per-method capability class: `read | player_data | config` is an operator
+vocabulary that a player never holds, so tagging a socket method with one would
+make it deniable for every caller the dispatcher has. An operator-only method
+goes in `ops/0` instead.
 
 ## Writing an operator action
 
-`rpc/0` is player-scoped by construction, so an admin action - defining a
-quest, correcting a counter, anything a player must never call - has no home
-there. `ops/0` is that home, and it is reached on the ops plane by an operator
-credential:
+`rpc/0` is player-scoped, so an admin action - defining a quest, correcting a
+counter, anything a player must never call - has no home there. `ops/0` is that
+home, reached on the ops plane by an operator credential:
 
 ```erlang
 -spec ops() -> asobi_extension:ops().
@@ -215,12 +273,25 @@ POST /api/v1/ops/ext/quests/define
 GET  /api/v1/ops/ext/quests/summary?filter=active
 ```
 
-You still declare no routes. Core owns exactly one - `/ext/:extension/:action`
-- and dispatches every declared action behind it, the same way it owns one
-WebSocket frame type and dispatches `rpc/0` behind that (ADR 0003).
+`/api/v1/ops/ext/:extension/:action` is the only mutating route on the whole
+ops plane, and this is what puts something behind it. Core's own ops routes are
+all reads. You still declare no routes: core owns `/ext/:extension/:action` and
+dispatches every declared action behind it, the same way it owns one WebSocket
+frame type and dispatches `rpc/0` behind that.
 
-A handler has the same shape as an RPC handler, because there is no reason for
-a second one:
+Know what gates it. On a stock deployment there is no `ops_secret`, so every
+bearer request is denied 403 and none of this is reachable. Once a secret is
+set, these routes are live whether or not the console is - `console` gates
+`/console` only, never the ops plane. A holder of the secret holds every
+capability class, so declaring `class => config` restricts which *minted* tokens
+reach an action, not which secret-holders do. See
+[Operator console](console.md).
+
+The console cannot invoke an ops action today. The surface is HTTP only, and
+`ops` is not among the capabilities `/api/v1/ops/features` reports for an
+extension - it reports `lua`, `rpc` and `tables`.
+
+Same handler shape as `rpc/0`:
 
 ```erlang
 -spec define(map(), asobi_ops_extension:ctx()) -> asobi_rpc:reply().
@@ -232,22 +303,47 @@ define(#{~"key" := Key}, #{actor := #{id := ActorId}}) ->
 ```
 
 `Params` is the decoded JSON body for a write and the parsed query string for
-a `get`. `Ctx` carries the actor that was admitted, so recording who asked
-needs no second lookup.
+a `get`. `Ctx` is `#{actor, extension, action}`, so recording who asked and
+what they reached needs no second lookup.
+
+Readiness guards this plane as well as the socket: until migrations finish,
+every action answers `not_ready` (503).
 
 Three things are core's, not yours:
 
-- **`class` is the whole authorisation.** `read | player_data | config` is
-  ADR 0007's vocabulary, the same one core's own ops routes carry. An action
-  is admitted when its class is in the caller's capabilities and never
-  otherwise. There is nothing to check inside your handler.
-- **An undeclared action is denied, not 404.** It has no class, and a route
-  with no class is refused - so an unknown extension, an unknown action and a
-  method the action does not answer all answer 403. Which extensions are
-  installed is not something an unauthorised caller gets to enumerate.
-- **Every method but `get` is audited.** Core wraps the call in a durable
-  audit row naming the operator before your function runs. You cannot opt out,
-  and declaring a method other than `get` is what opts in.
+- `class` is the whole authorisation. `read | player_data | config` is the same
+  vocabulary core's own ops routes carry. An action is admitted when its class
+  is in the caller's capabilities and never otherwise. There is nothing to
+  check inside your handler.
+- An undeclared action is denied, not 404. It has no class, and a route with no
+  class is refused - so an unknown extension, an unknown action and a method
+  the action does not answer all answer 403. Which extensions are installed is
+  not something an unauthorised caller gets to enumerate.
+- Every method but `get` is audited. Core runs your function inside
+  `asobi_ops_audit:mutation/4` and writes the row from what it returned. You
+  cannot opt out, and declaring a method other than `get` is what opts in.
+
+### What the audit records today
+
+The audit path understands `{ok, Succeeded, Failed} | {error, Reason}`. An ops
+handler returns `{ok, map()} | {error, Code} | {error, Code, Details}`, so only
+the two-element `{error, Code}` matches. Everything else raises inside the
+audit write, which is caught and downgraded to an error-level log line naming
+the action, the exception class and the reason.
+
+So today, a failing action returning `{error, Code}` records a durable row; a
+successful mutation and a raising one are logged, not recorded. The response to
+the caller is unaffected either way. Tracked as an open issue; do not build a
+compliance story on the row until it is closed.
+
+### Manifest validation
+
+Each of these is a build failure at `rebar3 asobi check`, and again at boot:
+
+- the action is one non-empty path segment, with no `/ . ? # %`
+- `method` is `get`, `post`, `put` or `delete`
+- `class` is `read`, `player_data` or `config`
+- `mfa` is `{Module, Function, 2}`
 
 ## Writing a Lua binding
 
@@ -280,13 +376,24 @@ or missing argument is `{ error = "argument 2 must be a integer" }` at the
 script's own call site, and a binding that raises or returns outside the
 contract is an error result plus one logged line naming the function.
 
-`args` types are `binary`, `integer`, `number`, `boolean`, `table` and `any`.
-Lua has a single number type, so a script writing `1` may hand over `1.0`; a
-whole float satisfies `integer`.
+`args` types are `binary`, `integer`, `number`, `boolean`, `table` and `any`,
+one per `mfa` argument. Lua has a single number type, so a script writing `1`
+may hand over `1.0`; a whole float satisfies `integer`.
 
-`vms` decides which VM kinds see the binding. A `match` binding is absent from
-a world's zone VMs, and its namespace table is not even created there. Bot VMs
-get no `game.*` surface at all today, so `vms => [bot]` installs nothing.
+`effects` is `write` or `none`, and it is not decoration: probe VMs re-run the
+whole script body to ask `phases()` and swap every `write` function for an
+inert stub, so a `write` declared `none` fires twice on every match creation.
+
+`vms` decides which VM kinds see the binding, and may name `match`, `world` or
+`zone`. A `match` binding is absent from a world's zone VMs, and its namespace
+table is not even created there.
+
+`bot` is refused at `rebar3 asobi check`, not ignored. A bot script is loaded
+with no `game` table at all - see [Bots](lua-bots.md) - so a binding declaring
+`bot` would install nothing, and a declaration that silently does nothing is a
+defect. Making it work was rejected: a bot has no `players.id`, so the argument
+every extension binding takes cannot be supplied. A bot decides from the state
+the match broadcasts and nothing more; put what it needs in that state.
 
 Core calls `{M, F, A}` fully qualified rather than holding a fun, so a code
 upgrade takes effect without waiting for every live match VM to end.
@@ -301,18 +408,21 @@ upgrade takes effect without waiting for every live match VM to end.
 | Domain logic | Nothing. They are modules; other code calls them | nothing |
 | RPC handlers | Cannot be inferred | `rpc/0` |
 | Lua namespace | Cannot be inferred | `lua/0` |
+| Operator actions | Cannot be inferred | `ops/0` |
+| Error codes | Cannot be inferred; the core set is closed | `codes/0` |
 | Supervised processes | Optional | `sup/0` |
 | Namespace ownership | Cannot be inferred | `owns/0` |
 
-Discovery walks the OTP application graph, filtering on "exports
-`<app>_extension`". Depending on asobi is not the filter: `asobi_engine` and
-every game that embeds asobi have it in their closure and none is an
-extension.
+`rebar3 asobi check` warns that an extension declaring neither `rpc/0` nor
+`lua/0` is "reachable by nobody". The check counts those two only, so the
+warning also fires for an extension whose entire surface is `ops/0`, which is
+reachable. It is spurious for that case and safe to ignore; tracked as an open
+issue.
 
 ## Prefer a library application
 
-If your extension has processes, **omit `mod` from your `.app.src`** and
-declare children via `sup/0`.
+If your extension has processes, omit `mod` from your `.app.src` and declare
+children via `sup/0`.
 
 ```
 asobi_sup  (one_for_one, 10/60)
@@ -321,29 +431,65 @@ asobi_sup  (one_for_one, 10/60)
        `- clans
 ```
 
-The reason is specific. Applications in a release are permanent by default, and
-in OTP a permanent application terminating takes the whole runtime with it. So
-a normal OTP app whose supervisor exceeds its restart intensity **kills the
-node** - matchmaking, presence, every live match. Under
-`asobi_extension_sup` an extension that exhausts its own budget goes dark,
-core logs which one, and the node survives.
+Applications in a release are permanent by default, and in OTP a permanent
+application terminating takes the whole runtime with it. So a normal OTP app
+whose supervisor exceeds its restart intensity kills the node - matchmaking,
+presence, every live match. Under `asobi_extension_sup` an extension that
+exhausts its own budget goes dark, core logs which one, and the node survives.
+This is the ordinary BEAM pattern: Ecto repos, Oban and Phoenix endpoints are
+all started in the host's tree rather than by the library.
 
-This is the ordinary BEAM pattern, not an invention: Ecto repos, Oban and
-Phoenix endpoints are all started in the host's tree rather than by the library.
-
-A normal OTP application with its own `mod` also works. You then own the
-failure mode, and the operator has to remember to mark it non-permanent in the
-release.
-
-**Consequence:** with no `mod` there is no `start/2` for one-time setup. ETS
-tables and config validation move into the `init/1` of a supervised worker, and
-`application:which_applications()` will not show the extension as running.
+An application with its own `mod` also works; you then own the failure mode,
+and the operator has to mark it non-permanent in the release. With no `mod`
+there is no `start/2` for one-time setup: ETS tables and config validation move
+into the `init/1` of a supervised worker.
 
 Per-extension restart limits default to 5 in 60 and are settable:
 
 ```erlang
 {asobi, [{extension_restart, #{intensity => 5, period => 60}}]}
 ```
+
+`sup/0` children are per node. A supervised `gen_server` holding state holds N
+copies of it across an N-node cluster, one per node, with nothing synchronising
+them; and matches and worlds do not migrate between nodes. See
+[Clustering](clustering.md).
+
+## Boot order and readiness
+
+The route table compiles during Nova's boot, inside `nova_sup:init/1`;
+migrations run afterwards, from `asobi_app:start/2`. An extension endpoint is
+therefore reachable before its tables exist, so both seams fail closed until
+migrations finish: every RPC call and every ops action answers `not_ready`
+(503) until then. You get this for free - there is nothing to call.
+
+```erlang
+case asobi_readiness:guard() of
+    ok -> dispatch(Extension, Action, Actor, Req);
+    {error, _Object} -> {asobi_error, ~"not_ready"}
+end.
+```
+
+Your `sup/0` children are on the other side of that seam and get two
+guarantees, so none of them needs a retry path:
+
+- They start in the order `sup/0` returns them, and after the children of every
+  extension your application depends on. That is OTP's own child order and
+  `asobi_extensions:resolve/0`'s dependency order; nothing sorts either.
+- `init/1` may query. Extension children start after migrations have run to
+  completion, so the pool is up and every table - core's and yours - exists.
+
+Two failure modes are worth stating plainly:
+
+- An invalid manifest set stops the node. `asobi_extensions:resolve/0` raises
+  `{asobi_extensions, Problems}` after logging each problem in prose, from
+  inside Nova's route compilation. The node does not start. This is why
+  `rebar3 asobi check` is the gate.
+- If migrations did not complete, `asobi_extension_sup` starts no extension at
+  all and logs which ones it did not start, and every extension seam answers
+  503. The alternative is every extension crash-looping into its own restart
+  budget and going dark anyway. The marker is written once, before this
+  supervisor exists, so it cannot flip later and there is nothing to retry.
 
 ## Namespaces
 
@@ -363,36 +509,20 @@ kind derives:
 
 So a collision is caught even before either extension has bothered with
 `owns/0`, and a queue you actually run is claimed whether or not you remembered
-to say so.
+to say so. That leaves `owns/0` one job: the closed-set assertion. Naming a
+kind at all says "this is the whole set", so anything derived outside it is a
+build failure - which is what catches a worker on `quests` under an `owns/0`
+saying `quest`.
 
-That leaves `owns/0` one job: it is the **closed-set assertion**. Naming a kind
-at all says "this is the whole set", so anything derived outside it is a build
-failure. That is what catches the typo - a worker on `quests`, an `owns/0`
-saying `quest` - which used to be invisible, because nothing read `owns.queues`
-at runtime.
+Core's reserved names derive from core itself by the same rules: Lua namespaces
+from `asobi_lua_surface:reserved_namespaces/0`, tables from core's schemas,
+queues from core's shigoto workers.
 
-Core's reserved names are derived from core itself, by the same two rules: Lua
-namespaces from
-`asobi_lua_surface`, tables from core's schemas, queues from core's shigoto
-workers, and RPC prefixes from the domains of `asobi_error:core_codes/0` - an
-RPC prefix and an error-code domain are the same token, so owning `storage`
-would mint codes inside core's closed code set.
-
-## Bots are not a target
-
-`vms` may name `match`, `world` or `zone`. `bot` is **refused at
-`rebar3 asobi check`**, not ignored.
-
-A bot script is loaded without any `game` table at all - see
-[Bots](lua-bots.md) - so a binding declaring `bot` would install nothing, and a
-declaration that silently does nothing is a defect. Making it work was the
-alternative and was rejected: `game.quests` in a bot VM would be one extension
-namespace floating in a `game` table with no `game.log`, `game.economy` or
-`game.storage` under it, and a bot has no `players.id` - `bot_Spark` is not a
-player row - so the argument every extension binding takes cannot be supplied.
-
-A bot decides from the state the match broadcasts and nothing more. Put what it
-needs in that state.
+Reserved RPC prefixes are the domains of `asobi_error:core_codes/0` plus every
+core Lua namespace, because an RPC prefix and an error-code domain are the same
+token. So `game`, `economy`, `leaderboard`, `storage`, `chat`, `spatial`,
+`zone` and `terrain` are all refused as RPC prefixes as well as Lua
+namespaces - owning `storage` would mint codes inside core's closed code set.
 
 ## Error codes
 
@@ -409,27 +539,27 @@ codes() -> #{~"quests.already_claimed" =>
 `{asobi_error, ~"quests.already_claimed"}` then answers 409 with the shared
 object and logs nothing.
 
-Every code must be `<domain>.<name>`, and the domain is an RPC prefix you own:
-a code domain and an RPC prefix are the same token, so `rebar3 asobi check`
-refuses a code in core's namespace or in another extension's, and refuses a
-bare one. The set is read once at boot, from the manifest, so it stays closed
-per deployment - a string arriving in a request or a Lua script still cannot
-become a code.
+Every code must be `<domain>.<name>` with the domain an RPC prefix you own, so
+`rebar3 asobi check` refuses a code in core's namespace or another extension's,
+and refuses a bare one. `status` must be 100-599 and `message` non-empty. The
+set is read once at boot, from the manifest, so it stays closed per
+deployment - a string arriving in a request or a Lua script cannot become a
+code.
 
 ## Tables
 
 Three distinct things, and only one creates a table:
 
-1. **The schema** - a `kura_schema` module. Describes.
-2. **The migration** - generated by `rebar3 kura compile`, never hand-written.
+1. The schema - a `kura_schema` module. Describes.
+2. The migration - generated by `rebar3 kura compile`, never hand-written.
    Creates.
-3. **`owns/0`** - reserves the name. Creates nothing.
+3. `owns/0` - reserves the name. Creates nothing.
 
 Rules:
 
-- An extension may foreign-key into core. **Core never foreign-keys into an
-  extension.**
-- **Extensions never alter core tables.** Use a sidecar table keyed on
+- An extension may foreign-key into core. Core never foreign-keys into an
+  extension.
+- Extensions never alter core tables. Use a sidecar table keyed on
   `player_id`. Two extensions both adding `level` to `players` is
   unrecoverable, and core adding the same column later is worse.
 - An extension FK into `players.id` must cascade or declare an erase path. A
@@ -440,12 +570,30 @@ Your migrations run from your own application: kura discovers them through
 `asobi_repo:migration_apps/0`, inside core's transaction and under one
 advisory lock.
 
+### A table extracted out of core
+
+`owns/0` and the migration that creates a table are separable, and one case
+needs them separate: a table that used to be core's.
+
+`asobi_seasons` owns `seasons`, but the `CREATE TABLE` sits in an asobi
+migration that has already run against live databases, and shares a file with a
+table core kept. So the extension ships a schema and no migration, and asobi
+keeps the history it cannot honestly disown. Ownership is the manifest's job;
+history is append-only.
+
+The operational consequence: core has no `seasons` schema, so `rebar3 kura
+compile` will offer to drop the table. Decline it. The same applies to any
+table extracted this way, and this is the shape of every future extraction. It
+only applies to a table core once created: a table an extension invents is
+created by the extension's own migration, like `quests`.
+
 ## Deleting a player
 
 Cascade or declare an erase path - and an undeclared `on_delete` lowers to
 `no_action`, so the foreign key `rebar3 kura compile` generates refuses the
 delete until you have picked one. The first row your extension writes for a
-player makes that player undeletable otherwise.
+player makes that player undeletable otherwise. The symptom of declaring
+neither is guests quietly ceasing to be reaped.
 
 Cascade is one line on the association:
 
@@ -457,8 +605,7 @@ Cascade is one line on the association:
 ```
 
 `rebar3 kura compile` carries that into the generated migration as
-`ON DELETE CASCADE`, and there is nothing else to write. The symptom of
-declaring neither is guests quietly ceasing to be reaped.
+`ON DELETE CASCADE`, and there is nothing else to write.
 
 Cascade is right for progress rows and wrong for a financial or audit row -
 the case that rejected a blanket cascade in the first place. Implement
@@ -476,39 +623,18 @@ once per installed extension in dependency order. Do not open a transaction of
 your own. Extensions run before core so an erase path can still read the
 player's core rows.
 
-**Erasure is atomic across every extension.** Returning `{error, Reason}` or
+Erasure is atomic across every extension. Returning `{error, Reason}` or
 raising aborts the whole deletion - no extension's rows go, core's rows stay,
-the player survives, and one logged line names the extension and the reason.
-Best-effort was rejected: an erasure that half-succeeds and reports success
-leaves an account gone with some extension's rows orphaned and nothing durable
-saying which, which is a worse answer to a data-subject request than one that
-fails loudly and can be retried.
-
-The corollary: an erase path doing work the transaction cannot undo - deleting
-a remote object, calling a third party - must be idempotent, because a later
-extension's failure rolls back everything around it and the deletion is retried.
+the player survives, and one logged line names the extension and the reason. So
+an erase path doing work the transaction cannot undo, such as deleting a remote
+object, must be idempotent: a later extension's failure rolls back everything
+around it and the deletion is retried.
 
 Omit `erase_player/1` when your rows cascade: it is the alternative to that
 declaration, not a second copy of it. Cascade lives on the column because the
-database is what enforces it, and a manifest key saying the same thing could
-disagree with the schema that actually decides - which is why this is a
-callback and not an `owns/0` key. Delete the rows or null the player reference
-and keep the ledger; core only needs the player row to be able to go.
-
-### A table extracted out of core
-
-`owns/0` and the migration that creates a table are separable, and one case
-needs them separate: a table that used to be core's.
-
-`asobi_seasons` owns `seasons`, but the `CREATE TABLE` sits in an asobi
-migration that has already run against live databases - and shares a file with
-a table core kept. So the extension ships a schema and no migration, and asobi
-keeps the history it cannot honestly disown. Ownership is the manifest's job;
-history is append-only.
-
-This is the shape of every future extraction, not a special case for seasons.
-It only applies to a table core once created: a table an extension invents is
-created by the extension's own migration, like `quests`.
+database is what enforces it, which is why this is a callback and not an
+`owns/0` key. Delete the rows or null the player reference and keep the ledger;
+core only needs the player row to be able to go.
 
 ## Counters
 
@@ -524,43 +650,43 @@ progress-shaped extension needs:
 ).
 ```
 
-One `INSERT ... ON CONFLICT ... DO UPDATE SET counter = t.counter + EXCLUDED.counter`,
+One statement, roughly
+`INSERT ... ON CONFLICT (...) DO UPDATE SET "counter" = "quest_progress"."counter" + EXCLUDED."counter"`,
 so two concurrent callers both land and the row is created if it is missing.
-The conflict target must be a primary key or covered by a unique index.
+The conflict target must be a primary key or covered by a unique index, and a
+field cannot be both a key and a counter.
 
 There is no general `query/2`. Every identifier `increment/3` interpolates is
 a field of the schema you pass and every value is a bound parameter, which is
 a promise raw SQL through the seam could not make.
 
-## Readiness
+## Testing
 
-The route table compiles during Nova's boot; migrations run afterwards, from
-`asobi_app:start/2`. An extension endpoint is therefore reachable before its
-tables exist, so core fails closed until migrations finish:
+Core's suites under `test/extensions/` are the worked examples.
 
-```erlang
-case asobi_readiness:guard() of
-    ok -> dispatch(Method, Params);
-    {error, Object} -> {asobi_error, 503, Object}
-end.
-```
+A fixture extension needs no `.app` file and no separate build.
+`asobi_fixture_app:install/3` hands `application:load/1` an application spec
+directly, with your manifest module in its `modules` list - exactly what
+discovery reads. `asobi_fixture_quests_extension` declares all of `rpc/0`,
+`lua/0`, `ops/0`, `codes/0` and `owns/0`; `asobi_fixture_minimal_extension` is
+the `info/0`-only case; `asobi_fixture_clans_extension` is a second extension
+whose application depends on the first, so start order is observable.
 
-The `not_ready` code is 503, because retrying works.
+Exercise `rpc/0` without a socket by calling the dispatcher directly.
+`asobi_rpc:handle(Cid, Payload, Caller)` takes the payload map and a caller of
+`#{player_id, session}` or the atom `unauthenticated`, and returns
+`{Cid, Outcome}` - no cowboy, no connection. `asobi_rpc_tests` is the pattern:
+reset the registry, install the fixture, `asobi_extensions:resolve()`,
+`asobi_readiness:mark_ready()`, call, assert. Reset both in teardown, because
+the registry and the readiness marker are `persistent_term`.
+`asobi_ops_extension:handle/1` takes a `cowboy_req` map, so the ops seam is
+tested from a hand-built map carrying `bindings` and `auth_data`;
+`asobi_ops_extension_tests` shows the shape.
 
-Your `sup/0` children are on the other side of that seam and get two guarantees,
-so none of them needs a retry path:
-
-- **They start in the order `sup/0` returns them**, and after the children of
-  every extension your application depends on. That is OTP's own child order and
-  `asobi_extensions:resolve/0`'s dependency order; nothing sorts either.
-- **`init/1` may query.** Extension children start after migrations have run to
-  completion, so the pool is up and every table - core's and yours - exists.
-
-If migrations did not complete, `asobi_extension_sup` starts **no extension at
-all** and logs which ones it did not start. The alternative is every extension
-crash-looping into its own restart budget and going dark anyway, with an OTP
-crash report as the only explanation. The marker is written once, before this
-supervisor exists, so it cannot flip later and there is nothing to retry.
+`rebar3 asobi check` belongs in your host release's CI, not the extension's
+own: it validates a whole installed set, and an extension built alone has
+nothing to collide with. Run it after `compile` (the provider already depends
+on it) and before anything boots the node.
 
 ## Where the logic goes
 
@@ -580,21 +706,6 @@ asobi_quests/
 those is a thin adapter over it, which is what makes one implementation
 reachable from a client call, a background job and a Lua binding.
 
-## Installing versus consuming
-
-**Consuming** an installed extension from Lua or from a client works on every
-tier. A bundled first-party extension is callable as `game.quests.*` by any Lua
-game, including on managed hosting.
-
-**Installing a third-party extension** is where the tier matters:
-
-    Library / self-host from your own release ....... yes
-    Self-host from the published container image .... no
-    Managed hosting ................................ first-party only
-
-The published image and the managed service run a fixed application set decided
-at image build time.
-
 ## Not sandboxed
 
 An extension runs in the same node, the same supervision tree and with the same
@@ -602,3 +713,10 @@ database credentials as core. `asobi_repo` is unrestricted, and `os:cmd/1`,
 `open_port/2` and `load_nif/2` are all reachable. Its migrations run with full
 DDL privilege. Treat installing one as you would treat any dependency with
 production credentials.
+
+## Next steps
+
+- [WebSocket protocol](websocket-protocol.md) - the frame `rpc.call` lives in.
+- [Operator console](console.md) - turning the ops plane on.
+- [Clustering](clustering.md) - what is per node and what is not.
+- [Lua API](lua-api.md) - the `game.*` surface your namespace joins.

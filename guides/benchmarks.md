@@ -1,21 +1,27 @@
 # Benchmarks
 
-Performance measurements for Asobi on a single node. All tests run client and
-server on the same machine (8 cores, shared schedulers), so real-world
-deployments with separate client machines will see higher server throughput.
+Single-node performance measurements. Client and server run on the same
+machine, so a real deployment with the load generator elsewhere will see higher
+server throughput than the tables below.
+
+Measured on 2026-04-02 at commit `8069c02`. Re-run them yourself before you
+size anything: the numbers below are one machine on one day, not a promise.
 
 ## Test environment
 
-- **CPU**: 8 cores
-- **OTP**: 28
-- **PostgreSQL**: 17 (Docker, max_connections=500, shared_buffers=256MB)
-- **DB pool**: 200 connections
-- **Single Erlang node**, no clustering
+- 8 cores, client and server sharing them
+- Erlang/OTP 28 and PostgreSQL 17, what the image was built on at that commit.
+  asobi builds on OTP 29 today - see [Self-hosting](self-hosting.md)
+- PostgreSQL in Docker with `max_connections=500`, `shared_buffers=256MB`
+- Database pool: 200 connections (the `dev_sys.config.src` default the CT
+  profile runs with)
+- One Erlang node, no clustering
 
 ## WebSocket throughput
 
-Heartbeat round-trip: client sends `session.heartbeat`, server replies with
-timestamp. Measures the full WebSocket pipeline including JSON encode/decode.
+Heartbeat round-trip: the client sends `session.heartbeat`, the server replies
+with a timestamp. This measures the whole WebSocket pipeline including JSON
+encode and decode.
 
 | Connections | Messages | Throughput | RTT p50 | RTT p99 | Memory/conn |
 |-------------|----------|------------|---------|---------|-------------|
@@ -23,97 +29,103 @@ timestamp. Measures the full WebSocket pipeline including JSON encode/decode.
 | 3,500 | 7,000,000 | 83,000 msg/sec | 4.4ms | 6.5ms | ~15KB |
 | 7,000 | 695,800 | 39,000 msg/sec | 5.8ms | 19.9ms | ~13KB |
 
-**Peak sustained**: ~83,000 messages/sec with 3,500 concurrent connections.
+Peak sustained: ~83,000 messages/sec at 3,500 concurrent connections.
 
-At 7,000 connections the per-message throughput drops because the benchmark
-client competes with the server for CPU on the same machine.
+At 7,000 connections per-message throughput drops because the benchmark client
+is competing with the server for CPU on the same machine.
 
 ### Blast mode
 
-Fire-and-forget: all messages sent before waiting for replies. Measures raw
+Fire-and-forget: all messages sent before waiting for any reply. Measures raw
 server processing capacity.
 
 | Connections | Messages each | Total delivered | Throughput |
 |-------------|---------------|-----------------|------------|
 | 3,500 | 2,000 | 7,044,000 | 83,000 msg/sec |
 
-All messages delivered with zero loss.
+All messages delivered, none lost.
 
 ## HTTP REST API
 
-100 concurrent players, each running the full lifecycle: register, login, then
-API reads.
+100 concurrent players, each running register, login, then API reads.
 
 | Endpoint | p50 | p95 | p99 |
 |----------|-----|-----|-----|
-| POST /auth/register | 1,463ms | 1,464ms | 1,464ms |
-| POST /auth/login | 724ms | 1,278ms | 1,308ms |
-| GET /matches | 8ms | 45ms | 64ms |
-| GET /friends | 7ms | 99ms | 133ms |
-| GET /wallets | 11ms | 272ms | 280ms |
-| GET /players/:id | 14ms | 191ms | 194ms |
+| `POST /api/v1/auth/register` | 1,463ms | 1,464ms | 1,464ms |
+| `POST /api/v1/auth/login` | 724ms | 1,278ms | 1,308ms |
+| `GET /api/v1/matches` | 8ms | 45ms | 64ms |
+| `GET /api/v1/friends` | 7ms | 99ms | 133ms |
+| `GET /api/v1/wallets` | 11ms | 272ms | 280ms |
+| `GET /api/v1/players/:id` | 14ms | 191ms | 194ms |
 
-Registration and login are slow by design: pbkdf2 with 100,000 iterations is
-CPU-intensive but correct for password security. API reads are sub-15ms p50.
+Register and login are slow on purpose: pbkdf2 at 100,000 iterations is meant
+to cost CPU. Everything else is sub-15ms at p50.
 
 ## Game type suitability
 
-### Mobile / casual (turn-based, party, puzzle)
+### Mobile and casual (turn-based, party, puzzle)
 
-Excellent fit. Sub-10ms WebSocket RTT, 3,000+ CCU per node. Most mobile games
-need <100 messages/sec per player, so a single node handles thousands of
-concurrent players comfortably.
+Good fit. Sub-10ms WebSocket RTT, thousands of concurrent connections per node.
+Most mobile games send well under 100 messages/sec per player.
 
-### MMO (persistent world)
+### Persistent worlds
 
-Viable for zone servers. 3,000-7,000 concurrent connections per node with good
-latency. A 20,000 CCU MMO would need 5-10 nodes. Erlang's `pg`-based clustering
-is designed for this.
+Viable per world. 3,000-7,000 concurrent connections per node with acceptable
+latency.
+
+One world lives entirely on one node and does not migrate, so a node is not a
+slice of a shared world - it is a set of separate worlds. Reaching 20,000 CCU
+across 5-10 nodes therefore means running 5-10 sets of worlds, with players
+sharded across them by your own routing. If your design needs one world larger
+than a single node can hold, adding nodes does not help. See
+[Clustering](clustering.md#the-scaling-unit-is-a-world-not-a-node).
 
 ### Competitive real-time (FPS, fighting, racing)
 
-Not the target. WebSocket (TCP) has a 5-25ms RTT floor. These genres need UDP
-transport with <3ms latency. Consider Photon or a custom UDP relay alongside
-Asobi for the game state, using Asobi for everything else (auth, matchmaking,
-economy, social, leaderboards).
+Not the target. WebSocket over TCP has a 5-25ms RTT floor and these genres want
+UDP under 3ms. Run a UDP transport for game state alongside asobi and use asobi
+for everything else: auth, matchmaking, economy, social, leaderboards.
 
 ## Bottlenecks and tuning
 
 ### Authentication under load
 
-pbkdf2 saturates CPU during login storms (1,000+ simultaneous registrations).
-Mitigations:
+pbkdf2 saturates CPU during login storms. Mitigations:
 
-- **Reverse proxy rate limiting** on `/auth/*` endpoints
-- **Auth result caching** for repeated token validations
-- **Multiple nodes** behind a load balancer to spread pbkdf2 work
+- Rate-limit `/api/v1/auth/*` at the reverse proxy. asobi's own limiter is
+  per node, so it is `N x` looser across a cluster - see
+  [Clustering](clustering.md#what-is-per-node).
+- More nodes behind a load balancer, to spread the pbkdf2 work.
 
 ### Database pool
 
-The default pool size matters. With 10 connections, 100+ concurrent DB
-operations queue up. Recommended:
+The pool is `pool_size` under the `kura` application in `sys.config`. What
+ships:
 
-| Deployment | pool_size | PG max_connections |
-|------------|-----------|--------------------|
-| Development | 50 | 100 |
-| Production (single node) | 200 | 500 |
-| Production (cluster) | 100 per node | 500-1000 |
+| Config | `pool_size` |
+|--------|-------------|
+| `config/prod_sys.config.src` (the image) | 20 |
+| `config/dev_sys.config.src` (dev and CT) | 200 |
+
+The production default of 20 is deliberately conservative, because every node
+opens its own pool and PostgreSQL's `max_connections` is a fleet-wide budget:
+`nodes x pool_size` has to fit inside it with room for your own tooling. Raise
+it when you see queueing on database-bound endpoints, and raise
+`max_connections` to match.
 
 ### Memory
 
-WebSocket connections use ~13-20KB each. A node with 8GB RAM can sustain
-~100,000 connections from memory alone. The practical limit is CPU (message
-processing) not memory.
+WebSocket connections cost ~13-20KB each, so at the concurrency measured above
+memory is not the constraint. CPU spent on message processing is.
 
-## Running benchmarks
+## Running the benchmarks
 
 ```bash
 # HTTP load test (default 100 players)
 ASOBI_LOAD_N=500 rebar3 ct --suite=asobi_load_bench
 
-# WebSocket benchmark
-# Phase 1: Register players (cached after first run)
-# Phase 2: Connect and blast heartbeats
+# WebSocket benchmark. Phase 1 registers players (cached after the first run),
+# phase 2 connects and blasts heartbeats.
 ASOBI_BENCH_PLAYERS=5000 \
 ASOBI_WS_N=5000 \
 ASOBI_WS_MSGS=2000 \
@@ -121,13 +133,14 @@ ASOBI_WS_WAVE=200 \
 rebar3 ct --suite=asobi_ws_bench
 ```
 
-Environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
+| Variable | Default | Meaning |
+|----------|---------|---------|
 | `ASOBI_LOAD_N` | 100 | HTTP benchmark: concurrent players |
 | `ASOBI_BENCH_PLAYERS` | 1000 | WS benchmark: players to register |
 | `ASOBI_BENCH_BATCH` | 50 | WS benchmark: registration batch size |
 | `ASOBI_WS_N` | 500 | WS benchmark: concurrent connections |
 | `ASOBI_WS_MSGS` | 200 | WS benchmark: messages per connection |
 | `ASOBI_WS_WAVE` | 200 | WS benchmark: connections per wave |
+
+Both suites need a running PostgreSQL 17 - see
+[Self-hosting](self-hosting.md).

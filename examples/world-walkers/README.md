@@ -13,7 +13,7 @@ see "two avatars on a screen", **start here**.
 docker compose up
 ```
 
-That brings up Postgres + asobi_lua. Asobi reads `lua/config.lua`,
+That brings up Postgres + asobi. Asobi reads `lua/config.lua`,
 sees `walkers = "world.lua"`, and registers `walkers` as a world mode.
 
 ## Connect two clients

@@ -1,366 +1,390 @@
 # Voting
 
-Asobi includes an in-match voting system for roguelike-style group decisions
-such as path selection, item picks, event choices, and run modifiers.
+An in-session voting system for group decisions: path selection, item picks,
+event choices, run modifiers. It runs inside a match or a world.
 
-## How It Works
+## The namespace follows the session
 
-1. Game mode (or match server) starts a vote with options and a timed window
-2. Eligible players receive a `match.vote_start` event via WebSocket
-3. Players cast votes during the window
-4. When the window expires, votes are tallied and the result is broadcast
-5. The game mode receives the result via the `vote_resolved/3` callback
+Worlds run votes exactly as matches do, and the frames a client receives are
+named after the session it is in:
 
-## Starting a Vote
+| Session | Push frames |
+|---|---|
+| Match | `match.vote_start`, `match.vote_tally`, `match.vote_result`, `match.vote_vetoed` |
+| World | `world.vote_start`, `world.vote_tally`, `world.vote_result`, `world.vote_vetoed` |
 
-There are two ways to start a vote:
+A world client listening for `match.vote_start` receives nothing at all. Listen
+for the namespace your game runs in.
 
-### Automatic (via `vote_requested` callback)
+## How it works
 
-The match server polls the `vote_requested/1` callback after every tick. Return
-a vote config to start a vote, or `none`/`nil` to skip. This is the simplest
-approach and works for both Erlang and Lua game modules. Votes can be triggered
-at any point during gameplay - not just between rounds.
+1. The game asks for a vote, with options and a timed window.
+2. Eligible players receive `vote_start` in their session's namespace.
+3. Players cast votes during the window with the `vote.cast` frame.
+4. The window closes, votes are tallied and the result is broadcast.
+5. The game module's optional `vote_resolved` callback receives the result.
 
-<!-- tabs -->
-**Lua**
+## Starting a vote from Lua
+
+There are two Lua triggers, one per session type. Both are polled by the server
+after every tick.
+
+**A match script** implements `vote_requested(state)`. Return a config table to
+start a vote, or `nil` to skip:
+
 ```lua
 function vote_requested(state)
-    return { method = "plurality", options = {"map_a", "map_b"}, window_ms = 15000 }
+  if state.boss_defeated and not state.boon_picked then
+    return {
+      template  = "boon_pick",
+      options   = { { id = "shield", label = "Shield" },
+                    { id = "speed",  label = "Speed" } },
+      method    = "plurality",
+      window_ms = 15000
+    }
+  end
+  return nil
 end
 ```
-**Erlang**
-```erlang
-vote_requested(#{phase := vote_pending} = _GameState) ->
-    {ok, #{
-        template => ~"path_choice",
-        options => [
-            #{id => ~"jungle", label => ~"Jungle Path"},
-            #{id => ~"volcano", label => ~"Volcano Path"}
-        ],
-        window_ms => 15000,
-        method => ~"plurality"
-    }};
-vote_requested(_) ->
-    none.
+
+Returning `nil`, `false` or an empty table skips.
+
+An Erlang match module may also implement `vote_started/1`, which fires when a
+vote starts this way. The Lua bridge does not export it, so a Lua
+`vote_started` function is never called. Set your own flag inside
+`vote_requested` instead.
+
+**A world script** sets `state._vote` inside `post_tick`, because a world has no
+`vote_requested` callback:
+
+```lua
+function post_tick(tick, state)
+  if state.boss_hp <= 0 then
+    state._vote = {
+      template  = "boon_pick",
+      options   = { { id = "shield", label = "Shield" },
+                    { id = "speed",  label = "Speed" } },
+      method    = "plurality",
+      window_ms = 15000
+    }
+    state.boss_hp = 10000    -- clear the trigger so it does not re-fire
+  end
+  return state
+end
 ```
-<!-- /tabs -->
 
-When a vote starts this way, the optional `vote_started/1` callback is called
-to let the game module update its state (e.g. change phase).
+Clear whatever condition set `_vote`, or the next tick sets it again.
 
-### Manual (via match server API)
+### Known gap: a Lua config does not start a vote today
 
-Votes can also be started explicitly from a game mode callback:
+Both triggers are called and both decode your table, but the decoded table
+reaches the vote server with **string keys**, and the vote server reads atom
+keys. It therefore fails to start and the failure is swallowed at both call
+sites, so the vote silently never happens: no `vote_start` frame, no log line
+naming your script.
+
+This is a defect, not a design. Until it is fixed, a vote has to be started
+from Erlang. If you are writing a Lua-only game and you need voting now, this
+is the one feature you cannot reach.
+
+## Starting a vote from Erlang
+
+`asobi_match_server:start_vote/2` and `asobi_world_server:start_vote/2` take the
+session pid and a config map with **atom keys**. There is no Lua equivalent.
 
 ```erlang
-%% From inside a game module callback
 asobi_match_server:start_vote(MatchPid, #{
-    template => ~"path_choice",
-    options => [
-        #{id => ~"jungle", label => ~"Jungle Path"},
+    template   => ~"path_choice",
+    options    => [
+        #{id => ~"jungle",  label => ~"Jungle Path"},
         #{id => ~"volcano", label => ~"Volcano Path"},
-        #{id => ~"caves", label => ~"Ice Caves"}
+        #{id => ~"caves",   label => ~"Ice Caves"}
     ],
-    window_ms => 15000,
-    method => ~"plurality",
+    window_ms  => 15000,
+    method     => ~"plurality",
     visibility => ~"live"
 }).
 ```
 
-### Config Options
+An Erlang game module can also implement `vote_requested/1`, returning
+`{ok, Config}` or `none`, which the match server polls after every tick.
 
-| Key            | Type           | Default        | Description                        |
-|----------------|----------------|----------------|------------------------------------|
-| `options`      | `[map()]`      | required       | List of `#{id, label}` option maps |
-| `template`     | `binary()`     | `"default"`    | Template name (resolved from config) |
-| `window_ms`    | `pos_integer()`| `15000`        | Vote window in milliseconds        |
-| `method`       | `binary()`     | `"plurality"`  | `"plurality"`, `"approval"`, `"weighted"`, or `"ranked"` |
-| `visibility`   | `binary()`     | `"live"`       | `"live"` or `"hidden"`             |
-| `tie_breaker`  | `binary()`     | `"random"`     | `"random"` or `"first"`            |
-| `veto_enabled` | `boolean()`    | `false`        | Allow players to veto              |
-| `weights`      | `map()`        | `#{}`          | Voter weights for `"weighted"` method |
-| `max_revotes`  | `pos_integer()`| `3`            | Max times a voter can change their vote |
+The server fills in `match_id`, `match_pid`, `eligible` (every current player)
+and merged `weights` before the vote starts, so a caller never supplies them.
 
-The match server automatically fills in `match_id`, `match_pid`, and
-`eligible` (all current players) when starting the vote.
+Starting a vote in a match that has not started yet answers
+`{error, match_not_started}`, and in a paused match `{error, match_paused}`.
 
-## Voting Methods
+## Config reference
 
-### Plurality
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `options` | `[map()]` | required | List of `#{id, label}` option maps |
+| `template` | `binary()` | `"default"` | Template name, resolved from `vote_templates` |
+| `vote_id` | `binary()` | generated | Override the vote id |
+| `window_ms` | `pos_integer()` | `15000` | Vote window in milliseconds |
+| `method` | `binary()` | `"plurality"` | `"plurality"`, `"approval"`, `"weighted"` or `"ranked"` |
+| `visibility` | `binary()` | `"live"` | `"live"` or `"hidden"` |
+| `tie_breaker` | `binary()` | `"random"` | `"random"` or `"first"` |
+| `veto_enabled` | `boolean()` | `false` | Allow an eligible voter to veto |
+| `weights` | `map()` | `#{}` | `#{voter_id => number()}` for `"weighted"` |
+| `max_revotes` | `pos_integer()` | `3` | Times a voter may change their vote |
+| `window_type` | `binary()` | `"fixed"` | `"fixed"`, `"ready_up"`, `"hybrid"` or `"adaptive"` |
+| `min_window_ms` | `pos_integer()` | `5000` | Minimum window before `"hybrid"` may close early |
+| `supermajority` | `float()` | `0.75` | Threshold for `"adaptive"` early close and for `require_supermajority` |
+| `require_supermajority` | `boolean()` | `false` | Winner must reach `supermajority` or the result is no-consensus |
+| `spectators` | `[binary()]` | `[]` | Spectator voter ids, a separate pool |
+| `spectator_weight` | `float()` | `0.3` | Spectator share of the merged score, 0.0-1.0 |
+| `quorum` | `float()` | `0.0` | Minimum fraction of eligible voters for a valid result. 0.0 disables |
+| `default_votes` | `map()` | `#{}` | `#{voter_id => option_id}` applied at resolution for absentees |
+| `delegation` | `map()` | `#{}` | `#{delegator_id => delegate_id}` |
 
-Each player picks exactly one option. The option with the most votes wins.
-Ties are broken by the configured `tie_breaker` strategy.
+`match_id`, `match_pid` and `eligible` are also config keys, but the session
+server supplies all three.
 
-### Approval
+## Voting methods
 
-Each player submits a list of all options they approve of. The option with
-the highest total approval count wins. Good for "avoid the worst option"
-scenarios.
+**Plurality.** Each player picks one option; most votes wins. Ties go to
+`tie_breaker`.
 
-### Weighted
+**Approval.** Each player submits a list of options they approve of; highest
+total approval wins. Good for "avoid the worst option".
 
-Each vote is multiplied by the voter's weight. Pass weights via config:
-
-```erlang
-asobi_match_server:start_vote(MatchPid, #{
-    options => Options,
-    method => ~"weighted",
-    weights => #{~"player1" => 3, ~"player2" => 1}
-}).
-```
-
-Players not in the weights map default to weight 1. Useful for
-performance-based voting or role-based voting.
-
-### Ranked Choice
-
-Each player submits a ranked list. The option with fewest first-choice votes
-is eliminated each round, and those votes transfer to the next preference.
-Continues until one option has a majority.
+**Weighted.** Each vote is multiplied by the voter's weight. Voters absent from
+the `weights` map count as 1.
 
 ```erlang
-asobi_match_server:start_vote(MatchPid, #{
-    options => Options,
-    method => ~"ranked"
-}).
+#{method => ~"weighted", weights => #{~"player1" => 3, ~"player2" => 1}}
 ```
 
-Clients send a list for `option_id`:
+**Ranked.** Each player submits a ranked list. The option with the fewest
+first-choice votes is eliminated each round and its votes transfer to the next
+preference, until one option has a majority. Clients send a list for
+`option_id`:
 
 ```json
 {"type": "vote.cast", "payload": {"vote_id": "...", "option_id": ["jungle", "caves", "volcano"]}}
 ```
 
-Live tallies show first-choice counts. The final result includes the winner
-after all elimination rounds.
+Live tallies show first-choice counts; the final result is the winner after all
+elimination rounds.
 
-## Spectator Voting
+## Window types
 
-Spectators are a separate voter pool whose votes are merged with player
-votes using a configurable weight ratio.
+Every type has `window_ms` as a hard upper bound.
+
+| `window_type` | Closes when |
+|---|---|
+| `"fixed"` | `window_ms` elapses. Simple and predictable |
+| `"ready_up"` | Every eligible voter has voted, or `window_ms` elapses |
+| `"hybrid"` | As `ready_up`, but not before `min_window_ms` |
+| `"adaptive"` | On reaching `supermajority` the remaining time shrinks to 3 seconds, giving latecomers a last chance. A later cast that breaks the supermajority does not restore the original window - the shortened timer keeps running |
+
+## Spectator voting
+
+Spectators are a separate pool merged with player votes:
 
 ```erlang
-asobi_match_server:start_vote(MatchPid, #{
-    options => Options,
-    spectators => [~"spec1", ~"spec2", ~"spec3"],
-    spectator_weight => 0.3  %% spectators get 30% influence, players 70%
-}).
+#{spectators => [~"spec1", ~"spec2"], spectator_weight => 0.3}
 ```
 
-Both pools are tallied independently, normalized, then merged:
-`score = player_normalized * (1 - spectator_weight) + spectator_normalized * spectator_weight`
+Both pools are tallied independently, normalised, then merged:
 
-For spectator-only votes (audience decides), set `eligible => []` and
+```
+score = player_normalised * (1 - spectator_weight) + spectator_normalised * spectator_weight
+```
+
+For an audience-decides vote, set `eligible => []` and
 `spectator_weight => 1.0`.
 
-## Async Voting
+## Async voting
 
-For non-real-time games where not all players are online simultaneously.
+For games where not everyone is online at once.
 
-### Quorum
+**Quorum.** `#{quorum => 0.5}` requires half the eligible voters to
+participate. Short of that, the result carries `winner => undefined` and
+`status => "no_quorum"`.
 
-Require a minimum fraction of eligible voters before the result is valid:
+**Default votes.** `#{default_votes => #{~"player2" => ~"opt_b"}}` applies a
+fallback at resolution time only. Defaults never count as active votes during
+the window, and an explicit vote overrides them.
 
-```erlang
-#{quorum => 0.5}  %% at least 50% must vote
-```
-
-If quorum is not met when the window expires, the result has
-`winner => undefined` and `status => "no_quorum"`.
-
-### Default Votes
-
-Set fallback votes for players who don't participate:
-
-```erlang
-#{default_votes => #{~"player2" => ~"opt_b", ~"player3" => ~"opt_a"}}
-```
-
-Defaults are applied at resolution time only — they don't count as active
-votes during the window. Players who vote explicitly override their default.
-
-### Delegation
-
-Let a player's vote follow another player's choice:
-
-```erlang
-#{delegation => #{~"player3" => ~"player1"}}
-```
-
-If player3 doesn't vote but player1 voted for `opt_a`, player3's vote
-becomes `opt_a` at resolution time. If the delegate also didn't vote,
+**Delegation.** `#{delegation => #{~"player3" => ~"player1"}}` makes player3's
+vote follow player1's at resolution time. If the delegate did not vote either,
 no vote is added.
 
-## Vote Templates
+## Vote templates
 
-Define reusable vote configurations in your app config. Per-call config
-overrides template defaults:
+Reusable configurations in app config. Per-call config overrides the template:
 
 ```erlang
 {asobi, [
     {vote_templates, #{
-        ~"boon_pick" => #{method => ~"plurality", window_ms => 15000, visibility => ~"live"},
-        ~"path_choice" => #{method => ~"approval", window_ms => 20000, visibility => ~"hidden"},
-        ~"weighted_pick" => #{method => ~"weighted", window_ms => 15000}
+        ~"boon_pick"   => #{method => ~"plurality", window_ms => 15000, visibility => ~"live"},
+        ~"path_choice" => #{method => ~"approval", window_ms => 20000, visibility => ~"hidden"}
     }}
 ]}
 ```
 
-Then start a vote with just the template name and options:
+```erlang
+asobi_match_server:start_vote(MatchPid, #{template => ~"boon_pick", options => Options}).
+```
+
+## Reacting to the result
+
+<!-- tabs -->
+**Lua**
+```lua
+function vote_resolved(template, result, state)
+  if template == "path_choice" then
+    state.current_path = result.winner
+  end
+  return state
+end
+```
+**Erlang**
+```erlang
+vote_resolved(~"path_choice", #{winner := WinnerId}, GameState) ->
+    {ok, GameState#{current_path => WinnerId}}.
+```
+<!-- /tabs -->
+
+The callback is optional. Without it the vote still runs and broadcasts, the
+game just does not react server-side.
+
+The Lua form works for a **match** script only. The world bridge does not
+export `vote_resolved/3`, so a Lua world script's `vote_resolved` is never
+called; an Erlang world module's is.
+
+## Majority tyranny mitigations
+
+**Frustration accumulator.** A player who votes for the losing option
+accumulates frustration; on the next vote their weight becomes
+`1 + frustration_count * frustration_bonus`, and winning resets it to 0. Three
+consecutive losses give a weight of 2.5. `frustration_bonus` defaults to `0.5`
+and the merged weights are attached to every vote the session starts, but only
+`method => "weighted"` reads them - plurality, approval and ranked count
+ballots, not weights. So the accumulator is armed by default and inert until a
+vote asks for weighting.
+
+**Supermajority requirement.** `require_supermajority => true` with a
+`supermajority` threshold. If no option reaches it, the result carries
+`winner => undefined` and `status => "no_consensus"`, and `vote_resolved`
+decides what happens next.
+
+**Veto tokens.** `veto_tokens_per_player` defaults to `0`, which disables veto
+tokens. A player spends one with the `vote.veto` frame, which cancels the
+current vote immediately. Exhausted tokens answer `no_veto_tokens`.
+
+`frustration_bonus` and `veto_tokens_per_player` are read from the map that
+starts the **session**, not from the vote config and not from `game_modes`.
+Nothing in the shipped create paths passes them: a matchmaker-spawned match and
+every world get the defaults above. Only Erlang code calling
+`asobi_match_sup:start_match/1` directly can set them.
 
 ```erlang
-asobi_match_server:start_vote(MatchPid, #{
-    template => ~"boon_pick",
-    options => Options
+asobi_match_sup:start_match(#{
+    mode                   => ~"arena",
+    game_module            => my_arena,
+    game_config            => #{},
+    min_players            => 4,
+    max_players            => 4,
+    frustration_bonus      => 0,
+    veto_tokens_per_player => 2
 }).
 ```
 
-## Window Types
+## Client protocol
 
-The `window_type` config controls when a vote closes. All types have a
-maximum `window_ms` timeout as a safety net.
-
-### Fixed (default)
-
-Vote runs for exactly `window_ms`, then closes. Simple and predictable.
-
-```erlang
-#{window_type => ~"fixed", window_ms => 15000}
-```
-
-### Ready-up
-
-Closes as soon as all eligible voters have cast a vote, or when `window_ms`
-expires. Best for small groups where everyone is engaged.
-
-```erlang
-#{window_type => ~"ready_up", window_ms => 30000}
-```
-
-### Hybrid
-
-Like ready-up, but enforces a minimum `min_window_ms` before early close.
-Prevents snap decisions while still closing early once everyone votes.
-
-```erlang
-#{window_type => ~"hybrid", window_ms => 30000, min_window_ms => 5000}
-```
-
-### Adaptive
-
-Starts with full `window_ms`, but when a supermajority threshold is reached,
-the remaining time shrinks to 3 seconds. Gives latecomers a last chance
-without forcing everyone to wait.
-
-```erlang
-#{window_type => ~"adaptive", window_ms => 20000, supermajority => 0.75}
-```
-
-If the supermajority is lost (e.g. someone changes their vote), the timer
-resets to the original remaining time.
-
-## Rate Limiting
-
-Voters can change their vote during the window, but are limited to
-`max_revotes` changes (default 3). After that, `{error, rate_limited}` is
-returned. The initial vote does not count against the limit.
-
-## Game Mode Integration
-
-Implement the optional `asobi_match` callbacks to react to vote results:
-
-```erlang
--module(my_roguelike).
--behaviour(asobi_match).
-
-%% ... init/1, join/2, leave/2, handle_input/3, get_state/2 ...
-
-vote_resolved(~"path_choice", #{winner := WinnerId}, GameState) ->
-    %% Apply the voted path to game state
-    {ok, GameState#{current_path => WinnerId}};
-vote_resolved(~"item_pick", #{winner := ItemId}, GameState) ->
-    {ok, add_item(ItemId, GameState)}.
-```
-
-Both callbacks are optional. If `vote_resolved/3` is not implemented, the
-vote still runs and broadcasts results to clients — the game mode just
-doesn't react server-side.
-
-## WebSocket Protocol
-
-### Casting a Vote (client to server)
+### Casting a vote
 
 ```json
 {
   "type": "vote.cast",
   "cid": "v1",
-  "payload": {
-    "vote_id": "...",
-    "option_id": "jungle"
-  }
+  "payload": {"vote_id": "...", "option_id": "jungle"}
 }
 ```
 
-For approval voting, `option_id` is a list:
-
-```json
-{"option_id": ["jungle", "caves"]}
-```
-
-Response:
+For approval and ranked voting, `option_id` is a list.
 
 ```json
 {"type": "vote.cast_ok", "cid": "v1", "payload": {"success": true}}
 ```
 
-Players can change their vote by sending another `vote.cast` during the
-window. The new vote replaces the previous one.
+Sending `vote.cast` again during the window replaces the previous vote, up to
+`max_revotes` changes. The initial vote does not count against the limit.
 
-### Server Push Events
+### Vetoing
 
-All vote events are broadcast to match players as `match.*` events:
+```json
+{"type": "vote.veto", "cid": "v2", "payload": {"vote_id": "..."}}
+```
 
-#### `match.vote_start`
+```json
+{"type": "vote.veto_ok", "cid": "v2", "payload": {"success": true}}
+```
 
-A new vote has started.
+### Errors
+
+Both frames answer a `{"type": "error"}` frame carrying the shared error object
+plus a `reason` field.
+
+| `reason` | `error.code` | Meaning |
+|---|---|---|
+| `not_in_match` | `match.not_in_match` | The connection is not joined to a match |
+| `vote_not_found` | `ws.request_failed` | No live vote with that id in this session |
+| `not_eligible` | `ws.request_failed` | The voter is not in the eligible or spectator pool |
+| `invalid_option` | `ws.request_failed` | `option_id` is not one of the vote's options |
+| `rate_limited` | `rate_limited` | `max_revotes` changes already used |
+| `vote_closed` | `ws.request_failed` | The window and its 500ms grace period have passed |
+| `veto_disabled` | `ws.request_failed` | `veto_enabled` is false for this vote |
+| `no_veto_tokens` | `ws.request_failed` | The player has spent every veto token |
+
+**A world player always gets `not_in_match`.** Both frames route on the
+session's `match_pid`, and joining a world sets `world_pid` instead, so a world
+vote can be started and broadcast but not cast from a client today. This is the
+same defect class as the Lua config above. Report both if they block you.
+
+### Grace period
+
+Votes arriving within 500ms of the window closing are still accepted, to absorb
+network latency.
+
+## Server push frames
+
+Shown here in the `match.` namespace; a world sends the same payloads under
+`world.`.
+
+`match.vote_start`:
 
 ```json
 {
   "type": "match.vote_start",
   "payload": {
     "vote_id": "...",
-    "options": [
-      {"id": "jungle", "label": "Jungle Path"},
-      {"id": "volcano", "label": "Volcano Path"},
-      {"id": "caves", "label": "Ice Caves"}
-    ],
+    "options": [{"id": "jungle", "label": "Jungle Path"}],
     "window_ms": 15000,
     "method": "plurality"
   }
 }
 ```
 
-#### `match.vote_tally`
-
-Running tally update (only with `"live"` visibility). Sent each time a vote
-is cast.
+`match.vote_tally`, sent on every cast, and only with `"live"` visibility:
 
 ```json
 {
   "type": "match.vote_tally",
   "payload": {
     "vote_id": "...",
-    "tallies": {"jungle": 2, "volcano": 1, "caves": 0},
+    "tallies": {"jungle": 2, "volcano": 1},
     "time_remaining_ms": 8432,
     "total_votes": 3
   }
 }
 ```
 
-#### `match.vote_result`
-
-Vote has closed and the winner is determined.
+`match.vote_result`:
 
 ```json
 {
@@ -368,130 +392,68 @@ Vote has closed and the winner is determined.
   "payload": {
     "vote_id": "...",
     "winner": "jungle",
-    "counts": {"jungle": 2, "volcano": 1, "caves": 0},
-    "distribution": {"jungle": 0.666, "volcano": 0.333, "caves": 0.0},
+    "counts": {"jungle": 2, "volcano": 1},
+    "distribution": {"jungle": 0.666, "volcano": 0.333},
     "total_votes": 3,
     "turnout": 1.0
   }
 }
 ```
 
-#### `match.vote_vetoed`
-
-A player has vetoed the vote (when `veto_enabled` is true).
+`match.vote_vetoed`:
 
 ```json
-{
-  "type": "match.vote_vetoed",
-  "payload": {
-    "vote_id": "...",
-    "vetoed_by": "player_id"
-  }
-}
+{"type": "match.vote_vetoed", "payload": {"vote_id": "...", "vetoed_by": "player_id"}}
 ```
 
-## REST API
+## Visibility
 
-### List votes for a match
+- `"live"` - running tallies are broadcast after each cast and included in
+  state queries.
+- `"hidden"` - no `vote_tally` frame is sent at all; the tallies arrive only in
+  `vote_result` when the vote closes, which prevents bandwagoning.
+
+Visibility governs the live frames only. It is not recorded on the persisted
+row, so a resolved hidden vote's per-voter ballots are readable in the history
+below exactly like a live one's.
+
+## Reading vote history
+
+There is no votes screen on the console. Two REST routes cover it, and both
+read the `votes` table, which is written **only when a vote resolves** - a vote
+in progress appears in neither.
+
+Every vote for a match, most recent 50, newest first:
 
 ```bash
 curl http://localhost:8084/api/v1/matches/<match_id>/votes \
   -H 'Authorization: Bearer <token>'
 ```
 
-Returns the most recent 50 votes for the match, ordered by newest first.
+```json
+{"votes": [{"id": "...", "match_id": "...", "template": "...", "method": "plurality", "options": [], "votes_cast": {}, "result": {}, "distribution": {}, "turnout": 1.0, "eligible_count": 3, "window_ms": 15000, "opened_at": "...", "closed_at": "...", "inserted_at": "..."}]}
+```
 
-### Get a single vote
+Restricted to participants of that match: anyone else gets `403 forbidden`.
+A world's votes are stored under the world id in the same `match_id` column, so
+the same route takes a world id - but only after the world finishes and writes
+its record, and only for the players still in it at that moment. While the
+world is live the participant check finds neither a record nor a match server
+and answers `403`.
+
+One vote by id:
 
 ```bash
 curl http://localhost:8084/api/v1/votes/<vote_id> \
   -H 'Authorization: Bearer <token>'
 ```
 
-## Visibility Modes
-
-- **`"live"`**: Running tallies are broadcast after each vote and included in
-  state queries. Creates excitement and enables strategic voting.
-- **`"hidden"`**: Tallies are not shown until the vote closes. Prevents
-  bandwagon effects. Only total vote count is visible during the window.
-
-## Veto
-
-When `veto_enabled` is true, any eligible voter can veto the vote. This
-immediately cancels it and notifies all players. Use sparingly — typically
-as a limited-use resource managed by the game mode.
-
-## Majority Tyranny Mitigations
-
-When the same majority always outvotes a minority, voting becomes
-frustrating. Asobi provides three configurable mitigations.
-
-### Frustration Accumulator
-
-Players who vote for the losing option accumulate frustration. On the
-next vote, their weight is boosted: `1 + frustration_count * frustration_bonus`.
-When they finally win, their frustration resets to 0.
-
-Configure at match level:
-
-```erlang
-asobi_match_sup:start_match(#{
-    game_module => MyGame,
-    frustration_bonus => 0.5  %% default 0.5, set 0 to disable
-}).
-```
-
-A player who lost 3 consecutive votes gets weight `1 + 3 * 0.5 = 2.5`,
-making their vote count 2.5x. This only applies to weighted voting or
-when frustration weights are merged (which happens automatically when
-starting votes via the match server).
-
-### Supermajority Requirement
-
-Force high-stakes votes to require a supermajority. If no option reaches
-the threshold, the result has `winner => undefined` and
-`status => "no_consensus"`.
-
-```erlang
-asobi_match_server:start_vote(MatchPid, #{
-    options => Options,
-    require_supermajority => true,
-    supermajority => 0.75  %% 75% required
-}).
-```
-
-The game mode's `vote_resolved/3` callback receives the no-consensus
-result and can decide what to do (random pick, re-vote, default option).
-
-### Veto Tokens
-
-Give players a limited number of vetoes per match. When used, the current
-vote is immediately cancelled. The game mode decides what happens next.
-
-Configure at match level:
-
-```erlang
-asobi_match_sup:start_match(#{
-    game_module => MyGame,
-    veto_tokens_per_player => 2  %% default 0 (disabled)
-}).
-```
-
-Clients use veto tokens via WebSocket:
-
-```json
-{"type": "vote.veto", "payload": {"vote_id": "..."}}
-```
-
-The match server checks token availability before forwarding to the vote
-server. Returns `{error, no_veto_tokens}` when exhausted.
-
-## Grace Period
-
-Votes arriving within 500ms after the window closes are still accepted to
-compensate for network latency.
+Unknown ids answer `404 vote.not_found`. This route is authenticated but not
+participant-scoped. See [Operator console](console.md) for what the console
+does cover.
 
 ## Next steps
 
-- [WebSocket protocol](websocket-protocol.md) - the `match.vote_*` push messages.
+- [WebSocket protocol](websocket-protocol.md) - the frame envelope.
+- [Phases](phases.md) - run a vote to decide what the next phase does.
 - [Configuration](configuration.md) - vote templates.

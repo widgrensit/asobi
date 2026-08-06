@@ -2,40 +2,55 @@
 
 How to gather players before a game starts.
 
-Asobi has no `Lobby` object. That is a deliberate choice, not a gap - a
-lobby is a *state*, not a type, and asobi already has two things that hold
-players before a game begins. This guide is about picking one and wiring it
-up, because the pieces are documented separately and the flow is not
-obvious from any one of them.
+asobi has no `Lobby` object. A lobby is a state, not a type, and asobi already
+has two things that hold players before a game begins. This guide is about
+picking one and wiring it up.
 
 ## Which one
 
 | | Waiting match | Persistent world |
 |---|---|---|
 | Use for | gather N players, play, done | a hub people return to between games |
-| Processes | 1 | ~6 (instance sup, zone sup, zone, ticker, server) |
+| Who can create one | an Erlang caller in the release, or the matchmaker | any client, over `world.create` or `POST /api/v1/worlds` |
+| Processes | 1 | 6 (instance sup, zone sup, zone manager, one zone, ticker, world server) |
 | Ticks while idle | none | yes, at `tick_rate` |
 | Presence | you broadcast it | free, from the tick loop |
-| Lifetime | starts at `min_players`, times out after 60s | survives empty if `persistent` |
+| Lifetime | starts at `min_players`, gives up after 60s | survives empty if `persistent` |
 
-For "gather four players and start", use a **waiting match**. A world is a
-spatial simulation; running one so people can stand still is the expensive
-way round.
+A waiting match is the cheaper shape, but the row above that decides it is
+"who can create one". Read the next section before choosing it.
 
 ## Waiting match
 
-A match starts in the `waiting` state and only transitions to `running`
-when `min_players` is reached. That waiting period is the lobby.
+A match starts in the `waiting` state and transitions to `running` when
+`min_players` is reached. That waiting period is the lobby.
 
-```lua
--- arena.lua
-match_size  = 4      -- min_players: the match starts when the 4th player joins
-max_players = 4
-listed      = true   -- so match.list can find it
+**No client-facing call brings a waiting match into existence.**
+`asobi_match_sup:start_match/1` is the only thing that creates a match, and its
+only caller in the release is the matchmaker - which spawns a match with
+`min_players` already equal to the group it just formed, so the waiting state
+lasts as long as the join fan-out and no longer. There is no `match.create`
+frame and no `POST /api/v1/matches`.
+
+So the waiting-match lobby is an **Erlang-only** route: it needs a module in
+your release that calls `asobi_match_sup:start_match/1` with a `min_players`
+higher than the number of players it seeds, and `listed => true` so clients can
+find it.
+
+```erlang
+{ok, Pid} = asobi_match_sup:start_match(#{
+    mode         => ~"arena",
+    game_module  => my_arena,
+    game_config  => #{},
+    min_players  => 4,
+    max_players  => 4,
+    listed       => true
+}).
 ```
 
-A waiting match holds one process and one 60-second timer. It does not tick
-until it starts, so idle lobbies cost close to nothing.
+**If you are writing Lua, use a world instead.** A world is the only session a
+client can create, so it is the only lobby a Lua-only game can build. Skip to
+[Persistent world as a hub](#persistent-world-as-a-hub).
 
 ### Letting players find it
 
@@ -44,18 +59,61 @@ GET /api/v1/matches/live        REST
 match.list                      WebSocket
 ```
 
-Both filter on `mode` and `has_capacity`. Matches are **unlisted by
-default** - a matchmaker-spawned match is already assigned to its players
-and has no reason to be browsable - so a mode opts in with `listed = true`.
+Both filter on `mode` and `has_capacity`. Matches are unlisted by default - a
+matchmaker-spawned match is already assigned to its players and has no reason to
+be browsable - so a mode opts in with `listed = true`.
 
 Do not use `GET /api/v1/matches` for this. It reads the match record table:
 finished matches, an audit trail, nothing joinable. See
 [REST API](rest-api.md).
 
+### The 60-second timeout
+
+A match that does not reach `min_players` within 60 seconds stops itself. That
+value is fixed (`?WAITING_TIMEOUT` in `asobi_match_server`) and is not exposed
+per mode. Fine for quick play; too short if you want players assembling at their
+own pace.
+
+## Persistent world as a hub
+
+For a town square people return to between games, use a world. This is the path
+a client can drive on its own.
+
+```lua
+-- hub.lua
+game_type   = "world"
+persistent  = true    -- stays alive when empty; without this it dies on the last leave
+grid_size   = 1       -- one zone: no spatial partitioning needed to stand around
+tick_rate   = 200     -- 5 Hz is plenty; the 50ms default is for action games
+match_size  = 1
+```
+
+`listed` and `quick_play` are not Lua globals - the loader does not read them,
+so writing them in a script does nothing. Both default to true, which is what a
+hub wants: it is browsable and `world.find_or_create` drops everyone into the
+same one. Changing either needs an operator `game_modes` entry for that mode,
+which replaces the script's mode config rather than merging into it - so
+declare `module => {lua, "hub.lua"}` and the rest of the shape in it too.
+
+`persistent` is the flag that makes it a hub rather than a session. Without it a
+world finishes the moment the last player leaves, so the next player gets a
+fresh empty one.
+
+Presence is free here: worlds tick and broadcast zone state, so players see each
+other without you broadcasting anything. `world:<WorldId>` chat works and is
+gated on world membership.
+
+Nothing creates the hub at boot. The first `world.find_or_create` instantiates
+it and it stays up from then on; after a restart the first player recreates it.
+
+Worlds are subject to `world_max_per_player` (5) and `world_max` (1000) - see
+[World capacity](configuration.md#world-capacity).
+
 ### Private lobbies
 
-Share a code out of band and check it on the way in. The join context is
-whatever the client put in the join payload; asobi never reads it.
+Because only a world can be created by a client, a code-gated private lobby is a
+world too. Share a code out of band and check it on the way in. The join context
+is whatever the client put in the join payload; asobi never reads it.
 
 ```lua
 function join(player_id, state, ctx)
@@ -68,77 +126,54 @@ function join(player_id, state, ctx)
 end
 ```
 
-Combine with `listed = false` for a lobby that is reachable only by code.
-See [Join context](websocket-protocol.md#join-context).
+Hiding it from the browser needs `listed => false` in an Erlang `game_modes`
+entry; a Lua-only game cannot set it, so its code-gated world stays listed and
+the join callback is the whole gate. `listed` and `quick_play` are properties
+of the mode, not of one instance, so every world of that mode is equally
+hidden. See [Join context](websocket-protocol.md#join-context).
 
 ### Telling the room someone arrived
 
-Core does not push a join notification to the players already waiting. That
-is deliberate: `match.left` is a reply to the leaver rather than a
-broadcast, so co-member notification is the game's decision throughout, and
-what a lobby shows differs per game - a bare count, a full roster, nothing
-until it fills.
+Core does not push a join notification to the players already waiting. That is
+deliberate: what a lobby shows differs per game - a bare count, a full roster,
+nothing until it fills.
 
 `game.broadcast` from your join callback is the whole of it, as above. It
-reaches every player currently in the match, and the example above arrives
-client-side as `{"type": "match.lobby_update", "payload": {"players": ...}}`.
-Naming rules and the SDK-side handler for these are in
-[Custom events](websocket-protocol.md#custom-events).
+reaches every player currently in the session, and the example above arrives
+client-side as `{"type": "world.lobby_update", "payload": {"players": ...}}` -
+`match.lobby_update` from a match script. Naming rules and the SDK-side handler
+are in [Custom events](websocket-protocol.md#custom-events).
 
 ### Chat in a lobby
 
-There is no `match:` chat channel scheme. `world:<WorldId>` exists and is
-gated on world membership; matches have no equivalent. Use `game.broadcast`
-with your own message shape.
+There is no `match:` channel scheme. `world:<WorldId>`, `zone:<WorldId>:<X>,<Y>`
+and `prox:<WorldId>:<X>,<Y>` exist and are gated on world membership; matches
+have no equivalent, so a match lobby uses `game.broadcast` with your own message
+shape.
 
-The `room:` scheme is not open-join - it resolves to a group membership check.
-`room:<group_id>` now correctly authorises the members of `<group_id>`
-([asobi#209](https://github.com/widgrensit/asobi/issues/209), resolved).
+The `room:` scheme is not open-join - `room:<GroupId>` resolves to a membership
+check against that group.
 
-### The 60-second timeout
+## Seeing what players see
 
-A match that does not reach `min_players` within 60 seconds stops itself.
-That value is currently fixed (`?WAITING_TIMEOUT` in `asobi_match_server`)
-and is not exposed per mode. Fine for quick play; too short if you want
-players assembling at their own pace.
-
-## Persistent world as a hub
-
-For a town square people return to between games, use a world.
-
-```lua
--- hub.lua
-game_type   = "world"
-persistent  = true    -- stays alive when empty; without this it dies on the last leave
-grid_size   = 1       -- one zone: no spatial partitioning needed to stand around
-tick_rate   = 200     -- 5 Hz is plenty; the 50ms default is for action games
-listed      = true
-quick_play  = true    -- world.find_or_create drops everyone into the same one
-match_size  = 1
-```
-
-`persistent` is the flag that makes it a hub rather than a session. Without
-it a world finishes the moment the last player leaves, so the next player
-gets a fresh empty one.
-
-Presence is free here: worlds tick and broadcast zone state, so players see
-each other without you broadcasting anything. `world:<WorldId>` chat works
-and is gated on world membership.
-
-Nothing creates the hub at boot. The first `world.find_or_create`
-instantiates it and it stays up from then on; after a restart the first
-player recreates it, restoring snapshots if `persistent`.
-
-Worlds are subject to `world_max_per_player` (5) and `world_max` (1000) -
-see [World capacity](configuration.md#world-capacity).
+The console's Matches screen is the **finished-match record**, not the live
+list: core writes one row when a match ends, so a waiting lobby never appears
+there. To see what a player browsing sees, call `GET /api/v1/matches/live`.
+There is no worlds screen either; use `GET /api/v1/worlds`. See
+[Operator console](console.md).
 
 ## Not included
 
-- **Ready-up.** No first-class ready state. Track it in your own game state
-  and broadcast it; the join context and `game.broadcast` are enough.
+- **Ready-up.** No first-class ready state. Track it in your own game state and
+  broadcast it; the join context and `game.broadcast` are enough. A game that
+  wants a shared one can ship it as an extension method and call it over the
+  `rpc.call` frame - see [Extensions](extensions.md).
 - **Party.** You cannot queue as a group through the matchmaker. Play with
-  specific people by sharing a match id or a join code.
+  specific people by sharing a world id or a join code, or add party grouping as
+  an extension.
 - **Rich filters.** Discovery filters on `mode` and `has_capacity` only.
-  Anything richer belongs in your strategy module.
-- **Member roster API.** The joiner receives the roster on `match.joined`;
-  there is no separate "who is here" call. Keep the list in your game state.
+  Anything richer belongs in your strategy module, or in an extension method
+  that returns the filtered list.
+- **Member roster API.** The joiner receives the roster on `match.joined` /
+  `world.joined`; there is no separate "who is here" call. Keep the list in your
+  game state, or expose it as an extension method.

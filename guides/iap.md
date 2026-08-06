@@ -1,32 +1,35 @@
-# In-App Purchases
+# In-app purchases
 
-Asobi provides server-side receipt validation for Apple App Store and
-Google Play purchases. All IAP endpoints require an authenticated session.
+Server-side receipt validation for the Apple App Store and Google Play. Both
+endpoints require an authenticated session.
 
-## Why Server-Side Validation?
+There is no Lua path for IAP. Verification is an HTTP route the client calls
+directly; a game script cannot reach it.
 
-Client-side receipt validation can be spoofed. Always validate purchases on the
-server before granting items, currency, or premium features to a player.
+## Why server-side validation
+
+Client-side receipt checks can be spoofed. Validate on the server before
+granting items, currency or premium features.
+
+asobi verifies the receipt and records it. It does **not** credit a wallet or
+grant an item - map the returned `product_id` to whatever your game owes and
+call the [economy](economy.md) yourself.
 
 ## Apple App Store
 
-Validates signed transactions from StoreKit 2. The game client sends the
-JWS (JSON Web Signature) string obtained after a purchase.
+Validates signed transactions from StoreKit 2. The client sends the JWS string
+it got after the purchase.
 
 ```
 POST /api/v1/iap/apple
 ```
 
-### Example
-
 ```bash
 curl -X POST http://localhost:8084/api/v1/iap/apple \
-  -H 'Authorization: Bearer <session_token>' \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{"signed_transaction": "eyJhbGciOi..."}'
 ```
-
-### Response
 
 ```json
 {
@@ -34,56 +37,61 @@ curl -X POST http://localhost:8084/api/v1/iap/apple \
   "transaction_id": "2000000123456789",
   "original_transaction_id": "2000000123456789",
   "purchase_date": 1711700000000,
-  "expires_date": null,
+  "expires_date": "undefined",
   "quantity": 1,
   "type": "Consumable",
-  "valid": true
+  "valid": true,
+  "duplicate": false
 }
 ```
 
+`valid` is `false` only when `expires_date` is in the past, which happens for
+an expired subscription and nothing else. A consumable has no `expires_date`
+and is always `valid: true` when it verifies at all - every other failure is an
+error response, not `valid: false`.
+
+A field the store's payload does not carry comes back as the **string**
+`"undefined"`, not JSON `null` - here `expires_date`,
+`original_transaction_id` and `product_id`, and on the Google side
+`purchase_time` and `consumption_state`. Treat `"undefined"` as absent.
+
 ### Configuration
+
+Apple validation needs the bundle id **and** a trust anchor for the certificate
+chain. Both are required; configure only the first and every call fails.
 
 ```erlang
 {asobi, [
-    {apple_bundle_id, <<"com.example.game">>}
+    {apple_bundle_id, ~"com.example.game"},
+
+    %% One of these two. `apple_root_certs` takes a list of DER or PEM
+    %% binaries; `apple_root_cert_path` a file to read them from.
+    {apple_root_cert_path, ~"/etc/asobi/AppleRootCA-G3.cer"}
 ]}
 ```
 
-The `apple_bundle_id` must match your app's bundle identifier. Transactions
-with a mismatched bundle ID are rejected.
+Missing bundle id answers `iap.verification_failed` with
+`details.reason: "apple_iap_not_configured"`. Missing certificates answer the
+same code with `details.reason: "apple_root_cert_not_configured"`, and
+certificates that will not decode with `"apple_root_cert_invalid"`. A
+transaction whose `bundleId` does not match yours is rejected with
+`"bundle_id_mismatch"`.
 
-### Handling the Result
-
-After a successful validation, grant the purchase to the player using the
-economy system:
-
-```erlang
-case asobi_iap:verify_apple(SignedTransaction) of
-    {ok, #{product_id := ProductId, valid := true}} ->
-        %% Map product ID to in-game currency/items
-        grant_purchase(PlayerId, ProductId);
-    {ok, #{valid := false}} ->
-        %% Subscription expired or purchase invalid
-        {error, expired};
-    {error, Reason} ->
-        {error, Reason}
-end.
-```
+Get the Apple Root CA - G3 certificate from
+[Apple's PKI page](https://www.apple.com/certificateauthority/).
 
 ## Google Play
 
-Validates purchases using the Google Play Developer API. The game client sends
-the product ID and purchase token obtained from Google Play Billing.
+Validates purchases through the Google Play Developer API. The client sends the
+product id and the purchase token from Google Play Billing.
 
 ```
 POST /api/v1/iap/google
 ```
 
-### Example
-
 ```bash
 curl -X POST http://localhost:8084/api/v1/iap/google \
-  -H 'Authorization: Bearer <session_token>' \
+  -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
   -d '{
     "product_id": "gems_100",
@@ -91,107 +99,128 @@ curl -X POST http://localhost:8084/api/v1/iap/google \
   }'
 ```
 
-### Response
-
 ```json
 {
   "product_id": "gems_100",
   "order_id": "GPA.1234-5678-9012-34567",
-  "purchase_time": 1711700000000,
+  "purchase_time": "1711700000000",
   "consumption_state": 0,
   "acknowledged": false,
-  "valid": true
+  "valid": true,
+  "duplicate": false
 }
 ```
 
+`product_id`, `order_id`, `purchase_time` and `consumption_state` are Google's
+own values passed through unchanged. `purchase_time` is Google's
+`purchaseTimeMillis`, which the Play Developer API serialises as a **string**
+because it is an int64 - parse it, do not assume a number.
+
+The Google path returns `valid: true` or an error. It never returns
+`valid: false`: a purchase Google reports as cancelled or pending is an error
+response, not a successful one with a flag.
+
 ### Configuration
 
-Google Play validation requires a service account with the
-`androidpublisher` scope.
+Google Play validation needs a service account with the `androidpublisher`
+scope.
 
-1. Create a service account in [Google Cloud Console](https://console.cloud.google.com/)
-2. Grant it access in Google Play Console → API access
-3. Download the JSON key file
+1. Create a service account in [Google Cloud Console](https://console.cloud.google.com/).
+2. Grant it access under Google Play Console, API access.
+3. Download the JSON key file and point asobi at it.
 
 ```erlang
 {asobi, [
-    {google_package_name, <<"com.example.game">>},
-    {google_service_account_key, <<"/path/to/service-account.json">>}
+    {google_package_name, ~"com.example.game"},
+    {google_service_account_key, ~"/path/to/service-account.json"}
 ]}
 ```
 
-### Purchase States
+### Purchase states
 
-| `consumptionState` | Meaning |
+| `consumption_state` | Meaning |
 |---|---|
 | `0` | Not consumed |
 | `1` | Consumed |
 
-| `acknowledged` | Meaning |
-|---|---|
-| `false` | Not yet acknowledged |
-| `true` | Acknowledged |
+`acknowledged` is `true` once Google's `acknowledgementState` is 1. Acknowledge
+purchases after granting, or Google refunds them automatically.
 
-## SDK Integration
+## Replay protection
 
-### Unity (C#)
+asobi persists every verified transaction to the `iap_transactions` table,
+keyed uniquely on `(provider, transaction_id)` - the Apple `transaction_id` or
+the Google `order_id`. Two consequences:
 
-```csharp
-// After a StoreKit 2 purchase (Apple)
-string signedTransaction = storeKit.Transaction.JwsRepresentation;
-var result = await asobi.IAP.VerifyApple(signedTransaction);
-if (result.Valid) {
-    // Purchase verified, items granted server-side
-}
+- The **same player** re-submitting a receipt gets `200` with
+  `"duplicate": true` and no second row. Re-submission is safe, so a client
+  that retries after a network failure cannot double-grant, provided your grant
+  path checks `duplicate`.
+- A **different player** submitting a receipt someone else already claimed gets
+  `409 iap.transaction_already_claimed`. A receipt belongs to one account.
 
-// After a Google Play purchase
-string purchaseToken = purchase.PurchaseToken;
-var result = await asobi.IAP.VerifyGoogle("gems_100", purchaseToken);
-if (result.Valid) {
-    // Purchase verified
-}
+A verified receipt carrying no transaction id at all is refused with
+`iap.missing_transaction_id` rather than stored unkeyed.
+
+## Error codes
+
+| Status | Code | `details.reason` examples |
+|---|---|---|
+| `400` | `missing_field` | The Apple body is missing `signed_transaction` |
+| `422` | `iap.verification_failed` | `apple_iap_not_configured`, `apple_root_cert_not_configured`, `apple_root_cert_invalid`, `bundle_id_mismatch`, `invalid_jws`, `invalid_jws_format`, `google_iap_not_configured`, `missing_required_fields` (the Google body is missing `product_id` or `purchase_token`), `purchase_not_found`, `purchase_cancelled`, `purchase_pending`, `google_api_error`, `google_api_unavailable` |
+| `422` | `iap.missing_transaction_id` | The verified receipt carries no transaction id |
+| `409` | `iap.transaction_already_claimed` | Another player already claimed this transaction |
+| `500` | `iap.record_failed` | The verified transaction could not be written |
+
+The reasons under `iap.verification_failed` name an internal verification step.
+They are diagnostics, not a contract: branch on the code, log the reason.
+
+```json
+{"error": {"code": "iap.verification_failed", "message": "...", "details": {"reason": "bundle_id_mismatch"}}}
 ```
 
-### Godot (GDScript)
+## Handling the result
 
-```gdscript
-# Apple
-var result = await asobi.iap.verify_apple(signed_transaction)
-if result.valid:
-    print("Purchase verified: ", result.product_id)
+### In Erlang
 
-# Google
-var result = await asobi.iap.verify_google("gems_100", purchase_token)
-if result.valid:
-    print("Purchase verified: ", result.order_id)
+```erlang
+case asobi_iap:verify_apple(SignedTransaction) of
+    {ok, #{product_id := ProductId, valid := true}} ->
+        grant_purchase(PlayerId, ProductId);
+    {ok, #{valid := false}} ->
+        {error, subscription_expired};
+    {error, Reason} ->
+        {error, Reason}
+end.
 ```
 
-### Dart / Flutter / Flame
+`verify_google/1` takes **one map** with binary keys, not two arguments:
 
-```dart
-// Apple
-final result = await asobi.iap.verifyApple(signedTransaction);
-if (result.valid) {
-  // Grant items
-}
-
-// Google
-final result = await asobi.iap.verifyGoogle('gems_100', purchaseToken);
-if (result.valid) {
-  // Grant items
-}
+```erlang
+{ok, Result} = asobi_iap:verify_google(#{
+    ~"product_id" => ~"gems_100",
+    ~"purchase_token" => PurchaseToken
+}).
 ```
 
-## Security Notes
+Neither function records the transaction or binds it to a player - that is the
+controller's job. Calling `asobi_iap` directly skips replay protection.
 
-- Always validate receipts server-side, never trust the client alone
-- Check the `product_id` matches what you expect before granting items
-- For Apple subscriptions, check `expires_date` and `valid` together
-- For Google, acknowledge purchases after granting to prevent refund abuse
-- Log all IAP validations for audit and dispute resolution
+### From a client
 
-## Next Steps
+Every SDK wraps these two routes and returns the response above unchanged,
+including `valid` and `duplicate`. See your SDK's README for the exact method
+names.
 
-- [Authentication](authentication.md) -- auth methods and provider linking
-- [Economy](economy.md) -- wallets, currencies, and store
-- [REST API](rest-api.md) -- full API reference
+## Inspecting purchases
+
+The console has no IAP screen. Verified transactions land in the
+`iap_transactions` table - `player_id`, `provider`, `transaction_id`,
+`original_transaction_id`, `product_id`, `inserted_at` - so query the database
+for dispute resolution. See [Operator console](console.md).
+
+## Next steps
+
+- [Authentication](authentication.md) - auth methods and provider linking.
+- [Economy](economy.md) - the wallets and items you grant after a receipt verifies.
+- [REST API](rest-api.md) - full API reference.

@@ -1,4 +1,4 @@
-## Example docker-compose for running Asobi with Lua game scripts.
+## Example docker-compose for running asobi with Lua game scripts.
 ## Copy this file to your project and customize.
 ##
 ##   cp docker-compose.example.yml docker-compose.yml
@@ -8,7 +8,7 @@
 
 services:
   asobi:
-    image: ghcr.io/widgrensit/asobi_lua:latest
+    image: ghcr.io/widgrensit/asobi:latest
     ports:
       - "8084:8084"
     volumes:

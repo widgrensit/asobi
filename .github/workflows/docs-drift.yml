@@ -21,6 +21,8 @@ on:
       - 'guides/**'
       - 'README.md'
       - 'docs/ARCHITECTURE.md'
+      - 'examples/**'
+      - 'CONTRIBUTING.md'
       - '.github/workflows/docs-drift.yml'
   pull_request:
     branches: [main]
@@ -33,6 +35,8 @@ on:
       - 'guides/**'
       - 'README.md'
       - 'docs/ARCHITECTURE.md'
+      - 'examples/**'
+      - 'CONTRIBUTING.md'
       - '.github/workflows/docs-drift.yml'
 
 concurrency:

@@ -1,27 +1,24 @@
-# Lua Scripting
+# Lua scripting
 
-Write your game logic in Lua instead of Erlang. Asobi runs Lua scripts
-inside the BEAM via [Luerl](https://github.com/rvirding/luerl), giving you
-the fault tolerance and concurrency of OTP with a language game developers
-already know.
+asobi is one Erlang/OTP node containing the game backend, the Lua runtime and
+the operator console. There are two ways in: run the image and write Lua, which
+is what this guide covers, or depend on the Hex package and write Erlang, which
+is the same node through its other surface.
 
-No Erlang knowledge required. No compilation step. Just Lua files and Docker.
+Lua runs inside the BEAM via [Luerl](https://github.com/rvirding/luerl), so a
+script gets OTP's fault tolerance and concurrency without a separate process,
+a compilation step or a toolchain.
 
-## Quick Start with Docker
-
-The fastest way to get started -- no Erlang toolchain needed:
+## Quick start
 
 ```bash
 mkdir my_game && cd my_game
-mkdir -p lua/bots
+mkdir -p game/bots
 ```
 
-Create your match script:
+Write `game/match.lua`:
 
 ```lua
--- lua/match.lua
-
--- Game mode config
 match_size = 2
 max_players = 8
 strategy = "fill"
@@ -71,12 +68,12 @@ function get_state(player_id, state)
 end
 ```
 
-Create a `docker-compose.yml`:
+Write `docker-compose.yml`:
 
 ```yaml
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -88,34 +85,71 @@ services:
       retries: 5
 
   asobi:
-    image: ghcr.io/widgrensit/asobi_lua:latest
+    image: ghcr.io/widgrensit/asobi:latest
     depends_on:
       postgres: { condition: service_healthy }
     ports:
       - "8084:8084"
     volumes:
-      - ./lua:/app/game:ro
+      - ./game:/app/game
     environment:
       ASOBI_DB_HOST: postgres
       ASOBI_DB_NAME: my_game_dev
+      ASOBI_DB_PASSWORD: postgres
 ```
-
-Start it:
 
 ```bash
 docker compose up -d
 ```
 
-That's it. Your game is running. Asobi reads your Lua scripts from the
-mounted volume, discovers the game mode from `match.lua`, and handles
-everything else -- database, authentication, matchmaking, WebSockets.
+asobi reads the scripts from the mounted directory, derives the game mode from
+`match.lua`, and serves the database, authentication, matchmaking and
+WebSocket layers around it.
 
-### Multiple Game Modes
+The directory it reads is `/app/game`. Change it with `{asobi, [{game_dir,
+"/some/other/path"}]}` in `sys.config` if you are not using this compose file.
 
-For games with more than one mode, add a `config.lua` manifest:
+## Editing while it runs
+
+Edit a script and save it; the next tick picks it up. There is no restart and
+no rebuild.
+
+The bridge stats the script on every tick and re-evaluates the new file body
+against the running Luerl state when the mtime moves. Re-evaluating the body
+redeclares globals and redefines functions in place, so in-flight state
+survives: players, counters and tables stay exactly as they were, because
+nothing re-runs `init()`. Changing what `tick` does takes effect on the next
+tick, for matches already in progress.
+
+A file that fails to load logs `lua hot reload failed` with the reason, records
+the new mtime so the same broken file is not retried every tick, and keeps
+running the last good code. Fix the file and save again.
+
+The `require` cache is cleared on reload, so an edited module a script
+`require`s is re-read too.
+
+Mode-shape edits are separate. `match_size`, `max_players`, `strategy`, the
+`bots` table and the `config.lua` manifest are consumed when a match is
+*formed*, before any match server exists, so a per-tick reload is structurally
+blind to them. A watcher polls the manifest and every registered mode script
+every 1500 ms and re-runs the config loader when an mtime moves. New matches
+get the new shape; running matches keep the values they started with.
+
+Turn the whole thing off with `ASOBI_LUA_RELOAD=off` or `{asobi,
+[{reload_mode, off}]}`. That skips the per-tick stat and stops the watcher
+polling, which is what a sealed production image wants: its mtimes never move
+anyway. Anything other than `off` means `auto`, so a typo cannot silently
+disable reload.
+
+Put all of it under `{asobi, [...]}`. An existing `{asobi_lua, [...]}` block
+from before the merge still works for the runtime's own settings - see
+[Which application key](configuration.md#which-application-key).
+
+## Multiple game modes
+
+For more than one mode, add a `config.lua` manifest:
 
 ```lua
--- lua/config.lua
 return {
     arena = "arena/match.lua",
     ctf   = "ctf/match.lua"
@@ -124,7 +158,7 @@ return {
 
 ```
 my_game/
-├── lua/
+├── game/
 │   ├── config.lua
 │   ├── arena/
 │   │   └── match.lua
@@ -133,19 +167,19 @@ my_game/
 └── docker-compose.yml
 ```
 
-Each match script declares its own config as globals. When `config.lua`
-exists, Asobi reads it instead of looking for a top-level `match.lua`.
-When there is no `config.lua`, a single `match.lua` is loaded as the
-`"default"` game mode.
+Each match script declares its own config as globals. When `config.lua` exists
+it is read instead of a top-level `match.lua`. With no `config.lua`, a single
+`match.lua` is loaded as the `"default"` mode. A mode script path that escapes
+the game directory is rejected.
 
-## Match Script Globals
+## Match script globals
 
-Declare your game mode settings as globals at the top of your match script.
-Asobi reads these at startup before calling any callbacks.
+Declare the mode's settings as globals at the top of the script. asobi reads
+them before any callback runs.
 
 ```lua
 match_size   = 4                          -- required: min players to start
-max_players  = 10                         -- optional: max per match (defaults to match_size)
+max_players  = 10                         -- optional: max per match
 strategy     = "fill"                     -- optional: "fill" or "skill_based"
 bots         = { script = "bots/ai.lua" } -- optional: enable bot filling
 guest_auth   = true                       -- optional: allow anonymous guest play
@@ -154,54 +188,47 @@ registration = "closed"                   -- optional: signup posture
 
 | Global | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `match_size` | yes | -- | Minimum players needed to start a match |
+| `match_size` | yes | - | Minimum players needed to start a match. Must be a positive integer |
 | `max_players` | no | `match_size` | Maximum players per match |
-| `strategy` | no | `"fill"` | Matchmaking strategy |
-| `bots` | no | none | Bot configuration (see [Bots](lua-bots.md)) |
-| `guest_auth` | no | `false` | Enable anonymous guest play. Also requires an operator-supplied pepper; on iff both are present (asobi ADR 0004) |
-| `registration` | no | `"open"` | Signup posture: `"open"`, `"oauth_only"` (no password signup), or `"closed"` (no new players at all). The operator layer wins: this applies only when the release's `sys.config` leaves `registration` unset |
-| `lazy_zones` | no | auto | On-demand zone loading (auto-enabled for grids > 100) |
-| `zone_idle_timeout` | no | 30000 | Milliseconds before an idle zone is reaped |
-| `max_active_zones` | no | 10000 | Maximum concurrent zones in memory |
-| `spatial_grid_cell_size` | no | none | Cell size for spatial grid indexing (enables grid acceleration) |
-| `cold_tick_divisor` | no | 10 | Tick rate divisor for cold (unoccupied) zones |
+| `strategy` | no | `"fill"` | `"fill"` or `"skill_based"` |
+| `game_type` | no | `"match"` | `"world"` routes the script through the world bridge - see [World server](world-server.md) |
+| `state_strategy` | no | per-player | `"shared"` broadcasts one payload to everyone; see below |
+| `bots` | no | none | Bot configuration - see [Bots](lua-bots.md) |
+| `guest_auth` | no | `false` | Offer anonymous no-account play. Also requires an operator-supplied pepper; on only when both are present (ADR 0004) |
+| `registration` | no | `"open"` | `"open"`, `"oauth_only"` (no password signup) or `"closed"` (no new players). The operator layer wins: this applies only when the release's `sys.config` leaves `registration` unset |
 
-For a single-mode game these globals live in `match.lua`. In a multi-mode game
-(a `config.lua` manifest that maps modes to match scripts), deployment-wide
-settings such as `guest_auth` and `registration` go in `config.lua`, not the
-per-mode scripts.
+`strategy` is not validated. A value that is neither `"fill"` nor
+`"skill_based"` falls back to `fill`, and nothing is logged - check the
+spelling yourself.
 
-## Using with Erlang Projects
+`state_strategy = "shared"` routes the mode to a different bridge, one that
+calls `get_state` **once per tick with one argument** and broadcasts a single
+pre-encoded payload to every subscriber. It is the right choice when every
+player sees the same world, and it changes the signature you must write:
 
-If you're building an Erlang OTP application, add `asobi_lua` as a
-dependency in your `rebar.config`:
+```lua
+state_strategy = "shared"
 
-```erlang
-{deps, [
-    {asobi_lua, {git, "https://github.com/widgrensit/asobi_lua.git", {tag, "v0.1.0"}}}
-]}.
+function get_state(state)
+    return { players = state.players }
+end
 ```
 
-Configure Lua game modes in your `sys.config`:
+A script written against the two-argument `get_state(player_id, state)` will
+not work under `"shared"`, and vice versa. Bots do not work under `"shared"`
+either - see [Lua bots](lua-bots.md#what-a-bot-script-gets).
 
-```erlang
-{asobi, [
-    {game_modes, #{
-        ~"arena" => #{
-            module => {lua, "game/match.lua"},
-            match_size => 4,
-            max_players => 8
-        }
-    }}
-]}
-```
+World mode adds its own globals (`tick_rate`, `grid_size`, `zone_size`,
+`view_radius`, `player_ttl_ms` and more). They live in
+[World server](world-server.md) rather than here.
 
-The Lua config loader only runs when a game directory with scripts exists.
-Erlang projects with their own `sys.config` are completely unaffected.
+For a single-mode game these globals live in `match.lua`. In a multi-mode game,
+the deployment-wide ones - `guest_auth` and `registration` - are read from
+`config.lua`, not from the per-mode scripts.
 
 ## Callbacks
 
-Every Lua match script must define these functions:
+Six callbacks are required.
 
 ### `init(config)`
 
@@ -217,7 +244,7 @@ function init(config)
 end
 ```
 
-### `join(player_id, state)`
+### `join(player_id, state)` or `join(player_id, state, ctx)`
 
 Called when a player joins. Returns the updated state.
 
@@ -232,6 +259,29 @@ function join(player_id, state)
 end
 ```
 
+The optional third argument carries the join context the client sent with
+`match.join`, and it is the only way a Lua game implements join codes, invites
+or passwords:
+
+```lua
+function join(player_id, state, ctx)
+    state.players[player_id] = {
+        hp = 100,
+        spectator = state.join_code ~= nil and ctx.code ~= state.join_code
+    }
+    return state
+end
+```
+
+Declaring two parameters keeps working unchanged - Lua discards the extra
+argument.
+
+`ctx` is validated before it reaches the script: a flat table, at most 8 keys,
+keys up to 64 bytes, scalar values up to 256 bytes, no nesting. asobi never
+interprets, echoes or logs it. Returning the updated state is the only
+supported outcome, so a failed check has to be expressed in the state you
+return, as above.
+
 ### `leave(player_id, state)`
 
 Called when a player leaves. Returns the updated state.
@@ -245,19 +295,17 @@ end
 
 ### `handle_input(player_id, input, state)`
 
-Called when a player sends input via WebSocket. The `input` table contains
-whatever the client sent. Returns the updated state.
+Called when a player sends input over the WebSocket. `input` is whatever the
+client sent. Returns the updated state.
 
 ```lua
 function handle_input(player_id, input, state)
     local p = state.players[player_id]
     if not p or p.hp <= 0 then return state end
 
-    -- Movement
     if input.right then p.x = p.x + p.speed end
     if input.left then p.x = p.x - p.speed end
 
-    -- Shooting
     if input.shoot and input.aim_x then
         table.insert(state.projectiles, {
             x = p.x, y = p.y,
@@ -272,13 +320,13 @@ function handle_input(player_id, input, state)
 end
 ```
 
+This is the one callback with no execution budget - see
+[Limits](#limits-and-what-happens-when-you-hit-them).
+
 ### `tick(state)`
 
-Called every tick (default 10 times per second). Advance your simulation here.
-Returns the updated state.
-
-To signal that the match is finished, set `_finished` and `_result` on the
-state:
+Called every tick. A match ticks every 100 ms, and a match script cannot
+change that. Advance the simulation and return the updated state.
 
 ```lua
 function tick(state)
@@ -298,8 +346,8 @@ end
 
 ### `get_state(player_id, state)`
 
-Called every tick for each player. Returns the state visible to that player.
-Use this for fog-of-war, hiding other players' data, etc.
+Called every tick for each player. Returns the state that player may see - use
+it for fog of war, hidden hands, anything the client must not be told.
 
 ```lua
 function get_state(player_id, state)
@@ -311,12 +359,13 @@ function get_state(player_id, state)
 end
 ```
 
-### `vote_requested(state)` (optional)
+Under `state_strategy = "shared"` this becomes `get_state(state)`.
 
-Called after each tick. Return a vote configuration table to start a player
-vote, or `nil` to skip. Votes can be triggered at any point during gameplay -
-between rounds, after a boss kill, when a player levels up, or any other
-game event.
+### Optional callbacks
+
+`vote_requested(state)` is called after each tick. Return a vote configuration
+to start a player vote, or `nil` to skip. Votes can start at any point:
+between rounds, after a boss kill, on a level-up.
 
 ```lua
 function vote_requested(state)
@@ -336,38 +385,11 @@ function vote_requested(state)
 end
 ```
 
-Mid-game example (roguelike ability choice):
+The match keeps running while a vote is active, and several votes can run at
+once. See [Voting](voting.md).
 
-```lua
-function vote_requested(state)
-    if state.pending_vote then
-        local vote = state.pending_vote
-        state.pending_vote = nil
-        return vote
-    end
-    return nil
-end
-
-function tick(state)
-    -- Trigger a vote when party reaches XP threshold
-    if state.party_xp >= state.next_level_xp and not state.pending_vote then
-        state.pending_vote = {
-            template = "choose_ability",
-            options = random_abilities(3),
-            method = "plurality",
-            window_ms = 15000
-        }
-    end
-    return state
-end
-```
-
-The game keeps running while a vote is active. Multiple votes can run
-simultaneously.
-
-### `vote_resolved(template, result, state)` (optional)
-
-Called when a vote completes. `result.winner` contains the winning option ID.
+`vote_resolved(template, result, state)` is called when a vote completes;
+`result.winner` is the winning option id.
 
 ```lua
 function vote_resolved(template, result, state)
@@ -378,10 +400,16 @@ function vote_resolved(template, result, state)
 end
 ```
 
+`phases(config)`, `on_phase_started(phase_name, state)` and
+`on_phase_ended(phase_name, state)` drive a session's lifecycle stages -
+warmup, combat, results. Define `phases/1` and the engine walks the list in
+order. See [Phases](phases.md).
+
 ## Modules and `require()`
 
-Split your game into multiple files using Lua's `require()`. Asobi
-automatically sets `package.path` to your script's directory.
+Split a game across files with `require()`. There is no `package` table and no
+`package.path` to set: `require` is asobi's own and resolves relative to the
+directory of the script that was loaded.
 
 ```
 game/
@@ -420,16 +448,18 @@ function M.move_projectiles(state)
 end
 
 function M.check_collisions(state)
-    -- collision detection logic
     return state
 end
 
 return M
 ```
 
-## Finishing a Match
+Dotted names work: `require("bots.chaser")` loads `bots/chaser.lua`. Parent
+traversal, absolute paths and symlinked module files are rejected.
 
-Set `_finished = true` and `_result` on your state table in `tick()`:
+## Finishing a match
+
+Set `_finished = true` and `_result` on the state table in `tick()`:
 
 ```lua
 function tick(state)
@@ -445,178 +475,82 @@ function tick(state)
 end
 ```
 
-The `_result` table is sent to all players via the `match.finished` WebSocket
-event. Structure it however you like -- clients will receive it as JSON.
+`_result` is sent to every player as the `match.finished` event. Structure it
+however you like; clients receive it as JSON.
 
-## Available Functions
+## The game.* API
 
-Your Lua scripts have access to:
+Scripts call engine features through the `game` table: logging, broadcasts,
+economy, leaderboards, notifications, storage, chat, spatial queries, and any
+namespace an installed [extension](extensions.md) declares. Around thirty
+functions, each with its own argument shapes and return convention.
 
-- **Standard Lua**: `table`, `string`, `math`, `utf8`, `bit32`, `pairs`,
-  `ipairs`, `next`, `type`, `tostring`, `tonumber`, `pcall`, `error`,
-  `assert`, `setmetatable`/`getmetatable`, `rawget`/`rawset`/`rawequal`/`rawlen`
-- **Time helpers**: `os.clock`, `os.date`, `os.difftime`, `os.time`
-- **`math.random(n)`**: integer in `[1, n]`. **`math.random(a, b)`**:
-  integer in `[a, b]`; an empty interval (`a > b`) raises, as in
-  standard Lua. Non-integer bounds are truncated toward zero (standard
-  Lua raises instead). The RNG is auto-seeded per match, so
-  **`math.randomseed` has no effect** — calling it is harmless, but
-  scripts cannot rely on seeded determinism.
-- **`math.sqrt(n)`**: square root. Negative input returns `0.0`.
-- **`require("foo.bar")`**: loads `foo/bar.lua` relative to your game
-  directory. Names are validated; `..`, `/`, and absolute paths are
-  rejected. Modules are cached, and `asobi_lua_match` clears the cache
-  on hot-reload so changes to required files pick up.
-- **`game.log(level, message[, meta])`**: structured logging - see
-  [Logging](#logging) below. `print` is removed; use this instead.
-- **`game.<extension>.*`**: any namespace an installed
-  [extension](extensions.md) declares, e.g. `game.quests.progress(...)`.
-  It reads like a core function and returns the same `{ ok = ... }` /
-  `{ error = "..." }` envelope.
+They are all in [The game.\* API](lua-api.md).
 
-The following are removed from the Lua environment:
+## World mode
 
-- **OS escape hatches**: `os.execute`, `os.exit`, `os.getenv`,
-  `os.remove`, `os.rename`, `os.tmpname`
-- **Code loaders**: `dofile`, `loadfile`, `load`, `loadstring`
-- **I/O**: the entire `io` library (`io.open`, `io.read`, `io.write`, ...)
-- **Package machinery**: `package` and the default `require`. Use the
-  asobi_lua-controlled `require/1` described above instead.
+Persistent or large-area games (open worlds, MMOs, big co-op maps) set
+`game_type = "world"` and use a different callback set built around zones,
+terrain and interest management.
 
-Every Lua callback also runs under a wall-clock timeout. A `while true do end`
-in any callback is killed when the budget elapses; the bridge logs a warning
-and continues with the previous state. See [SECURITY.md](../SECURITY.md#sandbox-model)
-for the full sandbox model and per-callback timeout limits.
-
-## World Mode: Large Sessions with Zones
-
-For persistent or large-area games (MMOs, open worlds), use world mode instead
-of match mode. World scripts support zone lifecycle and terrain features.
-
-### Zone Configuration
-
-Set zone globals at the top of your world script:
-
-```lua
-match_size = 1
-max_players = 100
-lazy_zones = true              -- load zones on demand
-zone_idle_timeout = 60000      -- reap idle zones after 60s
-max_active_zones = 500         -- cap concurrent zones
-spatial_grid_cell_size = 64    -- spatial grid cell size for fast queries
-cold_tick_divisor = 5          -- tick slower in unoccupied zones
-```
-
-### Terrain Provider (optional)
-
-Return a terrain provider module from `terrain_provider()`. The provider
-supplies compressed chunk data for each zone coordinate.
-
-```lua
-function terrain_provider(config)
-    return {
-        module = "my_terrain_provider",
-        args = { tileset = "overworld" }
-    }
-end
-```
-
-Return `nil` to disable terrain.
-
-### Zone Lifecycle Callbacks (optional)
-
-```lua
-function on_zone_loaded(cx, cy, state)
-    -- Called when a zone is lazily loaded
-    local zone_state = { biome = "plains", spawned = false }
-    return zone_state, state
-end
-
-function on_zone_unloaded(cx, cy, state)
-    -- Called when a zone is reaped after idle timeout
-    return state
-end
-```
-
-### Terrain API
-
-Inside your game scripts, query terrain via the `game.terrain` namespace:
-
-```lua
--- Get compressed chunk data for a coordinate
-local result = game.terrain.get_chunk(3, 7)
-
--- Preload chunks around the player
-game.terrain.preload({
-    { cx = 3, cy = 7 },
-    { cx = 4, cy = 7 },
-    { cx = 3, cy = 8 }
-})
-```
-
-### Spatial Queries (Zone-Based)
-
-Query entities in the current zone by position. These use the zone's spatial
-grid when `spatial_grid_cell_size` is set, falling back to brute-force scan.
-
-```lua
--- Find all entities within radius of a point
-local nearby = game.spatial.query_radius(100, 200, 50)
-for _, hit in ipairs(nearby) do
-    game.log("debug", "nearby entity", { id = hit.id, x = hit.x, y = hit.y })
-end
-
--- Find all entities inside a rectangle
-local in_area = game.spatial.query_rect(0, 0, 400, 300)
-```
-
-Both return a list of `{id, x, y}` tables.
-
-The entity-table variants (`game.spatial.query_radius(entities, x, y, radius)`)
-still work for client-side filtering without a zone process.
+[World server](world-server.md) owns that, and
+[Large worlds](large-worlds.md) covers scaling it.
 
 ## Logging
 
-`game.log` writes a structured line through the server's logger, so it shows
-up in the container's log stream and, on managed cloud, in the console log
-viewer for your environment (filter on `game.log`):
+`game.log` writes a structured line through the node's logger, so it lands in
+the container's JSON log stream:
 
 ```lua
 function handle_input(player_id, input, state)
     game.log("info", "input received", { player = player_id, kind = input.kind })
-    -- ...
     return state
 end
 ```
 
-- Levels: `"debug"`, `"info"`, `"warn"`/`"warning"`, `"error"`. Anything
+- Levels are `"debug"`, `"info"`, `"warn"`/`"warning"` and `"error"`. Anything
   else returns `{ error = ... }`.
-- `message` can be a string or any value (tables are rendered as JSON).
-  Messages are capped at 500 characters.
-- `meta` is an optional table of key/values, capped at 2 KB.
-- Logging is rate-limited (30 lines per second per match or zone, with a
-  node-wide cap of 300). Over budget, `game.log` returns `false` and the
-  line is dropped - so a log call in a tight tick loop degrades gracefully
-  instead of flooding the log stream. Self-hosting operators can tune both
-  budgets via `{asobi_lua, rate_limits}` if log-pipeline cost matters -
-  the defaults allow up to ~2.5 KB x 300 lines per second per node at
-  the ceiling.
+- `message` may be a string or any value (tables are rendered as JSON), and is
+  truncated at 500 characters.
+- `meta` is an optional table. Over 2 KB of encoded JSON it is **dropped
+  whole** and logged as `{"_truncated": true}`, not shortened - so split a
+  large payload across several calls, or log a summary instead.
+- Logging is rate limited to 30 lines a second per match or zone, with a
+  node-wide ceiling of 300. Over budget `game.log` returns `false` and the line
+  is dropped, so a log call in a tight tick loop degrades instead of flooding.
+  Self-hosters can tune both budgets via the `rate_limits` key.
 
-`print` does not exist in the sandbox; it was removed because it bypassed
-the structured log stream. `game.log` is the supported way to see what your
-server is doing.
+`print` and `eprint` do not exist: they wrote straight to stdout, breaking the
+structured stream and giving a tight loop an unmetered flood path.
 
-## Debugging Script Errors
+## Debugging script errors
 
-A runtime error in a callback never crashes the match: the server logs the
-error, keeps the previous state, and carries on. From the client that looks
-like the callback silently doing nothing. A common first-hour trap is
-`state.counter = state.counter + 1` when `init` never set `counter`, which
-fails every call with "bad arithmetic on nil".
+A runtime error in a callback does not crash the match. The server logs it,
+keeps the previous state and carries on, which from the client looks exactly
+like the callback doing nothing. The classic first-hour version is
+`state.counter = state.counter + 1` when `init` never set `counter`.
 
-During development, set `ASOBI_DEV_ERRORS=true` on the container to have
-each failing `handle_input` also send a `module.error` event to the player
-whose input triggered it:
+### Finding it in the logs
+
+Grep for `lua callback failed`. The line carries:
+
+- `callback` - which function failed.
+- `script` - the script's basename.
+- `reason_class` - `timeout` or `runtime_error`.
+- `detail` - the Lua error message, capped at 500 characters.
+- `suppressed_since_last` - how many identical failures were dropped since the
+  last line got through.
+
+That last field exists because these lines are rate limited to three every ten
+seconds per script and callback. A gap in the log is not the failure stopping;
+`suppressed_since_last` tells you what it really was. The telemetry counter
+behind it is not rate limited, so a dashboard sees the true rate.
+
+### Pushing errors to the client during development
+
+Set `ASOBI_DEV_ERRORS=true` (`1` also works) on the container, or
+`{asobi, [{dev_errors, true}]}` in `sys.config`. A failing `handle_input` then
+also sends a `module.error` event to the player whose input triggered it:
 
 ```json
 {"type": "module.error", "payload": {
@@ -627,17 +561,67 @@ whose input triggered it:
 }}
 ```
 
-The deprecated `game.error` name carries the same payload and is sent
-alongside it until the 1.0 wire break. See
-[WebSocket Protocol](websocket-protocol.md).
+The application-env key is consulted first and wins: with `{dev_errors,
+false}` set, `ASOBI_DEV_ERRORS=true` does nothing.
 
-Events are rate-limited to one per second per match. Leave the flag off in
-production (it is off by default): error messages can reveal script
-internals, and players should never see them.
+These events come from a failing `handle_input` in a match, and from a failing
+`handle_input` in a zone when the game runs in world mode. The rate limit is
+one event per second per bridge process, so per match or per zone. The
+deprecated `game.error` name carries the same payload alongside it until the
+1.0 wire break - see [WebSocket protocol](websocket-protocol.md).
 
-## Next Steps
+Leave the flag off in production; it is off by default. Error messages can
+reveal script internals and players should never see them.
 
-- [Bots](lua-bots.md) -- add AI-controlled players to your game
-- [Self-hosting](self-hosting.md) -- production deployment and live updates
-- [Configuration](https://asobi.dev/docs/configuration) -- all Asobi configuration options
-- [WebSocket Protocol](https://asobi.dev/docs/protocols/websocket) -- client-server message format
+## Limits and what happens when you hit them
+
+Every callback except `handle_input` runs in a child process under a wall-clock
+budget, a heap cap and a reduction budget. A `while true do end` there is
+killed at the deadline: the bridge logs, discards that call's result, keeps the
+previous state and carries on with the next tick.
+
+`handle_input` is the exception. It runs inline, because at high input rates
+the spawn cost dominates the actual Lua work, and it therefore has no budget at
+all. A runaway `handle_input` hangs that one match or zone indefinitely - no
+timeout fires and no supervisor restarts it. Bound your own loops.
+
+[Sandbox and limits](security-sandbox.md) has the per-callback numbers and the
+reasoning.
+
+## In Erlang
+
+The same node, configured from `sys.config` instead of from script globals:
+
+```erlang
+{deps, [
+    {asobi, "~> 0.68"}
+]}.
+```
+
+```erlang
+{asobi, [
+    {game_modes, #{
+        ~"arena" => #{
+            module => {lua, "game/match.lua"},
+            match_size => 4,
+            max_players => 8
+        }
+    }}
+]}
+```
+
+The operator's `game_modes` is never written by asobi and always wins a name
+clash with a script-declared mode of the same name. The Lua loader itself still
+runs at boot whether or not a game directory exists: with no `match.lua` and no
+`config.lua` it declares no modes, but it does write `guest_auth` (to `false`),
+which is what stops a stale `true` from a previous bundle surviving.
+
+## Next steps
+
+- [The game.\* API](lua-api.md) - everything a script can call.
+- [Bots](lua-bots.md) - AI-controlled players.
+- [World server](world-server.md) - zones and large sessions.
+- [Configuration](configuration.md) - every asobi setting.
+- [WebSocket protocol](websocket-protocol.md) - the client-server message
+  format.
+- [Self-hosting](self-hosting.md) - production deployment.

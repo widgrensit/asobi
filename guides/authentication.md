@@ -1,24 +1,22 @@
 # Authentication
 
-Asobi supports multiple authentication methods: username/password, OAuth/OIDC
-social login (Google, Apple, Microsoft, Discord), Steam, and anonymous
-[guest](#guest-anonymous) accounts that a player can later upgrade to a real one.
+asobi supports username/password, OAuth/OIDC social login (Google, Apple,
+Microsoft, Discord), Steam, and anonymous [guest](#guest-anonymous) accounts a
+player can later upgrade to a real one. A player can link several providers to
+one account.
 
-Players can link multiple providers to a single account.
+Every auth endpoint returns the same four fields: `player_id`, `access_token`
+(short-lived), `refresh_token` (used against `/auth/refresh`) and `username`.
+Use `access_token` as the `Bearer` credential. There is no `session_token`
+field anywhere in asobi.
 
-> Auth endpoints return an `access_token` (short-lived) and a `refresh_token`
-> (used against `/auth/refresh`). Use the `access_token` as the `Bearer`
-> credential.
+Run the `curl` examples in Git Bash or WSL on Windows, or use PowerShell's
+`Invoke-RestMethod` with the same URL and a JSON `-Body`. Authenticated calls
+add `-Headers @{ Authorization = 'Bearer <token>' }`.
 
-> #### Windows {: .info}
->
-> Run the `curl` examples in Git Bash or WSL, or use PowerShell's
-> `Invoke-RestMethod` with the same URL and a JSON `-Body`. Authenticated calls
-> add `-Headers @{ Authorization = 'Bearer <token>' }`.
+## Username and password
 
-## Username & Password
-
-The simplest method. Register and login to receive a token pair:
+Register to create an account and receive a token pair:
 
 ```bash
 curl -X POST http://localhost:8084/api/v1/auth/register \
@@ -30,17 +28,28 @@ curl -X POST http://localhost:8084/api/v1/auth/register \
 {"player_id": "...", "access_token": "...", "refresh_token": "...", "username": "player1"}
 ```
 
+Log in to get a fresh pair for an existing account:
+
+```bash
+curl -X POST http://localhost:8084/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "player1", "password": "secret123"}'
+```
+
+The response is identical. A wrong username or password answers
+`401 auth.invalid_credentials`; a missing field answers `400 missing_field`.
+
 Use the access token in subsequent requests:
 
 ```
 Authorization: Bearer <access_token>
 ```
 
-## Refresh & Rotation
+## Refresh and rotation
 
 Access tokens are short-lived. When one expires (a `401`), exchange the refresh
 token for a fresh pair at `/api/v1/auth/refresh`. Rotation is single-use: the
-server burns the presented refresh token and returns a new access token _and_ a
+server burns the presented refresh token and returns a new access token and a
 new refresh token, so always store both from the response.
 
 ```bash
@@ -53,11 +62,31 @@ curl -X POST http://localhost:8084/api/v1/auth/refresh \
 The official SDKs persist the refresh token, attach the access token to every
 call, and refresh-and-retry on a 401 automatically.
 
-## OAuth / Social Login
+## Logout
 
-For game clients, Asobi uses server-side token validation. The game client
-authenticates with the platform SDK (Google Sign-In, Apple Sign-In, etc.)
-to obtain an ID token, then sends it to Asobi for validation.
+```bash
+curl -X POST http://localhost:8084/api/v1/auth/logout \
+  -H 'Content-Type: application/json' \
+  -d '{"refresh_token": "<refresh_token>"}'
+```
+
+```json
+{"success": true}
+```
+
+Passing the refresh token revokes the whole **refresh family** - the chain of
+tokens that rotation minted from the original login, not just the one presented
+- so a stolen older token in that chain is dead too. The access token on the
+request is revoked as well.
+
+Calling it with no body still revokes the access token on the request and
+answers `200`. Logging out twice is not an error.
+
+## OAuth and social login
+
+The game client authenticates with the platform SDK (Google Sign-In, Apple
+Sign-In and so on) to obtain an ID token, then sends it to asobi for
+server-side validation.
 
 ```
 POST /api/v1/auth/oauth
@@ -67,8 +96,8 @@ POST /api/v1/auth/oauth
 
 1. Player taps "Sign in with Google" in your game
 2. Platform SDK returns an ID token (JWT)
-3. Game client sends the token to Asobi
-4. Asobi validates the JWT against the provider's JWKS
+3. The game client sends the token to asobi
+4. asobi validates the JWT against the provider's JWKS
 5. If the identity exists, the player is logged in
 6. If not, a new player account is created and linked
 
@@ -103,26 +132,53 @@ Returning player response:
 }
 ```
 
-### Error Responses
+### Error responses
 
-| Status | `error`                | Cause |
-|--------|------------------------|-------|
-| `400`  | `missing_required_fields` | `provider` or `token` missing |
-| `401`  | `invalid_token`        | Token failed provider validation |
-| `401`  | `unsupported_provider` | `provider` isn't one of the values below |
-| `403`  | *(registration reason)* | New-account registration is closed for this provider (`asobi_registration:check/1`) |
-| `409`  | `already_registering`  | Two first-sign-ins for the same provider identity raced; retry - the retry logs in to the account the other request created |
-| `500`  | `registration_failed`  | Account creation failed for a reason other than the race above (logged server-side) |
+| Status | `error.code` | Cause |
+|---|---|---|
+| `400` | `missing_field` | `provider` or `token` absent, or not a string |
+| `401` | `auth.provider_rejected` | The provider rejected the token. The specific reason is in `details.reason` |
+| `401` | `auth.unsupported_provider` | `provider` is not one of the values below, or the deployment configured no provider under that name |
+| `403` | `auth.registration_closed` | New-account registration is closed for this deployment |
+| `409` | `auth.already_registering` | Two first-sign-ins for the same provider identity raced; retry, and the retry logs in to the account the other request created |
+| `409` | `auth.provider_already_linked` | On `/auth/link`: that provider account already belongs to another player |
+| `500` | `auth.registration_failed` | Account creation failed for a reason other than the race above (logged server-side) |
 
-### Supported Providers
+Every provider-side rejection collapses to `auth.provider_rejected`, whatever
+went wrong. A bad signature, an expired token, a wrong audience, an unreachable
+JWKS and a Steam ticket the Steam Web API refused all produce that one code,
+with the distinguishing reason in `details.reason`:
 
-| Provider  | `provider` value | Issuer |
-|-----------|-----------------|--------|
-| Google    | `"google"`      | `https://accounts.google.com` |
-| Apple     | `"apple"`       | `https://appleid.apple.com` |
-| Microsoft | `"microsoft"`   | `https://login.microsoftonline.com/common/v2.0` |
-| Discord   | `"discord"`     | `https://discord.com` |
-| Steam     | `"steam"`       | N/A (custom, see below) |
+```json
+{"error": {"code": "auth.provider_rejected", "message": "...", "details": {"reason": "invalid_token"}}}
+```
+
+Branch on the code, log the reason. The reason is a server-side label - for
+Steam it is lifted from Steam's own error response - so it is not part of
+asobi's contract and can be reworded.
+
+### Supported providers
+
+The issuer column is the value **you configure**, not a default: asobi ships no
+OIDC provider configuration at all, so social login is entirely off until you
+add `oidc_providers`. These are the well-known issuers for each provider.
+
+| Provider | `provider` value | Issuer to configure |
+|---|---|---|
+| Google | `"google"` | `https://accounts.google.com` |
+| Apple | `"apple"` | `https://appleid.apple.com` |
+| Microsoft | `"microsoft"` | `https://login.microsoftonline.com/common/v2.0` |
+| Discord | `"discord"` | `https://discord.com` |
+| Steam | `"steam"` | not OIDC, see [Steam](#steam) below |
+
+A provider entry with no `issuer`, or with an issuer that is not `https://`,
+is **disabled at boot**. The node logs `oidc provider is missing issuer` or
+`oidc provider has a non-https issuer` naming the provider, then starts
+normally with that one provider dropped. You do not get an error at request
+time; you get `401 auth.unsupported_provider` for a provider you believe you
+configured, and the reason is in the boot log. The https rule is not optional:
+asobi pins the TLS trust anchor for the discovery and JWKS fetch, and a
+plaintext issuer bypasses that pin entirely.
 
 ### Configuration
 
@@ -132,25 +188,26 @@ Add provider credentials to your `sys.config`:
 {asobi, [
     {oidc_providers, #{
         google => #{
-            issuer => <<"https://accounts.google.com">>,
-            client_id => <<"YOUR_CLIENT_ID">>,
-            client_secret => <<"YOUR_CLIENT_SECRET">>
+            issuer => ~"https://accounts.google.com",
+            client_id => ~"YOUR_CLIENT_ID",
+            client_secret => ~"YOUR_CLIENT_SECRET"
         },
         apple => #{
-            issuer => <<"https://appleid.apple.com">>,
-            client_id => <<"YOUR_CLIENT_ID">>,
-            client_secret => <<"YOUR_CLIENT_SECRET">>
+            issuer => ~"https://appleid.apple.com",
+            client_id => ~"YOUR_CLIENT_ID",
+            client_secret => ~"YOUR_CLIENT_SECRET"
         }
     }}
 ]}
 ```
 
-Each provider needs a client ID and secret from the respective developer console:
+The map key is an atom and the value a map; anything else is logged and
+dropped. Each provider needs a client id and secret from its developer console:
 
-- **Google**: [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials
-- **Apple**: [Apple Developer](https://developer.apple.com/) → Certificates, Identifiers & Profiles → Service IDs
-- **Microsoft**: [Azure Portal](https://portal.azure.com/) → App registrations
-- **Discord**: [Discord Developer Portal](https://discord.com/developers/applications) → OAuth2
+- Google: [Google Cloud Console](https://console.cloud.google.com/), APIs and Services, Credentials
+- Apple: [Apple Developer](https://developer.apple.com/), Certificates Identifiers and Profiles, Service IDs
+- Microsoft: [Azure Portal](https://portal.azure.com/), App registrations
+- Discord: [Discord Developer Portal](https://discord.com/developers/applications), OAuth2
 
 ## Steam
 
@@ -163,15 +220,15 @@ curl -X POST http://localhost:8084/api/v1/auth/oauth \
   -d '{"provider": "steam", "token": "14000000..."}'
 ```
 
-Asobi validates the ticket via the Steam Web API and fetches the player's
+asobi validates the ticket via the Steam Web API and fetches the player's
 display name from their Steam profile.
 
 ### Configuration
 
 ```erlang
 {asobi, [
-    {steam_api_key, <<"YOUR_STEAM_WEB_API_KEY">>},
-    {steam_app_id, <<"YOUR_STEAM_APP_ID">>}
+    {steam_api_key, ~"YOUR_STEAM_WEB_API_KEY"},
+    {steam_app_id, ~"YOUR_STEAM_APP_ID"}
 ]}
 ```
 
@@ -187,18 +244,19 @@ the device, and presents it to resume the same account on every launch.
 Guest auth is **opt-in** and disabled by default. It turns on only when two
 independent parties agree (see [Configuration](#configuration-2)): the **game**
 declares `guest_auth = true` in its Lua config, and the **operator** supplies a
-verifier pepper. Either one alone leaves the endpoints returning `403`.
+verifier pepper. Either one alone leaves the endpoints returning
+`403 guest.disabled`.
 
 ### How it works
 
 1. On first launch the client generates a random `device_secret` (>= 32 bytes
    from a CSPRNG) and a stable `device_id`, and stores both on the device
    (Keychain on iOS, Keystore on Android, etc.).
-2. The client posts them to `POST /api/v1/auth/guest`. Asobi creates a player
+2. The client posts them to `POST /api/v1/auth/guest`. asobi creates a player
    and stores only a **salted, peppered HMAC** of the secret - never the secret
    itself - then returns a token pair.
 3. On later launches the client posts the same `device_id` + `device_secret`.
-   Asobi verifies the HMAC and resumes the **same** player (create-or-resume).
+   asobi verifies the HMAC and resumes the **same** player (create-or-resume).
 4. When the player is ready, they call `POST /api/v1/auth/guest/upgrade` with a
    username and password. The account becomes a normal password account and the
    device secret is revoked.
@@ -255,8 +313,8 @@ First call (new account):
 ```
 
 Later calls with the same credentials resume the same player and omit `created`.
-A wrong secret for a known `device_id` returns `401 invalid_device_secret` and
-never creates a second account.
+A wrong secret for a known `device_id` returns `401 guest.invalid_device_secret`
+and never creates a second account.
 
 ### Upgrade to a real account
 
@@ -297,66 +355,75 @@ Player id, progress, wallets, and inventory are preserved.
 | `401`  | `guest.already_upgraded`           | The account was already claimed; log in with its real credentials |
 | `403`  | `guest.disabled`                   | Guest auth is off - the game did not declare `guest_auth`, or no pepper is present |
 | `403`  | `auth.registration_closed`         | The deployment's registration posture refuses new accounts |
+| `403`  | `auth.password_registration_disabled` | From the shared registration guard. A closed deployment answers `auth.registration_closed` on the guest paths, so you should not see this one here |
 | `404`  | `player.not_found`                 | The upgrade token resolves to no player |
 | `409`  | `guest.device_already_registered`  | Two creates for the same device raced; retry - the retry resumes the existing guest |
 | `409`  | `guest.not_unclaimed`              | Upgrade target is not an unclaimed guest |
 | `409`  | `auth.username_taken`              | Upgrade username is already in use |
-| `500`  | `auth.password_registration_disabled` | Upgrade needs the password path, which this deployment disabled |
+| `422`  | `validation_failed`                | On upgrade: the new username or password failed validation. `details.fields` is per-field, for a form UI |
 | `500`  | `guest.create_failed`              | The player row could not be created |
 | `500`  | `internal`                         | The device resolves to an identity whose player no longer exists, or another server-side failure |
 | `503`  | `guest.capacity_reached`           | Global create limit or the unlinked-guest cap was hit |
 
 ### Configuration
 
-Guest auth is on **iff both** halves below are satisfied; either alone fails
-closed with `403 guest_auth_disabled`. The toggle belongs to the game, the pepper
-to the operator (ADR 0004: guest auth is declared by the game, peppered by the
-operator).
+Guest auth is on only if both halves below are satisfied; either alone fails
+closed with `403 guest.disabled`. The toggle belongs to the game, the pepper to
+the operator (ADR 0004).
 
 **1. The game declares the toggle.** `guest_auth` is a boolean game global,
-declared like `match_size` or `bots` - in `match.lua` for a single-mode game, or
+declared like `match_size` - in `match.lua` for a single-mode game, or
 `config.lua` for a multi-mode game:
 
 ```lua
 guest_auth = true
 ```
 
-**2. The operator supplies the pepper** (and any abuse controls). The pepper is
-the one value that must never live in a bundle:
+**2. The operator supplies the pepper** and any abuse controls:
 
 ```erlang
 {asobi, [
-    %% Required. A key-id -> pepper map (>= 32 bytes each). Keep old keys for the
-    %% guest retention window so existing guests can still resume after rotation.
-    {guest_verifier_pepper, #{<<"v1">> => <<"a-32-byte-or-longer-secret......">>}},
-    {guest_verifier_key_id, <<"v1">>},
+    %% Required. A key-id -> pepper map, each pepper >= 32 bytes. Keep old key
+    %% ids for the guest retention window so existing guests still resume
+    %% after a rotation.
+    {guest_verifier_pepper, #{~"v1" => ~"a-32-byte-or-longer-secret......"}},
+    {guest_verifier_key_id, ~"v1"},
 
     %% Optional abuse controls.
     {guest_unlinked_cap, 100000},        %% max unclaimed guests, or `infinity`
 
-    %% Optional retention. Unset = permanent guests (never reaped). Set to a
-    %% number of seconds to delete unclaimed guests older than that.
+    %% Optional retention. Unset = permanent guests (never reaped). A number of
+    %% seconds deletes unclaimed guests older than that.
     {guest_reap_after, 2592000}          %% e.g. 30 days
 ]}
 ```
 
-There is no `ASOBI_GUEST_AUTH` env var. A self-hoster owns both sides: set
-`guest_auth = true` in Lua and provide the pepper via
-`ASOBI_GUEST_VERIFIER_PEPPER`. On managed cloud the pepper is provisioned per
-environment, so the same bundle is off in dev (no pepper) and on in prod.
+A bare binary is accepted too, as shorthand for a single key: with
+`{guest_verifier_pepper, ~"a-32-byte-or-longer-secret......"}` every verifier
+uses it whatever key id is recorded. Prefer the map, because the bare form has
+no way to rotate.
 
-The pepper is a server-side secret that makes a stolen database of verifiers
-useless without it - store it like any other secret (env/secret manager), not in
-source. Guest creation is additionally bounded by a global rate limiter and the
-per-IP auth limiter.
+`guest_verifier_key_id` defaults to `~"v1"`, so a map keyed `~"v1"` needs no
+second setting. A pepper under 32 bytes is treated as absent and guest auth
+stays off.
 
-## Linking Providers
+**`guest_verifier_pepper` in `sys.config` is the only mechanism that works.**
+The image declares an `ASOBI_GUEST_VERIFIER_PEPPER` environment variable, but
+nothing substitutes it into the rendered configuration and nothing reads it: a
+deployment that sets only that variable gets `403 guest.disabled` on every
+guest call, forever. Set the `sys.config` key.
 
-Players can link additional providers to their existing account. This allows
-them to sign in from different platforms (e.g., link both Google and Steam to
-the same player).
+The pepper is a server-side secret that makes a stolen table of verifiers
+useless without it, so keep it out of source and out of your game bundle. Guest
+creation is additionally bounded by a global rate limiter and the per-IP auth
+limiter.
 
-### Link a Provider
+## Linking providers
+
+A player can link additional providers to an existing account and then sign in
+from any of them.
+
+### Link a provider
 
 Requires an authenticated session.
 
@@ -371,25 +438,32 @@ curl -X POST http://localhost:8084/api/v1/auth/link \
 {"provider": "discord", "provider_uid": "123456789", "linked": true}
 ```
 
-### Unlink a Provider
+A provider account already linked to someone else answers
+`409 auth.provider_already_linked`.
 
-Asobi prevents unlinking the last auth method to avoid locking the player out.
+### Unlink a provider
+
+**The provider goes in the query string, not the body.** A `DELETE` carrying a
+JSON body is not read at all and answers `400 missing_field`.
 
 ```bash
-curl -X DELETE http://localhost:8084/api/v1/auth/unlink \
-  -H 'Authorization: Bearer <access_token>' \
-  -H 'Content-Type: application/json' \
-  -d '{"provider": "discord"}'
+curl -X DELETE 'http://localhost:8084/api/v1/auth/unlink?provider=discord' \
+  -H 'Authorization: Bearer <access_token>'
 ```
 
 ```json
 {"success": true}
 ```
 
-## WebSocket Authentication
+asobi refuses to unlink the last auth method, so a player cannot lock
+themselves out: if the account has no password and no other linked provider,
+the call answers `422 auth.last_auth_method`. An unlinked provider answers
+`404 auth.identity_not_found`.
 
-After obtaining an access token (from any auth method), connect to the
-WebSocket and authenticate:
+## WebSocket authentication
+
+After obtaining an access token from any auth method, connect to the WebSocket
+and authenticate:
 
 ```json
 {
@@ -398,43 +472,26 @@ WebSocket and authenticate:
 }
 ```
 
-The token works the same regardless of which provider was used to obtain it.
+The token works the same regardless of which provider issued it.
 
-## SDK Integration
+## SDK integration
 
-The same Google sign-in flow across the SDKs. The platform SDK returns an ID
-token; hand it to Asobi and the access token is stored internally.
+Every SDK wraps these routes, stores the token pair and refreshes it on a 401.
+The platform SDK returns an ID token; hand it to `auth.oauth` with the provider
+name. See your SDK's README for the exact method names and the device-credential
+helper covered under [Guest](#guest-anonymous).
 
-<!-- tabs -->
-**Unity (C#)**
-```csharp
-string idToken = googleSignIn.IdToken;
-var response = await asobi.Auth.OAuth("google", idToken);
-// response.SessionToken is now set automatically
-```
-**Godot (GDScript)**
-```gdscript
-var id_token = google_sign_in.get_id_token()
-var result = await asobi.auth.oauth("google", id_token)
-# Session token is stored internally
-```
-**Dart / Flutter / Flame**
-```dart
-final idToken = googleSignIn.currentUser!.authentication.idToken!;
-final result = await asobi.auth.oauth('google', idToken);
-// Session token is stored internally
-```
-**Defold (Lua)**
-```lua
-local id_token = google_sign_in.get_id_token()
-asobi.auth.oauth("google", id_token, function(result)
-    -- Session token is stored internally
-end)
-```
-<!-- /tabs -->
+## Inspecting players
 
-## Next Steps
+The console has a Players screen, searchable by username and display name. It
+shows the ops projection only: `id`, `username`, `display_name`, `avatar_url`,
+`metadata`, `inserted_at` and `updated_at`. It does not show linked providers,
+guest status, device verifiers or tokens, and it cannot ban, reset a password,
+revoke a session or unlink anything - the ops plane is reads. See
+[Operator console](console.md).
 
-- [In-App Purchases](iap.md) -- receipt validation for Apple and Google
-- [REST API](rest-api.md) -- full API reference
-- [WebSocket Protocol](websocket-protocol.md) -- real-time message types
+## Next steps
+
+- [In-app purchases](iap.md) - receipt validation for Apple and Google
+- [REST API](rest-api.md) - full API reference
+- [WebSocket protocol](websocket-protocol.md) - real-time message types
