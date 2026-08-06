@@ -16,7 +16,7 @@ the equivalent public endpoint already exposes.
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kura/include/kura.hrl").
 
--export([players/1, player/1, matches/1, match/1, features/1]).
+-export([players/1, player/1, matches/1, match/1, features/1, stats/1]).
 -export([leaderboards/1, leaderboard_entries/1, matchmaker/1]).
 -export([economy_items/1, economy_item/1, economy_listings/1, economy_listing/1]).
 -export([chat_channels/1, chat_messages/1]).
@@ -100,6 +100,10 @@ chat_messages(_Req) ->
 -spec features(cowboy_req:req()) -> response().
 features(_Req) ->
     {json, asobi_ops_features:features()}.
+
+-spec stats(cowboy_req:req()) -> response().
+stats(_Req) ->
+    {json, asobi_ops_stats:collect()}.
 
 -spec leaderboards(cowboy_req:req()) -> response().
 leaderboards(Req) ->

@@ -221,6 +221,7 @@ ops_routes() ->
             {~"/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
             {~"/matches/:id", fun asobi_ops_controller:match/1, #{methods => [get, options]}},
             {~"/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}},
+            {~"/stats", fun asobi_ops_controller:stats/1, #{methods => [get, options]}},
             {~"/leaderboards", fun asobi_ops_controller:leaderboards/1, #{
                 methods => [get, options]
             }},

@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { readCookie, searchParams } from '../src/api.js';
-import { ago, count, duration, shortId, text, timestamp } from '../src/format.js';
+import { ago, bytes, count, duration, shortId, text, timestamp } from '../src/format.js';
 
 // What this covers and what it does not.
 //
@@ -95,4 +95,29 @@ test('shortId keeps both ends of a uuid so two rows are distinguishable', () => 
   assert.ok(id.startsWith(short.slice(0, 8)));
   assert.ok(id.endsWith(short.slice(-4)));
   assert.equal(shortId('short'), 'short');
+});
+
+// Binary units: erlang:memory/0 counts bytes the machine allocated, so an
+// operator reading "412.7 MiB" against a container limit set in MiB is
+// comparing like with like.
+test('bytes reports plain bytes below a KiB', () => {
+  assert.equal(bytes(0), '0 B');
+  assert.equal(bytes(512), '512 B');
+});
+
+test('bytes steps up through binary units', () => {
+  assert.equal(bytes(1024), '1.0 KiB');
+  assert.equal(bytes(1024 * 1024), '1.0 MiB');
+  assert.equal(bytes(1024 * 1024 * 1024), '1.0 GiB');
+});
+
+test('bytes keeps one decimal, not fifteen', () => {
+  assert.equal(bytes(432766976), '412.7 MiB');
+});
+
+test('bytes renders a dash for anything that is not a number', () => {
+  assert.equal(bytes(null), '—');
+  assert.equal(bytes(undefined), '—');
+  assert.equal(bytes(NaN), '—');
+  assert.equal(bytes('1024'), '—');
 });

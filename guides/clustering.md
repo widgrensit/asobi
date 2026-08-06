@@ -19,16 +19,35 @@ cluster-safe out of the box via the BEAM's process groups (`pg`).
   send is proxied via a `pg` lookup of the match's owning process.
 - **Storage** - Postgres is shared, so everything persistent is consistent
   across nodes.
-- **Matchmaker** - replicated: one `gen_server` per node, with tickets held in
-  Postgres, so any node can form a match.
 
 ## What isn't
+
+- **The matchmaker queue is per-node.** One `gen_server` per node, and its
+  tickets live in that process's own state - nothing is shared and nothing is
+  persisted. Two players who queue for the same mode against different nodes
+  will not be matched with each other, and each node forms matches only from
+  its own queue.
+
+  Plan for it. Either send all matchmaking traffic for a mode to one node, or
+  accept that effective queue depth is your real depth divided by node count -
+  which shows up as longer waits and weaker matches, not as an error. The ops
+  plane reports the queue of whichever node answered
+  (`GET /api/v1/ops/matchmaker`), so a cluster's console readings are a
+  fraction of the fleet-wide total.
 
 - **Matches and worlds do not migrate between nodes.** If the owning node dies,
   its active matches are lost (their state persists in Postgres for post-mortem,
   but play does not resume elsewhere).
 - **ETS caches** (zone entity snapshots, rate-limit counters) are per-node. Hot
   paths assume local access.
+- **The operator console's session is per-node**, and so is the secret its CSRF
+  token is derived from. A console login is only valid on the node that issued
+  it, so behind a round-robin load balancer roughly `(N-1)/N` of the console's
+  requests answer 403 and drop the operator back to the sign-in screen. Give
+  `/console` and `/api/v1/ops` a sticky route, or point the console at one node
+  directly.
+- **Rate limits are counted per-node.** The 5/s bucket on `/console/session`
+  that resists credential guessing becomes `5 x N` across a cluster.
 - **Luerl VMs** are per-process and per-node - there is no shared script state
   across nodes.
 

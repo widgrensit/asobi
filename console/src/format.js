@@ -35,6 +35,23 @@ export function count(value) {
   return typeof value === 'number' ? value.toLocaleString('en-GB') : '—';
 }
 
+// Binary units, because these are VM memory readings and erlang:memory/0
+// counts bytes the machine allocated, not bytes a marketing department
+// counted. One decimal above KiB - an operator wants "412.7 MiB", not
+// "412.68359375 MiB" and not "413 MiB".
+export function bytes(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let n = Math.abs(value);
+  let unit = 0;
+  while (n >= 1024 && unit < units.length - 1) {
+    n /= 1024;
+    unit += 1;
+  }
+  const sign = value < 0 ? '-' : '';
+  return unit === 0 ? `${sign}${n} B` : `${sign}${n.toFixed(1)} ${units[unit]}`;
+}
+
 export function text(value) {
   if (value === null || value === undefined || value === '') return '—';
   return String(value);

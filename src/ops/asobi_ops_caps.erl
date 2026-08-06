@@ -34,6 +34,7 @@ so a new ops route cannot ship untagged.
 -spec classes() -> [route()].
 classes() ->
     [
+        {get, [~"stats"], read},
         {get, [~"players"], read},
         {get, [~"players", '_'], read},
         {get, [~"matches"], read},

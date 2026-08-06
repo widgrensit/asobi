@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { config } from './config.js';
 import { login } from './api.js';
 import { useDebounced, useListParams, useOps } from './hooks.js';
-import { ago, count, duration, shortId, text, timestamp } from './format.js';
+import { ago, bytes, count, duration, shortId, text, timestamp } from './format.js';
 import {
   Bool,
   DataTable,
@@ -184,14 +184,25 @@ export function Login({ onSignedIn }) {
 export function Overview() {
   const features = useOps('/features', {});
   const queue = useOps('/matchmaker', { limit: 5 }, { poll: 5000 });
+  // Two seconds, matching what the old asobi_admin dashboard pushed. These are
+  // VM reads with no database behind them, so the endpoint stays answerable
+  // when Postgres is the thing that is unwell - which is when an operator is
+  // most likely to be looking at this page.
+  const runtime = useOps('/stats', {}, { poll: 2000 });
   const core = features.data?.data?.core;
   const extensions = features.data?.data?.extensions || [];
   const summary = queue.data?.queue;
+  const vm = runtime.data?.data;
 
   return (
     <Screen title="Overview" subtitle="What this node is, and what it is doing right now.">
       <ErrorBanner error={features.error || queue.error} onRetry={features.refresh} />
       <div className="stats">
+        <Stat
+          label="Online players"
+          value={vm && vm.online_players !== null ? count(vm.online_players) : '—'}
+          hint={vm && vm.online_players === null ? 'presence unavailable' : null}
+        />
         <Stat label="Node version" value={core ? core.version : '—'} hint={core ? core.name : null} />
         <Stat
           label="In queue"
@@ -205,6 +216,29 @@ export function Overview() {
         />
         <Stat label="Extensions" value={count(extensions.length)} hint={extensions.length ? null : 'none installed'} />
       </div>
+
+      {/* The node name is here rather than buried in a detail row because
+          asobi clusters, and every node serves its own copy of this console.
+          Behind a load balancer these numbers are whichever node answered -
+          a reading you cannot act on unless you know which one that was. */}
+      <section className="card">
+        <h2 className="card-title">Runtime</h2>
+        <p className="card-note">
+          This node only. {vm ? <Mono>{vm.node}</Mono> : 'Waiting for the first sample.'}
+        </p>
+        <Detail
+          fields={[
+            ['Uptime', vm ? duration(vm.uptime_ms) : '—'],
+            ['Processes', vm ? `${count(vm.process_count)} of ${count(vm.process_limit)}` : '—'],
+            ['Run queue', vm ? count(vm.run_queue) : '—'],
+            ['Schedulers', vm ? count(vm.scheduler_count) : '—'],
+            ['Memory, total', vm ? bytes(vm.memory_total) : '—'],
+            ['Memory, processes', vm ? bytes(vm.memory_processes) : '—'],
+            ['Memory, ETS', vm ? bytes(vm.memory_ets) : '—'],
+            ['Memory, binaries', vm ? bytes(vm.memory_binary) : '—'],
+          ]}
+        />
+      </section>
 
       <section className="card">
         <h2 className="card-title">Core capabilities</h2>
