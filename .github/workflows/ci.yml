@@ -7,6 +7,12 @@ on:
   pull_request:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  # Manual re-run. CI here only triggers on push and pull_request, so when a
+  # run is lost - a cancelled job, an Actions incident draining a backlog -
+  # there is no way to ask for another against main without pushing to it,
+  # which the PR-only workflow forbids. During the 2026-08-06 Actions outage
+  # main sat with no completed CI run for hours for exactly this reason.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
