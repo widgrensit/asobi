@@ -9,8 +9,13 @@ name: Protocol sync
 # them: an SDK may need a dispatch case for the new event, and that is a human
 # decision in that repo.
 #
-# Needs SDK_SYNC_TOKEN, a fine-grained PAT with contents:write and
-# pull-requests:write on the seven SDK repos.
+# Authenticates as the `asobi-protocol-sync` GitHub App, installed on the seven
+# SDK repos with Contents and Pull requests set to read/write. Needs
+# SDK_SYNC_APP_ID (variable) and SDK_SYNC_APP_PRIVATE_KEY (secret).
+#
+# An App rather than a PAT because a PAT belongs to a person and expires: the
+# ghcr pull secret already took the fleet down once by lapsing at 30 days. The
+# App is owned by the org and mints a token per run that dies with the job.
 #
 # Without it this FAILS. It used to log the reason and pass, on the reasoning
 # that a build nobody can fix should not go red - but the token was never set,
@@ -20,7 +25,9 @@ name: Protocol sync
 # be copied across by hand on 2026-08-05.
 #
 # A green run that did nothing is worse than a red one. This repo's owner is
-# the person who can add the secret, so red is the signal that gets it fixed.
+# the person who can fix the credentials, so red is the signal that gets it
+# fixed - including the case where the App is uninstalled from an SDK repo, or
+# a new SDK is added to the matrix and nobody installs it there.
 
 on:
   push:
@@ -56,23 +63,34 @@ jobs:
       - name: Check out asobi
         uses: actions/checkout@v5
 
-      - name: Check for the sync token
+      - name: Check the App credentials are present
         env:
-          TOKEN: ${{ secrets.SDK_SYNC_TOKEN }}
+          APP_ID: ${{ vars.SDK_SYNC_APP_ID }}
+          APP_KEY: ${{ secrets.SDK_SYNC_APP_PRIVATE_KEY }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::SDK_SYNC_TOKEN is not set, so ${{ matrix.repo }} was NOT synced."
+          if [ -z "$APP_ID" ] || [ -z "$APP_KEY" ]; then
+            echo "::error::asobi-protocol-sync App credentials missing, so ${{ matrix.repo }} was NOT synced."
             echo "The corpus changed and this SDK's vendored copy is now behind."
-            echo "Create a fine-grained PAT with contents:write and pull-requests:write"
-            echo "on the seven SDK repos and add it as the SDK_SYNC_TOKEN secret."
+            echo "Set SDK_SYNC_APP_ID (variable) and SDK_SYNC_APP_PRIVATE_KEY (secret)."
             exit 1
           fi
+
+      # Scoped to the one repo this matrix leg touches, so a leg cannot write to
+      # the other six. Expires with the job.
+      - name: Mint a token for ${{ matrix.repo }}
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.SDK_SYNC_APP_ID }}
+          private-key: ${{ secrets.SDK_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: asobi-${{ matrix.sdk }}
 
       - name: Check out ${{ matrix.repo }}
         uses: actions/checkout@v5
         with:
           repository: ${{ matrix.repo }}
-          token: ${{ secrets.SDK_SYNC_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           path: sdk
 
       - name: Sync the corpus
@@ -92,7 +110,7 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           path: sdk
-          token: ${{ secrets.SDK_SYNC_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           branch: chore/protocol-fixtures
           base: main
           commit-message: "chore: sync the protocol fixtures from asobi"
