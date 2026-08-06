@@ -27,4 +27,11 @@ export const config = {
   nodeVersion: meta('asobi-node-version') || 'unknown',
   sameOrigin: base === '',
   token,
+  // Which deployment this console is pointed at. Empty when unconfigured,
+  // which is the single-deployment case where a label would only be noise.
+  label: meta('asobi-target-label'),
+  // Require confirmation before anything destructive. The failure mode of
+  // running several consoles at once is acting on prod while believing you
+  // are in staging.
+  production: meta('asobi-target-production') === 'true',
 };

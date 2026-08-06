@@ -40,9 +40,13 @@ render(Nonce, #{script := Script, styles := Styles}, Version) ->
         ~"<meta charset=\"utf-8\">\n",
         ~"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
         ~"<meta name=\"robots\" content=\"noindex, nofollow\">\n",
-        ~"<title>asobi ops</title>\n",
+        ~"<title>",
+        escape(title()),
+        ~"</title>\n",
         meta(~"asobi-api-base", api_base()),
         meta(~"asobi-node-version", Version),
+        meta(~"asobi-target-label", label()),
+        meta(~"asobi-target-production", production()),
         [stylesheet(Style) || Style <- Styles],
         ~"<script type=\"module\" nonce=\"",
         escape(Nonce),
@@ -92,6 +96,50 @@ api_base() ->
     case asobi_console_csp:api_base() of
         {ok, Base} -> Base;
         none -> ~""
+    end.
+
+%% Which deployment this console is pointed at, for an operator with several
+%% tabs open. Configured per deployment (`console_label`); the tab title is the
+%% only place a browser will show it without the operator clicking anything,
+%% which is exactly the moment they are choosing between tabs.
+%%
+%% Not derived from the node name: a self-hoster's "staging" and a cloud
+%% environment's "prod" are the names an operator thinks in, and neither is
+%% `asobi@10.0.0.4`.
+-spec label() -> binary().
+label() ->
+    case application:get_env(asobi, console_label) of
+        {ok, Label} when is_binary(Label), Label =/= ~"" -> Label;
+        {ok, Label} when is_list(Label), Label =/= "" -> unicode:characters_to_binary(Label);
+        _ -> ~""
+    end.
+
+-spec title() -> binary().
+title() ->
+    case label() of
+        ~"" -> ~"asobi ops";
+        Label -> <<"asobi ops - ", Label/binary>>
+    end.
+
+%% Marks a deployment an operator should be careful in. Today the console only
+%% colours the label with it.
+%%
+%% Core ops is read-only, but `/ext/:extension/:action` already accepts POST,
+%% PUT and DELETE, so an installed extension can expose a destructive action
+%% right now. Those are what the flag is ultimately for: confirm before
+%% anything in the `player_data` or `config` classes. Shipping the declaration
+%% ahead of the guard means a deployment that says it is production already
+%% does so when the guard arrives, rather than every operator having to go back
+%% and set it afterwards.
+%%
+%% Acting on prod while believing you are in staging is the failure mode of
+%% running several consoles at once, and it is the same risk for a self-hoster
+%% as for a cloud tenant.
+-spec production() -> binary().
+production() ->
+    case application:get_env(asobi, console_production, false) of
+        true -> ~"true";
+        _ -> ~"false"
     end.
 
 -spec meta(binary(), binary()) -> iolist().

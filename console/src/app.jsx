@@ -67,7 +67,15 @@ export default function App() {
     <HashRouter>
       <div className="shell">
         <nav className="nav">
-          <div className="brand">asobi ops</div>
+          {/* The label is the first thing in the shell, and production is
+              coloured, because an operator with several consoles open picks a
+              tab before they read anything else in it. */}
+          <div className="brand">
+            asobi ops
+            {config.label ? (
+              <span className={config.production ? 'target target-prod' : 'target'}>{config.label}</span>
+            ) : null}
+          </div>
           <ul className="nav-list">
             {NAV.map(([to, label]) => (
               <li key={to}>

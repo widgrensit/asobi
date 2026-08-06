@@ -137,6 +137,22 @@ a {
   color: var(--coral-deep);
 }
 
+.target {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--ink-soft, #666);
+}
+
+/* Production is the one target where acting by mistake is expensive, so it is
+   the one target that is coloured rather than quiet. */
+.target-prod {
+  color: var(--coral-deep);
+}
+
 .nav-list {
   list-style: none;
   display: flex;

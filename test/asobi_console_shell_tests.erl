@@ -93,3 +93,61 @@ a_hostile_version_string_cannot_break_out_of_its_attribute_test() ->
 
 restore({ok, Value}) -> application:set_env(asobi, console_api_base, Value);
 restore(undefined) -> application:unset_env(asobi, console_api_base).
+
+%%--------------------------------------------------------------------
+%% Target label
+%%--------------------------------------------------------------------
+
+%% An operator running several consoles needs to know which one a tab is.
+%% The label reaches the page through a meta tag like every other runtime
+%% value, so it costs the CSP nothing.
+
+with_env(Key, Value, Fun) ->
+    Prev = application:get_env(asobi, Key),
+    application:set_env(asobi, Key, Value),
+    try
+        Fun()
+    after
+        case Prev of
+            {ok, Old} -> application:set_env(asobi, Key, Old);
+            undefined -> application:unset_env(asobi, Key)
+        end
+    end.
+
+unlabelled_deployments_keep_the_plain_title_test() ->
+    with_env(console_label, undefined, fun() ->
+        application:unset_env(asobi, console_label),
+        Html = render(),
+        ?assertEqual(1, occurrences(Html, ~"<title>asobi ops</title>")),
+        ?assertEqual(1, occurrences(Html, ~"name=\"asobi-target-label\" content=\"\""))
+    end).
+
+a_label_reaches_the_tab_title_test() ->
+    with_env(console_label, ~"staging", fun() ->
+        Html = render(),
+        ?assertEqual(1, occurrences(Html, ~"<title>asobi ops - staging</title>")),
+        ?assertEqual(1, occurrences(Html, ~"name=\"asobi-target-label\" content=\"staging\""))
+    end).
+
+%% The label is operator-supplied config that lands in an attribute and in the
+%% title. Both are escaped by the same helper every other value uses.
+a_label_cannot_break_out_of_its_attribute_test() ->
+    with_env(console_label, ~"\"><script>alert(1)</script>", fun() ->
+        Html = render(),
+        ?assertEqual(0, occurrences(Html, ~"<script>alert(1)</script>")),
+        %% Twice: the label lands in the title and in the meta attribute, and
+        %% both go through the same escape.
+        ?assertEqual(2, occurrences(Html, ~"&lt;script&gt;")),
+        ?assertEqual(0, occurrences(Html, ~"content=\"\"><script"))
+    end).
+
+production_defaults_to_false_test() ->
+    application:unset_env(asobi, console_production),
+    Html = render(),
+    ?assertEqual(1, occurrences(Html, ~"name=\"asobi-target-production\" content=\"false\"")).
+
+production_is_marked_when_set_test() ->
+    with_env(console_production, true, fun() ->
+        Html = render(),
+        ?assertEqual(1, occurrences(Html, ~"name=\"asobi-target-production\" content=\"true\""))
+    end).
