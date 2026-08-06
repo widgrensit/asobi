@@ -57,6 +57,15 @@ jobs:
             type=sha,format=long
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            # {{major}} is "0" on a 0.x line, and that tag already exists from a
+            # workflow deleted in #45 - orphaned, still pointing at an April 2026
+            # pre-Lua-merge, pre-console image that boots and looks fine. Emitting
+            # it here is what stops a stale tag serving four-month-old code to
+            # anyone who pinned the major.
+            #
+            # It is still a weak pin on 0.x, where minors are not compatible.
+            # guides/self-hosting.md tells readers to pin the minor or a digest.
+            type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
