@@ -131,13 +131,13 @@ A client calls a declared method over the WebSocket:
 
 ```json
 {"type": "rpc.call", "cid": "c-1",
- "payload": {"protocol": 1, "method": "quests.claim", "params": {"quest_id": "q-1"}}}
+ "payload": {"protocol": 1, "method": "quests.claim", "params": {"quest_key": "daily_kills"}}}
 ```
 
 and gets back one of:
 
 ```json
-{"type": "rpc.ok",    "cid": "c-1", "payload": {"result": {"reward": 100}}}
+{"type": "rpc.ok",    "cid": "c-1", "payload": {"result": {"quest_key": "daily_kills", "currency": "gold", "amount": 100}}}
 {"type": "rpc.error", "cid": "c-1", "payload": {"error": {"code": "quests.already_claimed", "message": "...", "details": {}}}}
 ```
 
@@ -159,7 +159,7 @@ You rarely build that frame by hand. Every client SDK wraps it, generates the
 ```js
 // asobi-js: resolves with `result`, rejects with an AsobiRpcError
 try {
-  const { reward } = await ws.rpc("quests.claim", { quest_id: "q-1" });
+  const { currency, amount } = await ws.rpc("quests.claim", { quest_key: "daily_kills" });
 } catch (e) {
   if (e.code === "quests.already_claimed") { /* domain outcome */ }
 }
@@ -167,8 +167,8 @@ try {
 
 ```gdscript
 # asobi-godot: the reply arrives on the callable, keyed by the returned cid
-realtime.rpc_call("quests.claim", {"quest_id": "q-1"}, func(ok, data):
-    if ok: print(data["reward"])
+realtime.rpc_call("quests.claim", {"quest_key": "daily_kills"}, func(ok, data):
+    if ok: print(data["amount"], data["currency"])
     else:  print(data["code"]))
 ```
 
@@ -185,7 +185,7 @@ TOKEN=$(curl -sX POST https://your-host/api/v1/auth/login \
 
 printf '%s\n%s\n' \
   "{\"type\":\"session.connect\",\"cid\":\"1\",\"payload\":{\"token\":\"$TOKEN\"}}" \
-  '{"type":"rpc.call","cid":"2","payload":{"protocol":1,"method":"quests.claim","params":{"quest_id":"q-1"}}}' \
+  '{"type":"rpc.call","cid":"2","payload":{"protocol":1,"method":"quests.claim","params":{"quest_key":"daily_kills"}}}' \
   | websocat wss://your-host/ws
 ```
 
@@ -207,11 +207,12 @@ The handler is `(Params, Ctx)`, which is why the arity in `rpc/0` is always 2:
 
 ```erlang
 -spec claim(asobi_rpc:params(), asobi_rpc:ctx()) -> asobi_rpc:reply().
-claim(#{~"quest_id" := QuestId}, #{player_id := PlayerId}) ->
-    case asobi_quests:claim(PlayerId, QuestId) of
-        {ok, Reward}               -> {ok, #{reward => Reward}};
-        {error, already_claimed}   -> {error, ~"quests.already_claimed"};
-        {error, {no_such, Id}}     -> {error, ~"quests.not_found", #{quest_id => Id}}
+claim(#{~"quest_key" := QuestKey}, #{player_id := PlayerId}) ->
+    case asobi_quests:claim(PlayerId, QuestKey) of
+        {ok, #{currency := C, amount := A}} ->
+            {ok, #{quest_key => QuestKey, currency => C, amount => A}};
+        {error, already_claimed} -> {error, ~"quests.already_claimed"};
+        {error, {no_such, Key}}  -> {error, ~"quests.not_found", #{quest_key => Key}}
     end.
 ```
 
