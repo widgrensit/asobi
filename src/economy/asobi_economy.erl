@@ -147,8 +147,8 @@ purchase(PlayerId, ListingId) when is_binary(PlayerId), is_binary(ListingId) ->
 %% Must be called inside an open transaction.
 -spec acquire_wallet_lock(binary(), binary()) -> ok.
 acquire_wallet_lock(PlayerId, Currency) ->
-    %% pg_advisory_xact_lock returns void, which pgo can't decode — wrap
-    %% it in a subselect so the row pgo sees is plain int.
+    %% pg_advisory_xact_lock returns void, which the driver can't decode -
+    %% wrap it in a subselect so the row it sees is plain int.
     SQL =
         ~"SELECT 1 AS locked FROM (SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))) AS _l",
     #{rows := [_ | _]} = kura_db:query(asobi_repo, SQL, [PlayerId, Currency]),

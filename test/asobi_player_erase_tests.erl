@@ -54,8 +54,8 @@ cleanup(_) ->
     ok.
 
 %% A transaction that runs its fun inline, so the assertions inside `steps/1`
-%% are the thing under test rather than something pgo would have to be present
-%% to exercise.
+%% are the thing under test rather than something a live driver would have to
+%% be present to exercise.
 expect_player_present() ->
     meck:expect(asobi_repo, transaction, fun(Fun) -> Fun() end),
     meck:expect(asobi_repo, get, fun(asobi_player, ?PLAYER) ->
