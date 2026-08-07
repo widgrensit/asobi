@@ -18,6 +18,8 @@ on:
       - 'src/asobi_auth_error.erl'
       - 'scripts/check-error-drift.sh'
       - 'scripts/check-archived-refs.sh'
+      - 'scripts/check-telemetry-drift.sh'
+      - 'src/**'
       - 'guides/**'
       - 'README.md'
       - 'docs/ARCHITECTURE.md'
@@ -32,6 +34,8 @@ on:
       - 'src/asobi_auth_error.erl'
       - 'scripts/check-error-drift.sh'
       - 'scripts/check-archived-refs.sh'
+      - 'scripts/check-telemetry-drift.sh'
+      - 'src/**'
       - 'guides/**'
       - 'README.md'
       - 'docs/ARCHITECTURE.md'
@@ -55,3 +59,6 @@ jobs:
 
       - name: No user-facing doc points at an archived repository
         run: scripts/check-archived-refs.sh
+
+      - name: Telemetry events match the observability guide
+        run: scripts/check-telemetry-drift.sh
