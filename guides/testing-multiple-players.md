@@ -47,8 +47,8 @@ interfere:
 player. Two lines, no storage plumbing, no per-instance setup. This is the right
 default for a dev build.
 
-### Defold
-
+<!-- tabs -->
+**Defold**
 ```lua
 local asobi = require("asobi.client")
 local device = require("asobi.device")
@@ -69,9 +69,7 @@ function init(self)
 	end)
 end
 ```
-
-### Godot
-
+**Godot**
 ```gdscript
 func _ready() -> void:
 	Asobi.host = "localhost"
@@ -87,6 +85,7 @@ func _ready() -> void:
 	print("player_id: %s" % resp.player_id)
 	Asobi.realtime.connect_to_server()
 ```
+<!-- /tabs -->
 
 Every run leaves another guest account on the node. That is harmless locally,
 and `guest_reap_after` clears unclaimed guests on a real deployment. Ship
