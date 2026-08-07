@@ -123,8 +123,9 @@ services:
       ASOBI_CORS_ORIGINS: "*"
 ```
 
-The image was renamed from `ghcr.io/widgrensit/asobi_lua`; the old name still
-publishes for now, so change your compose file when convenient.
+The image was renamed from `ghcr.io/widgrensit/asobi_lua`. That name is no
+longer rebuilt - tags already published keep working and are not going away,
+but they will not get fixes - so change your compose file.
 
 `ASOBI_CORS_ORIGINS` has no default. Left unset, the node answers with an empty
 `Access-Control-Allow-Origin` and every browser request fails with nothing in

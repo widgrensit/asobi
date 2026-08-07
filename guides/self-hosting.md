@@ -170,8 +170,9 @@ database password, so Postgres and asobi cannot drift apart. `ops_secret.txt`
 is mounted as a file rather than passed as a variable, which keeps it out of
 `docker inspect` and out of the process environment.
 
-The image was renamed from `ghcr.io/widgrensit/asobi_lua`; the old name still
-publishes for now, so change your compose file when convenient.
+The image was renamed from `ghcr.io/widgrensit/asobi_lua`. That name is no
+longer rebuilt - tags already published keep working and are not going away,
+but they will not get fixes - so change your compose file.
 
 ```yaml
 services:

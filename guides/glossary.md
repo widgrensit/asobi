@@ -28,8 +28,8 @@ blocks, which are still read - see
 [Which application key](configuration.md#which-application-key).
 
 The one stale `asobi_lua` is the image name. `ghcr.io/widgrensit/asobi_lua`
-still publishes, so an existing compose file keeps working; change it to
-`ghcr.io/widgrensit/asobi` when convenient.
+is no longer rebuilt: tags already published keep working and are never
+deleted, but they receive no fixes. Use `ghcr.io/widgrensit/asobi`.
 
 ## Client SDKs
 
