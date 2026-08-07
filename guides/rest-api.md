@@ -121,8 +121,9 @@ POST /api/v1/worlds         Create a world
 ```
 
 `GET /api/v1/worlds` accepts `mode` (ignored above 64 bytes) and
-`has_capacity=true`. Only worlds whose mode sets `listed` (the default) are
-returned. Results are cached for 500ms.
+`has_capacity=true`. Only worlds whose mode sets `listed` (the default for a
+world; set `listed = false` in the script to hide one) are returned. Results
+are cached for 500ms.
 
 `POST /api/v1/worlds` returns **201** with the world info, **429**
 `world.player_limit_reached` when the player is at their per-player cap, and
@@ -152,8 +153,9 @@ and `limit` (1-200, default 50), newest first.
 
 `GET /api/v1/matches/live` enumerates running match processes and is what a
 lobby browser wants. It accepts `mode` and `has_capacity=true`. Matches are
-**unlisted by default** - a mode opts in with `listed => true` - so an empty
-result usually means no mode has opted in yet.
+**unlisted by default** - a mode opts in with `listed = true` (a Lua global, or
+`listed => true` in the operator's `game_modes` config) - so an empty result
+usually means no mode has opted in yet.
 
 Neither returns the player roster. As with worlds, joining is `match.join`
 over WS.

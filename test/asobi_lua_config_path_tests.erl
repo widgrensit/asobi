@@ -58,6 +58,30 @@ double_slash_rejected_test() ->
         asobi_lua_config:safe_join(?BASE, ~"arena//match.lua")
     ).
 
+newline_in_segment_rejected_test() ->
+    %% A newline in a filename is legal on Linux and survives a tar, and the
+    %% resolved path is logged as a charlist, which OTP's default formatter
+    %% prints with ~ts rather than escaping. Without this a bundle names a file
+    %% "a\nlevel=emergency msg=...\n.lua" and forges whole operator log lines.
+    ?assertMatch(
+        {error, _},
+        asobi_lua_config:safe_join(?BASE, ~"a\nlevel=emergency msg=forged\n.lua")
+    ).
+
+control_char_in_segment_rejected_test() ->
+    %% The whole C0 range plus DEL, not just newline: CR splits a line just as
+    %% well, and ESC drives a terminal reading the log.
+    ?assertMatch({error, _}, asobi_lua_config:safe_join(?BASE, ~"arena/ma\rtch.lua")),
+    ?assertMatch({error, _}, asobi_lua_config:safe_join(?BASE, ~"arena/ma\x{1b}[2Jtch.lua")),
+    ?assertMatch({error, _}, asobi_lua_config:safe_join(?BASE, ~"arena/ma\x{7f}tch.lua")),
+    ?assertMatch({error, _}, asobi_lua_config:safe_join(?BASE, ~"arena/ma\x{00}tch.lua")).
+
+ordinary_path_still_accepted_test() ->
+    %% The control-char guard must not reject anything that was legal before:
+    %% spaces, dots, dashes and non-ASCII names are all fine.
+    ?assertMatch({ok, _}, asobi_lua_config:safe_join(?BASE, ~"my modes/arena-2.lua")),
+    ?assertMatch({ok, _}, asobi_lua_config:safe_join(?BASE, ~"モード/match.lua")).
+
 base_with_trailing_slash_handled_test() ->
     %% Operator-supplied GameDir may or may not have a trailing slash.
     %% Both forms must yield the same normalised result and pass the

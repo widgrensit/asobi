@@ -9,8 +9,9 @@ choosing a match actually needs.
 
 Matches are **unlisted by default**. A match spawned by the matchmaker is
 already assigned to its players and has no reason to appear in a browser,
-so a mode opts in with `listed => true`. This is the inverse of worlds,
-which default to listed because their browser already shipped.
+so a mode opts in with `listed = true` (a Lua global, or `listed => true` in
+the operator's `game_modes` config). This is the inverse of worlds, which
+default to listed because their browser already shipped.
 """.
 
 -export([list_matches/0, list_matches/1, list_matches_cached/1]).

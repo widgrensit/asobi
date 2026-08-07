@@ -201,9 +201,22 @@ log_invalid_registration(Value) ->
         expected => [~"open", ~"oauth_only", ~"closed"]
     }).
 
+%% Every value passed here comes out of the game's own script, so its size is
+%% chosen by whoever wrote the bundle. `listed = string.rep("A", 4000000)` is a
+%% four-megabyte log line per load, and the config watcher reloads on any mtime
+%% change - so this bounds both the binary and the printed term (~0P with a
+%% depth, not ~p, which is unbounded on a deep structure).
+-define(MAX_LOGGED_VALUE, 200).
+
 -spec describe(term()) -> binary().
-describe(V) when is_binary(V) -> V;
-describe(V) -> iolist_to_binary(io_lib:format("~p", [V])).
+describe(V) when is_binary(V) -> elide(V);
+describe(V) -> elide(iolist_to_binary(io_lib:format("~0P", [V, 8]))).
+
+-spec elide(binary()) -> binary().
+elide(B) when byte_size(B) =< ?MAX_LOGGED_VALUE ->
+    B;
+elide(<<Head:?MAX_LOGGED_VALUE/binary, _/binary>> = B) ->
+    <<Head/binary, "... (", (integer_to_binary(byte_size(B)))/binary, " bytes)">>.
 
 %% Evaluate the game's config script (config.lua when present, else match.lua)
 %% in a sandboxed Luerl state so the deployment-wide globals can be read off it.
@@ -344,11 +357,8 @@ read_match_globals(ScriptPath, St) ->
             Config11 = maybe_add_int(Config10, zone_size, ZoneSize),
             Config12 = maybe_add_non_neg_int(Config11, view_radius, ViewRadius),
             Config13 = maybe_add_bool(Config12, persistent, Persistent),
-            %% Absent globals leave the key out entirely rather than writing a
-            %% default, so the two discovery defaults stay where they are -
-            %% matches unlisted (asobi_matchmaker), worlds listed
-            %% (asobi_game_modes:world_config/1). A script that never mentions
-            %% these produces a mode map identical to before.
+            %% The per-kind defaults stay downstream: matches unlisted
+            %% (asobi_matchmaker), worlds listed (asobi_game_modes:world_config/1).
             Config14 = maybe_add_bool(Config13, listed, Listed),
             Config15 = maybe_add_bool(Config14, quick_play, QuickPlay),
             {ok, Config15};
@@ -523,10 +533,25 @@ is_safe_relative(Bin) ->
             (<<>>) -> false;
             (~"..") -> false;
             (~".") -> false;
-            (_) -> true
+            (Seg) when is_binary(Seg) -> not has_control_char(Seg);
+            (_) -> false
         end,
         Parts
     ).
+
+%% The manifest picks these path segments, and the resolved path is then logged
+%% as a charlist, which OTP's default formatter prints with ~ts rather than
+%% escaping. A newline in a filename is legal on Linux and survives a tar, so
+%% without this a bundle forges whole operator log lines by naming a file
+%% "a\nlevel=emergency msg=...\n.lua". Rejected at the boundary rather than
+%% escaped at each log site.
+-spec has_control_char(binary()) -> boolean().
+has_control_char(<<C, _/binary>>) when C < 32; C =:= 127 ->
+    true;
+has_control_char(<<_, Rest/binary>>) ->
+    has_control_char(Rest);
+has_control_char(<<>>) ->
+    false.
 
 %% --- Lua helpers ---
 
@@ -620,23 +645,41 @@ read_global_bool(Name, St) ->
 %% `listed = 0` is the case that matters: 0 is truthy in Lua, so writing it to
 %% mean "off" is a plausible mistake, and it is not a Lua boolean.
 read_global_bool_strict(Name, ScriptPath, St) ->
-    case luerl:get_table_keys([Name], St) of
+    %% luerl:get_table_keys/2 catches only error:{lua_error,_,_}, and reading a
+    %% global runs any __index metamethod the script installed. Same guard as
+    %% asobi_lua_loader:is_defined/2, so a metamethod cannot take the loader
+    %% down through a path luerl does not catch.
+    try luerl:get_table_keys([Name], St) of
         {ok, true, _} ->
             true;
         {ok, false, _} ->
             false;
         {ok, nil, _} ->
             undefined;
-        _ ->
-            ?LOG_WARNING(#{
-                event => lua_config_global_ignored,
-                script => ScriptPath,
-                global => Name,
-                reason => not_a_boolean,
-                hint => ~"expected true or false; the mode default applies"
-            }),
-            undefined
+        {ok, Val, _} ->
+            %% Naming the offending value is the whole point: the author has to
+            %% find which of several candidate lines produced it.
+            warn_ignored_global(Name, ScriptPath, not_a_boolean, describe(Val));
+        Other ->
+            %% Not a failed type match but a failed read. Claiming
+            %% not_a_boolean here would report a reason that is not true.
+            warn_ignored_global(Name, ScriptPath, unreadable, describe(Other))
+    catch
+        Class:Reason ->
+            warn_ignored_global(Name, ScriptPath, unreadable, describe({Class, Reason}))
     end.
+
+-spec warn_ignored_global(binary(), file:filename_all(), atom(), binary()) -> undefined.
+warn_ignored_global(Name, ScriptPath, Reason, Value) ->
+    ?LOG_WARNING(#{
+        event => lua_config_global_ignored,
+        script => ScriptPath,
+        global => Name,
+        reason => Reason,
+        value => Value,
+        hint => ~"expected true or false; the mode default applies"
+    }),
+    undefined.
 
 read_global_string(Name, St) ->
     case luerl:get_table_keys([Name], St) of

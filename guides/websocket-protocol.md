@@ -173,7 +173,8 @@ membership are separate surfaces.
 
 **Matches are unlisted by default.** A matchmaker-spawned match is already
 assigned to its players, so it has no reason to appear in a browser. A mode
-opts in with `listed => true`. This is the inverse of worlds, which default
+opts in with `listed = true` (a Lua global, or `listed => true` in the
+operator's `game_modes` config). This is the inverse of worlds, which default
 to listed.
 
 Distinct from `GET /api/v1/matches`, which reads the match *record* table

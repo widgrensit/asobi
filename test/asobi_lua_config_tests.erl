@@ -78,6 +78,10 @@ config_test_() ->
             fun discovery_flags_absent_keep_defaults/0},
         {"a non-boolean listed is ignored and warns rather than failing open",
             fun discovery_flag_non_boolean_warns/0},
+        {"a non-boolean quick_play is ignored and warns, and stays true downstream",
+            fun quick_play_non_boolean_warns/0},
+        {"a huge global value is elided in the warning rather than logged whole",
+            fun oversized_global_value_elided/0},
         {"guest_auth = true global enables the asobi guest_auth flag",
             fun guest_auth_global_enables/0},
         {"guest_auth absent leaves the flag off", fun guest_auth_absent_leaves_off/0},
@@ -768,8 +772,77 @@ discovery_flag_non_boolean_warns() ->
         Mode = maps:get(~"default", get_game_modes()),
         ?assertEqual(false, maps:is_key(listed, Mode)),
         receive
-            {log_event, #{event := lua_config_global_ignored, global := ~"listed"}} -> ok
+            {log_event, #{
+                event := lua_config_global_ignored,
+                global := ~"listed",
+                value := Value
+            }} ->
+                %% The value is what makes the warning actionable, so assert it
+                %% reaches the report rather than only that something was logged.
+                ?assertEqual(~"0", Value)
         after 1000 -> erlang:error(no_warning_logged_for_non_boolean_listed)
+        end
+    after
+        _ = logger:remove_handler(?FUNCTION_NAME),
+        cleanup_temp_dir(TmpDir)
+    end.
+
+quick_play_non_boolean_warns() ->
+    %% quick_play defaults to true on both kinds, so unlike listed it can never
+    %% fail closed - there is no configuration where a dropped value is safe.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_quick_play_not_boolean.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = logger:add_handler(?FUNCTION_NAME, ?MODULE, #{config => #{pid => self()}}),
+    try
+        ok = asobi_lua_config:maybe_load_game_config(),
+        Mode = maps:get(~"default", get_game_modes()),
+        ?assertEqual(false, maps:is_key(quick_play, Mode)),
+        {ok, WorldConfig} = asobi_game_modes:world_config(~"default"),
+        ?assertEqual(true, maps:get(quick_play, WorldConfig)),
+        receive
+            {log_event, #{
+                event := lua_config_global_ignored,
+                global := ~"quick_play",
+                value := ~"false"
+            }} ->
+                ok
+        after 1000 -> erlang:error(no_warning_logged_for_non_boolean_quick_play)
+        end
+    after
+        _ = logger:remove_handler(?FUNCTION_NAME),
+        cleanup_temp_dir(TmpDir)
+    end.
+
+oversized_global_value_elided() ->
+    %% The value in this report is chosen by whoever wrote the bundle, so
+    %% `listed = string.rep("A", 400000)` is otherwise a 400 KB log line per
+    %% load - and the config watcher reloads on any mtime change.
+    TmpDir = make_temp_dir(),
+    Script = [
+        "match_size = 1\n",
+        "game_type = \"world\"\n",
+        "listed = string.rep(\"A\", 400000)\n",
+        "function init(config) return {} end\n",
+        "function spawn_position(p, s) return { x = 0, y = 0 } end\n",
+        "function join(p, s) return s end\n",
+        "function leave(p, s) return s end\n",
+        "function zone_tick(e, z) return e, z end\n",
+        "function handle_input(p, i, e) return e end\n",
+        "function post_tick(t, s) return s end\n",
+        "function generate_world(seed, c) return { [\"0,0\"] = {} } end\n"
+    ],
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Script),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = logger:add_handler(?FUNCTION_NAME, ?MODULE, #{config => #{pid => self()}}),
+    try
+        ok = asobi_lua_config:maybe_load_game_config(),
+        receive
+            {log_event, #{event := lua_config_global_ignored, global := ~"listed", value := V}} ->
+                ?assert(byte_size(V) < 300),
+                ?assertMatch({_, _}, binary:match(V, ~"400000 bytes"))
+        after 1000 -> erlang:error(no_warning_logged_for_oversized_listed)
         end
     after
         _ = logger:remove_handler(?FUNCTION_NAME),
