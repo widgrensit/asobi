@@ -237,6 +237,50 @@ volumes:
 Put this behind a TLS-terminating reverse proxy (Caddy, nginx, Traefik). asobi
 speaks plain HTTP and WebSocket and expects the proxy to handle certificates.
 
+### A worked Caddy block
+
+```caddy
+your-host.example.com {
+	# Caddy sends X-Forwarded-Proto by default, which is what asobi reads to
+	# decide whether the console's session cookie may be marked Secure. Behind
+	# a proxy that does NOT send it, set {console_secure_cookie, true} instead
+	# and the cookie is marked regardless.
+	reverse_proxy localhost:8084
+}
+```
+
+That is the whole thing. Caddy upgrades WebSockets and forwards the
+`X-Forwarded-*` headers without being asked, which is why the block is three
+lines - most of what a worked example usually spells out is default here.
+
+Two things it does **not** do, both of which matter later rather than now:
+
+- **CORS is asobi's, not the proxy's.** `ASOBI_CORS_ORIGINS` is what a browser
+  client is checked against; a proxy header will not stand in for it.
+- **One node only.** Behind a load balancer across several nodes, `/ws`,
+  `/console` and `/api/v1/ops` all need a **sticky** route. Sessions, console
+  logins and a player's world are all remembered on the node that made them -
+  see [Clustering](clustering.md), where the failure modes are listed and one
+  of them is silent.
+
+nginx needs the upgrade headers stated explicitly:
+
+```nginx
+location / {
+    proxy_pass         http://127.0.0.1:8084;
+    proxy_http_version 1.1;
+    proxy_set_header   Upgrade    $http_upgrade;
+    proxy_set_header   Connection "upgrade";
+    proxy_set_header   Host       $host;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_read_timeout 3600s;   # a game socket is idle between ticks
+}
+```
+
+The read timeout is the one people miss: nginx defaults to 60 seconds and will
+close a quiet WebSocket, which surfaces as players dropping on a timer nobody
+configured.
+
 `ASOBI_NODE_HOST` is not in that compose on purpose. It names the Erlang node
 (`-name asobi@${ASOBI_NODE_HOST}` in `config/vm.args.src`), not a bind address;
 the port asobi listens on is `ASOBI_PORT`. The image default `127.0.0.1` is

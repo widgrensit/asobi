@@ -58,7 +58,7 @@ extension means building your own release from the Hex package.
 | Caller | Path | For |
 |---|---|---|
 | Game logic, in-match, server-side | `game.quests.progress(player_id, 1)` | "player killed something, +1" |
-| Game client, over the network | `asobi.rpc("quests.claim", ...)` | "give me my reward" |
+| Game client, over the network | an `rpc.call` frame - `ws.rpc(...)` in JS, `rpc_call(...)` in Godot, `realtime:rpc(...)` in Defold and LÖVE | "give me my reward" |
 | An operator, on the ops plane | `POST /api/v1/ops/ext/quests/define` | "add a daily quest" |
 
 An extension with only the wire cannot observe gameplay; one with only Lua
@@ -170,6 +170,30 @@ try {
 realtime.rpc_call("quests.claim", {"quest_id": "q-1"}, func(ok, data):
     if ok: print(data["reward"])
     else:  print(data["code"]))
+```
+
+Without an SDK - to check a method by hand, or from a language with no asobi
+SDK yet - it is two frames on the socket. RPC rides the game WebSocket, so this
+is `websocat` rather than `curl`, and the socket must be authenticated first:
+an `rpc.call` on an unauthenticated socket is rejected, because `rpc/0` is
+player-scoped and there is no player yet.
+
+```bash
+TOKEN=$(curl -sX POST https://your-host/api/v1/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"alice","password":"..."}' | jq -r .access_token)
+
+printf '%s\n%s\n' \
+  "{\"type\":\"session.connect\",\"cid\":\"1\",\"payload\":{\"token\":\"$TOKEN\"}}" \
+  '{"type":"rpc.call","cid":"2","payload":{"protocol":1,"method":"quests.claim","params":{"quest_id":"q-1"}}}' \
+  | websocat wss://your-host/ws
+```
+
+The reply carries the `cid` you sent, which is what lets several calls be in
+flight at once:
+
+```json
+{"type":"rpc.ok","cid":"2","payload":{"result":{"reward":100}}}
 ```
 
 Branch on `code`, never on `message`. The shape is the same in every SDK - a

@@ -218,6 +218,49 @@ Two things behave differently:
 - A bot script is loaded when the bot process starts, so an edit reaches bots
   spawned after it, not bots already in a match.
 
+### Play it
+
+Everything above sets the game up. This runs it, and it is worth doing once
+before writing any more Lua - the loop it proves is the whole product.
+
+Register a player and keep the token:
+
+```bash
+TOKEN=$(curl -sX POST http://localhost:8084/api/v1/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"username":"player1","password":"secret123"}' | jq -r .access_token)
+```
+
+Then open a socket, authenticate, and queue:
+
+```bash
+printf '%s\n%s\n' \
+  "{\"type\":\"session.connect\",\"cid\":\"1\",\"payload\":{\"token\":\"$TOKEN\"}}" \
+  '{"type":"matchmaker.add","cid":"2","payload":{"mode":"default"}}' \
+  | websocat ws://localhost:8084/ws
+```
+
+`mode` is `"default"` because a bare `lua/match.lua` with no `config.lua`
+registers one mode under that name.
+
+You will see `session.connected`, then `matchmaker.queued`, then **a pause of
+up to eight seconds**, then `match.matched` followed by `match.state` frames.
+
+The pause is the part worth understanding rather than waiting out. Your mode
+declares `match_size = 2` and you are one player, so nothing can form yet. The
+bot spawner checks the queue every eight seconds, sees somebody waiting in a
+mode that declares `bots`, and queues one - which is why bots never start a
+match on their own, and why your first match needs a human to want it. Remove
+the `bots` line and this command waits forever until a second player queues.
+
+Each `match.state` is the return value of your `tick` function, encoded and
+broadcast. That is the loop: your Lua ran on the server, and a client that
+speaks four JSON frames saw the result.
+
+From here a real client replaces `websocat` - see the
+[WebSocket protocol](websocket-protocol.md) for the full frame list, or pick an
+SDK from the [README](../README.md) and skip the frames entirely.
+
 See [Lua scripting](lua-scripting.md) for the full callback reference and
 [Lua API](lua-api.md) for the host functions available inside a script.
 
@@ -337,7 +380,7 @@ rebar3 shell
 Database migrations run automatically on startup. The server is now listening
 on the configured port.
 
-## Register a player
+### 4. Register a player
 
 bash (Linux, macOS, Git Bash, WSL):
 
@@ -366,7 +409,7 @@ Response:
 }
 ```
 
-## Connect via WebSocket
+### 5. Connect via WebSocket
 
 Connect to `ws://localhost:8084/ws` and send the `access_token`:
 
@@ -382,7 +425,7 @@ Connect to `ws://localhost:8084/ws` and send the `access_token`:
 A connection that never sends `session.connect` is closed by the idle-auth
 timer (1008, `idle_auth_timeout`).
 
-## Implement your game
+### 6. Implement your game
 
 Create a module implementing the `asobi_match` behaviour:
 
