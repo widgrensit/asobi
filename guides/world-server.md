@@ -412,6 +412,16 @@ limiter, since `asobi_zone` owns them outright.
 but out of quick-play rotation, or reachable by quick-play while hidden from
 the browser.
 
+In Lua, as globals on the mode script:
+
+```lua
+game_type  = "world"
+listed     = false    -- never shows up in the browser
+quick_play = false    -- and never absorbs a quick-play request
+```
+
+Or in an operator `game_modes` entry:
+
 ```erlang
 ~"tutorial" => #{
     type => world,
@@ -420,6 +430,10 @@ the browser.
     quick_play => false   %% and never absorbs a quick-play request
 }
 ```
+
+Both default to `true` for a world, so a mode that says nothing is browsable
+and quick-playable. A match mode is the inverse for `listed`: unlisted until
+it opts in.
 
 Neither flag gates joining. A client that already knows a `world_id` can
 still `world.join` it. Both flags control discovery only.

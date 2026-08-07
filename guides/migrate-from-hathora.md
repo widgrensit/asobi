@@ -161,7 +161,7 @@ mutation, which is well within the scope of one Lua file.
 | `createLobby`, `createRoom`, queue | `POST /api/v1/matchmaker` | Body `{"mode": "...", "properties": {}}`, response `{"ticket_id": "...", "status": "pending"}`. |
 | Ticket poll | `GET /api/v1/matchmaker/:ticket_id` | |
 | Cancel | `DELETE /api/v1/matchmaker/:ticket_id` | |
-| `listActivePublicLobbies` | `GET /api/v1/matches/live` | Live, joinable matches; filter with `mode` and `has_capacity`. Matches are unlisted by default and a mode opts in with `listed => true` in the operator's `game_modes` config; the Lua config reader does not pick up a `listed` global. Not `GET /api/v1/matches`, which is the finished-match record table. |
+| `listActivePublicLobbies` | `GET /api/v1/matches/live` | Live, joinable matches; filter with `mode` and `has_capacity`. Matches are unlisted by default and a mode opts in with `listed = true` (a Lua global, or `listed => true` in the operator's `game_modes` config). Not `GET /api/v1/matches`, which is the finished-match record table. |
 | `getConnectionInfo(roomId)` | WebSocket upgrade on `GET /ws` | See [WebSocket handshake](#websocket-handshake). The first frame must authenticate. |
 | Custom room messages | Extension RPC | Frame `rpc.call` with `{protocol: 1, method, params}`; replies `rpc.ok` `{result}` or `rpc.error` `{error: {code, message, details}}`, correlated by `cid`. All seven client SDKs support it. See [Extensions](extensions.md). |
 | `ping` region API | None | Probe each deployment endpoint yourself if you need client-side region selection. |

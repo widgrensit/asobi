@@ -31,12 +31,16 @@ bots = { script = "bots/arena_bot.lua" }
 | `strategy` | no | `"fill"` | `"fill"`, `"skill_based"`, or a custom module |
 | `bots` | no | none | `{ script = "path/to/bot.lua" }` - see [Bots](lua-bots.md) |
 | `game_type` | no | `"match"` | `"match"` or `"world"` |
+| `listed` | no | `false` for matches, `true` for worlds | Whether instances appear in discovery (`match.list` / `world.list`). Never gates joining |
+| `quick_play` | no | `true` | Whether `world.find_or_create` may place a player into an existing instance of this mode |
 | `state_strategy` | no | none | `"shared"` selects the encode-once broadcast path |
 | `guest_auth` | no | `false` | Declares that this game offers anonymous play. The operator still has to supply a pepper |
 | `registration` | no | none | `"open"`, `"oauth_only"` or `"closed"`. The operator's `sys.config` wins when it sets one |
 
 World-mode games (`game_type = "world"`) read a further set of globals -
-`tick_rate`, `grid_size`, `zone_size`, `view_radius`, `empty_grace_ms`,
+`tick_rate`, `grid_size`, `zone_size`, `view_radius`, `persistent`,
+`lazy_zones`, `zone_idle_timeout`, `max_active_zones`,
+`spatial_grid_cell_size`, `cold_tick_divisor`, `empty_grace_ms`,
 `player_ttl_ms`. [World server](world-server.md) documents those.
 
 **Where you put `guest_auth` and `registration` matters.** They are read from
@@ -154,7 +158,7 @@ Shorthand (Erlang module only):
 | `skill_expand_rate` | `50` | Window expansion per 5 seconds (`skill_based` only) |
 | `bots` | `#{}` | Bot configuration - see [Bots](lua-bots.md) |
 | `listed` | `false` for matches, `true` for worlds | Whether instances appear in discovery (`match.list` / `world.list`). Matches are unlisted by default: a matchmaker-spawned match is already assigned to its players, so opt in explicitly |
-| `quick_play` | `true` | Worlds only. Whether `world.find_or_create` may place a player into an existing world of this mode. Independent of `listed` - see [World server](world-server.md#visibility) |
+| `quick_play` | `true` | Whether `world.find_or_create` may place a player into an existing world of this mode. Read on the world entry path for whatever mode name it is handed, so setting it `false` on a match mode is protective rather than inert. Independent of `listed` - see [World server](world-server.md#visibility) |
 
 ### Operator modes and game-declared modes
 

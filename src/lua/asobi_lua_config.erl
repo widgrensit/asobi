@@ -31,6 +31,8 @@ max_players    = 10                         -- optional, defaults to match_size
 strategy       = "fill"                     -- optional, "fill" | "skill_based"
 bots           = { script = "bots/ai.lua", min_players = 4 } -- optional; min_players defaults to match_size, enabled defaults to true
 game_type      = "world"                    -- optional, "match" (default) or "world"
+listed         = true                       -- optional, browsable via match.list / world.list (matches default false, worlds true)
+quick_play     = true                       -- optional, reachable via world.find_or_create (default true)
 state_strategy = "shared"                   -- optional, "shared" picks asobi_lua_match_shared (encode-once broadcast)
 guest_auth     = true                       -- optional, offer anonymous no-account play (needs an operator pepper; ADR 0004)
 registration   = "closed"                   -- optional, "open" | "oauth_only" | "closed" (operator sys.config wins)
@@ -306,6 +308,8 @@ read_match_globals(ScriptPath, St) ->
     ZoneSize = read_global_int(~"zone_size", St),
     ViewRadius = read_global_int(~"view_radius", St),
     Persistent = read_global_bool(~"persistent", St),
+    Listed = read_global_bool_strict(~"listed", ScriptPath, St),
+    QuickPlay = read_global_bool_strict(~"quick_play", ScriptPath, St),
     LazyZones = read_global_bool(~"lazy_zones", St),
     ZoneIdleTimeout = read_global_int(~"zone_idle_timeout", St),
     MaxActiveZones = read_global_int(~"max_active_zones", St),
@@ -340,7 +344,14 @@ read_match_globals(ScriptPath, St) ->
             Config11 = maybe_add_int(Config10, zone_size, ZoneSize),
             Config12 = maybe_add_non_neg_int(Config11, view_radius, ViewRadius),
             Config13 = maybe_add_bool(Config12, persistent, Persistent),
-            {ok, Config13};
+            %% Absent globals leave the key out entirely rather than writing a
+            %% default, so the two discovery defaults stay where they are -
+            %% matches unlisted (asobi_matchmaker), worlds listed
+            %% (asobi_game_modes:world_config/1). A script that never mentions
+            %% these produces a mode map identical to before.
+            Config14 = maybe_add_bool(Config13, listed, Listed),
+            Config15 = maybe_add_bool(Config14, quick_play, QuickPlay),
+            {ok, Config15};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.
@@ -596,6 +607,35 @@ read_global_bool(Name, St) ->
         {ok, true, _} -> true;
         {ok, false, _} -> false;
         _ -> undefined
+    end.
+
+%% Same read, but says something when the global is present and is not a
+%% boolean. Worth the extra clause only where the downstream default is
+%% `true`: every other boolean global here defaults to false, so a typo fails
+%% closed and the author notices the feature never turned on. `listed` and
+%% `quick_play` default to true on the world path, so a value that is not a
+%% Lua boolean fails OPEN - the script says "hide this" and the world stays in
+%% the public browser and in quick-play rotation.
+%%
+%% `listed = 0` is the case that matters: 0 is truthy in Lua, so writing it to
+%% mean "off" is a plausible mistake, and it is not a Lua boolean.
+read_global_bool_strict(Name, ScriptPath, St) ->
+    case luerl:get_table_keys([Name], St) of
+        {ok, true, _} ->
+            true;
+        {ok, false, _} ->
+            false;
+        {ok, nil, _} ->
+            undefined;
+        _ ->
+            ?LOG_WARNING(#{
+                event => lua_config_global_ignored,
+                script => ScriptPath,
+                global => Name,
+                reason => not_a_boolean,
+                hint => ~"expected true or false; the mode default applies"
+            }),
+            undefined
     end.
 
 read_global_string(Name, St) ->

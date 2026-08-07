@@ -88,12 +88,12 @@ tick_rate   = 200     -- 5 Hz is plenty; the 50ms default is for action games
 match_size  = 1
 ```
 
-`listed` and `quick_play` are not Lua globals - the loader does not read them,
-so writing them in a script does nothing. Both default to true, which is what a
-hub wants: it is browsable and `world.find_or_create` drops everyone into the
-same one. Changing either needs an operator `game_modes` entry for that mode,
-which replaces the script's mode config rather than merging into it - so
-declare `module => {lua, "hub.lua"}` and the rest of the shape in it too.
+`listed` and `quick_play` are Lua globals, both defaulting to true for a world -
+which is what a hub wants: it is browsable and `world.find_or_create` drops
+everyone into the same one. Set either to `false` in the script to change it.
+An operator `game_modes` entry still wins, and it replaces the script's mode
+config rather than merging into it - so if you add one, declare
+`module => {lua, "hub.lua"}` and the rest of the shape in it too.
 
 `persistent` is the flag that makes it a hub rather than a session. Without it a
 world finishes the moment the last player leaves, so the next player gets a
@@ -126,11 +126,11 @@ function join(player_id, state, ctx)
 end
 ```
 
-Hiding it from the browser needs `listed => false` in an Erlang `game_modes`
-entry; a Lua-only game cannot set it, so its code-gated world stays listed and
-the join callback is the whole gate. `listed` and `quick_play` are properties
-of the mode, not of one instance, so every world of that mode is equally
-hidden. See [Join context](websocket-protocol.md#join-context).
+Hide it from the browser with `listed = false` in the script. That is discovery
+only - it never gates joining, so the join callback above is still the whole
+gate. `listed` and `quick_play` are properties of the mode, not of one
+instance, so every world of that mode is equally hidden. See
+[Join context](websocket-protocol.md#join-context).
 
 ### Telling the room someone arrived
 

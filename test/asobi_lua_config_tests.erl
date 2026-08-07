@@ -2,6 +2,9 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("asobi_lua_bots.hrl").
 
+%% logger handler callback, used by discovery_flag_non_boolean_warns/0.
+-export([log/2]).
+
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
     {ok, LibDir} = safe_lib_dir(),
@@ -67,6 +70,14 @@ config_test_() ->
             fun bot_config_min_players_clamped_at_ceiling/0},
         {"world dimension globals (tick_rate/grid_size/zone_size/view_radius/persistent)",
             fun world_dimension_globals_forwarded/0},
+        {"listed/quick_play = false on a world reach the mode and world config",
+            fun discovery_flags_forwarded/0},
+        {"listed = true opts a match mode into the live-match browser",
+            fun listed_match_global_forwarded/0},
+        {"absent listed/quick_play leave the per-kind defaults alone",
+            fun discovery_flags_absent_keep_defaults/0},
+        {"a non-boolean listed is ignored and warns rather than failing open",
+            fun discovery_flag_non_boolean_warns/0},
         {"guest_auth = true global enables the asobi guest_auth flag",
             fun guest_auth_global_enables/0},
         {"guest_auth absent leaves the flag off", fun guest_auth_absent_leaves_off/0},
@@ -686,6 +697,93 @@ world_dimension_globals_forwarded() ->
     ?assertEqual(0, maps:get(view_radius, WorldConfig)),
     ?assertEqual(true, maps:get(persistent, WorldConfig)),
     cleanup_temp_dir(TmpDir).
+
+discovery_flags_forwarded() ->
+    %% Both flags are discovery-tier only and default to true for a world, so
+    %% a hub is browsable and quick-playable without saying anything. A script
+    %% that wants a hidden or out-of-rotation mode had no way to say so from
+    %% Lua and needed an operator game_modes entry, which replaces the whole
+    %% mode map rather than merging into it.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_discovery_flags.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(false, maps:get(listed, Mode)),
+    ?assertEqual(false, maps:get(quick_play, Mode)),
+    %% And world_config/1 must echo them through, or the world server still
+    %% boots listed and the script's declaration is decorative.
+    {ok, WorldConfig} = asobi_game_modes:world_config(~"default"),
+    ?assertEqual(false, maps:get(listed, WorldConfig)),
+    ?assertEqual(false, maps:get(quick_play, WorldConfig)),
+    cleanup_temp_dir(TmpDir).
+
+listed_match_global_forwarded() ->
+    %% The inverse default: matches are unlisted, so a match script has to opt
+    %% in before match.list will ever return it.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_listed_match.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(true, maps:get(listed, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+discovery_flags_absent_keep_defaults() ->
+    %% The compatibility case. A script that never mentions either flag must
+    %% produce a mode map with neither key, so the differing per-kind defaults
+    %% downstream (matches false, worlds true) keep deciding. Writing a
+    %% default here instead would silently flip every existing Lua match mode
+    %% into the browser.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_world_dimensions.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(false, maps:is_key(listed, Mode)),
+    ?assertEqual(false, maps:is_key(quick_play, Mode)),
+    %% world_config/1 then supplies the world default, which is true for both.
+    {ok, WorldConfig} = asobi_game_modes:world_config(~"default"),
+    ?assertEqual(true, maps:get(listed, WorldConfig)),
+    ?assertEqual(true, maps:get(quick_play, WorldConfig)),
+    cleanup_temp_dir(TmpDir).
+
+discovery_flag_non_boolean_warns() ->
+    %% These two are the first boolean globals whose downstream default is
+    %% true, so an unreadable value fails OPEN - the script asked to hide the
+    %% world and it stays browsable. `listed = 0` is the plausible version of
+    %% that mistake, because 0 is truthy in Lua but reads as "off" to most
+    %% authors. The key must stay absent (so the default still decides) AND
+    %% the loader must say so, or this is a silent dev-facing failure.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_listed_not_boolean.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = logger:add_handler(?FUNCTION_NAME, ?MODULE, #{config => #{pid => self()}}),
+    try
+        ok = asobi_lua_config:maybe_load_game_config(),
+        Mode = maps:get(~"default", get_game_modes()),
+        ?assertEqual(false, maps:is_key(listed, Mode)),
+        receive
+            {log_event, #{event := lua_config_global_ignored, global := ~"listed"}} -> ok
+        after 1000 -> erlang:error(no_warning_logged_for_non_boolean_listed)
+        end
+    after
+        _ = logger:remove_handler(?FUNCTION_NAME),
+        cleanup_temp_dir(TmpDir)
+    end.
+
+%% logger handler callback: forwards the report of each event to the test pid
+%% so a case can assert on what the loader logged.
+-spec log(logger:log_event(), logger:handler_config()) -> ok.
+log(#{msg := {report, Report}}, #{config := #{pid := Pid}}) when is_pid(Pid) ->
+    Pid ! {log_event, Report},
+    ok;
+log(_Event, _Config) ->
+    ok.
 
 %% --- Helpers ---
 

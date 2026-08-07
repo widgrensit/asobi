@@ -182,6 +182,7 @@ match_size   = 4                          -- required: min players to start
 max_players  = 10                         -- optional: max per match
 strategy     = "fill"                     -- optional: "fill" or "skill_based"
 bots         = { script = "bots/ai.lua" } -- optional: enable bot filling
+listed       = true                       -- optional: show live instances in discovery
 guest_auth   = true                       -- optional: allow anonymous guest play
 registration = "closed"                   -- optional: signup posture
 ```
@@ -194,12 +195,20 @@ registration = "closed"                   -- optional: signup posture
 | `game_type` | no | `"match"` | `"world"` routes the script through the world bridge - see [World server](world-server.md) |
 | `state_strategy` | no | per-player | `"shared"` broadcasts one payload to everyone; see below |
 | `bots` | no | none | Bot configuration - see [Bots](lua-bots.md) |
+| `listed` | no | `false` for matches, `true` for worlds | Whether live instances appear in `match.list` / `world.list`. Discovery only - it never gates joining, so a client holding an id still joins an unlisted instance |
+| `quick_play` | no | `true` | Whether `world.find_or_create` may place a player into an existing instance of this mode |
 | `guest_auth` | no | `false` | Offer anonymous no-account play. Also requires an operator-supplied pepper; on only when both are present (ADR 0004) |
 | `registration` | no | `"open"` | `"open"`, `"oauth_only"` (no password signup) or `"closed"` (no new players). The operator layer wins: this applies only when the release's `sys.config` leaves `registration` unset |
 
 `strategy` is not validated. A value that is neither `"fill"` nor
 `"skill_based"` falls back to `fill`, and nothing is logged - check the
 spelling yourself.
+
+`listed` and `quick_play` must be a Lua `true` or `false`. Anything else is
+ignored with a warning and the default applies. Watch for `listed = 0`: 0 is
+truthy in Lua, so it does not mean "off", and on a world - where the default
+is `true` - taking it as a value would leave the world browsable when you
+asked to hide it.
 
 `state_strategy = "shared"` routes the mode to a different bridge, one that
 calls `get_state` **once per tick with one argument** and sends a single
