@@ -176,6 +176,19 @@ an operator mode wins a name clash and a game bundle can never drop or redefine
 it. Read it with `asobi_game_config:modes/0`. The raw `game_modes` app-env key
 is only the operator half.
 
+**The override is whole-entry, not per-key.** The merge happens at the mode
+name, so an operator entry replaces the game's entire map for that mode rather
+than layering onto it. Writing the minimal-looking
+
+```erlang
+{game_modes, #{~"arena" => #{listed => true}}}
+```
+
+does not force `listed` on top of the game's config - it replaces the mode with
+one that declares no `module`, and the mode then fails to resolve. To override
+one key you must restate the whole shape, including
+`module => {lua, "..."}`.
+
 ## Game directory
 
 ```erlang
