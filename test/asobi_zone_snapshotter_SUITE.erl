@@ -128,7 +128,20 @@ delete_world_clears_snapshots(_Config) ->
     {ok, Before} = asobi_zone_snapshotter:load_snapshots(WorldId),
     ?assertEqual(1, map_size(Before)),
     asobi_zone_snapshotter:delete_world(WorldId),
-    %% delete is async cast; give it a moment.
-    timer:sleep(50),
-    {ok, After} = asobi_zone_snapshotter:load_snapshots(WorldId),
-    ?assertEqual(0, map_size(After)).
+    %% delete is an async cast. A fixed sleep is a guess about how long the
+    %% cast takes, and a loaded CI runner beats any guess worth making, so
+    %% poll for the result instead.
+    ?assertEqual(0, snapshot_count_when_settled(WorldId, 100)).
+
+snapshot_count_when_settled(WorldId, 0) ->
+    {ok, Snaps} = asobi_zone_snapshotter:load_snapshots(WorldId),
+    map_size(Snaps);
+snapshot_count_when_settled(WorldId, Attempts) ->
+    {ok, Snaps} = asobi_zone_snapshotter:load_snapshots(WorldId),
+    case map_size(Snaps) of
+        0 ->
+            0;
+        _ ->
+            timer:sleep(20),
+            snapshot_count_when_settled(WorldId, Attempts - 1)
+    end.
