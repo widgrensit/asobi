@@ -291,6 +291,12 @@ Names vary by SDK: `guest_device` (the snake-case SDKs), `guestDevice` (Dart and
 JS), `GuestDevice`/`GuestDeviceAsync` (Unreal and Unity). See the SDK's README
 for the exact name and the storage location on each platform.
 
+Because the pair identifies the device, two clients started on one machine share
+it and resume the *same* player. That is correct behaviour and it is also the
+first thing to trip over when testing multiplayer locally. See
+[Testing with multiple players](testing-multiple-players.md) for the ways round
+it.
+
 ### Create or resume
 
 ```bash

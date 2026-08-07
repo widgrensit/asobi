@@ -281,6 +281,8 @@ numbers are this node's queue only. See [Operator console](console.md).
 
 ## Next steps
 
+- [Testing with multiple players](testing-multiple-players.md) - why your two
+  test clients are one player, and why they land in separate matches.
 - [WebSocket protocol](websocket-protocol.md) - the `matchmaker.*` and `match.*` frames.
 - [Configuration](configuration.md) - per-mode matchmaker tuning.
 - [Clustering](clustering.md) - what a second node does to the queue.

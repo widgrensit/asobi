@@ -261,6 +261,11 @@ From here a real client replaces `websocat` - see the
 [WebSocket protocol](websocket-protocol.md) for the full frame list, or pick an
 SDK from the [README](../README.md) and skip the frames entirely.
 
+Two clients on one machine is the next thing you will try, and it has one
+gotcha worth reading first: a guest account belongs to the device, so both
+windows sign in as the same player unless you tell them not to. See
+[Testing with multiple players](testing-multiple-players.md).
+
 See [Lua scripting](lua-scripting.md) for the full callback reference and
 [Lua API](lua-api.md) for the host functions available inside a script.
 

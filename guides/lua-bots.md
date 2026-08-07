@@ -306,6 +306,8 @@ if you need the human answer.
 
 ## Next steps
 
+- [Testing with multiple players](testing-multiple-players.md) - bot fill is why
+  two humans testing together each get their own match.
 - [The game.\* API](lua-api.md) - what match and world scripts can call, and
   bots cannot (see [What a bot script gets](#what-a-bot-script-gets)).
 - [Lua scripting](lua-scripting.md) - the match callbacks a bot's input feeds.

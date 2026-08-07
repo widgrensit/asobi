@@ -130,6 +130,7 @@ UDP relay if you need sub-3ms physics.
 - [**Architecture**](guides/architecture.md) - supervision tree, modules, design
 - [**REST API**](guides/rest-api.md) · [**WebSocket protocol**](guides/websocket-protocol.md)
 - [**Matchmaking**](guides/matchmaking.md) · [**Lobbies**](guides/lobbies.md) · [**Voting**](guides/voting.md) · [**Phases**](guides/phases.md)
+- [**Testing with multiple players**](guides/testing-multiple-players.md) - why two clients on one machine are one player, and how to get two
 - [**World server**](guides/world-server.md) · [**Large worlds**](guides/large-worlds.md)
 - [**Economy**](guides/economy.md) · [**Authentication**](guides/authentication.md) · [**IAP**](guides/iap.md)
 - [**Lua scripting**](guides/lua-scripting.md) · [**Lua API reference**](guides/lua-api.md) · [**Lua bots**](guides/lua-bots.md)
