@@ -120,12 +120,20 @@ a_password_account_must_echo_its_password(Config) ->
     ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
     Config.
 
+%% 403, not 401. The caller is authenticated - they failed a step-up
+%% confirmation - and every SDK reads a 401 as "refresh the pair and replay", so
+%% a 401 here would burn a token rotation on each wrong password and replay a
+%% destructive call. Pinned because the status is the part clients act on.
 a_wrong_password_erases_nothing(Config) ->
     #{~"player_id" := PlayerId, ~"access_token" := Token} = password_account(Config),
     {ok, R} = erase(Token, #{~"password" => ~"not-the-password"}, Config),
-    ?assertStatus(401, R),
-    ?assertMatch(#{~"error" := #{~"code" := ~"auth.invalid_credentials"}}, nova_test:json(R)),
+    ?assertStatus(403, R),
+    ?assertMatch(#{~"error" := #{~"code" := ~"player.confirmation_failed"}}, nova_test:json(R)),
     ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
+    %% And the session is untouched: a refused confirmation must not cost the
+    %% player the account they still have.
+    {ok, R2} = erase(Token, #{~"password" => ~"secret1234"}, Config),
+    ?assertStatus(200, R2),
     Config.
 
 a_password_account_erases_itself_with_the_password(Config) ->

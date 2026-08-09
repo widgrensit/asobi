@@ -161,6 +161,11 @@ severed rather than deleted, for the reason described under
 [the operator route](#erasing-and-exporting-a-player). Every erasure writes an
 audit row whose actor is the player themselves.
 
+A refused confirmation is `403`, not `401`, on purpose: the caller is
+authenticated and failed a step-up check, so an SDK that treats `401` as
+"refresh the token pair and replay the request" must not do either of those
+things here.
+
 **The session dies with the account.** A retried call after a successful one
 answers `401`, not `200` or `404`, because the token it presents was deleted
 inside the same transaction. A client whose request timed out should read a
@@ -169,8 +174,8 @@ subsequent `401` as "it worked", not as "sign in again".
 | Status | `error.code` | Meaning |
 |--------|--------------|---------|
 | `400`  | `missing_field` | The account has a password and the body carried none |
-| `401`  | `auth.invalid_credentials` | The password does not match. Nothing was deleted |
 | `401`  | `unauthenticated` | No session, or the account is already gone |
+| `403`  | `player.confirmation_failed` | The password does not match. Nothing was deleted, and the session is still valid |
 | `409`  | `player.credentials_changed` | The password changed while the request was in flight. Nothing was deleted; retry |
 | `429`  | `rate_limited` | Erasure has its own tight bucket, because the wrong-password path runs the password KDF |
 | `500`  | `player.erase_failed` | The transaction rolled back. Nothing was deleted |
@@ -513,6 +518,11 @@ severed rather than deleted, for the reason described under
 [the operator route](#erasing-and-exporting-a-player). Every erasure writes an
 audit row whose actor is the player themselves.
 
+A refused confirmation is `403`, not `401`, on purpose: the caller is
+authenticated and failed a step-up check, so an SDK that treats `401` as
+"refresh the token pair and replay the request" must not do either of those
+things here.
+
 **The session dies with the account.** A retried call after a successful one
 answers `401`, not `200` or `404`, because the token it presents was deleted
 inside the same transaction. A client whose request timed out should read a
@@ -521,8 +531,8 @@ subsequent `401` as "it worked", not as "sign in again".
 | Status | `error.code` | Meaning |
 |--------|--------------|---------|
 | `400`  | `missing_field` | The account has a password and the body carried none |
-| `401`  | `auth.invalid_credentials` | The password does not match. Nothing was deleted |
 | `401`  | `unauthenticated` | No session, or the account is already gone |
+| `403`  | `player.confirmation_failed` | The password does not match. Nothing was deleted, and the session is still valid |
 | `409`  | `player.credentials_changed` | The password changed while the request was in flight. Nothing was deleted; retry |
 | `429`  | `rate_limited` | Erasure has its own tight bucket, because the wrong-password path runs the password KDF |
 | `500`  | `player.erase_failed` | The transaction rolled back. Nothing was deleted | and matches

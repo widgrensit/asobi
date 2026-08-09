@@ -120,6 +120,11 @@ working and a new one reads one place: see `legacy/2`.
     {~"guest.create_failed", 500, ~"The guest player could not be created."},
     {~"player.not_found", 404, ~"No player exists with this id."},
     {
+        ~"player.confirmation_failed",
+        403,
+        ~"The password does not match this account. Nothing was deleted."
+    },
+    {
         ~"player.credentials_changed",
         409,
         ~"This account's credentials changed while the request was in flight. Retry."

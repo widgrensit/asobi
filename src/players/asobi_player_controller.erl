@@ -65,7 +65,14 @@ erase_self(#{auth_data := #{player_id := PlayerId}} = Req) when is_binary(Player
             %% enforces it.
             case confirmed(Hash, Req) of
                 ok -> erase(PlayerId, Hash);
-                wrong_password -> {asobi_error, ~"auth.invalid_credentials"};
+                %% 403, not the 401 `auth.invalid_credentials` login uses. The
+                %% caller IS authenticated - they failed a step-up confirmation,
+                %% not a sign-in - and every SDK treats a 401 as "refresh the
+                %% token pair and replay", so answering 401 here burns a refresh
+                %% rotation on each wrong password and replays a destructive
+                %% call. 403 says "authenticated, not permitted", which is what
+                %% happened.
+                wrong_password -> {asobi_error, ~"player.confirmation_failed"};
                 no_password_given -> {asobi_error, ~"missing_field"}
             end;
         {error, not_found} ->
