@@ -494,9 +494,9 @@ full deployment. Both log `guest_create_denied` with a `reason`; the cap denial
 also logs the `count` and `cap` it compared, which is what tells you whether
 the ceiling is anywhere near.
 
-Clients can shed guests themselves with `DELETE /api/v1/auth/guest`
-(see [Authentication](authentication.md#delete-a-guest)), which is the only
-guest removal available when `guest_reap_after` is not settable.
+Clients can shed guests themselves with `POST /api/v1/players/me/erase`
+(see [REST API](rest-api.md#erasing-your-own-account)), which is the only guest
+removal available when `guest_reap_after` is not settable.
 
 Measured from the last resume, not from account creation. Under device auth a
 guest stays unclaimed for life - there is no password to set - so account age

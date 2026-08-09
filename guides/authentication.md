@@ -349,36 +349,34 @@ Upgrade revokes every token the guest held (a fresh pair is returned) and
 deletes the device verifier, so the old device secret can no longer sign in.
 Player id, progress, wallets, and inventory are preserved.
 
-### Delete a guest
+### Delete the account
 
-Requires the guest's own session, and works only while the account is still an
-unclaimed guest. A claimed account is a real account: it answers
-`409 guest.not_unclaimed` and stays.
+Guest removal is not a guest route. `POST /api/v1/players/me/erase` erases the
+calling player whatever kind of account it is, and a guest is simply the case
+with no credential to re-confirm. See
+[Erasing your own account](rest-api.md#erasing-your-own-account) for the
+contract; the guest-specific part is only that no `password` is required,
+because a guest has none.
 
 ```bash
-curl -X DELETE http://localhost:8084/api/v1/auth/guest \
-  -H 'Authorization: Bearer <access_token>'
+curl -X POST http://localhost:8084/api/v1/players/me/erase \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' -d '{}'
 ```
 
-```json
-{ "deleted": true }
-```
+It is the only erasure path that needs no operator secret, which makes it the
+only one a cloud tenant can reach: `guest_reap_after` and the ops erasure route
+are both operator keys a cloud tenant cannot set.
 
-This is the same erasure the retention sweep and the ops route run, so it takes
-the player row, the device identity, and every child row with it - see
-[Erasing and exporting a player](rest-api.md#erasing-and-exporting-a-player).
-It is irreversible, the session
-dies with it, and the device pair that created the account becomes a stranger:
-the next call to `/auth/guest` with it creates a new player.
+**A device secret is now a destruction credential, not just an impersonation
+one.** Anyone holding it can resume the account and erase it, with no password
+to stop them, because there is no password. That is a deliberate trade - the
+alternative is a guest who can never delete their account - but it raises the
+bar on where a shipping client stores the pair: treat it the way you would treat
+a password, not a cache key.
 
-Reach for it when a client wants to abandon an account it will never resume -
-a "play as someone else" button, or a test client that mints a throwaway device
-pair per launch. It is the only guest removal a cloud tenant can drive, because
-`guest_reap_after` and the ops erasure route are both operator-only keys a
-cloud tenant cannot set.
-
-A device pair that is written to disk once and reused does not need this at
-all, and that is what a shipping client should do. A fresh pair per launch is a
+A device pair written to disk once and reused does not need this route at all,
+and that is what a shipping client should do. A fresh pair per launch is a
 testing trick (see [Testing with multiple
 players](testing-multiple-players.md)), and it is the pattern that accumulates
 accounts.
@@ -398,12 +396,11 @@ accounts.
 | `403`  | `auth.password_registration_disabled` | From the shared registration guard. A closed deployment answers `auth.registration_closed` on the guest paths, so you should not see this one here |
 | `404`  | `player.not_found`                 | The upgrade token resolves to no player |
 | `409`  | `guest.device_already_registered`  | Two creates for the same device raced; retry - the retry resumes the existing guest |
-| `409`  | `guest.not_unclaimed`              | Upgrade or delete target is not an unclaimed guest |
+| `409`  | `guest.not_unclaimed`              | Upgrade target is not an unclaimed guest |
 | `409`  | `auth.username_taken`              | Upgrade username is already in use |
 | `422`  | `validation_failed`                | On upgrade: the new username or password failed validation. `details.fields` is per-field, for a form UI |
 | `429`  | `guest.rate_limited`               | The deployment-wide guest-create limiter is saturated. `details.retry_after` is seconds; retry then |
 | `500`  | `guest.create_failed`              | The player row could not be created |
-| `500`  | `guest.delete_failed`              | The erasure rolled back; the account is intact |
 | `500`  | `internal`                         | The device resolves to an identity whose player no longer exists, or another server-side failure |
 | `503`  | `guest.capacity_reached`           | The unlinked-guest cap is reached. Raise `guest_unlinked_cap`, set `guest_reap_after`, or have clients delete guests they abandon |
 | `503`  | `guest.unavailable`                | The node could not count existing guests, so it refused rather than create without a bound. Not a full deployment - look for a database fault, and check the `guest_create_denied` log line |

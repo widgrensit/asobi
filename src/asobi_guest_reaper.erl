@@ -257,11 +257,9 @@ Whether `PlayerId` is a guest nobody has claimed.
 Unclaimed means the player never set a password **and** owns no identity from
 another provider - linking Google or Steam is a claim even though
 `asobi_oauth_controller:link/1` sets no password and leaves the guest identity
-in place. Exported because erasure is destructive and irreversible, so the
-sweep and `asobi_guest_controller:delete/1` must not be able to disagree about
-who may be erased. The upgrade predicate inside `m:asobi_guest_controller` is a
+in place. The upgrade predicate inside `m:asobi_guest_controller` is a
 deliberately different, looser question - may this account be *upgraded* - and
-is not a substitute here.
+is not a substitute for this one anywhere erasure is involved.
 
 Answers `false` when a lookup fails, so a caller about to delete something
 fails closed.

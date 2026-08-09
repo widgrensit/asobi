@@ -80,6 +80,8 @@ select_limiter(Req) ->
     %% tighter bucket (asobi#157); it must match before the /auth/ prefix.
     case binary:split(cowboy_req:path(Req), ~"/", [global, trim_all]) of
         [~"api", ~"v1", ~"auth", ~"register"] -> asobi_register_limiter;
+        %% Account erasure runs the KDF too, on a path nothing else serves.
+        [~"api", ~"v1", ~"players", ~"me", ~"erase"] -> asobi_erase_limiter;
         [~"api", ~"v1", ~"auth" | _] -> asobi_auth_limiter;
         [~"api", ~"v1", ~"iap" | _] -> asobi_iap_limiter;
         %% The console login trades a shared secret for a session, so it is
@@ -114,6 +116,14 @@ select_limiter_test_() ->
             asobi_iap_limiter, select_limiter(fake_req(#{path => ~"/api/v1/iap/purchase"}))
         ),
         ?_assertEqual(asobi_api_limiter, select_limiter(fake_req(#{path => ~"/api/v1/friends"}))),
+        ?_assertEqual(
+            asobi_erase_limiter, select_limiter(fake_req(#{path => ~"/api/v1/players/me/erase"}))
+        ),
+        %% A player id that is not the literal `me` is an ordinary read.
+        ?_assertEqual(
+            asobi_api_limiter,
+            select_limiter(fake_req(#{path => ~"/api/v1/players/0198c0de-0000-7000-8000-0000"}))
+        ),
         %% asobi#157 regression: slash-normalisation variants that the
         %% router folds onto /auth/register must not escape the register
         %% bucket onto the looser auth (5/s) or api (300/s) limiter.

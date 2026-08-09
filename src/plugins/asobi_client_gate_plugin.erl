@@ -6,7 +6,7 @@
 -export([pre_request/4, post_request/4, plugin_info/0]).
 
 -ifdef(TEST).
--export([decision/1, context/1, token/1, gate_applies/1]).
+-export([decision/1, context/1, token/1]).
 -endif.
 
 %% Runs immediately after the rate limiter (config/{dev,prod}_sys.config.src):
@@ -163,19 +163,11 @@ gate_module() ->
             undefined
     end.
 
-%% Method as well as path. This is a pre-auth gate on anonymous *registration*,
-%% and it reads its token from the JSON body - so matching a path alone caught
-%% `DELETE /api/v1/auth/guest`, an authenticated route with no body, whose token
-%% therefore came out empty and was denied by any real gate before the auth
-%% plugin ever ran. On a deployment that configures a captcha (the natural
-%% control for open registration) that turned the only guest-removal path a
-%% cloud tenant has into a permanent 403.
 -spec gate_applies(cowboy_req:req()) -> boolean().
 gate_applies(Req) ->
-    Method = cowboy_req:method(Req),
     case binary:split(cowboy_req:path(Req), ~"/", [global, trim_all]) of
-        [~"api", ~"v1", ~"auth", ~"register"] -> Method =:= ~"POST";
-        [~"api", ~"v1", ~"auth", ~"oauth"] -> Method =:= ~"POST";
-        [~"api", ~"v1", ~"auth", ~"guest"] -> Method =:= ~"POST";
+        [~"api", ~"v1", ~"auth", ~"register"] -> true;
+        [~"api", ~"v1", ~"auth", ~"oauth"] -> true;
+        [~"api", ~"v1", ~"auth", ~"guest"] -> true;
         _ -> false
     end.

@@ -241,6 +241,14 @@ register_limiters() ->
     Defaults = #{
         auth => #{algorithm => sliding_window, limit => 5, window => 1000},
         register => #{algorithm => sliding_window, limit => 3, window => 1000},
+        %% Account erasure runs the same KDF as register, on the wrong-password
+        %% path an attacker controls, and it is the only irreversible thing a
+        %% player can do to themselves. Deleting your account is a once-ever
+        %% action, so the honest rate is far below register's: this bounds
+        %% single-IP KDF cost on a route where a legitimate client has no reason
+        %% to retry quickly. Same argument as register (asobi#157), lower
+        %% number because the honest frequency is lower.
+        erase => #{algorithm => sliding_window, limit => 3, window => 60000},
         iap => #{algorithm => sliding_window, limit => 10, window => 1000},
         api => #{algorithm => sliding_window, limit => 300, window => 1000},
         ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000},
@@ -310,6 +318,7 @@ limiter_name(iap) -> asobi_iap_limiter;
 limiter_name(api) -> asobi_api_limiter;
 limiter_name(ws_connect) -> asobi_ws_connect_limiter;
 limiter_name(join) -> asobi_join_limiter;
+limiter_name(erase) -> asobi_erase_limiter;
 limiter_name(guest_global) -> asobi_guest_global_limiter;
 limiter_name(script_log) -> asobi_script_log_limiter;
 limiter_name(rehome) -> asobi_rehome_limiter;

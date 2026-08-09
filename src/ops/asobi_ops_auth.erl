@@ -54,7 +54,7 @@ for this class".
 
 -include_lib("kernel/include/logger.hrl").
 
--export([verify/1, resolve/1, display/1, verify_secret/1]).
+-export([verify/1, resolve/1, display/1, verify_secret/1, subject_actor/1]).
 
 -define(LABEL_HEADER, ~"x-asobi-operator").
 -define(CSRF_HEADER, ~"x-csrf-token").
@@ -66,7 +66,17 @@ for this class".
 %% actor `asobi_player_erase:run/1` audits an in-shell erasure as, so a row
 %% written from the node itself is not indistinguishable from one written by
 %% somebody holding the operator secret.
--type source() :: static_secret | cloud | local_user | shell.
+%%
+%% `subject` is not an operator at all: it is a player acting on their own
+%% record, which today means `asobi_player_controller:erase_self/1`. It exists
+%% because ADR 0007's reason for auditing erasure - the data is gone, so the row
+%% is the only surviving evidence the request was honoured - does not care who
+%% asked, and a self-erasure that left no row would be the one irreversible
+%% deletion in the product with nothing behind it but a log line. Every other
+%% source names a way of holding operator capabilities; this one names their
+%% absence, so `caps` is always `[]` and a reader must not infer permission from
+%% the row. See ADR 0007.
+-type source() :: static_secret | cloud | local_user | shell | subject.
 -type actor() :: #{
     id := binary(),
     display := binary(),
@@ -231,6 +241,28 @@ csrf_header(Req) ->
         Token when is_binary(Token) -> Token;
         undefined -> ~""
     end.
+
+-doc """
+The actor for a player acting on their own record.
+
+`attested => true`: the caller reached the route through a live session, so the
+credential really was presented - unlike `static_secret`, whose `false` marks a
+bearer token anyone holding the shared secret could have sent. `caps => []`
+because a player holds no operator capabilities, and nothing in the ops plane
+may consult this actor to authorise anything; it exists to attribute an audit
+row, not to permit one. `id` is the player's own id, so `actor_id` and
+`target_id` are equal on every row it writes - which is exactly the query for
+"erasures nobody but the subject asked for".
+""".
+-spec subject_actor(binary()) -> actor().
+subject_actor(PlayerId) when is_binary(PlayerId) ->
+    #{
+        id => PlayerId,
+        display => ~"self",
+        source => subject,
+        caps => [],
+        attested => true
+    }.
 
 -doc """
 The operator label from `x-asobi-operator`, or the default display name.

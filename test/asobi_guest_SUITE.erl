@@ -18,12 +18,7 @@
     create_no_retry_on_non_unique_username_error/1,
     a_full_deployment_says_capacity_reached/1,
     an_uncountable_table_says_unavailable_not_capacity/1,
-    a_saturated_global_limiter_says_rate_limited/1,
-    guest_erases_itself/1,
-    delete_refused_for_a_claimed_account/1,
-    delete_refused_for_a_non_guest/1,
-    delete_refused_for_a_guest_that_linked_a_provider/1,
-    delete_needs_a_session/1
+    a_saturated_global_limiter_says_rate_limited/1
 ]).
 
 all() ->
@@ -41,12 +36,7 @@ all() ->
         create_no_retry_on_non_unique_username_error,
         a_full_deployment_says_capacity_reached,
         an_uncountable_table_says_unavailable_not_capacity,
-        a_saturated_global_limiter_says_rate_limited,
-        guest_erases_itself,
-        delete_refused_for_a_claimed_account,
-        delete_refused_for_a_non_guest,
-        delete_refused_for_a_guest_that_linked_a_provider,
-        delete_needs_a_session
+        a_saturated_global_limiter_says_rate_limited
     ].
 
 %% Set AFTER the app starts, not before. Booting asobi runs
@@ -85,9 +75,6 @@ create(DeviceId, Secret, Config) ->
         #{json => #{~"device_id" => DeviceId, ~"device_secret" => Secret}},
         Config
     ).
-
-auth(Token) ->
-    [{~"authorization", <<"Bearer ", Token/binary>>}].
 
 %% --- Tests ---
 
@@ -635,99 +622,4 @@ a_saturated_global_limiter_says_rate_limited(Config) ->
         ok = seki:delete_limiter(asobi_guest_global_limiter),
         ok = seki:new_limiter(asobi_guest_global_limiter, Restore)
     end,
-    Config.
-
-%% Before DELETE /auth/guest the only ways to remove a guest were an operator
-%% retention key and an operator secret, neither of which a cloud tenant can
-%% set. Erasing the caller must take the identity with it, or the next launch
-%% resumes the account that was just deleted.
-guest_erases_itself(Config) ->
-    Dev = device_id(),
-    Secret = secret(),
-    {ok, R1} = create(Dev, Secret, Config),
-    #{~"player_id" := PlayerId, ~"access_token" := Token} = nova_test:json(R1),
-    {ok, R2} = nova_test:delete(
-        "/api/v1/auth/guest", #{headers => auth(Token)}, Config
-    ),
-    ?assertStatus(200, R2),
-    ?assertEqual({error, not_found}, asobi_repo:get(asobi_player, PlayerId)),
-    ?assertEqual({ok, 0}, count(asobi_player_identity, player_id, PlayerId)),
-
-    %% The token died with the rows it authenticated against, so a second
-    %% delete on the same session is not a second erasure.
-    {ok, R3} = nova_test:delete("/api/v1/auth/guest", #{headers => auth(Token)}, Config),
-    ?assertStatus(401, R3),
-
-    %% And the same device pair is now a stranger: it creates a new player
-    %% rather than resuming the erased one.
-    {ok, R4} = create(Dev, Secret, Config),
-    ?assertStatus(200, R4),
-    #{~"player_id" := NewPlayerId} = nova_test:json(R4),
-    ?assertNotEqual(PlayerId, NewPlayerId),
-    Config.
-
-%% A claimed account is a real account. The device secret that used to resume
-%% it must not be able to throw it away, and neither must the session it was
-%% upgraded into - the gate is "still an unclaimed guest", not "was one".
-delete_refused_for_a_claimed_account(Config) ->
-    {ok, R1} = create(device_id(), secret(), Config),
-    #{~"access_token" := Token} = nova_test:json(R1),
-    Username = asobi_test_helpers:unique_username(~"keepme"),
-    {ok, R2} = nova_test:post(
-        "/api/v1/auth/guest/upgrade",
-        #{json => #{~"username" => Username, ~"password" => ~"secret1234"}, headers => auth(Token)},
-        Config
-    ),
-    ?assertStatus(200, R2),
-    #{~"access_token" := NewToken, ~"player_id" := PlayerId} = nova_test:json(R2),
-    {ok, R3} = nova_test:delete("/api/v1/auth/guest", #{headers => auth(NewToken)}, Config),
-    ?assertStatus(409, R3),
-    ?assertMatch(#{~"error" := #{~"code" := ~"guest.not_unclaimed"}}, nova_test:json(R3)),
-    ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
-    Config.
-
-%% A passwordless OAuth-only account satisfies "has no password" but owns no
-%% guest identity, and must not be erasable through the guest route - the same
-%% side door `upgrade/1` closes.
-delete_refused_for_a_non_guest(Config) ->
-    Username = asobi_test_helpers:unique_username(~"oauthdel"),
-    PlayerCS = kura_changeset:validate_required(
-        kura_changeset:cast(asobi_player, #{}, #{username => Username}, [username]),
-        [username]
-    ),
-    {ok, Player} = asobi_repo:insert(PlayerCS),
-    PlayerId = maps:get(id, Player),
-    IdCS = asobi_player_identity:changeset(#{}, #{
-        player_id => PlayerId, provider => ~"google", provider_uid => device_id()
-    }),
-    {ok, _} = asobi_repo:insert(IdCS),
-    {json, 200, _, #{access_token := Token}} = asobi_auth_tokens:issue(Player, 200, #{}),
-    {ok, R} = nova_test:delete("/api/v1/auth/guest", #{headers => auth(Token)}, Config),
-    ?assertStatus(409, R),
-    ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
-    Config.
-
-%% The gate that `is_unclaimed_guest/2` would have got wrong. Linking a
-%% provider sets no password and leaves the guest identity in place, so the
-%% upgrade predicate still calls this account an unclaimed guest - while
-%% `asobi_guest_reaper` spares it and its owner can still sign in with Google.
-%% Erasing it here would destroy a live account, orphan its purchase receipts,
-%% and leave the provider sign-in landing on a brand-new empty player.
-delete_refused_for_a_guest_that_linked_a_provider(Config) ->
-    {ok, R1} = create(device_id(), secret(), Config),
-    #{~"player_id" := PlayerId, ~"access_token" := Token} = nova_test:json(R1),
-    IdCS = asobi_player_identity:changeset(#{}, #{
-        player_id => PlayerId, provider => ~"google", provider_uid => device_id()
-    }),
-    {ok, _} = asobi_repo:insert(IdCS),
-    {ok, R2} = nova_test:delete("/api/v1/auth/guest", #{headers => auth(Token)}, Config),
-    ?assertStatus(409, R2),
-    ?assertMatch(#{~"error" := #{~"code" := ~"guest.not_unclaimed"}}, nova_test:json(R2)),
-    ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
-    ?assertEqual({ok, 2}, count(asobi_player_identity, player_id, PlayerId)),
-    Config.
-
-delete_needs_a_session(Config) ->
-    {ok, R} = nova_test:delete("/api/v1/auth/guest", #{}, Config),
-    ?assertStatus(401, R),
     Config.

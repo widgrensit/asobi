@@ -160,7 +160,13 @@ run(PlayerId, #{caps := Caps} = Actor) when is_binary(PlayerId) ->
 erase_player(PlayerId, Actor) ->
     try asobi_repo:transaction(fun() -> erase_txn(PlayerId, Actor) end) of
         {ok, Summary} ->
-            after_commit(PlayerId),
+            %% Not bare `after_commit(PlayerId)`: an exception raised in a
+            %% `try ... of` body escapes the `catch` below, so a gen_server
+            %% timeout in one of the three evictions would answer `{error, _}`
+            %% for an erasure that had already committed, and log nothing. The
+            %% rows are gone by this point, so a failed eviction is a thing to
+            %% log and retry by hand, never a reason to report failure.
+            after_commit_best_effort(PlayerId),
             {ok, Summary};
         {error, _Reason} = Error ->
             Error;
@@ -232,6 +238,22 @@ after_commit(PlayerId) ->
     ok = asobi_auth_cache:revoke_player(PlayerId),
     ok = asobi_leaderboard_server:evict_player(PlayerId),
     ok = asobi_presence:disconnect(PlayerId, ~"erased").
+
+-spec after_commit_best_effort(binary()) -> ok.
+after_commit_best_effort(PlayerId) ->
+    try
+        after_commit(PlayerId)
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_ERROR(#{
+                msg => ~"player erase committed but post-commit eviction failed",
+                player_id => PlayerId,
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            }),
+            ok
+    end.
 
 %% A player row already gone is `ok`: the children have still been cleaned, and
 %% a retried erasure must not fail on the half it already finished.

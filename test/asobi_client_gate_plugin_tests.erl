@@ -7,11 +7,8 @@
 %% defaults to [] and the header lookup is try-wrapped), so a bare map is fine
 %% at runtime - this just tells eqwalizer to trust it as a cowboy_req:req()
 %% for the duration of the test (mirrors asobi_body_cap_plugin_tests).
-%% `method` defaults to POST because gate_applies/1 now matches on it: the gate
-%% is a pre-auth check on anonymous registration, and the authenticated
-%% `DELETE /api/v1/auth/guest` shares a path with the create it must not gate.
 -spec fake_req(map()) -> dynamic().
-fake_req(M) -> maps:merge(#{method => ~"POST"}, M).
+fake_req(M) -> M.
 
 -define(REGISTER, fake_req(#{path => ~"/api/v1/auth/register"})).
 
@@ -27,7 +24,6 @@ gate_test_() ->
         fun hang_fails_closed/0,
         fun false_disables_gate/0,
         fun applies_to_oauth_and_guest/0,
-        fun does_not_apply_to_guest_delete/0,
         fun folds_slash_variants/0,
         fun context_omits_password_and_extracts_token/0,
         fun token_defaults_on_non_map_or_non_binary/0
@@ -95,23 +91,6 @@ applies_to_oauth_and_guest() ->
     ?assertEqual(
         {deny, ~"x"}, asobi_client_gate_plugin:decision(fake_req(#{path => ~"/api/v1/auth/oauth"}))
     ),
-    ?assertEqual(
-        {deny, ~"x"}, asobi_client_gate_plugin:decision(fake_req(#{path => ~"/api/v1/auth/guest"}))
-    ).
-
-%% `DELETE /api/v1/auth/guest` is authenticated and carries no body, so its
-%% gate token is always empty and any real gate denies it - before the auth
-%% plugin runs. Matching the path alone made a configured captcha turn the only
-%% guest-removal path a cloud tenant has into a permanent 403.
-does_not_apply_to_guest_delete() ->
-    set_gate(fun(_) -> {deny, ~"x"} end),
-    ?assertEqual(
-        pass,
-        asobi_client_gate_plugin:decision(
-            fake_req(#{path => ~"/api/v1/auth/guest", method => ~"DELETE"})
-        )
-    ),
-    %% ...but the create on the same path still gates.
     ?assertEqual(
         {deny, ~"x"}, asobi_client_gate_plugin:decision(fake_req(#{path => ~"/api/v1/auth/guest"}))
     ).

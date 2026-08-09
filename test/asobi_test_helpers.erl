@@ -48,26 +48,12 @@ http_routes(Groups) ->
         is_map_key(methods, Opts)
     ].
 
-%% The invariant is that every declared *path* answers a preflight, not that
-%% every declared entry lists `options`. routing_tree keys on path and method,
-%% so one `options` comparator anywhere serves the path - and a second one is
-%% worse than none: `routing_tree:insert/4` drops it in the default mode and
-%% throws `{duplicated_paths, _}` under `use_strict_routing`. A path declared
-%% in two groups (`/api/v1/auth/guest` is the POST unsecured and the DELETE
-%% secured) therefore declares `options` exactly once, and this must not read
-%% that as a gap. The live preflights are asobi_cors_SUITE.
 -spec routes_missing_options([map()]) -> [{binary(), binary()}].
 routes_missing_options(Groups) ->
-    Covered = sets:from_list([
-        <<Prefix/binary, Path/binary>>
-     || {Prefix, Path, _Handler, Methods} <- http_routes(Groups),
-        lists:member(options, Methods)
-    ]),
     [
         {Prefix, Path}
      || {Prefix, Path, _Handler, Methods} <- http_routes(Groups),
-        not lists:member(options, Methods),
-        not sets:is_element(<<Prefix/binary, Path/binary>>, Covered)
+        not lists:member(options, Methods)
     ].
 
 %% One concrete request path per group that serves HTTP. Groups that only

@@ -33,7 +33,6 @@ POST   /api/v1/auth/logout          Revoke the current tokens
 POST   /api/v1/auth/oauth           OAuth / Steam token validation
 POST   /api/v1/auth/guest           Create or resume an anonymous guest
 POST   /api/v1/auth/guest/upgrade   Claim a guest account (username + password)
-DELETE /api/v1/auth/guest           Erase the calling guest
 POST   /api/v1/auth/link            Link a provider to the current account
 DELETE /api/v1/auth/unlink          Unlink a provider
 ```
@@ -87,8 +86,9 @@ idempotent and reports nothing about which token was valid.
 
 Anonymous device-based auth, opt-in via config. `POST /auth/guest` creates a
 player on first call and resumes the same one on later calls; `/auth/guest/upgrade`
-(authenticated) claims it with a username and password, and `DELETE /auth/guest`
-(authenticated) erases it while it is still unclaimed. See the
+(authenticated) claims it with a username and password. To delete a guest, use
+[the account-erasure route](#erasing-your-own-account) - guest removal is not a
+guest-specific endpoint. See the
 [Authentication guide](authentication.md#guest-anonymous) for the device-secret
 contract, config, and error codes.
 
@@ -107,17 +107,9 @@ curl -X POST /api/v1/auth/guest \
 returns the same body without it, so treat a missing `created` as `false`
 rather than expecting the key.
 
-```bash
-curl -X DELETE /api/v1/auth/guest -H 'Authorization: Bearer <access_token>'
-```
-
-```json
-{"deleted": true}
-```
-
-A guest can only erase itself, and only while unclaimed. This is the one
-erasure path that needs no operator secret, so it is also the only one a cloud
-tenant can reach.
+To delete a guest account, call
+[`POST /players/me/erase`](#erasing-your-own-account) on its session. No
+`password` is needed, because a guest has none.
 
 ## Players
 
@@ -125,6 +117,63 @@ tenant can reach.
 GET /api/v1/players/:id        Get player profile
 PUT /api/v1/players/:id        Update own profile
 ```
+
+### Erasing your own account
+
+```
+POST /api/v1/players/me/erase
+```
+
+Erases the calling player and everything core holds about them. The subject is
+always the caller - the id comes from the session and there is no id in the
+path or body - so this route can never reach another account. An operator
+erasing somebody else is a different route with a different credential:
+[`/ops/players/:id/erase`](#erasing-and-exporting-a-player).
+
+An account with a password must echo it. One without - a guest, or a
+provider-only account - has no credential the client can re-present, so its
+session is the whole confirmation.
+
+```bash
+# password account
+curl -X POST /api/v1/players/me/erase \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"password": "secret123"}'
+
+# guest or provider-only account
+curl -X POST /api/v1/players/me/erase \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+```json
+{"deleted": true}
+```
+
+POST rather than DELETE because the confirmation travels in the body, and a
+DELETE body has no defined semantics - the same shape the operator route uses.
+
+Irreversible, and it takes the children with it: wallets, ledger, inventory,
+storage, cloud saves, notifications, leaderboard entries, chat, group
+memberships, friendships, stats, sessions and identities. Purchase receipts are
+severed rather than deleted, for the reason described under
+[the operator route](#erasing-and-exporting-a-player). Every erasure writes an
+audit row whose actor is the player themselves.
+
+**The session dies with the account.** A retried call after a successful one
+answers `401`, not `200` or `404`, because the token it presents was deleted
+inside the same transaction. A client whose request timed out should read a
+subsequent `401` as "it worked", not as "sign in again".
+
+| Status | `error.code` | Meaning |
+|--------|--------------|---------|
+| `400`  | `missing_field` | The account has a password and the body carried none |
+| `401`  | `auth.invalid_credentials` | The password does not match. Nothing was deleted |
+| `401`  | `unauthenticated` | No session, or the account is already gone |
+| `409`  | `player.credentials_changed` | The password changed while the request was in flight. Nothing was deleted; retry |
+| `429`  | `rate_limited` | Erasure has its own tight bucket, because the wrong-password path runs the password KDF |
+| `500`  | `player.erase_failed` | The transaction rolled back. Nothing was deleted |
 
 ## Worlds
 
@@ -419,7 +468,64 @@ return a field the list withheld. An id that is not a uuid is
 `400 ops.invalid_id` and never reaches the database; a real miss is
 `404 ops.not_found`.
 
-### Players and matches
+### Players
+
+### Erasing your own account
+
+```
+POST /api/v1/players/me/erase
+```
+
+Erases the calling player and everything core holds about them. The subject is
+always the caller - the id comes from the session and there is no id in the
+path or body - so this route can never reach another account. An operator
+erasing somebody else is a different route with a different credential:
+[`/ops/players/:id/erase`](#erasing-and-exporting-a-player).
+
+An account with a password must echo it. One without - a guest, or a
+provider-only account - has no credential the client can re-present, so its
+session is the whole confirmation.
+
+```bash
+# password account
+curl -X POST /api/v1/players/me/erase \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"password": "secret123"}'
+
+# guest or provider-only account
+curl -X POST /api/v1/players/me/erase \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+```json
+{"deleted": true}
+```
+
+POST rather than DELETE because the confirmation travels in the body, and a
+DELETE body has no defined semantics - the same shape the operator route uses.
+
+Irreversible, and it takes the children with it: wallets, ledger, inventory,
+storage, cloud saves, notifications, leaderboard entries, chat, group
+memberships, friendships, stats, sessions and identities. Purchase receipts are
+severed rather than deleted, for the reason described under
+[the operator route](#erasing-and-exporting-a-player). Every erasure writes an
+audit row whose actor is the player themselves.
+
+**The session dies with the account.** A retried call after a successful one
+answers `401`, not `200` or `404`, because the token it presents was deleted
+inside the same transaction. A client whose request timed out should read a
+subsequent `401` as "it worked", not as "sign in again".
+
+| Status | `error.code` | Meaning |
+|--------|--------------|---------|
+| `400`  | `missing_field` | The account has a password and the body carried none |
+| `401`  | `auth.invalid_credentials` | The password does not match. Nothing was deleted |
+| `401`  | `unauthenticated` | No session, or the account is already gone |
+| `409`  | `player.credentials_changed` | The password changed while the request was in flight. Nothing was deleted; retry |
+| `429`  | `rate_limited` | Erasure has its own tight bucket, because the wrong-password path runs the password KDF |
+| `500`  | `player.erase_failed` | The transaction rolled back. Nothing was deleted | and matches
 
 `ops/players` sorts on `id`, `username`, `display_name`, `inserted_at`,
 `updated_at`, and searches username and display name. `ops/matches` sorts on

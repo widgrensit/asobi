@@ -13,13 +13,12 @@
 %% POST /auth/guest/upgrade (username+password, revokes the device verifier) or
 %% the existing /auth/link path (OAuth). Guardian + beam-security-reviewer gate.
 %%
-%% A guest can also erase itself: DELETE /auth/guest. Before that existed the
-%% only way to remove a guest was `guest_reap_after` (inactivity retention, an
-%% operator key) or the ops erasure route (an operator secret), and a cloud
-%% tenant can set neither - so a deployment that accumulated throwaway guests
-%% had no way at all to shed them (asobi#419).
+%% Deleting a guest is not here: it is `DELETE /api/v1/players/me`
+%% (`asobi_player_controller:erase_self/1`), because a player erasing their own
+%% account is not a guest-shaped problem. A guest is just the case with no
+%% credential to re-confirm (asobi#419).
 
--export([authenticate/1, upgrade/1, delete/1]).
+-export([authenticate/1, upgrade/1]).
 
 -ifdef(TEST).
 -export([make_verifier/1, verify/2, decode_secret/1, valid_device_id/1, create/2, cap_gate/2]).
@@ -43,6 +42,7 @@
 -define(MAX_DEVICE_ID_BYTES, 255).
 -define(MAX_USERNAME_ATTEMPTS, 3).
 -define(DEFAULT_UNLINKED_CAP, 100000).
+-define(RATE_LIMITED_HINT_SECONDS, 5).
 
 -spec authenticate(cowboy_req:req()) -> response().
 authenticate(#{json := #{~"device_id" := DeviceId, ~"device_secret" := Secret}} = _Req) when
@@ -126,117 +126,6 @@ do_upgrade(Player, PlayerId, Username, Password) ->
             asobi_auth_error:from_changeset_fields(
                 kura_changeset:traverse_errors(ECS, fun(_F, M) -> M end)
             )
-    end.
-
-%% DELETE /api/v1/auth/guest - erase the calling guest and everything core
-%% holds about it. Authenticated as the guest, so it can only erase itself, and
-%% refused unless the caller is still an unclaimed guest: a claimed account is a
-%% real account and must not be thrown away by a device secret that used to
-%% resume it.
-%%
-%% Deliberately not gated on `guest_enabled/0`. Turning guest auth off stops new
-%% guests; it must not strand the ones already created with no way out. The
-%% caller had to hold a live session to get here either way.
-%%
-%% Writes no `ops_audit_entries` row, matching `m:asobi_guest_reaper` rather
-%% than the operator erasure route. ADR 0007 audits erasure because a person
-%% asked and the row is the surviving evidence, but the actor there is an
-%% operator acting on somebody else. Here the subject is the caller, the ops
-%% audit log is the operator plane's log, and a route any authenticated guest
-%% can call in a loop must not be able to write unbounded rows into it - the
-%% same reasoning `do_upgrade/4` uses for `revoke_player/1` over `clear/0`.
-%% The gate is `asobi_guest_reaper:unclaimed_guest/1`, NOT the local
-%% `is_unclaimed_guest/2` that `upgrade/1` uses. The two ask different
-%% questions and only one of them is safe in front of an erasure: the local one
-%% is "no password AND owns a guest identity", which is still true of a guest
-%% who linked Google or Steam, because `asobi_oauth_controller:link/1` sets no
-%% password and leaves the guest identity in place. Erasing that account
-%% destroys a player who can still sign in, and the retention sweep spares it -
-%% a self-serve route must not be the one path that does not.
--spec delete(cowboy_req:req()) -> response().
-delete(#{auth_data := #{player_id := PlayerId}} = _Req) when is_binary(PlayerId) ->
-    case asobi_guest_reaper:unclaimed_guest(PlayerId) of
-        true -> erase_self(PlayerId);
-        false -> {asobi_error, ~"guest.not_unclaimed"}
-    end;
-delete(_Req) ->
-    {asobi_error, ~"unauthenticated"}.
-
-%% One transaction around the re-check and the erasure, and `after_commit/1`
-%% only once it has committed - the same shape `m:asobi_guest_reaper` uses, and
-%% for the same reason: a guest that calls /auth/guest/upgrade concurrently must
-%% win, and an ETS eviction cannot roll back.
-%%
-%% The re-check takes `FOR UPDATE` on the player row. Without it the re-check is
-%% a plain READ COMMITTED select, so an upgrade committing between the select
-%% and the `DELETE FROM players` is not seen by the delete - which predicates on
-%% id, not on `hashed_password` - and the concurrent upgrade loses instead of
-%% winning, handing its caller fresh tokens for a player that no longer exists.
--spec erase_self(binary()) -> response().
-erase_self(PlayerId) ->
-    Fun = fun() ->
-        case locked_unclaimed_guest(PlayerId) of
-            false -> {error, claimed_during_delete};
-            true -> asobi_player_erase:steps(PlayerId)
-        end
-    end,
-    try asobi_repo:transaction(Fun) of
-        ok ->
-            after_commit(PlayerId),
-            ?LOG_INFO(#{event => guest_self_deleted, player_id => PlayerId}),
-            {json, 200, #{}, #{deleted => true}};
-        {error, claimed_during_delete} ->
-            {asobi_error, ~"guest.not_unclaimed"};
-        Other ->
-            ?LOG_WARNING(#{
-                event => guest_self_delete_failed, player_id => PlayerId, result => Other
-            }),
-            {asobi_error, ~"guest.delete_failed"}
-    catch
-        Class:Reason:Stacktrace ->
-            ?LOG_ERROR(#{
-                event => guest_self_delete_rolled_back,
-                player_id => PlayerId,
-                class => Class,
-                reason => Reason,
-                stacktrace => Stacktrace
-            }),
-            {asobi_error, ~"guest.delete_failed"}
-    end.
-
-%% Take the row lock first, then re-ask the predicate. Both statements are in
-%% the caller's transaction, so a concurrent upgrade blocks on the lock and its
-%% password write is visible to the predicate on the other side of it.
--spec locked_unclaimed_guest(binary()) -> boolean().
-locked_unclaimed_guest(PlayerId) ->
-    Q = kura_query:lock(
-        kura_query:where(kura_query:from(asobi_player), {id, PlayerId}), ~"FOR UPDATE"
-    ),
-    case asobi_repo:all(Q) of
-        {ok, [_Player]} -> asobi_guest_reaper:unclaimed_guest(PlayerId);
-        _ -> false
-    end.
-
-%% The rows are already committed away by the time this runs, so a failure here
-%% must be logged and retried by hand, never turned into a 500 that tells the
-%% caller nothing happened. It cannot live in the `try ... of` body either: an
-%% exception raised in the `of` body escapes the `catch` (the trap
-%% `asobi_oauth_controller` documents), so a gen_server timeout inside
-%% `after_commit/1` would 500 without even logging.
--spec after_commit(binary()) -> ok.
-after_commit(PlayerId) ->
-    try
-        asobi_player_erase:after_commit(PlayerId)
-    catch
-        Class:Reason:Stacktrace ->
-            ?LOG_ERROR(#{
-                event => guest_self_delete_after_commit_failed,
-                player_id => PlayerId,
-                class => Class,
-                reason => Reason,
-                stacktrace => Stacktrace
-            }),
-            ok
     end.
 
 %% On upgrade the account is claimed, so remove the guest identity entirely: the
@@ -359,24 +248,33 @@ create(DeviceId, SecretBin) ->
 %% becoming one). The report that goes to the log and the object that goes to
 %% the client are the same decision, so they cannot drift.
 -spec denial(map()) -> response().
-denial(#{reason := global_rate_limited, retry_after := RetryAfter}) ->
-    %% Answered the way `m:asobi_rate_limit_plugin` answers its own 429, not
-    %% through the plain error object: a `retry-after` header and a top-level
-    %% `retry_after` alongside the object's `details`. An SDK backing off on
-    %% the standard header would otherwise not back off here at all, and
-    %% `retry_after` is one of the four legacy top-level keys asobi_error's
-    %% moduledoc pins in place.
-    {json, 429, #{~"retry-after" => integer_to_binary(RetryAfter)},
-        asobi_error:legacy_body(~"guest.rate_limited", #{~"retry_after" => RetryAfter})};
+denial(#{reason := global_rate_limited}) ->
+    %% Shaped like `m:asobi_rate_limit_plugin`'s own 429 - a `retry-after`
+    %% header and a top-level `retry_after` beside the object's `details`, so an
+    %% SDK backing off on the standard header backs off here too.
+    %%
+    %% A fixed hint, NOT the limiter's real remaining window. This bucket is
+    %% keyed on one constant, so it is the whole node's guest-signup budget: the
+    %% true figure would tell an unauthenticated caller exactly how long to
+    %% sleep between single requests to hold it shut against every real player,
+    %% which is the cheapest possible lockout and has been measured on this
+    %% stack before (asobi_saas#249). The precise number stays in the
+    %% `guest_create_denied` log line, where the operator needs it and an
+    %% attacker cannot read it. The per-IP limiter may publish its real value
+    %% because the attacker already owns that bucket; this one is shared.
+    {json, 429, #{~"retry-after" => integer_to_binary(?RATE_LIMITED_HINT_SECONDS)},
+        asobi_error:legacy_body(~"guest.rate_limited", #{
+            ~"retry_after" => ?RATE_LIMITED_HINT_SECONDS
+        })};
 denial(#{reason := unlinked_cap_reached}) ->
     {asobi_error, ~"guest.capacity_reached"};
 denial(#{reason := unlinked_count_unavailable}) ->
-    {asobi_error, ~"guest.unavailable"};
-%% Total over what `create_gate/0` returns today. The clause is here so that a
-%% fourth reason added later is still a refusal rather than a `function_clause`
-%% on an unauthenticated path - fail closed has to survive the next edit.
-denial(_) ->
-    {asobi_error, ~"guest.capacity_reached"}.
+    {asobi_error, ~"guest.unavailable"}.
+
+%% No catch-all clause, on purpose. Dialyzer proves this mapping total over
+%% everything `create_gate/0` returns, so a fourth reason added later fails the
+%% build rather than reaching production - a stronger backstop than a
+%% fail-closed clause, which dialyzer would then report as unreachable anyway.
 
 %% Three unrelated conditions refuse a create, and each is a different
 %% operator problem. They used to share one code and one reason-less warning
@@ -390,9 +288,7 @@ create_gate() ->
         {allow, _} ->
             cap_gate(asobi_guest_reaper:cached_unlinked_count(), cap());
         {deny, #{retry_after := RetryAfterMs}} ->
-            {deny, #{
-                reason => global_rate_limited, retry_after => max(1, RetryAfterMs div 1000)
-            }}
+            {deny, #{reason => global_rate_limited, retry_after_ms => RetryAfterMs}}
     end.
 
 %% Finite by default (fail-closed): the ceiling must not be off by default.

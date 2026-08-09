@@ -131,6 +131,38 @@ An automated retention sweep is not an operator action and writes no rows:
 row per reaped guest would bury the operator actions this table exists for
 under the machine's own housekeeping.
 
+### 5. A player erasing their own account writes a row too (amended 2026-08-09)
+
+`POST /api/v1/players/me/erase` (asobi#419) lets a player erase themselves,
+which platform store rules and GDPR Art. 17 between them make a shipping
+requirement rather than a feature. The actor is the subject, not an operator,
+so it is worth stating why it lands in this table anyway and why it is not the
+sweep case.
+
+The argument in section 4 does not mention who asked. The data is gone by
+definition, the row is the only surviving evidence, and the erasure is one
+transaction the row can commit inside. All three hold identically here, and
+this is the only irreversible thing in the product a player can do to
+themselves - so the case for a durable record is stronger than for the
+operator route, not weaker.
+
+The reason it is not the sweep case is volume. The sweep writes no rows because
+it erases up to 500 accounts a pass, unattributably, on the machine's own
+schedule. A self-erasure is one account, asked for by a person, and it can
+succeed at most once per account: the transaction deletes the caller's own
+`player_tokens`, so a second attempt on the same session is unauthenticated.
+Successful rows are therefore bounded by the account-creation rate, which is
+already bounded by registration posture, the per-IP limiter, the node-wide
+guest limiter and the unlinked-guest cap. Failed attempts are not audited.
+
+The actor is `#{source => subject, caps => [], attested => true}`. `subject` is
+the one `asobi_ops_auth:source()` value that does not name a way of holding
+operator capabilities: it names their absence, so nothing may read `caps` from
+such a row and infer permission. `attested` is true because the caller
+presented a live session, which is a stronger claim than the `static_secret`
+actor makes. `actor_id` equals `target_id` on every row it writes, which is the
+query for "erasures nobody but the subject asked for".
+
 ## Consequences
 
 - **Attribution survives the request.** Every mutation is answerable months
