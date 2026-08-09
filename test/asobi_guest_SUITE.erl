@@ -22,6 +22,7 @@
     guest_erases_itself/1,
     delete_refused_for_a_claimed_account/1,
     delete_refused_for_a_non_guest/1,
+    delete_refused_for_a_guest_that_linked_a_provider/1,
     delete_needs_a_session/1
 ]).
 
@@ -44,6 +45,7 @@ all() ->
         guest_erases_itself,
         delete_refused_for_a_claimed_account,
         delete_refused_for_a_non_guest,
+        delete_refused_for_a_guest_that_linked_a_provider,
         delete_needs_a_session
     ].
 
@@ -703,6 +705,26 @@ delete_refused_for_a_non_guest(Config) ->
     {ok, R} = nova_test:delete("/api/v1/auth/guest", #{headers => auth(Token)}, Config),
     ?assertStatus(409, R),
     ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
+    Config.
+
+%% The gate that `is_unclaimed_guest/2` would have got wrong. Linking a
+%% provider sets no password and leaves the guest identity in place, so the
+%% upgrade predicate still calls this account an unclaimed guest - while
+%% `asobi_guest_reaper` spares it and its owner can still sign in with Google.
+%% Erasing it here would destroy a live account, orphan its purchase receipts,
+%% and leave the provider sign-in landing on a brand-new empty player.
+delete_refused_for_a_guest_that_linked_a_provider(Config) ->
+    {ok, R1} = create(device_id(), secret(), Config),
+    #{~"player_id" := PlayerId, ~"access_token" := Token} = nova_test:json(R1),
+    IdCS = asobi_player_identity:changeset(#{}, #{
+        player_id => PlayerId, provider => ~"google", provider_uid => device_id()
+    }),
+    {ok, _} = asobi_repo:insert(IdCS),
+    {ok, R2} = nova_test:delete("/api/v1/auth/guest", #{headers => auth(Token)}, Config),
+    ?assertStatus(409, R2),
+    ?assertMatch(#{~"error" := #{~"code" := ~"guest.not_unclaimed"}}, nova_test:json(R2)),
+    ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
+    ?assertEqual({ok, 2}, count(asobi_player_identity, player_id, PlayerId)),
     Config.
 
 delete_needs_a_session(Config) ->

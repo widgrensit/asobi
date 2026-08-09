@@ -38,7 +38,7 @@
 %% count instead. Operator-initiated erasure - `asobi_player_erase:run/1,2` -
 %% audits, because there a person asked.
 
--export([start_link/0, sweep_now/0, cached_unlinked_count/0]).
+-export([start_link/0, sweep_now/0, cached_unlinked_count/0, unclaimed_guest/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -include_lib("kernel/include/logger.hrl").
@@ -251,8 +251,21 @@ erase_guest(PlayerId) ->
             skipped
     end.
 
-%% A guest is unclaimed only if the player never set a password and has no
-%% identity from another provider (i.e. never upgraded/linked).
+-doc """
+Whether `PlayerId` is a guest nobody has claimed.
+
+Unclaimed means the player never set a password **and** owns no identity from
+another provider - linking Google or Steam is a claim even though
+`asobi_oauth_controller:link/1` sets no password and leaves the guest identity
+in place. Exported because erasure is destructive and irreversible, so the
+sweep and `asobi_guest_controller:delete/1` must not be able to disagree about
+who may be erased. The upgrade predicate inside `m:asobi_guest_controller` is a
+deliberately different, looser question - may this account be *upgraded* - and
+is not a substitute here.
+
+Answers `false` when a lookup fails, so a caller about to delete something
+fails closed.
+""".
 -spec unclaimed_guest(binary()) -> boolean().
 unclaimed_guest(PlayerId) ->
     NoPassword =

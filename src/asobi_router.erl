@@ -60,9 +60,14 @@ api_routes() ->
             {~"/auth/guest/upgrade", fun asobi_guest_controller:upgrade/1, #{
                 methods => [post, options]
             }},
-            {~"/auth/guest", fun asobi_guest_controller:delete/1, #{
-                methods => [delete, options]
-            }},
+            %% No `options` here, unlike every other route. The path is already
+            %% declared in `auth_routes/0` for the POST, which registers the
+            %% OPTIONS comparator; declaring it twice makes the table throw
+            %% `{duplicated_paths, _}` at boot under `use_strict_routing`.
+            %% Preflight still works: `nova_cors_plugin` answers OPTIONS in
+            %% `pre_request`, ahead of the security handler, so the unsecured
+            %% declaration is the right one to keep.
+            {~"/auth/guest", fun asobi_guest_controller:delete/1, #{methods => [delete]}},
             {~"/auth/link", fun asobi_oauth_controller:link/1, #{methods => [post, options]}},
             {~"/auth/unlink", fun asobi_oauth_controller:unlink/1, #{methods => [delete, options]}},
 
