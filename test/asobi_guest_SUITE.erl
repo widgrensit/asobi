@@ -18,7 +18,8 @@
     create_no_retry_on_non_unique_username_error/1,
     a_full_deployment_says_capacity_reached/1,
     an_uncountable_table_says_unavailable_not_capacity/1,
-    a_saturated_global_limiter_says_rate_limited/1
+    a_saturated_global_limiter_says_rate_limited/1,
+    a_failing_count_is_asked_once_per_ttl/1
 ]).
 
 all() ->
@@ -36,7 +37,8 @@ all() ->
         create_no_retry_on_non_unique_username_error,
         a_full_deployment_says_capacity_reached,
         an_uncountable_table_says_unavailable_not_capacity,
-        a_saturated_global_limiter_says_rate_limited
+        a_saturated_global_limiter_says_rate_limited,
+        a_failing_count_is_asked_once_per_ttl
     ].
 
 %% Set AFTER the app starts, not before. Booting asobi runs
@@ -621,5 +623,32 @@ a_saturated_global_limiter_says_rate_limited(Config) ->
     after
         ok = seki:delete_limiter(asobi_guest_global_limiter),
         ok = seki:new_limiter(asobi_guest_global_limiter, Restore)
+    end,
+    Config.
+
+%% A failing count fails the create closed, so without caching the failure every
+%% single guest create re-runs a COUNT against the database that is already
+%% having trouble - a create storm turns one struggling query into a flood of
+%% them. The failure is cached for the same TTL as a good count, so the load is
+%% one attempt per window whichever way the query goes.
+a_failing_count_is_asked_once_per_ttl(Config) ->
+    application:set_env(asobi, guest_unlinked_count_ttl_ms, 60000),
+    meck:new(asobi_repo, [passthrough]),
+    meck:expect(asobi_repo, aggregate, fun(_Q, count) -> {error, timeout} end),
+    try
+        ets:delete_all_objects(asobi_guest_count_cache),
+        ?assertEqual(unknown, asobi_guest_reaper:cached_unlinked_count()),
+        ?assertEqual(unknown, asobi_guest_reaper:cached_unlinked_count()),
+        ?assertEqual(unknown, asobi_guest_reaper:cached_unlinked_count()),
+        ?assertEqual(1, meck:num_calls(asobi_repo, aggregate, '_')),
+
+        %% And the create path still refuses, under the honest code.
+        {ok, R} = create(device_id(), secret(), Config),
+        ?assertStatus(503, R),
+        ?assertMatch(#{~"error" := #{~"code" := ~"guest.unavailable"}}, nova_test:json(R))
+    after
+        meck:unload(asobi_repo),
+        ets:delete_all_objects(asobi_guest_count_cache),
+        application:unset_env(asobi, guest_unlinked_count_ttl_ms)
     end,
     Config.

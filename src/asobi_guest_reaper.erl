@@ -104,31 +104,39 @@ cached_unlinked_count() ->
             end
     end.
 
+%% A failed count is cached for the same TTL as a good one, and that is
+%% deliberate. `unknown` fails the create closed, so without caching it every
+%% single guest create re-runs a COUNT that is already failing - against a
+%% database that is, by construction, the thing having trouble. Caching the
+%% failure bounds the load on it to one attempt per TTL, and bounds the log
+%% volume to the same.
 -spec refresh_count(integer()) -> non_neg_integer() | unknown.
 refresh_count(Now) ->
-    case live_unlinked_count() of
-        N when is_integer(N) ->
-            Ttl =
-                case
-                    application:get_env(
-                        asobi, guest_unlinked_count_ttl_ms, ?DEFAULT_COUNT_TTL_MS
-                    )
-                of
-                    T when is_integer(T) -> T;
-                    _ -> ?DEFAULT_COUNT_TTL_MS
-                end,
-            true = ets:insert(?COUNT_CACHE, {count, N, Now + Ttl}),
-            N;
-        unknown ->
-            unknown
-    end.
+    Ttl =
+        case application:get_env(asobi, guest_unlinked_count_ttl_ms, ?DEFAULT_COUNT_TTL_MS) of
+            T when is_integer(T) -> T;
+            _ -> ?DEFAULT_COUNT_TTL_MS
+        end,
+    Count = live_unlinked_count(),
+    true = ets:insert(?COUNT_CACHE, {count, Count, Now + Ttl}),
+    Count.
 
+%% Answers `unknown` on any failure so the caller fails closed - and says why.
+%%
+%% This used to swallow the reason with a bare `_ -> unknown`, which made the
+%% failure undiagnosable from the node: `asobi_guest_controller` could report
+%% that it had been unable to count, but nothing anywhere said what the
+%% database had actually answered. That gap cost a real investigation
+%% (asobi#419), so the result is logged.
 -spec live_unlinked_count() -> non_neg_integer() | unknown.
 live_unlinked_count() ->
     Q = kura_query:where(kura_query:from(asobi_player_identity), {provider, ?PROVIDER}),
     case asobi_repo:aggregate(Q, count) of
-        {ok, N} when is_integer(N), N >= 0 -> N;
-        _ -> unknown
+        {ok, N} when is_integer(N), N >= 0 ->
+            N;
+        Other ->
+            ?LOG_WARNING(#{event => guest_count_failed, result => Other}),
+            unknown
     end.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
