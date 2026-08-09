@@ -482,8 +482,21 @@ operator half.
 |-----|---------|-------------|
 | `guest_verifier_pepper` | none | Key-id -> pepper map, or a single binary. Each pepper must be at least 32 bytes; a shorter one is treated as absent. Presence is the operator's on switch |
 | `guest_verifier_key_id` | `~"v1"` | Which pepper key id to use when minting new verifiers |
-| `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity` |
+| `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity`. Anything else falls back to the default and logs `invalid_guest_unlinked_cap` |
 | `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent |
+
+The cap is a soft ceiling, not an exact one: the count comes from a short-TTL
+cache rather than a `COUNT` per create, so it can overshoot by roughly (TTL x
+create rate). Reaching it answers `503 guest.capacity_reached`. If the node
+cannot run the count at all it refuses too, but under `503 guest.unavailable` -
+a different problem with a different fix, and a database fault rather than a
+full deployment. Both log `guest_create_denied` with a `reason`; the cap denial
+also logs the `count` and `cap` it compared, which is what tells you whether
+the ceiling is anywhere near.
+
+Clients can shed guests themselves with `DELETE /api/v1/auth/guest`
+(see [Authentication](authentication.md#delete-a-guest)), which is the only
+guest removal available when `guest_reap_after` is not settable.
 
 Measured from the last resume, not from account creation. Under device auth a
 guest stays unclaimed for life - there is no password to set - so account age

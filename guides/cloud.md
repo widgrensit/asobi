@@ -352,7 +352,11 @@ or store receipt validation today, self-host.
 you, so `guest_auth = true` in your Lua works. `guest_verifier_key_id`,
 `guest_unlinked_cap`, `guest_reap_after` and `guest_reap_interval_ms` are not
 settable, so unclaimed guests are never reaped and only the default soft cap
-applies. Pepper rotation is not yours either.
+applies. Pepper rotation is not yours either. Your client can still shed
+accounts one at a time with `DELETE /api/v1/auth/guest`
+([Authentication](authentication.md#delete-a-guest)) - that is the whole of
+guest removal on cloud, so a client that mints a throwaway device pair per
+launch should delete the account it abandons.
 
 **Ops-plane shape.** `ops_secret`, `console_erasure`, `console_session_ttl`,
 `console_secure_cookie`, `console_api_base`, `console_label`,

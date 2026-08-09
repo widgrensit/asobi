@@ -33,6 +33,7 @@ POST   /api/v1/auth/logout          Revoke the current tokens
 POST   /api/v1/auth/oauth           OAuth / Steam token validation
 POST   /api/v1/auth/guest           Create or resume an anonymous guest
 POST   /api/v1/auth/guest/upgrade   Claim a guest account (username + password)
+DELETE /api/v1/auth/guest           Erase the calling guest
 POST   /api/v1/auth/link            Link a provider to the current account
 DELETE /api/v1/auth/unlink          Unlink a provider
 ```
@@ -86,7 +87,8 @@ idempotent and reports nothing about which token was valid.
 
 Anonymous device-based auth, opt-in via config. `POST /auth/guest` creates a
 player on first call and resumes the same one on later calls; `/auth/guest/upgrade`
-(authenticated) claims it with a username and password. See the
+(authenticated) claims it with a username and password, and `DELETE /auth/guest`
+(authenticated) erases it while it is still unclaimed. See the
 [Authentication guide](authentication.md#guest-anonymous) for the device-secret
 contract, config, and error codes.
 
@@ -104,6 +106,18 @@ curl -X POST /api/v1/auth/guest \
 `created` is present only on the call that created the player. A resume
 returns the same body without it, so treat a missing `created` as `false`
 rather than expecting the key.
+
+```bash
+curl -X DELETE /api/v1/auth/guest -H 'Authorization: Bearer <access_token>'
+```
+
+```json
+{"deleted": true}
+```
+
+A guest can only erase itself, and only while unclaimed. This is the one
+erasure path that needs no operator secret, so it is also the only one a cloud
+tenant can reach.
 
 ## Players
 

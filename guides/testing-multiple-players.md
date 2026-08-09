@@ -88,8 +88,12 @@ func _ready() -> void:
 <!-- /tabs -->
 
 Every run leaves another guest account on the node. That is harmless locally,
-and `guest_reap_after` clears unclaimed guests on a real deployment. Ship
-`guest_device` in the build players actually install.
+and `guest_reap_after` clears unclaimed guests on a self-hosted deployment. On
+cloud that key is not yours to set, so a test client pointed at a cloud
+environment should call `DELETE /api/v1/auth/guest`
+([Authentication](authentication.md#delete-a-guest)) when it shuts down, or the
+accounts accumulate until the soft cap refuses new ones. Ship `guest_device` in
+the build players actually install.
 
 ## Stable test players across runs
 

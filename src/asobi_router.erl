@@ -60,6 +60,9 @@ api_routes() ->
             {~"/auth/guest/upgrade", fun asobi_guest_controller:upgrade/1, #{
                 methods => [post, options]
             }},
+            {~"/auth/guest", fun asobi_guest_controller:delete/1, #{
+                methods => [delete, options]
+            }},
             {~"/auth/link", fun asobi_oauth_controller:link/1, #{methods => [post, options]}},
             {~"/auth/unlink", fun asobi_oauth_controller:unlink/1, #{methods => [delete, options]}},
 

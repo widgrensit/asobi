@@ -12,11 +12,17 @@
 %% is configured; both missing/false fail closed. Upgrade to a real account:
 %% POST /auth/guest/upgrade (username+password, revokes the device verifier) or
 %% the existing /auth/link path (OAuth). Guardian + beam-security-reviewer gate.
+%%
+%% A guest can also erase itself: DELETE /auth/guest. Before that existed the
+%% only way to remove a guest was `guest_reap_after` (inactivity retention, an
+%% operator key) or the ops erasure route (an operator secret), and a cloud
+%% tenant can set neither - so a deployment that accumulated throwaway guests
+%% had no way at all to shed them (asobi#419).
 
--export([authenticate/1, upgrade/1]).
+-export([authenticate/1, upgrade/1, delete/1]).
 
 -ifdef(TEST).
--export([make_verifier/1, verify/2, decode_secret/1, valid_device_id/1, create/2]).
+-export([make_verifier/1, verify/2, decode_secret/1, valid_device_id/1, create/2, cap_gate/2]).
 -endif.
 
 -include_lib("kernel/include/logger.hrl").
@@ -36,6 +42,7 @@
 -define(MAX_SECRET_B64_BYTES, 1024).
 -define(MAX_DEVICE_ID_BYTES, 255).
 -define(MAX_USERNAME_ATTEMPTS, 3).
+-define(DEFAULT_UNLINKED_CAP, 100000).
 
 -spec authenticate(cowboy_req:req()) -> response().
 authenticate(#{json := #{~"device_id" := DeviceId, ~"device_secret" := Secret}} = _Req) when
@@ -119,6 +126,75 @@ do_upgrade(Player, PlayerId, Username, Password) ->
             asobi_auth_error:from_changeset_fields(
                 kura_changeset:traverse_errors(ECS, fun(_F, M) -> M end)
             )
+    end.
+
+%% DELETE /api/v1/auth/guest - erase the calling guest and everything core
+%% holds about it. Authenticated as the guest, so it can only erase itself, and
+%% refused unless the caller is still an unclaimed guest: a claimed account is a
+%% real account and must not be thrown away by a device secret that used to
+%% resume it.
+%%
+%% Deliberately not gated on `guest_enabled/0`. Turning guest auth off stops new
+%% guests; it must not strand the ones already created with no way out. The
+%% caller had to hold a live session to get here either way.
+%%
+%% Writes no `ops_audit_entries` row, matching `m:asobi_guest_reaper` rather
+%% than the operator erasure route. ADR 0007 audits erasure because a person
+%% asked and the row is the surviving evidence, but the actor there is an
+%% operator acting on somebody else. Here the subject is the caller, the ops
+%% audit log is the operator plane's log, and a route any authenticated guest
+%% can call in a loop must not be able to write unbounded rows into it - the
+%% same reasoning `do_upgrade/4` uses for `revoke_player/1` over `clear/0`.
+-spec delete(cowboy_req:req()) -> response().
+delete(#{auth_data := #{player_id := PlayerId}} = _Req) when is_binary(PlayerId) ->
+    case unclaimed_guest(PlayerId) of
+        true -> erase_self(PlayerId);
+        false -> {asobi_error, ~"guest.not_unclaimed"}
+    end;
+delete(_Req) ->
+    {asobi_error, ~"unauthenticated"}.
+
+%% One transaction around the re-check and the erasure, and `after_commit/1`
+%% only once it has committed - the same shape `m:asobi_guest_reaper` uses, and
+%% for the same reason: a guest that calls /auth/guest/upgrade concurrently must
+%% win, and an ETS eviction cannot roll back.
+-spec erase_self(binary()) -> response().
+erase_self(PlayerId) ->
+    Fun = fun() ->
+        case unclaimed_guest(PlayerId) of
+            false -> {error, claimed_during_delete};
+            true -> asobi_player_erase:steps(PlayerId)
+        end
+    end,
+    try asobi_repo:transaction(Fun) of
+        ok ->
+            asobi_player_erase:after_commit(PlayerId),
+            ?LOG_INFO(#{event => guest_self_deleted, player_id => PlayerId}),
+            {json, 200, #{}, #{deleted => true}};
+        {error, claimed_during_delete} ->
+            {asobi_error, ~"guest.not_unclaimed"};
+        Other ->
+            ?LOG_WARNING(#{
+                event => guest_self_delete_failed, player_id => PlayerId, result => Other
+            }),
+            {asobi_error, ~"guest.delete_failed"}
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_ERROR(#{
+                event => guest_self_delete_rolled_back,
+                player_id => PlayerId,
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            }),
+            {asobi_error, ~"guest.delete_failed"}
+    end.
+
+-spec unclaimed_guest(binary()) -> boolean().
+unclaimed_guest(PlayerId) ->
+    case asobi_repo:get(asobi_player, PlayerId) of
+        {ok, Player} -> is_unclaimed_guest(Player, PlayerId);
+        _ -> false
     end.
 
 %% On upgrade the account is claimed, so remove the guest identity entirely: the
@@ -226,13 +302,86 @@ create(DeviceId, SecretBin) ->
         {deny, Reason} ->
             asobi_auth_error:registration_denied(Reason);
         ok ->
-            case global_create_allowed() andalso within_unlinked_cap() of
-                false ->
-                    ?LOG_WARNING(#{event => guest_capacity_reached}),
-                    {asobi_error, ~"guest.capacity_reached"};
-                true ->
-                    insert_player_and_identity(DeviceId, SecretBin)
+            case create_gate() of
+                allow ->
+                    insert_player_and_identity(DeviceId, SecretBin);
+                {deny, Report} ->
+                    ?LOG_WARNING(Report#{event => guest_create_denied}),
+                    denial(Report)
             end
+    end.
+
+%% The gate decides *why*; this is the only place a why becomes a code, so
+%% every code is still a literal at its return site (asobi_error_contract_tests
+%% enforces that, and it is the rule that keeps a computed string from ever
+%% becoming one). The report that goes to the log and the object that goes to
+%% the client are the same decision, so they cannot drift.
+-spec denial(map()) -> response().
+denial(#{reason := global_rate_limited, retry_after := RetryAfter}) ->
+    {asobi_error, ~"guest.rate_limited", #{retry_after => RetryAfter}};
+denial(#{reason := unlinked_cap_reached}) ->
+    {asobi_error, ~"guest.capacity_reached"};
+denial(#{reason := unlinked_count_unavailable}) ->
+    {asobi_error, ~"guest.unavailable"}.
+
+%% Three unrelated conditions refuse a create, and each is a different
+%% operator problem. They used to share one code and one reason-less warning
+%% (asobi#419), so a field report of "capacity reached" could not be diagnosed
+%% from the node at all - and the most likely cause, a repo error while
+%% counting, was reported as a deployment that is full when it was nowhere
+%% near the cap. Fail closed either way, but say which one and log the numbers.
+-spec create_gate() -> allow | {deny, map()}.
+create_gate() ->
+    case seki:check(asobi_guest_global_limiter, ~"global") of
+        {allow, _} ->
+            cap_gate(asobi_guest_reaper:cached_unlinked_count(), cap());
+        {deny, #{retry_after := RetryAfterMs}} ->
+            {deny, #{
+                reason => global_rate_limited, retry_after => max(1, RetryAfterMs div 1000)
+            }}
+    end.
+
+%% Finite by default (fail-closed): the ceiling must not be off by default.
+%% Operators raise it or set `infinity` deliberately. The count is read from a
+%% short-TTL cache (asobi_guest_reaper) rather than COUNT-ing the whole guest
+%% table on every unauthenticated create, so the cap is advisory - a soft
+%% ceiling that can overshoot by up to (TTL x create-rate), not exact.
+%%
+%% Split from the config and count reads so every branch - including the one
+%% that only happens when the database is unreachable - is reachable from a
+%% unit test.
+-spec cap_gate(non_neg_integer() | unknown, non_neg_integer() | infinity) ->
+    allow | {deny, map()}.
+cap_gate(_Count, infinity) ->
+    allow;
+cap_gate(Count, Cap) when is_integer(Count), Count < Cap ->
+    allow;
+cap_gate(Count, Cap) when is_integer(Count) ->
+    {deny, #{reason => unlinked_cap_reached, count => Count, cap => Cap}};
+cap_gate(unknown, Cap) ->
+    %% The count query failed. Still fail closed - an unbounded create path is
+    %% the thing the cap exists to prevent - but this is "the node could not
+    %% find out", not "the node is full", and an operator told the second goes
+    %% looking for a ceiling that is nowhere near reached.
+    {deny, #{reason => unlinked_count_unavailable, cap => Cap}}.
+
+%% An unrecognised value used to fall through the `case` and crash every guest
+%% create with a `case_clause`, which reads as a server fault rather than the
+%% typo it is. Fall back to the default and say so.
+-spec cap() -> non_neg_integer() | infinity.
+cap() ->
+    case application:get_env(asobi, guest_unlinked_cap, ?DEFAULT_UNLINKED_CAP) of
+        infinity ->
+            infinity;
+        Cap when is_integer(Cap), Cap >= 0 ->
+            Cap;
+        Other ->
+            ?LOG_WARNING(#{
+                event => invalid_guest_unlinked_cap,
+                value => Other,
+                using => ?DEFAULT_UNLINKED_CAP
+            }),
+            ?DEFAULT_UNLINKED_CAP
     end.
 
 -spec insert_player_and_identity(binary(), binary()) -> response().
@@ -388,30 +537,6 @@ pepper(KeyId) ->
         Bin when is_binary(Bin), byte_size(Bin) >= 32 -> Bin;
         _ ->
             undefined
-    end.
-
--spec global_create_allowed() -> boolean().
-global_create_allowed() ->
-    case seki:check(asobi_guest_global_limiter, ~"global") of
-        {allow, _} -> true;
-        {deny, _} -> false
-    end.
-
--spec within_unlinked_cap() -> boolean().
-within_unlinked_cap() ->
-    %% Finite by default (fail-closed): the ceiling must not be off by default.
-    %% Operators raise it or set `infinity` deliberately. The count is read from
-    %% a short-TTL cache (asobi_guest_reaper) rather than COUNT-ing the whole
-    %% guest table on every unauthenticated create, so the cap is advisory - a
-    %% soft ceiling that can overshoot by up to (TTL x create-rate), not exact.
-    case application:get_env(asobi, guest_unlinked_cap, 100000) of
-        infinity ->
-            true;
-        Cap when is_integer(Cap) ->
-            case asobi_guest_reaper:cached_unlinked_count() of
-                N when is_integer(N) -> N < Cap;
-                unknown -> false
-            end
     end.
 
 %% --- Helpers ---
