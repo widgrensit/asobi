@@ -40,11 +40,16 @@ code_status() {
 # `{json, ...}` rather than an {asobi_error, Code} tuple, so the tuple regex
 # alone missed every code raised through it - which is how the guest table came
 # to omit the 422 the upgrade path returns on a bad username or password.
+#
+# `legacy_body/2` for the same reason, one step further out: a controller that
+# needs to set a response header builds the body itself and returns its own
+# `{json, Status, Headers, Body}`, which is how `guest.rate_limited` sets
+# `retry-after`. Same contract, same obligation to be documented.
 src_pairs() {
 	local codes
 	codes=$(
 		tr '\n' ' ' <"$1" | tr -s ' ' |
-			grep -oE '\{asobi_error, ?~"[a-z_.]+"|asobi_error:legacy\( ?~"[a-z_.]+"' |
+			grep -oE '\{asobi_error, ?~"[a-z_.]+"|asobi_error:legacy(_body)?\( ?~"[a-z_.]+"' |
 			sed -E 's/.*~"([a-z_.]+)"/\1/' | sort -u
 	)
 	[ -z "$codes" ] && return 0
@@ -136,6 +141,11 @@ check_table "guest error table" \
 # Add a check_table line above as other exhaustive error tables are written. A
 # table that is deliberately partial ("common errors") must not be listed here -
 # this guard reads every table it is given as a complete contract.
+#
+# rest-api.md's "Erasing your own account" table is deliberately absent for that
+# reason: it is exhaustive for the route but `asobi_player_controller` also
+# serves the profile read and update, whose codes are not in it. Splitting the
+# module or scoping this guard to a function would let it be listed.
 
 echo
 if [ "$fail" -ne 0 ]; then
