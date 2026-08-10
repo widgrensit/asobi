@@ -103,9 +103,16 @@ than a table. See [WebSocket protocol](websocket-protocol.md).
 game.match.set_joinable(open)            -- open or close the match to new joins
 ```
 
-Match only. A closed match keeps running and keeps everyone already in it; the
-next player to try is answered `match.locked`, and `match.list` reports it with
-`joinable = false` so a browser can leave it out.
+Match only - a world or zone script gets `{ error = "..." }` back, because the
+call would otherwise reach the world server. A closed match keeps running and
+keeps everyone already in it; the next player to try is answered
+`match.locked`, and `match.list` reports it with `joinable = false` so a
+browser can leave it out.
+
+There is no config key and no default to set: a match opens joinable and the
+game closes it when the game decides. An Erlang game module does the same
+thing with `asobi_match_server:set_joinable(self(), false)` - its callbacks
+run in the match process, so `self()` is the match.
 
 This is the runtime half of joinability. `listed` decides whether a match is
 advertised at all, and an unlisted match is still joinable by id - hiding a
@@ -132,7 +139,8 @@ game.bots.add(name)                      -- place a bot in this match
 game.bots.remove(bot_id)                 -- take one out
 ```
 
-Match only. `name` is bare and gets the `bot_` prefix every bot id carries, so
+Match only - a world or zone script gets `{ error = "..." }` back. `name` is
+bare and gets the `bot_` prefix every bot id carries, so
 `game.bots.add("Spark")` puts `bot_Spark` in the roster; `remove` accepts either
 form. Names are 1-32 characters of `[A-Za-z0-9_-]`.
 

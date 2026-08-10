@@ -158,7 +158,10 @@ decides whether a match is advertised by `m:asobi_match_lobby`, and an
 unlisted match is still joinable by id, so hiding a match is not closing it.
 
 Asynchronous because the caller is usually the match's own Lua VM
-(`game.match.set_joinable`), which runs inside this process.
+(`game.match.set_joinable`), which runs inside this process. An Erlang game
+module is in the same position - its callbacks run here too - so it closes
+its own match with `set_joinable(self(), false)` from `tick/1`, `join/2` or
+any other callback.
 """.
 -spec set_joinable(pid(), boolean()) -> ok.
 set_joinable(Pid, Joinable) when is_boolean(Joinable) ->

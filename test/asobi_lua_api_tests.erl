@@ -36,6 +36,10 @@ api_test_() ->
         {"game.bots.add places a bot", fun game_bots_add/0},
         {"game.bots.add rejects an out-of-shape name", fun game_bots_add_bad_name/0},
         {"game.bots.remove removes one", fun game_bots_remove/0},
+        {"match.set_joinable is refused in a world VM", fun set_joinable_world_vm/0},
+        {"match.set_joinable is refused in a zone VM", fun set_joinable_zone_vm/0},
+        {"bots.add is refused in a world VM", fun bots_add_world_vm/0},
+        {"bots.remove is refused in a world VM", fun bots_remove_world_vm/0},
         {"game.send forwards to presence", fun game_send/0},
         {"game.send preserves a plain string message", fun game_send_string/0},
         {"game.economy.grant calls engine", fun game_economy_grant/0},
@@ -274,6 +278,34 @@ game_bots_remove() ->
     St = install_api(),
     {ok, [true | _], _} = eval("return game.bots.remove('bot_Spark')", St),
     ?assert(meck:called(asobi_bot_spawner, remove_bot, [self(), ~"bot_Spark"])).
+
+%% A world and a zone VM bind `match_pid` to the *world* server, so these
+%% would otherwise reach asobi_world_server: bots.add would seat a bot in a
+%% world (it answers get_info and join with the same shapes), and
+%% set_joinable would hit a cast its running/3 has no clause for and take the
+%% world down with every player in it.
+set_joinable_world_vm() ->
+    assert_refused_off_match("return game.match.set_joinable(false).error", install_api_world()),
+    ?assertNot(meck:called(asobi_match_server, set_joinable, '_')).
+
+set_joinable_zone_vm() ->
+    assert_refused_off_match(
+        "return game.match.set_joinable(false).error", install_api_with_zone()
+    ),
+    ?assertNot(meck:called(asobi_match_server, set_joinable, '_')).
+
+bots_add_world_vm() ->
+    assert_refused_off_match("return game.bots.add('Spark').error", install_api_world()),
+    ?assertNot(meck:called(asobi_bot_spawner, add_bot, '_')).
+
+bots_remove_world_vm() ->
+    assert_refused_off_match("return game.bots.remove('bot_Spark').error", install_api_world()),
+    ?assertNot(meck:called(asobi_bot_spawner, remove_bot, '_')).
+
+assert_refused_off_match(Code, St) ->
+    {ok, [Error | _], _} = eval(Code, St),
+    ?assert(is_binary(Error)),
+    ?assertNotEqual(nomatch, binary:match(Error, ~"only available in a match")).
 
 game_send() ->
     St = install_api(),
@@ -979,6 +1011,13 @@ install_api() ->
 install_api_with_zone() ->
     {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
     Ctx = #{match_id => ~"test-match", match_pid => self(), zone_pid => self()},
+    asobi_lua_api:install(Ctx, St0).
+
+%% The shape asobi_lua_world:make_ctx/1 builds: `vm => world`, and `match_pid`
+%% pointing at the world server rather than a match.
+install_api_world() ->
+    {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
+    Ctx = #{vm => world, match_id => ~"test-world", match_pid => self()},
     asobi_lua_api:install(Ctx, St0).
 
 %% asobi_lua#110 + asobi#253: known_template/2 reads the live template set

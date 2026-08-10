@@ -546,18 +546,48 @@ fun_send() ->
 %% before the next message the match handles, and a join already sitting in the
 %% mailbox ahead of it is still accepted - closing a match stops the next
 %% joiner, not one already through the door.
-fun_match_set_joinable(#{match_pid := MatchPid}) ->
-    fun(Args, St) ->
-        case decode_args(Args, St) of
-            [Joinable] when is_boolean(Joinable) ->
-                asobi_match_server:set_joinable(MatchPid, Joinable),
-                {[true], St};
-            _ ->
-                error_result(~"match.set_joinable requires (boolean)", St)
+fun_match_set_joinable(#{match_pid := MatchPid} = Ctx) ->
+    match_only(
+        Ctx,
+        ~"match.set_joinable",
+        fun(Args, St) ->
+            case decode_args(Args, St) of
+                [Joinable] when is_boolean(Joinable) ->
+                    asobi_match_server:set_joinable(MatchPid, Joinable),
+                    {[true], St};
+                _ ->
+                    error_result(~"match.set_joinable requires (boolean)", St)
+            end
         end
-    end;
+    );
 fun_match_set_joinable(_) ->
     fun(_, St) -> error_result(~"match.set_joinable not available (no match context)", St) end.
+
+%% A world and a zone VM bind `match_pid` too - to the world server - so the
+%% presence of the key is not the gate, the VM kind is. Left ungated, both of
+%% these reach asobi_world_server: it answers `get_info` and `{join, _, _}`
+%% with the shapes the match server uses, so `bots.add` from a world script
+%% would quietly seat a bot in a world; and its `running/3` has no catch-all,
+%% so a `set_joinable` cast would kill the world and every player in it
+%% (the same shape as asobi#285/#290). Checked, not assumed.
+-spec match_only(map(), binary(), function()) -> function().
+match_only(Ctx, Name, Fun) ->
+    case vm_kind(Ctx) of
+        match ->
+            Fun;
+        Kind ->
+            fun(_, St) ->
+                error_result(
+                    iolist_to_binary([
+                        Name,
+                        ~" is only available in a match (this is a ",
+                        atom_to_binary(Kind),
+                        ~" script)"
+                    ]),
+                    St
+                )
+            end
+    end.
 
 %% --- Bots ---
 
@@ -567,34 +597,42 @@ fun_match_set_joinable(_) ->
 %% asynchronous for the same reason as set_joinable - asobi_bot joins the match
 %% from its own init, which would deadlock against a start_child issued from
 %% inside the match process.
-fun_bots_add(#{match_pid := MatchPid}) ->
-    fun(Args, St) ->
-        case decode_args(Args, St) of
-            [Name] when is_binary(Name) ->
-                case asobi_bot_spawner:validate_bot_name(Name) of
-                    ok ->
-                        asobi_bot_spawner:add_bot(MatchPid, Name),
-                        {[true], St};
-                    {error, Reason} ->
-                        error_result(Reason, St)
-                end;
-            _ ->
-                error_result(~"bots.add requires (name)", St)
+fun_bots_add(#{match_pid := MatchPid} = Ctx) ->
+    match_only(
+        Ctx,
+        ~"bots.add",
+        fun(Args, St) ->
+            case decode_args(Args, St) of
+                [Name] when is_binary(Name) ->
+                    case asobi_bot_spawner:validate_bot_name(Name) of
+                        ok ->
+                            asobi_bot_spawner:add_bot(MatchPid, Name),
+                            {[true], St};
+                        {error, Reason} ->
+                            error_result(Reason, St)
+                    end;
+                _ ->
+                    error_result(~"bots.add requires (name)", St)
+            end
         end
-    end;
+    );
 fun_bots_add(_) ->
     fun(_, St) -> error_result(~"bots.add not available (no match context)", St) end.
 
-fun_bots_remove(#{match_pid := MatchPid}) ->
-    fun(Args, St) ->
-        case decode_args(Args, St) of
-            [BotId] when is_binary(BotId) ->
-                asobi_bot_spawner:remove_bot(MatchPid, BotId),
-                {[true], St};
-            _ ->
-                error_result(~"bots.remove requires (bot_id)", St)
+fun_bots_remove(#{match_pid := MatchPid} = Ctx) ->
+    match_only(
+        Ctx,
+        ~"bots.remove",
+        fun(Args, St) ->
+            case decode_args(Args, St) of
+                [BotId] when is_binary(BotId) ->
+                    asobi_bot_spawner:remove_bot(MatchPid, BotId),
+                    {[true], St};
+                _ ->
+                    error_result(~"bots.remove requires (bot_id)", St)
+            end
         end
-    end;
+    );
 fun_bots_remove(_) ->
     fun(_, St) -> error_result(~"bots.remove not available (no match context)", St) end.
 
