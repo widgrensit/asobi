@@ -254,6 +254,29 @@ ops_routes() ->
             }},
             {~"/notifications", fun asobi_ops_controller:notifications/1, #{
                 methods => [get, options]
+            }},
+
+            %% The write plane. Each of these is a mutation `asobi_admin`
+            %% already served against `asobi_repo` directly; here they go
+            %% through core's own domain modules and every one writes an audit
+            %% row. `player_data` first, then `config`.
+            {~"/players/:id/ban", fun asobi_ops_write_controller:ban/1, #{
+                methods => [post, options]
+            }},
+            {~"/players/:id/unban", fun asobi_ops_write_controller:unban/1, #{
+                methods => [post, options]
+            }},
+            {~"/players/:id/grants", fun asobi_ops_write_controller:grant/1, #{
+                methods => [post, options]
+            }},
+            {~"/economy/items", fun asobi_ops_write_controller:create_item/1, #{
+                methods => [post, options]
+            }},
+            {~"/economy/listings", fun asobi_ops_write_controller:create_listing/1, #{
+                methods => [post, options]
+            }},
+            {~"/tournaments", fun asobi_ops_write_controller:create_tournament/1, #{
+                methods => [post, options]
             }}
         ]
     }.

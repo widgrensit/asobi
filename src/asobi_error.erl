@@ -162,6 +162,13 @@ working and a new one reads one place: see `legacy/2`.
     {~"ops.unknown_sort_order", 400, ~"`order` must be \"asc\" or \"desc\"."},
     {~"ops.query_failed", 500, ~"The ops query failed."},
 
+    %% Ops write plane. A rejected field reuses `validation_failed` rather
+    %% than minting an `ops.` twin of it - the shape is the same and a console
+    %% should parse one.
+    {~"ops.invalid_body", 400, ~"The body must be a JSON object."},
+    {~"ops.idempotency_key_required", 422, ~"A currency grant must carry an `idempotency_key`."},
+    {~"ops.write_failed", 500, ~"The ops mutation failed."},
+
     %% Operator console. One 404 covers both "this node does not serve the
     %% console" and "no such asset", so a caller cannot tell a deployment that
     %% has the console switched off from one that has it on.

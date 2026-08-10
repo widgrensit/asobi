@@ -11,7 +11,8 @@
     get_history/1,
     concurrent_wallet_creation/1,
     concurrent_debits_no_overspend/1,
-    debit_rejects_negative_amount/1
+    debit_rejects_negative_amount/1,
+    concurrent_grant_once_credits_exactly_once/1
 ]).
 
 all() ->
@@ -19,7 +20,8 @@ all() ->
         {group, wallet},
         concurrent_wallet_creation,
         concurrent_debits_no_overspend,
-        debit_rejects_negative_amount
+        debit_rejects_negative_amount,
+        concurrent_grant_once_credits_exactly_once
     ].
 
 groups() ->
@@ -140,6 +142,41 @@ debit_rejects_negative_amount(Config) ->
     ?assertError(function_clause, asobi_economy:debit(PlayerId, ~"gold", -1, #{})),
     ?assertError(function_clause, asobi_economy:debit(PlayerId, ~"gold", 0, #{})),
     ?assertError(function_clause, asobi_economy:grant(PlayerId, ~"gold", -1, #{})),
+    Config.
+
+%% `grant_once/5` claims a retried grant credits the wallet once, and rests
+%% that claim on the advisory lock rather than on a unique index. This is the
+%% claim: 20 concurrent calls carrying one key, one credit. Without the lock -
+%% or with the duplicate check moved outside the transaction - several would
+%% pass the check together and the balance would be a multiple of the amount.
+concurrent_grant_once_credits_exactly_once(Config) ->
+    {player_id, PlayerId} = lists:keyfind(player_id, 1, Config),
+    true = is_binary(PlayerId),
+    Currency = <<"once_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+    Key = <<"idem_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+    Amount = 25,
+    Workers = 20,
+    Self = self(),
+    Pids = [
+        spawn(fun() ->
+            Self !
+                {result, self(), asobi_economy:grant_once(PlayerId, Currency, Amount, #{}, Key)}
+        end)
+     || _ <- lists:seq(1, Workers)
+    ],
+    Results = [
+        receive
+            {result, P, R} -> R
+        after 10000 -> timeout
+        end
+     || P <- Pids
+    ],
+    Applied = length([R || {ok, applied, _} = R <- Results]),
+    Duplicates = length([R || {ok, duplicate, _} = R <- Results]),
+    ?assertEqual(Workers, Applied + Duplicates),
+    ?assertEqual(1, Applied),
+    {ok, Wallet} = asobi_economy:get_or_create_wallet(PlayerId, Currency),
+    ?assertEqual(Amount, maps:get(balance, Wallet)),
     Config.
 
 concurrent_wallet_creation(Config) ->

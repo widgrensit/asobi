@@ -294,15 +294,43 @@ ops_routes_are_mounted_behind_the_operator_check_test() ->
     #{security := Security, routes := Routes} = ops_group(),
     ?assertEqual(fun asobi_ops_auth:verify/1, Security),
     ?assert(Routes =/= []),
-    [?assertEqual([get, options], maps:get(methods, Opts)) || {_Path, _Handler, Opts} <- Routes].
+    [
+        begin
+            Methods = maps:get(methods, Opts),
+            ?assert(lists:member(options, Methods)),
+            ?assertEqual([], Methods -- [get, post, options])
+        end
+     || {_Path, _Handler, Opts} <- Routes
+    ].
 
-%% Read-only means read-only: the plane must not grow a write route by
-%% accident, and `asobi_ops_notifications:broadcast/5` is deliberately not one.
-ops_plane_serves_no_write_method_test() ->
-    #{routes := Routes} = ops_group(),
-    Methods = lists:usort([M || {_Path, _Handler, Opts} <- Routes, M <- maps:get(methods, Opts)]),
-    ?assertEqual([get, options], Methods),
-    ?assertEqual([], [Class || {_M, _S, Class} <- asobi_ops_caps:classes(), Class =/= read]).
+%% This was `ops_plane_serves_no_write_method_test/0`, which asserted the plane
+%% served no write route at all - deliberately, so that opening it had to be a
+%% conscious act rather than a route someone added. The write plane makes that
+%% statement false and this is the narrower one it was standing in for: a
+%% route's method and its capability class must agree.
+%%
+%% A `read`-classed route may only be a GET, so a mutation cannot ship under
+%% the class every operator credential holds; and a GET may only be `read`, so
+%% a listing cannot be tagged `player_data` and quietly become unreachable for
+%% a viewer. Together with `ops_routes_and_capability_classes_agree_test/0`,
+%% which holds the table and the router to each other, a write route added
+%% without a class - or with the wrong one - fails the build.
+ops_route_method_and_capability_class_agree_test() ->
+    Classes = asobi_ops_caps:classes(),
+    ?assertEqual([], [Route || {get, _S, Class} = Route <- Classes, Class =/= read]),
+    ?assertEqual([], [Route || {Method, _S, read} = Route <- Classes, Method =/= get]),
+    %% Non-vacuous: there really is a write route to have got this wrong.
+    ?assert(lists:any(fun({Method, _S, _C}) -> Method =/= get end, Classes)).
+
+%% Every write route is `player_data` or `config`, and both classes are used.
+%% ADR 0007 predicted this split; until the write plane landed neither class
+%% had a single route, so nothing held the table to the ADR.
+ops_write_routes_use_both_mutating_classes_test() ->
+    Classes = lists:usort([
+        Class
+     || {Method, _S, Class} <- asobi_ops_caps:classes(), Method =/= get
+    ]),
+    ?assertEqual([config, player_data], Classes).
 
 ops_group() ->
     [Group] = [G || #{prefix := ~"/api/v1/ops"} = G <- asobi_router:routes(dev)],

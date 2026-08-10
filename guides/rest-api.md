@@ -250,11 +250,19 @@ GET /api/v1/ops/chat/channels/:id/messages   Paginated channel history
 GET /api/v1/ops/tournaments                  Paginated tournament list
 GET /api/v1/ops/tournaments/:id              One tournament
 GET /api/v1/ops/notifications                Paginated sent notifications
+
+POST /api/v1/ops/players/:id/ban             Ban a player
+POST /api/v1/ops/players/:id/unban           Lift a ban
+POST /api/v1/ops/players/:id/grants          Grant currency, once per key
+POST /api/v1/ops/economy/items               Create an item definition
+POST /api/v1/ops/economy/listings            Create a store listing
+POST /api/v1/ops/tournaments                 Create a tournament
 ```
 
-The game-operations read plane, for a console rather than a game client. The
-lists differ from the ones above in three ways: they report a total, they
-accept a sort, and they page by offset.
+The game-operations plane, for a console rather than a game client. The lists
+differ from the ones above in three ways: they report a total, they accept a
+sort, and they page by offset. The mutations differ in one: every one of them
+writes an audit row.
 
 These routes do **not** accept player tokens. They are their own auth plane -
 see [Ops authentication](#ops-authentication) below.
@@ -383,9 +391,8 @@ and `rewards` do.
 `player_id`, `type` and `read`, and searches the subject. It answers the
 question a broadcast raises: who received it, and how many have opened it.
 
-The ops plane is read-only, so there is no broadcast route here. The broadcast
-is an in-process entry point that writes an audit row - see
-[Ops audit](#ops-audit).
+There is no broadcast route. The broadcast is an in-process entry point that
+writes an audit row - see [Ops audit](#ops-audit).
 
 ### Leaderboards
 
@@ -492,6 +499,90 @@ table name. `[]` when nothing is installed.
 This is what a console reads to decide which of its built-in screens to
 render, and to surface a version it was not built against.
 
+### Ops mutations
+
+Six, and they are the six an operator console actually needs. Three are
+`player_data` and three are `config`; see
+[Ops authentication](#ops-authentication) for what that means.
+
+A body is JSON. Ban and unban take none. A body that is not a JSON object is
+`400 ops.invalid_body`; a rejected field is `422 validation_failed` with
+`details.fields` naming each one; an id that is not a uuid is
+`400 ops.invalid_id` and never reaches the database.
+
+Every mutation is idempotent and says whether it changed anything, so a retry
+after a timeout is safe and answers the same as the call it retries.
+
+#### Ban and unban
+
+```
+POST /api/v1/ops/players/0197.../ban
+```
+
+```json
+{ "data": { "player_id": "0197...", "banned": true, "changed": true } }
+```
+
+`changed` is `false` when the player was already in that state. Re-banning
+does **not** move the original `banned_at` - the first ban's timestamp is
+evidence.
+
+A ban is not just a column. It also deletes the player's auth tokens, evicts
+their entry from the auth cache, and closes their open connections, in that
+order. Without the eviction a banned player keeps playing for up to
+`auth_cache_ttl_ms`; without the disconnect they keep playing until they
+choose to leave. An unban evicts the cache too, for the same reason with the
+sign flipped.
+
+An unknown player is `404 ops.not_found`.
+
+#### Grant currency
+
+```
+POST /api/v1/ops/players/0197.../grants
+{ "currency": "gold", "amount": 250, "idempotency_key": "restitution-4821" }
+```
+
+```json
+{ "data": { "player_id": "0197...", "currency": "gold", "amount": 250, "applied": true } }
+```
+
+`idempotency_key` is **required**. `422 ops.idempotency_key_required` without
+one, and nothing is written. A grant is a money mutation sent over a network
+that drops responses: a key you have to remember to send is a key that gets
+forgotten on the retry that needed it.
+
+Send the same key again and the answer is the same 200 with
+`"applied": false`. The balance does not move, and no second ledger row is
+written. The key is unique per wallet - per `(player, currency)` - which is
+also the scope the wallet lock serialises, so two simultaneous retries cannot
+both apply.
+
+`amount` is a positive whole number up to 1,000,000,000. The cap is a typo
+guard, not an economic opinion.
+
+#### Item definitions, store listings and tournaments
+
+```
+POST /api/v1/ops/economy/items
+{ "slug": "elixir", "name": "Elixir", "category": "consumable", "rarity": "rare" }
+```
+
+```json
+{ "data": { "id": "0198..." } }
+```
+
+`201` with the new id, which is also the audit row's subject. Listings take
+`item_def_id`, `currency`, `price` and optionally `active`, `valid_from`,
+`valid_until`, `metadata`. Tournaments take `name`, `leaderboard_id`,
+`start_at`, `end_at` and optionally `max_entries`, `entry_fee`, `rewards`,
+`status`, `metadata`; creating one also starts its process.
+
+Fields outside those lists are ignored, not rejected - including `id`, which
+the server always chooses. The schema's own rules apply: a duplicate `slug`
+or a `rarity` outside `common|uncommon|rare|epic|legendary` is a `422` naming
+the field. Every JSON object field is capped at 16 KB.
+
 ### Ops authentication
 
 Ops routes sit behind an operator credential, never a player token. Send the
@@ -523,7 +614,8 @@ A bearer token wins when both are present. See
 
 Each route carries exactly one capability class - `read`, `player_data` or
 `config` - and a request is admitted only if the credential holds that class.
-Everything above is `read`. Role names never appear on the wire.
+Every `GET` above is `read`. Ban, unban and grant are `player_data`; the three
+creates are `config`. Role names never appear on the wire.
 
 > #### One secret means one privilege level {: .warning}
 >
@@ -546,9 +638,17 @@ acting operator (`actor_id`, `actor_display`, `actor_source`,
 `actor_attested`), the action, its subject, and when it happened. Reads are
 not audited.
 
-The routes above are all reads, so nothing above writes a row yet. The table
-exists ahead of the write plane, and the one operator mutation that already
-exists - broadcasting a notification - goes through it.
+Every `POST` above writes one, whatever the outcome - including a refusal, so
+probing what a credential can reach leaves a trace. The in-process broadcast
+writes one too.
+
+`target_type` and `target_id` are the subject: the player for a ban or a
+grant, and for a create the id of the row that was created, so "who made this
+listing" is the same indexed lookup as "who banned this player".
+
+A grant that was refused as a replay is stored `outcome = ok` with
+`succeeded_count = 0`: it succeeded and moved nothing. That is what makes two
+audit rows over one ledger entry explainable rather than suspicious.
 
 `actor_attested` is the important column. A name that came from
 `x-asobi-operator` is self-declared, so it is stored `false`; only a verified

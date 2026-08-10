@@ -50,7 +50,18 @@ classes() ->
         {get, [~"chat", ~"channels", '_', ~"messages"], read},
         {get, [~"tournaments"], read},
         {get, [~"tournaments", '_'], read},
-        {get, [~"notifications"], read}
+        {get, [~"notifications"], read},
+
+        %% The write plane. `player_data` acts on a player - ban, unban, the
+        %% currency in their wallet - and `config` authors the definitions a
+        %% deployment runs on. ADR 0007 draws the line exactly here, so a
+        %% credential that may publish a store cannot also ban.
+        {post, [~"players", '_', ~"ban"], player_data},
+        {post, [~"players", '_', ~"unban"], player_data},
+        {post, [~"players", '_', ~"grants"], player_data},
+        {post, [~"economy", ~"items"], config},
+        {post, [~"economy", ~"listings"], config},
+        {post, [~"tournaments"], config}
     ].
 
 -doc """

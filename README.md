@@ -82,7 +82,7 @@ your release.
 - **Auth** — email/password, Google / Apple / Steam sign-in, and **guest (anonymous) play** with device-based create-or-resume and upgrade-to-account (game-declared, operator-peppered).
 - **Rate limiting** via `seki` (sliding window, per route group), **sessions** cached in ETS, **presence** via `pg`, **chat / social / economy / inventory / storage / tournaments / notifications** as Nova controllers.
 - **Client SDKs** for Godot, Defold, Unity, Unreal, JS/TS, Dart, Flame — [see below](#client-sdks).
-- **Operator console** — a browser UI over the ops read plane: players, matches, matchmaker queue, leaderboards, economy, chat, tournaments, notifications. Served by the node itself at `/console`, off until you turn it on.
+- **Operator console** — a browser UI over the ops plane: players, matches, matchmaker queue, leaderboards, economy, chat, tournaments, notifications, plus ban, unban, currency grants and economy definitions. Every mutation writes an audit row. Served by the node itself at `/console`, off until you turn it on.
 
 ## Benchmarks
 

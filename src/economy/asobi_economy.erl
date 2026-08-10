@@ -3,6 +3,7 @@
 -export([
     get_or_create_wallet/2,
     grant/4,
+    grant_once/5,
     debit/4,
     purchase/2,
     get_wallets/1,
@@ -67,6 +68,109 @@ grant(PlayerId, Currency, Amount, Opts) when
         {ok, W} when is_map(W) -> {ok, W};
         {error, _} = Err -> Err;
         _ -> {error, transaction_failed}
+    end.
+
+-doc """
+Grant at most once for `Key`, and say which of the two happened.
+
+`grant/4` is not idempotent: send it twice and the wallet gains the amount
+twice. That is tolerable for a game handing out a match reward it computed
+itself, and not tolerable for an operator pressing a button over HTTP, where
+a timeout tells the caller nothing about whether the money moved and the
+obvious response is to press it again.
+
+`Key` is the caller's idempotency key. The first call for a key writes the
+grant and returns `{ok, applied, Wallet}`; every later call with the same key
+writes nothing and returns `{ok, duplicate, Wallet}`. A retry is therefore
+safe by construction rather than by the operator remembering not to.
+
+## Why a plain read-then-write is enough here
+
+Checking for a prior grant and then writing one is a race in general - two
+concurrent retries can both find nothing. It is not a race here, because the
+check runs inside the transaction that already holds the wallet's advisory
+lock (`acquire_wallet_lock/2`, the lock `grant/4` and `debit/4` take), and the
+uniqueness scope is exactly what that lock serialises: one wallet, which is
+one `(player_id, currency)` pair. Two calls carrying the same key for the
+same wallet cannot interleave, and two calls for different wallets are
+different grants that were never meant to collide.
+
+So this needs no unique index and no migration. The cost is that a key is
+unique per wallet rather than globally: the same key sent for a different
+player is a second, independent grant. Idempotency keys are minted per
+request, so that is a caller bug rather than a hole - and refusing it would
+mean one operator's key could block another's legitimate grant.
+""".
+-spec grant_once(binary(), binary(), pos_integer(), map(), binary()) ->
+    {ok, applied | duplicate, map()} | {error, term()}.
+grant_once(PlayerId, Currency, Amount, Opts, Key) when
+    is_integer(Amount),
+    Amount > 0,
+    is_binary(PlayerId),
+    is_binary(Currency),
+    is_binary(Key),
+    Key =/= ~""
+->
+    Reference = maps:get(reference_type, Opts, ~"ops_grant"),
+    Full = Opts#{reference_type => Reference, reference_id => Key},
+    case
+        asobi_repo:transaction(fun() ->
+            ok = acquire_wallet_lock(PlayerId, Currency),
+            once_locked(PlayerId, Currency, Amount, Full, Reference, Key)
+        end)
+    of
+        {ok, applied, Wallet} = Applied when is_map(Wallet) ->
+            asobi_telemetry:economy_transaction(
+                PlayerId, Currency, Amount, maps:get(reason, Opts, ~"ops_grant")
+            ),
+            Applied;
+        {ok, duplicate, Wallet} = Duplicate when is_map(Wallet) ->
+            Duplicate;
+        {error, _} = Err ->
+            Err;
+        _ ->
+            {error, transaction_failed}
+    end;
+grant_once(_PlayerId, _Currency, _Amount, _Opts, _Key) ->
+    {error, invalid_grant}.
+
+-spec once_locked(binary(), binary(), pos_integer(), map(), binary(), binary()) ->
+    {ok, applied | duplicate, map()} | {error, term()}.
+once_locked(PlayerId, Currency, Amount, Opts, Reference, Key) ->
+    case get_or_create_wallet(PlayerId, Currency) of
+        {ok, Wallet} ->
+            case already_granted(maps:get(id, Wallet), Reference, Key) of
+                {ok, true} -> {ok, duplicate, Wallet};
+                {ok, false} -> applied(grant_inner(PlayerId, Currency, Amount, Opts));
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+-spec applied({ok, map()} | {error, term()}) -> {ok, applied, map()} | {error, term()}.
+applied({ok, Wallet}) -> {ok, applied, Wallet};
+applied({error, _} = Err) -> Err.
+
+%% A failed read must not read as "no prior grant" - that would turn a dropped
+%% connection into a double credit, which is the one outcome this whole
+%% function exists to prevent.
+-spec already_granted(binary(), binary(), binary()) -> {ok, boolean()} | {error, term()}.
+already_granted(WalletId, Reference, Key) ->
+    Q = kura_query:limit(
+        kura_query:where(
+            kura_query:where(
+                kura_query:where(kura_query:from(asobi_transaction), {wallet_id, WalletId}),
+                {reference_type, Reference}
+            ),
+            {reference_id, Key}
+        ),
+        1
+    ),
+    case asobi_repo:all(Q) of
+        {ok, [_ | _]} -> {ok, true};
+        {ok, []} -> {ok, false};
+        {error, _} = Err -> Err
     end.
 
 -spec debit(binary(), binary(), pos_integer(), map()) -> {ok, map()} | {error, term()}.
