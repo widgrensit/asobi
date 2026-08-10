@@ -614,13 +614,20 @@ operator surface on a public port has to be asked for.
 | `console_label` | none | Names this deployment in the tab title and the console header |
 | `console_production` | `false` | Marks a deployment to be careful in. The console colours its label |
 | `console_erasure` | `false` | Let a console session erase players. Off because a browser can be clickjacked and an erasure cannot be undone; a bearer secret holds the class regardless |
+| `console_bundle_app` | `asobi` | Which application's `priv/console` is served. Point it at the application `rebar3 asobi console` wrote a composed bundle into. An application that is not in the release makes `/console` answer 503 and logs `bundle_app_unavailable`; it never falls back to asobi's own bundle |
 
 `console`, `console_label` and `console_production` also read
 `ASOBI_CONSOLE`, `ASOBI_CONSOLE_LABEL` and `ASOBI_CONSOLE_PRODUCTION`, and
 `ops_secret` reads `ASOBI_OPS_SECRET_FILE` or `ASOBI_OPS_SECRET`. The other
-four - `console_session_ttl`, `console_secure_cookie`, `console_api_base` and
-`console_erasure` - have no environment variable and need a `sys.config`. A variable overrides
-`sys.config` only when it is set, so the two coexist.
+five - `console_session_ttl`, `console_secure_cookie`, `console_api_base`,
+`console_erasure` and `console_bundle_app` - have no environment variable and
+need a `sys.config`. A variable overrides `sys.config` only when it is set, so
+the two coexist.
+
+`console_bundle_app` is only for a host whose extensions ship their own operator
+screens; see [Extending the operator console](console-extensions.md). It has no
+environment variable on purpose: it names an application in the release, so it
+is decided when the release is built, not when the container starts.
 
 There is no `ASOBI_DB_PASSWORD_FILE`. The database password is substituted into
 `sys.config` before any Erlang runs, so it cannot be read from a file the way

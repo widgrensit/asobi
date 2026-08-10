@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { HashRouter, NavLink, Route, Routes } from 'react-router-dom';
 import { config } from './config.js';
-import { logout, whoami } from './api.js';
+import { features as readFeatures, logout, whoami } from './api.js';
+import { ConsoleContext, installedNames } from './context.js';
+import { extensions as declared } from './registry.generated.js';
+import { resolveRegistry } from './registry.js';
+import { SECTIONS } from './nav.js';
+import { ExtensionRoutes } from './extensions.jsx';
 import {
   Chat,
   ChatMessages,
@@ -22,18 +27,6 @@ import {
   Tournaments,
 } from './screens.jsx';
 
-const NAV = [
-  ['/', 'Overview'],
-  ['/players', 'Players'],
-  ['/matches', 'Matches'],
-  ['/matchmaker', 'Matchmaker'],
-  ['/leaderboards', 'Leaderboards'],
-  ['/economy', 'Economy'],
-  ['/chat', 'Chat'],
-  ['/tournaments', 'Tournaments'],
-  ['/notifications', 'Notifications'],
-];
-
 // Hash routing, not history routing. Deep links work, and the server needs no
 // catch-all route to serve the shell under - which matters more than usual
 // here, because a wildcard path segment is exactly the route form that has a
@@ -41,9 +34,11 @@ const NAV = [
 export default function App() {
   const [actor, setActor] = useState(null);
   const [checked, setChecked] = useState(false);
+  const [features, setFeatures] = useState(null);
 
   const signOut = useCallback(() => {
     setActor(null);
+    setFeatures(null);
     logout().catch(() => {});
   }, []);
 
@@ -54,72 +49,118 @@ export default function App() {
       .finally(() => setChecked(true));
   }, []);
 
+  // Read once per session rather than polled: the installed set is fixed for
+  // the lifetime of a node, and a console that outlives a deploy is a console
+  // whose page needs reloading anyway.
+  useEffect(() => {
+    if (!actor) return;
+    readFeatures()
+      .then((body) => setFeatures(body.data))
+      .catch(() => setFeatures(null));
+  }, [actor]);
+
   useEffect(() => {
     const onLost = () => setActor(null);
     window.addEventListener('asobi:unauthenticated', onLost);
     return () => window.removeEventListener('asobi:unauthenticated', onLost);
   }, []);
 
+  const registry = useMemo(
+    () => resolveRegistry(declared, { installed: installedNames(features), caps: actor && actor.caps }),
+    [features, actor],
+  );
+
+  // A refused extension means somebody's build is stale - a console composed
+  // against a different asobi, or an extension dropped from the release and
+  // left in the bundle. There is no operator action for it, so it is logged
+  // rather than rendered.
+  useEffect(() => {
+    for (const problem of registry.problems) {
+      // eslint-disable-next-line no-console
+      console.warn(`asobi console: extension ${problem.extension} refused (${problem.code}): ${problem.message}`);
+    }
+  }, [registry.problems]);
+
+  const context = useMemo(
+    () => ({ actor, features, extensions: registry.extensions }),
+    [actor, features, registry.extensions],
+  );
+
   if (!checked) return <div className="boot" aria-busy="true" />;
   if (!actor) return <Login onSignedIn={setActor} />;
 
   return (
-    <HashRouter>
-      <div className="shell">
-        <nav className="nav">
-          {/* The label is the first thing in the shell, and production is
-              coloured, because an operator with several consoles open picks a
-              tab before they read anything else in it. */}
-          <div className="brand">
-            asobi ops
-            {config.label ? (
-              <span className={config.production ? 'target target-prod' : 'target'}>{config.label}</span>
-            ) : null}
-          </div>
-          <ul className="nav-list">
-            {NAV.map(([to, label]) => (
-              <li key={to}>
-                <NavLink to={to} end={to === '/'} className={({ isActive }) => (isActive ? 'nav-link on' : 'nav-link')}>
-                  {label}
-                </NavLink>
-              </li>
-            ))}
-          </ul>
-          <div className="nav-foot">
-            <div className="who">
-              <span className="who-name">{actor.display}</span>
-              <span className="who-source">
-                {actor.source}
-                {actor.attested ? '' : ' · unattested'}
-              </span>
+    <ConsoleContext.Provider value={context}>
+      <HashRouter>
+        <div className="shell">
+          <nav className="nav">
+            {/* The label is the first thing in the shell, and production is
+                coloured, because an operator with several consoles open picks a
+                tab before they read anything else in it. */}
+            <div className="brand">
+              asobi ops
+              {config.label ? (
+                <span className={config.production ? 'target target-prod' : 'target'}>{config.label}</span>
+              ) : null}
             </div>
-            <button type="button" className="btn btn-quiet" onClick={signOut}>
-              Sign out
-            </button>
-            <div className="who-node">node {config.nodeVersion}</div>
-          </div>
-        </nav>
-        <main className="main">
-          <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/players" element={<Players />} />
-            <Route path="/players/:id" element={<PlayerDetail />} />
-            <Route path="/matches" element={<Matches />} />
-            <Route path="/matches/:id" element={<MatchDetail />} />
-            <Route path="/matchmaker" element={<Matchmaker />} />
-            <Route path="/leaderboards" element={<Leaderboards />} />
-            <Route path="/leaderboards/:id" element={<LeaderboardEntries />} />
-            <Route path="/economy" element={<Economy />} />
-            <Route path="/economy/items/:id" element={<EconomyItem />} />
-            <Route path="/chat" element={<Chat />} />
-            <Route path="/chat/:id" element={<ChatMessages />} />
-            <Route path="/tournaments" element={<Tournaments />} />
-            <Route path="/tournaments/:id" element={<TournamentDetail />} />
-            <Route path="/notifications" element={<Notifications />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </main>
-      </div>
-    </HashRouter>
+            {SECTIONS.map((section) => {
+              const items = registry.nav.filter((item) => item.section === section);
+              if (items.length === 0) return null;
+              return (
+                <ul className="nav-list" key={section}>
+                  {items.map((item) => (
+                    <li key={item.path}>
+                      <NavLink
+                        to={item.path}
+                        end={item.path === '/'}
+                        className={({ isActive }) => (isActive ? 'nav-link on' : 'nav-link')}
+                      >
+                        {item.label}
+                      </NavLink>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })}
+            <div className="nav-foot">
+              <div className="who">
+                <span className="who-name">{actor.display}</span>
+                <span className="who-source">
+                  {actor.source}
+                  {actor.attested ? '' : ' · unattested'}
+                </span>
+              </div>
+              <button type="button" className="btn btn-quiet" onClick={signOut}>
+                Sign out
+              </button>
+              <div className="who-node">node {config.nodeVersion}</div>
+            </div>
+          </nav>
+          <main className="main">
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/players" element={<Players />} />
+              <Route path="/players/:id" element={<PlayerDetail />} />
+              <Route path="/matches" element={<Matches />} />
+              <Route path="/matches/:id" element={<MatchDetail />} />
+              <Route path="/matchmaker" element={<Matchmaker />} />
+              <Route path="/leaderboards" element={<Leaderboards />} />
+              <Route path="/leaderboards/:id" element={<LeaderboardEntries />} />
+              <Route path="/economy" element={<Economy />} />
+              <Route path="/economy/items/:id" element={<EconomyItem />} />
+              <Route path="/chat" element={<Chat />} />
+              <Route path="/chat/:id" element={<ChatMessages />} />
+              <Route path="/tournaments" element={<Tournaments />} />
+              <Route path="/tournaments/:id" element={<TournamentDetail />} />
+              <Route path="/notifications" element={<Notifications />} />
+              {/* Everything an installed extension contributes, under one
+                  prefix it cannot escape. See extensions.jsx. */}
+              <Route path="/ext/:extension/*" element={<ExtensionRoutes />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </main>
+        </div>
+      </HashRouter>
+    </ConsoleContext.Provider>
   );
 }

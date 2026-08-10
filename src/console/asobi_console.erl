@@ -6,6 +6,14 @@ The console is a Vite/React bundle built from `console/` and committed to
 `priv/console`. This application serves it from the same origin as the ops
 API it reads - one artefact, no second host and no second container.
 
+A host that has extensions with their own console screens builds a **composed**
+bundle instead - `rebar3 asobi console`, which compiles every installed
+extension's `priv/console` into one chunk alongside core's own screens - and
+points `console_bundle_app` at the application that bundle was written into.
+Nothing below changes for it: the composed bundle is read, validated and served
+by exactly this code, because it is the same shape of Vite output. See
+`guides/console-extensions.md`.
+
 **Nothing here joins a request path onto a directory.** The served set is
 derived from the build manifest - the entry chunk, its stylesheets, and the
 assets it references - and each file is read into a map keyed by its own
@@ -48,7 +56,8 @@ stat-ing an absent directory on every request.
     assets := #{binary() => asset()}
 }.
 -type problem() ::
-    {manifest_unreadable, term()}
+    {bundle_app_unavailable, term()}
+    | {manifest_unreadable, term()}
     | {manifest_not_json, term()}
     | no_entry
     | {bad_asset_name, binary()}
@@ -82,7 +91,7 @@ enabled() ->
 bundle() ->
     case persistent_term:get(?KEY, undefined) of
         undefined ->
-            Result = load(dir()),
+            Result = resolve(),
             log(Result),
             persistent_term:put(?KEY, Result),
             Result;
@@ -150,9 +159,40 @@ collect(Key, Manifest) ->
 stylesheets(Names) ->
     [Name || Name <- Names, filename:extension(Name) =:= ~".css"].
 
--spec dir() -> file:filename_all().
+-spec resolve() -> {ok, bundle()} | {error, problem()}.
+resolve() ->
+    case dir() of
+        {ok, Dir} -> load(Dir);
+        {error, _} = Error -> Error
+    end.
+
+%% Which application's `priv/console` is served. `asobi` unless a host composed
+%% its own bundle with `rebar3 asobi console`, which writes the built bundle
+%% into an application of the host's own and needs this pointed at it.
+%%
+%% A configured application that is not in the release is a refusal, not a
+%% fallback to asobi's own bundle. A host that asked for its composed console
+%% and silently got the stock one would be missing exactly the screens it built
+%% the thing for, with nothing saying so - the same reasoning that makes an
+%% unreadable `ops_secret_file` leave the secret unset rather than fall back to
+%% the environment variable.
+-spec dir() -> {ok, file:filename_all()} | {error, problem()}.
 dir() ->
-    filename:join(code:priv_dir(asobi), ?DIR).
+    priv_dir(application:get_env(asobi, console_bundle_app, asobi)).
+
+%% An application name is an atom. Anything else - a binary out of a
+%% container's environment, a string out of a hand-written sys.config - is
+%% refused here rather than reaching `code:priv_dir/1`, so a mistyped value is
+%% the same legible 503 as a missing application instead of a crash inside a
+%% request.
+-spec priv_dir(term()) -> {ok, file:filename_all()} | {error, problem()}.
+priv_dir(App) when is_atom(App) ->
+    case code:priv_dir(App) of
+        {error, _Reason} -> {error, {bundle_app_unavailable, App}};
+        Priv -> {ok, filename:join(Priv, ?DIR)}
+    end;
+priv_dir(App) ->
+    {error, {bundle_app_unavailable, App}}.
 
 -spec read_manifest(file:filename_all()) -> {ok, binary()} | {error, problem()}.
 read_manifest(Dir) ->

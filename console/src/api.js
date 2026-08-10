@@ -84,6 +84,35 @@ export function ops(path, params) {
   return request(opsUrl(path, params));
 }
 
+// The installed feature set. One console bundle serves deployments that differ
+// in which extensions they have, so what renders is decided by what this node
+// answers here rather than by what the bundle was built with.
+export function features() {
+  return ops('/features');
+}
+
+// An extension's own `ops/0` action, at /api/v1/ops/ext/<extension>/<action>.
+//
+// Core owns that route and dispatches every declared action behind it, so
+// there is nothing to register and no route to add - the same arrangement that
+// already puts `rpc/0` behind one WebSocket frame type.
+//
+// A `get` carries its parameters in the query string and a write carries them
+// as a JSON body, because that is what `asobi_ops_extension` reads in each
+// case. Anything but `get` is audited by core before the handler runs, so a
+// write from this console is durably attributed to the operator who made it
+// whether or not the extension does anything about it.
+export function opsExt(extension, action, options = {}) {
+  const { method = 'get', params, body } = options;
+  const path = `/ext/${encodeURIComponent(extension)}/${encodeURIComponent(action)}`;
+  if (method === 'get') return ops(path, params);
+  return request(opsUrl(path), {
+    method: method.toUpperCase(),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
 export function login(secret, label) {
   return request('/console/session', {
     method: 'POST',

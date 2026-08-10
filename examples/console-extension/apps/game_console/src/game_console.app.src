@@ -1,0 +1,16 @@
+%% Holds the composed console bundle and nothing else.
+%%
+%% `rebar3 asobi console` writes into this application's priv/console, and
+%% {asobi, [{console_bundle_app, game_console}]} in sys.config is what makes the
+%% node serve it instead of asobi's own. It is a separate application because
+%% the bundle is the host's artefact: writing it into the asobi dependency would
+%% be a change that vanishes on the next fetch.
+{application, game_console, [
+    {description, "The composed asobi operator console for this release"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]}
+]}.

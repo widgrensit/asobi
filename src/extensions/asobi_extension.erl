@@ -10,8 +10,9 @@ reject.
 
 Most of what an extension provides is discovered rather than declared.
 Migrations and schemas come from `application:get_key(App, modules)`, shigoto
-workers need no registration at all, and domain logic is just modules. This
-behaviour covers only what core cannot infer.
+workers need no registration at all, operator console screens are React source
+at `priv/console/index.jsx` and are found by being there, and domain logic is
+just modules. This behaviour covers only what core cannot infer.
 
 ```erlang
 -module(asobi_quests_extension).
@@ -342,6 +343,11 @@ POST /api/v1/ops/ext/quests/define
 
 Actions cannot collide across extensions: they are keyed by the extension's
 own name, and two extensions cannot share a name.
+
+An extension can also ship the operator screens that call these, as React
+source at `priv/console/index.jsx`, composed into a host's console bundle by
+`rebar3 asobi console`. That is discovered rather than declared, so there is no
+callback for it here. See `guides/console-extensions.md`.
 """.
 -type ops() :: #{ops_action() => ops_entry()}.
 

@@ -20,6 +20,7 @@ import {
   Stat,
   Toolbar,
 } from './ui.jsx';
+import { Slot } from './slot.jsx';
 
 const ANY = { value: '', label: 'any' };
 
@@ -253,6 +254,8 @@ export function Overview() {
         </div>
       </section>
 
+      <Slot id="overview.stats" ctx={{ core, vm }} />
+
       <section className="card">
         <h2 className="card-title">Extensions</h2>
         {extensions.length === 0 ? (
@@ -349,6 +352,7 @@ export function PlayerDetail() {
             />
           </section>
           <JsonBlock label="Metadata" value={player.metadata} />
+          <Slot id="player.detail" ctx={{ player }} />
           <section className="card">
             <h2 className="card-title">Related</h2>
             <div className="chips">
@@ -358,6 +362,7 @@ export function PlayerDetail() {
               <Link className="btn btn-quiet" to={`/chat?sender=${encodeURIComponent(player.id)}`}>
                 Chat channels
               </Link>
+              <Slot id="player.actions" ctx={{ player }} />
             </div>
           </section>
         </>
@@ -434,6 +439,7 @@ export function MatchDetail() {
             />
           </section>
           <JsonBlock label="Result" value={match.result} />
+          <Slot id="match.detail" ctx={{ match }} />
         </>
       )}
     />

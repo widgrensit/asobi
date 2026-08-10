@@ -9,6 +9,30 @@ npm run build     # -> ../priv/console
 npm run dev       # vite dev server, proxying nothing: see "Running it" below
 ```
 
+## Extensions compile into this bundle, and here that set is empty
+
+An installed extension can add screens to the console by shipping React source
+in its own `priv/console`. `rebar3 asobi console`, run by a **host** release,
+copies this tree into `_build/asobi_console`, symlinks every such extension
+under it, generates `src/registry.generated.js` with one static import each,
+and builds the result into an application of the host's own. See
+[Extending the operator console](../guides/console-extensions.md) and
+[ADR 0009](../docs/adr/0009-console-extensions-compose-at-build-time.md).
+
+In *this* repository `src/registry.generated.js` is a committed stub exporting
+an empty array, and that is load-bearing rather than incidental: asobi's own
+bundle is built from asobi's own tree with no extension in it, which is what
+keeps the committed `priv/console` reproducible and the drift gate below a real
+check. Never commit a non-empty version of it.
+
+`src/public.js` is the surface an extension may import, aliased as
+`@asobi/console`. It is frozen the way the wire is frozen - everything it
+re-exports ends up compiled into releases this repository never sees - and
+`CONSOLE_API_VERSION` in `src/registry.js` is what an extension declares itself
+against. Everything this tree does not re-export through it stays free to
+change, which is the whole reason it exists rather than extensions importing
+`./ui.jsx`.
+
 ## The build output is committed
 
 `priv/console` is in git. That is a decision with a cost on both sides, so
@@ -95,6 +119,10 @@ the secret again.
 ops API, so it is useful for style work and not much else. For anything
 involving data, `npm run build` and reload the Erlang-served page - the build
 takes under a second.
+
+From a host release, `rebar3 asobi console --dev` is the better loop: it
+generates the document this tree does not carry and proxies `/api/v1/ops` and
+`/console/session` at a running node, so hot reload runs against real data.
 
 ## Cloud
 

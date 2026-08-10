@@ -315,9 +315,12 @@ console session does not get by default, so declaring it also keeps an action
 out of a browser unless the operator set `console_erasure`. See
 [Operator console](console.md).
 
-The console cannot invoke an ops action today. The surface is HTTP only, and
-`ops` is not among the capabilities `/api/v1/ops/features` reports for an
-extension - it reports `lua`, `rpc` and `tables`.
+The console can invoke an ops action, and an extension can ship the screens
+that do it: React source under `priv/console`, composed into the console bundle
+by `rebar3 asobi console`. See
+[Extending the operator console](console-extensions.md). `/api/v1/ops/features`
+reports `ops` for an extension that declares actions and `console` for one that
+ships screens, alongside `lua`, `rpc` and `tables`.
 
 Same handler shape as `rpc/0`:
 
@@ -794,6 +797,8 @@ production credentials.
 
 ## Next steps
 
+- [Extending the operator console](console-extensions.md) - screens for the
+  actions declared above.
 - [WebSocket protocol](websocket-protocol.md) - the frame `rpc.call` lives in.
 - [Operator console](console.md) - turning the ops plane on.
 - [Clustering](clustering.md) - what is per node and what is not.

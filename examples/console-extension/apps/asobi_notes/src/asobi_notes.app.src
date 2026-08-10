@@ -1,0 +1,11 @@
+{application, asobi_notes, [
+    {description, "Operator notes: an extension with its own console screens"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    %% No `mod`. A library application, supervised by asobi_extension_sup
+    %% through sup/0 - see the manifest for why.
+    {applications, [kernel, stdlib, asobi]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]}
+]}.

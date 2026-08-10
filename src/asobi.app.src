@@ -18,10 +18,11 @@
         luerl
     ]},
     %% `providers` is read by rebar3 when asobi is listed in a host's
-    %% `project_plugins`, and is what makes `rebar3 asobi check` available.
-    %% rebar3 looks here before falling back to a module named after the
-    %% application, so the provider module needs no special name.
-    {env, [{providers, [rebar3_asobi_check]}]},
+    %% `project_plugins`, and is what makes `rebar3 asobi check` and
+    %% `rebar3 asobi console` available. rebar3 looks here before falling back
+    %% to a module named after the application, so a provider module needs no
+    %% special name.
+    {env, [{providers, [rebar3_asobi_check, rebar3_asobi_console]}]},
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, [{"GitHub", "https://github.com/widgrensit/asobi"}]}

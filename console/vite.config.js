@@ -16,6 +16,13 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   base: '/console/',
   plugins: [react()],
+  resolve: {
+    // The one specifier an extension's console source may import. It resolves
+    // here in this repository's own build and in a host's composed build
+    // alike, so the same .jsx file compiles in both without the extension
+    // knowing which one it is in. See src/public.js.
+    alias: { '@asobi/console': new URL('./src/public.js', import.meta.url).pathname },
+  },
   build: {
     outDir: '../priv/console',
     emptyOutDir: true,
