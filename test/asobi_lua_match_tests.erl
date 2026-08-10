@@ -179,7 +179,12 @@ init_refuse_match() ->
 
 join_nil_refuses() ->
     {ok, State0} = init_refuse_match(),
-    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"silent", State0)).
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"silent", State0)),
+    %% Lua has two falsey values and `return cond and state or false` is an
+    %% ordinary way to write this, so `false` has to refuse as well as `nil`.
+    ?assertEqual(
+        {error, {join_refused, ~"also_refused"}}, asobi_lua_match:join(~"falsey", State0)
+    ).
 
 join_refusal_carries_reason() ->
     {ok, State0} = init_refuse_match(),
@@ -203,11 +208,27 @@ join_refusal_leaves_no_trace() ->
 %% is dropped - the refusal still stands, it just loses its label.
 join_refusal_reason_too_long() ->
     {ok, State0} = init_refuse_match(),
-    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"shouty", State0)).
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"shouty", State0)),
+    %% The cap is inclusive: 64 bytes travel, 65 do not.
+    ?assertEqual(
+        {error, {join_refused, binary:copy(~"y", 64)}},
+        asobi_lua_match:join(~"at_limit", State0)
+    ),
+    ?assertEqual(
+        {error, {join_refused, undefined}}, asobi_lua_match:join(~"over_limit", State0)
+    ).
 
 join_refusal_reason_not_ascii() ->
     {ok, State0} = init_refuse_match(),
-    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"binary", State0)).
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"binary", State0)),
+    %% Pins the low edge of the printable range: 31 is out, 32 (space) is in.
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"control", State0)),
+    %% And the high one: 126 (~) is the last character that survives, 127
+    %% (DEL) is not.
+    ?assertEqual(
+        {error, {join_refused, ~"a space and a ~"}}, asobi_lua_match:join(~"edges", State0)
+    ),
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"del", State0)).
 
 join_refusal_reason_not_a_string() ->
     {ok, State0} = init_refuse_match(),

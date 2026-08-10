@@ -31,7 +31,8 @@ presence_tracking_test_() ->
             fun bot_receives_shared_match_state/0},
         {"send_match_state/3 splits by recipient kind", fun send_match_state_splits/0},
         {"a vote_start match event reaches the bot", fun bot_receives_vote_start/0},
-        {"a finished bot leaves the delivery group", fun finished_bot_untracked/0}
+        {"a finished bot leaves the delivery group", fun finished_bot_untracked/0},
+        {"bot_pids/1 finds a tracked bot and nothing else", fun bot_pids_resolves/0}
     ]}.
 
 setup() ->
@@ -84,6 +85,23 @@ untrack_bot_drops_target() ->
     ?assertEqual([], pg:get_members(nova_scope, {bot, ~"bot_Blitz"})),
     ?assertEqual(Before, asobi_presence:online_count()),
     stop_relay(Pid).
+
+%% asobi_bot_spawner:remove_bot/2 resolves a bot id to the process it has to
+%% stop through this. A player id must not resolve - stopping a session
+%% because a script asked to remove a bot of the same name would be the worst
+%% possible outcome.
+bot_pids_resolves() ->
+    BotPid = relay(),
+    PlayerPid = relay(),
+    ok = asobi_presence:track_bot(~"bot_Pulse", BotPid),
+    ok = asobi_presence:track(~"bot_Pulse_human", PlayerPid),
+    ?assertEqual([BotPid], asobi_presence:bot_pids(~"bot_Pulse")),
+    ?assertEqual([], asobi_presence:bot_pids(~"bot_Pulse_human")),
+    ?assertEqual([], asobi_presence:bot_pids(~"bot_NeverExisted")),
+    ok = asobi_presence:untrack_bot(~"bot_Pulse", BotPid),
+    ?assertEqual([], asobi_presence:bot_pids(~"bot_Pulse")),
+    stop_relay(BotPid),
+    stop_relay(PlayerPid).
 
 %% --- the bot process itself ---
 

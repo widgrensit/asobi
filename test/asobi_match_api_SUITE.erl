@@ -8,7 +8,8 @@
     list_matches_with_records/1,
     list_matches_filter_mode/1,
     show_match/1,
-    show_match_not_found/1
+    show_match_not_found/1,
+    live_matches_filter_joinable/1
 ]).
 
 all() -> [{group, match_api}].
@@ -20,7 +21,8 @@ groups() ->
             list_matches_with_records,
             list_matches_filter_mode,
             show_match,
-            show_match_not_found
+            show_match_not_found,
+            live_matches_filter_joinable
         ]}
     ].
 
@@ -131,3 +133,64 @@ show_match_not_found(Config) ->
     ),
     ?assertStatus(404, Resp),
     Config.
+
+%% `/matches/live` reads live processes, not the record table the rest of this
+%% suite uses. A closed match must drop out of `joinable=true` and be the only
+%% thing left under `joinable=false`, so a lobby browser can tell "join this"
+%% from "watch this".
+live_matches_filter_joinable(Config) ->
+    Open = start_listed_match(~"live_open"),
+    Closed = start_listed_match(~"live_closed"),
+    ok = asobi_match_server:set_joinable(Closed, false),
+    timer:sleep(50),
+    try
+        ?assertEqual([~"live_open"], live_modes("?joinable=true", Config)),
+        ?assertEqual([~"live_closed"], live_modes("?joinable=false", Config)),
+        ?assertEqual(
+            [~"live_closed", ~"live_open"], lists:sort(live_modes("", Config))
+        ),
+        ?assertMatch([#{~"joinable" := true}], live_entries("?mode=live_open", Config))
+    after
+        stop_match(Open),
+        stop_match(Closed)
+    end,
+    Config.
+
+start_listed_match(Mode) ->
+    {ok, Pid} = asobi_match_sup:start_match(#{
+        game_module => asobi_test_game,
+        mode => Mode,
+        listed => true,
+        min_players => 2,
+        max_players => 4,
+        tick_rate => 50
+    }),
+    Pid.
+
+%% `shutdown`, not `kill`: these are transient children of asobi_match_sup, so
+%% an abnormal exit is restarted and the replacement match ticks on into
+%% whichever suite runs next.
+stop_match(Pid) ->
+    Ref = monitor(process, Pid),
+    exit(Pid, shutdown),
+    receive
+        {'DOWN', Ref, process, Pid, _} -> ok
+    after 5000 -> ok
+    end.
+
+%% The listing cache is keyed on the filters and lives 500ms, so a query made
+%% right after set_joinable could otherwise read a pre-close listing.
+live_entries(Query, Config) ->
+    timer:sleep(600),
+    {ok, Resp} = nova_test:get(
+        "/api/v1/matches/live" ++ Query, #{headers => auth(Config)}, Config
+    ),
+    ?assertStatus(200, Resp),
+    #{~"matches" := Matches} = nova_test:json(Resp),
+    [M || M <- Matches, lists:member(maps:get(~"mode", M, undefined), modes_under_test())].
+
+live_modes(Query, Config) ->
+    [maps:get(~"mode", M) || M <- live_entries(Query, Config)].
+
+modes_under_test() ->
+    [~"live_open", ~"live_closed"].

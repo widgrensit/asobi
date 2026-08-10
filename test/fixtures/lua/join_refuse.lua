@@ -10,11 +10,29 @@ function join(player_id, state, ctx)
 	if player_id == "silent" then
 		return nil
 	end
+	if player_id == "falsey" then
+		return false, "also_refused"
+	end
 	if player_id == "shouty" then
 		return nil, string.rep("x", 200)
 	end
+	if player_id == "at_limit" then
+		return nil, string.rep("y", 64)
+	end
+	if player_id == "over_limit" then
+		return nil, string.rep("y", 65)
+	end
+	if player_id == "del" then
+		return nil, "delete\127me"
+	end
 	if player_id == "binary" then
 		return nil, "\1\2\3"
+	end
+	if player_id == "control" then
+		return nil, "unit\31separator"
+	end
+	if player_id == "edges" then
+		return nil, "a space and a ~"
 	end
 	if player_id == "numeric" then
 		return nil, 42
