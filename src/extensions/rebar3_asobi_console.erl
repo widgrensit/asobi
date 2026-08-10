@@ -318,17 +318,17 @@ registry(Extensions) ->
         "// because the console is one chunk: the CSP's nonce does not reach a\n",
         "// dynamically imported module, so a lazily loaded screen would be refused by\n",
         "// the browser rather than merely arriving late.\n",
-        [io_lib:format("import ~ts from '../extensions/~ts/index.jsx';\n", [alias(Name), Name]) ||
+        [io_lib:format("import ~ts from '../extensions/~ts/index.jsx';\n", [binding(Name), Name]) ||
             #{name := Name} <- Extensions],
         "\nexport const extensions = [",
-        lists:join(", ", [alias(Name) || #{name := Name} <- Extensions]),
+        lists:join(", ", [binding(Name) || #{name := Name} <- Extensions]),
         "];\n"
     ].
 
 %% `info().name` is already a lowercase atom that is a legal identifier - the
 %% extension registry refuses anything else - so the import binding is the name
 %% with one prefix to keep it away from anything this module might add later.
-alias(Name) ->
+binding(Name) ->
     "ext_" ++ Name.
 
 host_config(Out, Args) ->
