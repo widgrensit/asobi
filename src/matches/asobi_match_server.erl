@@ -216,7 +216,11 @@ init(Config) ->
                 min_players => maps:get(min_players, Config, ?DEFAULT_MIN_PLAYERS),
                 max_players => maps:get(max_players, Config, ?DEFAULT_MAX_PLAYERS),
                 listed => maps:get(listed, Config, false),
-                joinable => maps:get(joinable, Config, true),
+                %% Not read from Config: a match that started closed could
+                %% never be joined, so it would sit in `waiting` until the
+                %% timeout killed it. Unlike `listed`, this is runtime-only -
+                %% `set_joinable/2` is the whole interface.
+                joinable => true,
                 started_at => undefined,
                 vote_frustration => #{},
                 veto_tokens => #{},
