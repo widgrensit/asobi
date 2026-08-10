@@ -107,7 +107,7 @@ jobs:
 
       - name: Open a PR
         if: steps.sync.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           path: sdk
           token: ${{ steps.app-token.outputs.token }}
