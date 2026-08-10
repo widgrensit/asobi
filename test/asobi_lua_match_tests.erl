@@ -28,6 +28,13 @@ lua_match_test_() ->
         {"join/3 passes the client context to lua", fun join_ctx_reaches_lua/0},
         {"join/3 context is optional for a two-arg lua join", fun join_ctx_ignored_by_old_script/0},
         {"join/2 still works and sends an empty context", fun join_two_arg_sends_empty_ctx/0},
+        {"returning nil refuses the join", fun join_nil_refuses/0},
+        {"a refusal reason reaches the caller", fun join_refusal_carries_reason/0},
+        {"a refused join leaves the game state untouched", fun join_refusal_leaves_no_trace/0},
+        {"an oversized refusal reason is dropped", fun join_refusal_reason_too_long/0},
+        {"a non-ascii refusal reason is dropped", fun join_refusal_reason_not_ascii/0},
+        {"a non-string refusal reason is dropped", fun join_refusal_reason_not_a_string/0},
+        {"a join that returns nothing refuses instead of crashing", fun join_no_return_refuses/0},
         {"leave removes player", fun leave_removes_player/0},
         {"handle_input updates player position", fun input_moves_player/0},
         {"handle_input handles boon pick", fun input_boon_pick/0},
@@ -166,6 +173,49 @@ join_two_arg_sends_empty_ctx() ->
     {ok, State1} = asobi_lua_match:join(~"p1", State0),
     #{~"rejected" := Rejected} = asobi_lua_match:get_state(~"p1", State1),
     ?assertEqual(1, Rejected, "no ctx means no code, so this script refuses").
+
+init_refuse_match() ->
+    asobi_lua_match:init(#{lua_script => fixture("join_refuse.lua")}).
+
+join_nil_refuses() ->
+    {ok, State0} = init_refuse_match(),
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"silent", State0)).
+
+join_refusal_carries_reason() ->
+    {ok, State0} = init_refuse_match(),
+    ?assertEqual(
+        {error, {join_refused, ~"wrong_code"}},
+        asobi_lua_match:join(~"p1", #{~"code" => ~"NOPE"}, State0)
+    ),
+    ?assertMatch({ok, _}, asobi_lua_match:join(~"p1", #{~"code" => ~"OPEN"}, State0)).
+
+%% A refused join must not be able to advance the game state - otherwise a
+%% client could drive a script by being turned away over and over.
+join_refusal_leaves_no_trace() ->
+    {ok, State0} = init_refuse_match(),
+    {error, _} = asobi_lua_match:join(~"silent", State0),
+    {error, _} = asobi_lua_match:join(~"silent", State0),
+    {ok, State1} = asobi_lua_match:join(~"p1", #{~"code" => ~"OPEN"}, State0),
+    #{~"attempts" := Attempts} = asobi_lua_match:get_state(~"p1", State1),
+    ?assertEqual(1, Attempts).
+
+%% The reason is author-written and reaches a client, so an out-of-shape one
+%% is dropped - the refusal still stands, it just loses its label.
+join_refusal_reason_too_long() ->
+    {ok, State0} = init_refuse_match(),
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"shouty", State0)).
+
+join_refusal_reason_not_ascii() ->
+    {ok, State0} = init_refuse_match(),
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"binary", State0)).
+
+join_refusal_reason_not_a_string() ->
+    {ok, State0} = init_refuse_match(),
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"numeric", State0)).
+
+join_no_return_refuses() ->
+    {ok, State0} = asobi_lua_match:init(#{lua_script => fixture("join_no_return.lua")}),
+    ?assertEqual({error, {join_refused, undefined}}, asobi_lua_match:join(~"p1", State0)).
 
 join_adds_player() ->
     {ok, State0} = init_match(),

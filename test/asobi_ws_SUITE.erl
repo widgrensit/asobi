@@ -11,7 +11,9 @@
     ws_match_input_not_in_match_hint/1,
     ws_match_input_hint_rate_limited/1,
     ws_script_error_rendered_as_extension_error/1,
-    ws_matchmaker_add_omitted_mode_rejected/1
+    ws_matchmaker_add_omitted_mode_rejected/1,
+    ws_backfill_join_binds_the_session/1,
+    ws_join_a_locked_match_is_refused/1
 ]).
 
 all() ->
@@ -23,7 +25,9 @@ all() ->
         ws_match_input_not_in_match_hint,
         ws_match_input_hint_rate_limited,
         ws_script_error_rendered_as_extension_error,
-        ws_matchmaker_add_omitted_mode_rejected
+        ws_matchmaker_add_omitted_mode_rejected,
+        ws_backfill_join_binds_the_session,
+        ws_join_a_locked_match_is_refused
     ].
 
 init_per_suite(Config) ->
@@ -190,6 +194,106 @@ ws_idle_auth_timeout_closes(Config) ->
     Config.
 
 %% --- helpers (mirrors asobi_chat_ws_SUITE) ---
+
+%% asobi#423: the whole backfill path over a real socket. A player who finds a
+%% match with match.list and joins it by id must end up bound to it - the
+%% matchmaker used to be the only thing that told the session which match it
+%% was in, so this join left the session with no match_pid: input came back
+%% `not_in_match` and leave silently did nothing. Both are only observable
+%% through the socket, which is why this is a suite case and not a unit test.
+ws_backfill_join_binds_the_session(Config) ->
+    {PlayerId, Token} = register_player(~"backfill", Config),
+    Conn = ws_connect_authed(Token, Config),
+    MatchPid = start_test_match(),
+    MatchId = maps:get(match_id, asobi_match_server:get_info(MatchPid)),
+
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"match.join",
+            ~"cid" => ~"bf1",
+            ~"payload" => #{~"match_id" => MatchId}
+        },
+        Conn
+    ),
+    {ok, Joined} = recv_until(
+        fun(M) -> maps:get(~"type", M, undefined) =:= ~"match.joined" end, Conn
+    ),
+    ?assertMatch(#{~"payload" := #{~"joinable" := true}}, Joined),
+
+    %% Input from a bound session is applied silently. The hint frame is the
+    %% failure signal, so its absence is the assertion.
+    ok = nova_test_ws:send_json(
+        #{~"type" => ~"match.input", ~"payload" => #{~"action" => ~"move"}}, Conn
+    ),
+    ?assertEqual(
+        {error, predicate_not_matched},
+        recv_until(
+            fun(M) ->
+                maps:get(~"reason", maps:get(~"payload", M, #{}), undefined) =:= ~"not_in_match"
+            end,
+            Conn,
+            5
+        )
+    ),
+
+    %% `match.left` is answered unconditionally, so the reply proves nothing.
+    %% What proves the leave landed is the match emptying and stopping. Asserted
+    %% before the socket closes, because closing the session would empty the
+    %% match on its own through the server's monitor and hide a leave that did
+    %% nothing.
+    Ref = monitor(process, MatchPid),
+    ok = nova_test_ws:send_json(#{~"type" => ~"match.leave", ~"cid" => ~"bf2"}, Conn),
+    {ok, _} = recv_until(
+        fun(M) -> maps:get(~"type", M, undefined) =:= ~"match.left" end, Conn
+    ),
+    receive
+        {'DOWN', Ref, process, MatchPid, {shutdown, empty}} -> ok
+    after 5000 ->
+        ct:fail({leave_did_not_reach_the_match, PlayerId})
+    end,
+    nova_test_ws:close(Conn),
+    Config.
+
+ws_join_a_locked_match_is_refused(Config) ->
+    {_, Token} = register_player(~"locked", Config),
+    Conn = ws_connect_authed(Token, Config),
+    MatchPid = start_test_match(),
+    MatchId = maps:get(match_id, asobi_match_server:get_info(MatchPid)),
+    ok = asobi_match_server:set_joinable(MatchPid, false),
+
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"match.join",
+            ~"cid" => ~"lk1",
+            ~"payload" => #{~"match_id" => MatchId}
+        },
+        Conn
+    ),
+    {ok, Reply} = recv_until(
+        fun(M) -> maps:get(~"type", M, undefined) =:= ~"error" end, Conn
+    ),
+    nova_test_ws:close(Conn),
+    ?assertMatch(
+        #{
+            ~"payload" := #{
+                ~"reason" := ~"match_locked",
+                ~"error" := #{~"code" := ~"match.locked"}
+            }
+        },
+        Reply
+    ),
+    Config.
+
+%% min_players => 1 so the match is `running` from the first join, which is
+%% the state a backfill joiner actually meets.
+start_test_match() ->
+    {ok, Pid} = asobi_match_sup:start_match(#{
+        game_module => asobi_test_game,
+        min_players => 1,
+        max_players => 4,
+        tick_rate => 50
+    }),
+    Pid.
 
 register_player(Suffix, Config) ->
     Username = unique_name(Suffix),

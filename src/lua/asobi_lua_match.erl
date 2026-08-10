@@ -22,7 +22,7 @@ The Lua script must define these functions:
 
 ```lua
 function init(config)        -- return initial game state table
-function join(player_id, state, ctx)  -- ctx is the client join context; return updated state
+function join(player_id, state, ctx)  -- return updated state, or nil[, reason] to refuse
 function leave(player_id, state)      -- return updated state
 function handle_input(player_id, input, state) -- return updated state
 function tick(state)         -- return state, or state + finished flag
@@ -127,6 +127,22 @@ Without this, `ctx` would reach asobi, find no `join/3` on the Lua bridge,
 fall back to `join/2` and be silently discarded - so every Lua game would
 be unable to implement join codes, invites or passwords despite the docs
 saying otherwise.
+
+Returning `nil` refuses the join, optionally with a reason string:
+
+```lua
+function join(player_id, state, ctx)
+    if state.locked then return nil, "match_locked" end
+    if ctx.code ~= state.join_code then return nil, "wrong_code" end
+    state.players[player_id] = { hp = 100 }
+    return state
+end
+```
+
+A refused player is never added to the roster and the Lua state is left
+exactly as it was before the call, so a refusal leaves no trace in the game
+state. The reason reaches the client; it is game vocabulary, so it travels
+in `details` and never becomes an asobi error code (see `m:asobi_error`).
 """.
 -spec join(binary(), map(), map()) -> {ok, map()} | {error, term()}.
 join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map(Ctx) ->
@@ -134,12 +150,47 @@ join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map
     %% already a Lua value, but Ctx arrives raw from the client.
     {EncCtx, LuaSt0} = luerl:encode(Ctx, LuaSt),
     case asobi_lua_loader:call(join, [PlayerId, GS, EncCtx], LuaSt0, ?JOIN_TIMEOUT) of
+        {ok, [Falsey | Rest], LuaSt1} when Falsey =:= nil; Falsey =:= false ->
+            {error, {join_refused, refusal_reason(Rest, LuaSt1)}};
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+        %% A `join` that falls off its end returns no values at all. Before
+        %% refusal existed this was a case_clause that killed the match
+        %% server and with it every player already in the roster; a script
+        %% bug must cost the author their own join, not the whole match.
+        {ok, [], _LuaSt1} ->
+            log_match_lua_error(
+                warning, join, join_returned_no_state, State, #{player_id => PlayerId}
+            ),
+            {error, {join_refused, undefined}};
         {error, Reason} ->
             log_match_lua_error(warning, join, Reason, State, #{player_id => PlayerId}),
             {error, Reason}
     end.
+
+%% The refusal reason is author-written and reaches a client, so it is bounded
+%% the same way a broadcast event name is: short, ASCII, no control bytes. An
+%% out-of-shape reason is dropped rather than rejected - the refusal itself is
+%% what matters, and failing it over a bad label would be worse.
+-define(MAX_REFUSAL_REASON, 64).
+
+-spec refusal_reason([dynamic()], dynamic()) -> binary() | undefined.
+refusal_reason([Value | _], LuaSt) ->
+    case luerl:decode(Value, LuaSt) of
+        Reason when is_binary(Reason), byte_size(Reason) =< ?MAX_REFUSAL_REASON, Reason =/= <<>> ->
+            case is_printable_ascii(Reason) of
+                true -> Reason;
+                false -> undefined
+            end;
+        _ ->
+            undefined
+    end;
+refusal_reason([], _LuaSt) ->
+    undefined.
+
+-spec is_printable_ascii(binary()) -> boolean().
+is_printable_ascii(Bin) ->
+    lists:all(fun(B) -> B >= 32 andalso B =< 126 end, binary_to_list(Bin)).
 
 -spec leave(binary(), map()) -> {ok, map()}.
 leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->

@@ -57,14 +57,25 @@ Store a computed listing against a bounded key with an absolute expiry.
 Async: the caller keeps the value it already computed; this only seeds the
 shared cache for the next reader.
 
-The key is `{ServerMod, HasCapacity}` - four keys total across worlds and
-matches. It must stay bounded and free of client-controlled values: keying
-on `mode` would let a client cycle distinct modes to miss on every request
-and grow the table without bound.
+The key is `{ServerMod, HasCapacity}` for worlds and
+`{ServerMod, HasCapacity, Joinable}` for matches - ten keys total across the
+two. Every element after the module has to be a bounded, non-client-controlled
+value: keying on `mode` would let a client cycle distinct modes to miss on
+every request and grow the table without bound. The guard enforces that shape
+rather than trusting the caller, which is why it is not simply `is_tuple/1`.
 """.
--spec cache_listing({module(), boolean()}, [map()], integer()) -> ok.
+-spec cache_listing(
+    {module(), boolean()} | {module(), boolean(), boolean() | undefined}, [map()], integer()
+) ->
+    ok.
 cache_listing({Mod, HasCapacity} = Key, Listing, ExpiresAt) when
     is_atom(Mod), is_boolean(HasCapacity)
+->
+    gen_server:cast(?MODULE, {cache_listing, Key, Listing, ExpiresAt});
+cache_listing({Mod, HasCapacity, Joinable} = Key, Listing, ExpiresAt) when
+    is_atom(Mod),
+    is_boolean(HasCapacity),
+    is_boolean(Joinable) orelse Joinable =:= undefined
 ->
     gen_server:cast(?MODULE, {cache_listing, Key, Listing, ExpiresAt}).
 

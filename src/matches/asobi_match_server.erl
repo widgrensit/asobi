@@ -37,7 +37,7 @@ the place to put callback hardening.
 -export([whereis/1]).
 
 -define(PG_SCOPE, nova_scope).
--export([start_vote/2, cast_vote/4, use_veto/3, broadcast_event/3]).
+-export([start_vote/2, cast_vote/4, use_veto/3, broadcast_event/3, set_joinable/2]).
 -export([callback_mode/0, init/1, terminate/3]).
 -export([waiting/3, running/3, paused/3, finished/3]).
 
@@ -149,6 +149,21 @@ use_veto(Pid, PlayerId, VoteId) ->
 broadcast_event(Pid, Event, Payload) ->
     gen_statem:cast(Pid, {broadcast_event, Event, Payload}).
 
+-doc """
+Open or close the match to new joins.
+
+A closed match keeps running and keeps its roster; it answers every further
+join with `match_locked`. This is the runtime half of joinability - `listed`
+decides whether a match is advertised by `m:asobi_match_lobby`, and an
+unlisted match is still joinable by id, so hiding a match is not closing it.
+
+Asynchronous because the caller is usually the match's own Lua VM
+(`game.match.set_joinable`), which runs inside this process.
+""".
+-spec set_joinable(pid(), boolean()) -> ok.
+set_joinable(Pid, Joinable) when is_boolean(Joinable) ->
+    gen_statem:cast(Pid, {set_joinable, Joinable}).
+
 -spec whereis(binary()) -> {ok, pid()} | error.
 whereis(MatchId) ->
     case pg:get_members(?PG_SCOPE, {asobi_match_server, MatchId}) of
@@ -201,6 +216,7 @@ init(Config) ->
                 min_players => maps:get(min_players, Config, ?DEFAULT_MIN_PLAYERS),
                 max_players => maps:get(max_players, Config, ?DEFAULT_MAX_PLAYERS),
                 listed => maps:get(listed, Config, false),
+                joinable => maps:get(joinable, Config, true),
                 started_at => undefined,
                 vote_frustration => #{},
                 veto_tokens => #{},
@@ -269,6 +285,8 @@ waiting({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
     {keep_state_and_data, [{reply, From, {error, match_not_started}}]};
 waiting({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
     {keep_state_and_data, [{reply, From, {error, match_not_started}}]};
+waiting(cast, {set_joinable, Joinable}, State) ->
+    {keep_state, State#{joinable => Joinable}};
 waiting(cast, cancel, State) ->
     {stop, {shutdown, cancelled}, State}.
 
@@ -461,7 +479,9 @@ running(
     end;
 running(info, {vote_vetoed, VoteId, _Template}, State) ->
     Active = maps:remove(VoteId, maps:get(active_votes, State, #{})),
-    {keep_state, State#{active_votes => Active}}.
+    {keep_state, State#{active_votes => Active}};
+running(cast, {set_joinable, Joinable}, State) ->
+    {keep_state, State#{joinable => Joinable}}.
 
 %% --- paused state ---
 
@@ -541,6 +561,11 @@ paused(info, {'DOWN', _MonRef, process, DownPid, _Reason}, #{reconnect_state := 
         none ->
             keep_state_and_data
     end;
+%% A pause does not decide joinability, so an operator closing a match while
+%% it is paused must still be honoured - the cast catch-all below would drop
+%% it silently and the match would reopen on resume.
+paused(cast, {set_joinable, Joinable}, State) ->
+    {keep_state, State#{joinable => Joinable}};
 %% asobi#290: every call with no clause above (start_vote, cast_vote,
 %% use_veto, join) used to fall through to the catch-all, which never
 %% replies - gen_statem:call/2 defaults to timeout infinity, so the caller
@@ -621,10 +646,15 @@ handle_join(
     Ctx,
     #{players := Players, max_players := Max, game_module := Mod, game_state := GS} = State
 ) ->
-    case map_size(Players) >= Max of
-        true ->
+    %% Defaulted rather than matched: a match recovered from a backup written
+    %% by an older node has no `joinable` key, and such a match must stay
+    %% joinable rather than crash the join.
+    case {maps:get(joinable, State, true), map_size(Players) >= Max} of
+        {false, _} ->
+            {keep_state_and_data, [{reply, From, {error, match_locked}}]};
+        {true, true} ->
             {keep_state_and_data, [{reply, From, {error, match_full}}]};
-        false ->
+        {true, false} ->
             case asobi_game_join:invoke(Mod, PlayerId, Ctx, GS) of
                 {ok, GS1} ->
                     %% Monitor the player session so we can run reconnect grace
@@ -663,19 +693,38 @@ handle_join(
                         maps:get(match_id, State), PlayerId
                     ),
                     State2 = notify_phase_player_joined(State1),
-                    maybe_start(From, PlayerId, State2);
+                    %% The session learns its match_pid here, not from
+                    %% whoever called join/3. Mirrors asobi_world_server's
+                    %% {world_joined, ...}. Without it a player who joined by
+                    %% id - `match.join` after `match.list`, ie the backfill
+                    %% path - has no match_pid on their session, so their
+                    %% `match.input` is answered with `not_in_match` and
+                    %% their `match.leave` silently does nothing. The
+                    %% matchmaker used to send this itself, and only it, which
+                    %% is why the defect was invisible on the matchmade path.
+                    asobi_presence:send(PlayerId, {match_joined, self()}),
+                    maybe_start(From, State2);
                 {error, Reason} ->
                     {keep_state_and_data, [{reply, From, {error, Reason}}]}
             end
     end.
 
-maybe_start(From, _PlayerId, #{players := Players, min_players := Min} = State) when
+%% `started_at` is stamped on the waiting -> running transition only. Stamping
+%% it on every join that clears min_players would let each backfill join into
+%% an already-running match restart the clock, so the persisted match record
+%% would report a duration measured from the last joiner.
+maybe_start(From, #{players := Players, min_players := Min} = State) when
     map_size(Players) >= Min
 ->
-    {next_state, running, State#{started_at => erlang:system_time(millisecond)}, [
-        {reply, From, ok}
-    ]};
-maybe_start(From, _PlayerId, State) ->
+    case maps:get(started_at, State, undefined) of
+        undefined ->
+            {next_state, running, State#{started_at => erlang:system_time(millisecond)}, [
+                {reply, From, ok}
+            ]};
+        _ ->
+            {keep_state, State, [{reply, From, ok}]}
+    end;
+maybe_start(From, State) ->
     {keep_state, State, [{reply, From, ok}]}.
 
 handle_leave(PlayerId, #{players := Players, game_module := Mod, game_state := GS} = State) ->
@@ -684,6 +733,11 @@ handle_leave(PlayerId, #{players := Players, game_module := Mod, game_state := G
             keep_state_and_data;
         true ->
             asobi_telemetry:match_player_left(maps:get(match_id, State), PlayerId),
+            %% The counterpart to `match_joined`: a session that keeps a
+            %% match_pid after leaving sends its input to a match it is no
+            %% longer in, and never gets the `not_in_match` hint that exists
+            %% to make exactly that debuggable (asobi#236).
+            asobi_presence:send(PlayerId, {match_left, self()}),
             %% Demonitor the player session if we set one up at join time so
             %% a stale 'DOWN' message can't trigger a second leave path.
             case maps:get(monitor_ref, maps:get(PlayerId, Players, #{}), undefined) of
@@ -833,7 +887,8 @@ match_info(Status, #{match_id := MatchId, players := Players} = State, IncludeRo
         player_count => map_size(Players),
         mode => maps:get(mode, State, undefined),
         max_players => maps:get(max_players, State, ?DEFAULT_MAX_PLAYERS),
-        listed => maps:get(listed, State, false)
+        listed => maps:get(listed, State, false),
+        joinable => maps:get(joinable, State, true)
     },
     Base =
         case IncludeRoster of
@@ -850,11 +905,13 @@ Projection of `get_info/1` for callers who are not in the match.
 
 Mirrors `asobi_world_server:listing_info/1`. `get_info/1` carries the full
 `players` roster and the server-side `listed` flag; neither reaches a
-browsing client.
+browsing client. `joinable` does: a client browsing for a match to join has
+to be able to tell a match that will take it from one that has closed, and
+without it the only way to find out is to attempt the join and be refused.
 """.
 -spec listing_info(map()) -> map().
 listing_info(Info) ->
-    Base = maps:with([match_id, status, player_count, max_players, mode], Info),
+    Base = maps:with([match_id, status, player_count, max_players, mode, joinable], Info),
     case maps:get(phase, Info, undefined) of
         Phase when is_map(Phase) ->
             Base#{phase => maps:with([status, phase, remaining_ms, start_condition], Phase)};

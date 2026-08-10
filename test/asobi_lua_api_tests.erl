@@ -30,6 +30,12 @@ api_test_() ->
         {"game.broadcast rejects an over-long event name", fun game_broadcast_long_name/0},
         {"game.broadcast rejects every core-reserved name",
             fun game_broadcast_rejects_all_reserved/0},
+        {"game.match.set_joinable closes the match", fun game_match_set_joinable/0},
+        {"game.match.set_joinable reopens it", fun game_match_set_joinable_true/0},
+        {"game.match.set_joinable rejects a non-boolean", fun game_match_set_joinable_bad_arg/0},
+        {"game.bots.add places a bot", fun game_bots_add/0},
+        {"game.bots.add rejects an out-of-shape name", fun game_bots_add_bad_name/0},
+        {"game.bots.remove removes one", fun game_bots_remove/0},
         {"game.send forwards to presence", fun game_send/0},
         {"game.send preserves a plain string message", fun game_send_string/0},
         {"game.economy.grant calls engine", fun game_economy_grant/0},
@@ -107,6 +113,12 @@ setup() ->
     meck:expect(asobi_id, generate, fun() -> ~"test-uuid-v7" end),
     meck:new(asobi_match_server, [no_link]),
     meck:expect(asobi_match_server, broadcast_event, fun(_, _, _) -> ok end),
+    meck:expect(asobi_match_server, set_joinable, fun(_, _) -> ok end),
+    %% passthrough: the same module owns validate_bot_name/1, which the
+    %% game.bots.add binding calls for real before it casts.
+    meck:new(asobi_bot_spawner, [passthrough, no_link]),
+    meck:expect(asobi_bot_spawner, add_bot, fun(_, _) -> ok end),
+    meck:expect(asobi_bot_spawner, remove_bot, fun(_, _) -> ok end),
     meck:new(asobi_presence, [non_strict, no_link]),
     meck:expect(asobi_presence, send, fun(_, _) -> ok end),
     meck:new(asobi_economy, [no_link]),
@@ -162,6 +174,7 @@ cleanup(_) ->
     meck:unload([
         asobi_id,
         asobi_match_server,
+        asobi_bot_spawner,
         asobi_presence,
         asobi_economy,
         asobi_leaderboard_server,
@@ -227,6 +240,40 @@ assert_broadcast_rejected(Code) ->
     {ok, [Error | _], _} = eval(Code, St),
     ?assert(is_binary(Error)),
     ?assertNot(meck:called(asobi_match_server, broadcast_event, '_')).
+
+game_match_set_joinable() ->
+    St = install_api(),
+    {ok, [true | _], _} = eval("return game.match.set_joinable(false)", St),
+    ?assert(meck:called(asobi_match_server, set_joinable, [self(), false])).
+
+game_match_set_joinable_true() ->
+    St = install_api(),
+    {ok, [true | _], _} = eval("return game.match.set_joinable(true)", St),
+    ?assert(meck:called(asobi_match_server, set_joinable, [self(), true])).
+
+game_match_set_joinable_bad_arg() ->
+    St = install_api(),
+    {ok, [Error | _], _} = eval("return game.match.set_joinable('yes').error", St),
+    ?assert(is_binary(Error)),
+    ?assertNot(meck:called(asobi_match_server, set_joinable, '_')).
+
+game_bots_add() ->
+    St = install_api(),
+    {ok, [true | _], _} = eval("return game.bots.add('Spark')", St),
+    ?assert(meck:called(asobi_bot_spawner, add_bot, [self(), ~"Spark"])).
+
+%% Bounded at the call site so the author sees the problem, rather than
+%% discovering a bot named with a space in the roster later.
+game_bots_add_bad_name() ->
+    St = install_api(),
+    {ok, [Error | _], _} = eval("return game.bots.add('has space').error", St),
+    ?assert(is_binary(Error)),
+    ?assertNot(meck:called(asobi_bot_spawner, add_bot, '_')).
+
+game_bots_remove() ->
+    St = install_api(),
+    {ok, [true | _], _} = eval("return game.bots.remove('bot_Spark')", St),
+    ?assert(meck:called(asobi_bot_spawner, remove_bot, [self(), ~"bot_Spark"])).
 
 game_send() ->
     St = install_api(),

@@ -7,7 +7,10 @@
 init(_Config) ->
     {ok, #{players => #{}, tick_count => 0}}.
 
--spec join(binary(), map()) -> {ok, map()}.
+-spec join(binary(), map()) -> {ok, map()} | {error, term()}.
+%% A game refusing a player, for the tests that need one.
+join(<<"refuse_", _/binary>>, _State) ->
+    {error, {join_refused, ~"not_today"}};
 join(PlayerId, #{players := Players} = State) ->
     {ok, State#{players => Players#{PlayerId => #{score => 0}}}}.
 

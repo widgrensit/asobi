@@ -275,10 +275,10 @@ or passwords:
 
 ```lua
 function join(player_id, state, ctx)
-    state.players[player_id] = {
-        hp = 100,
-        spectator = state.join_code ~= nil and ctx.code ~= state.join_code
-    }
+    if ctx.code ~= state.join_code then
+        return nil, "wrong_code"
+    end
+    state.players[player_id] = { hp = 100 }
     return state
 end
 ```
@@ -288,9 +288,35 @@ argument.
 
 `ctx` is validated before it reaches the script: a flat table, at most 8 keys,
 keys up to 64 bytes, scalar values up to 256 bytes, no nesting. asobi never
-interprets, echoes or logs it. Returning the updated state is the only
-supported outcome, so a failed check has to be expressed in the state you
-return, as above.
+interprets, echoes or logs it.
+
+#### Refusing a join
+
+Return `nil` to refuse. A refused player is never added to the roster, and the
+state you were handed is discarded, so a refusal leaves no trace - a client
+cannot drive your script by being turned away over and over.
+
+The second return value is a reason, and it reaches the client:
+
+```lua
+return nil, "match_locked"
+```
+
+It is your game's vocabulary, not asobi's, so it travels in the error object's
+`details.refused_reason` under the fixed code `match.join_refused`. A script
+cannot mint an error code. Keep it to 64 bytes of `[A-Za-z0-9_-]`-ish printable
+ASCII; a reason outside that is dropped and the refusal stands without one.
+
+If you want the player in the match but not playing, return the state with a
+flag on them rather than refusing:
+
+```lua
+state.players[player_id] = { hp = 100, spectator = true }
+return state
+```
+
+A `join` that returns nothing at all is treated as a refusal and logged - it is
+almost always a missing `return state`.
 
 ### `leave(player_id, state)`
 

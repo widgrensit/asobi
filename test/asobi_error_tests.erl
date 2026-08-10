@@ -124,6 +124,40 @@ ws_reason_and_rest_agree_on_the_code_test() ->
      || {Reason, Code} <- Shared
     ].
 
+%% A closed match and a full one are the same 409 but different codes: a
+%% client retries the second and gives up on the first.
+match_join_failures_have_their_own_codes_test() ->
+    ?assertMatch(
+        #{error := #{code := ~"match.full"}}, asobi_error:from_ws_reason(match_full)
+    ),
+    ?assertMatch(
+        #{error := #{code := ~"match.locked"}}, asobi_error:from_ws_reason(match_locked)
+    ),
+    ?assertMatch(
+        #{error := #{code := ~"match.join_refused"}},
+        asobi_error:from_ws_reason(~"join_refused")
+    ).
+
+%% The game's own refusal string is carried as a detail. It must never
+%% displace the code - that is the whole reason details exist.
+refusal_detail_rides_along_without_minting_a_code_test() ->
+    ?assertEqual(
+        #{
+            error => #{
+                code => ~"match.join_refused",
+                message => asobi_error:message(~"match.join_refused"),
+                details => #{refused_reason => ~"wrong_code"}
+            }
+        },
+        asobi_error:from_ws_reason(~"join_refused", #{refused_reason => ~"wrong_code"})
+    ).
+
+details_do_not_rescue_an_unmapped_reason_test() ->
+    ?assertMatch(
+        #{error := #{code := ~"ws.request_failed", details := #{reason := ~"nope"}}},
+        asobi_error:from_ws_reason(~"nope", #{extra => 1})
+    ).
+
 ws_reason_accepts_an_atom_test() ->
     ?assertEqual(
         asobi_error:from_ws_reason(~"queue_full"),

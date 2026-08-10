@@ -51,7 +51,7 @@ working and a new one reads one place: see `legacy/2`.
 -export([object/1, object/2, object/3]).
 -export([legacy/2, legacy_body/2]).
 -export([status/1, message/1, codes/0, core_codes/0, defined/1]).
--export([from_ws_reason/1, ws_reasons/0]).
+-export([from_ws_reason/1, from_ws_reason/2, ws_reasons/0]).
 -export([handle/3, register_handler/0]).
 
 -type code() :: binary().
@@ -220,6 +220,9 @@ working and a new one reads one place: see `legacy/2`.
     %% Matches, worlds, chat, matchmaking.
     {~"match.not_found", 404, ~"No live match exists with this id."},
     {~"match.not_in_match", 409, ~"This connection is not joined to a match."},
+    {~"match.full", 409, ~"The match has no room for another player."},
+    {~"match.locked", 409, ~"The match is closed to new players."},
+    {~"match.join_refused", 403, ~"The game refused this join. See `details.refused_reason`."},
     {~"world.not_found", 404, ~"No live world exists with this id."},
     {~"world.already_joined", 409, ~"This connection is already joined to a world."},
     {~"chat.invalid_channel_id", 400, ~"The channel id is not valid."},
@@ -250,6 +253,9 @@ working and a new one reads one place: see `legacy/2`.
     {~"not_authorized", ~"forbidden"},
     {~"not_in_match", ~"match.not_in_match"},
     {~"match_not_found", ~"match.not_found"},
+    {~"match_full", ~"match.full"},
+    {~"match_locked", ~"match.locked"},
+    {~"join_refused", ~"match.join_refused"},
     {~"world_not_found", ~"world.not_found"},
     {~"already_in_world", ~"world.already_joined"},
     {~"invalid_channel_id", ~"chat.invalid_channel_id"},
@@ -361,12 +367,24 @@ untouched; this maps it onto a code. A reason with no code of its own becomes
 must not be able to mint codes.
 """.
 -spec from_ws_reason(atom() | binary()) -> object().
-from_ws_reason(Reason) when is_atom(Reason) ->
-    from_ws_reason(atom_to_binary(Reason, utf8));
-from_ws_reason(Reason) when is_binary(Reason) ->
+from_ws_reason(Reason) ->
+    from_ws_reason(Reason, #{}).
+
+-doc """
+`from_ws_reason/1` with extra `details`.
+
+For the caller that has context the code alone cannot carry - the game's own
+refusal string behind `match.join_refused`, say. The details are additive:
+they never replace the code, so a script-supplied string still cannot become
+one.
+""".
+-spec from_ws_reason(atom() | binary(), details()) -> object().
+from_ws_reason(Reason, Details) when is_atom(Reason) ->
+    from_ws_reason(atom_to_binary(Reason, utf8), Details);
+from_ws_reason(Reason, Details) when is_binary(Reason), is_map(Details) ->
     case lists:keyfind(Reason, 1, ?WS_REASONS) of
-        {_, Code} -> object(Code);
-        false -> object(~"ws.request_failed", #{reason => Reason})
+        {_, Code} when is_binary(Code) -> object(Code, Details);
+        _ -> object(~"ws.request_failed", Details#{reason => Reason})
     end.
 
 -doc "The WebSocket reason -> code mapping, as `{Reason, Code}` pairs.".

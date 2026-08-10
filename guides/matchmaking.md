@@ -230,6 +230,20 @@ nodes never match each other, and a restart drops every waiting ticket. Behind a
 load balancer this is the fact that decides whether matchmaking works at all;
 see [Clustering](clustering.md).
 
+## Backfill
+
+The matchmaker builds matches out of the queue. It never routes a queued player
+into a match that is already running, and there is no backfill strategy to
+enable.
+
+Backfill is a discovery flow instead: the client calls `match.list` with
+`has_capacity` and `joinable`, picks one, and joins it by id with `match.join`.
+A `running` match accepts joins exactly as a `waiting` one does. Your `join`
+callback runs mid-match, so it has to cope with a player arriving into a live
+game state, and the script decides when to stop taking them with
+[`game.match.set_joinable(false)`](lua-api.md#match). See
+[Lobbies](lobbies.md#joining-a-match-already-in-progress).
+
 ## Playing with friends
 
 Gathering players before a game starts is covered in [Lobbies](lobbies.md).

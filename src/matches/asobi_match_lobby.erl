@@ -24,10 +24,16 @@ list_matches() ->
     list_matches(#{}).
 
 -doc """
-List live matches with optional filters: `mode`, `has_capacity`, `listed`.
+List live matches with optional filters: `mode`, `has_capacity`, `listed`,
+`joinable`.
 
 Only `waiting` and `running` matches are returned; a `finished` match is
 history and a `paused` one cannot be joined.
+
+`has_capacity` and `joinable` are separate questions and both have to be
+asked to find a match that will actually take a player: a match with room
+can still have closed itself to new joins, and a full match is not locked -
+it may free a slot on the next leave.
 """.
 -spec list_matches(map()) -> [map()].
 list_matches(Filters) ->
@@ -40,20 +46,28 @@ Cached `list_matches/1` for request paths, mirroring
 Each uncached call issues one `gen_statem:call` per live match. That cost
 is paid even when every match is unlisted and the result is empty, so a
 flood of `match.list` messages would stall every match's mailbox. Keyed on
-`has_capacity` only - `mode` is client-controlled and unbounded, so keying
-on it would miss on every request and grow the table without bound.
+`has_capacity` and `joinable` only - both are bounded, so the table stays
+small, while `mode` is client-controlled and unbounded and keying on it
+would miss on every request and grow the table without bound.
 """.
 -spec list_matches_cached(map()) -> [map()].
 list_matches_cached(Filters) ->
     HasCapacity = maps:get(has_capacity, Filters, false),
+    Joinable = maps:get(joinable, Filters, undefined),
     Now = erlang:monotonic_time(millisecond),
-    Key = {asobi_match_server, HasCapacity},
+    Key = {asobi_match_server, HasCapacity, Joinable},
+    Base = #{has_capacity => HasCapacity, listed => true},
+    Inner =
+        case Joinable of
+            undefined -> Base;
+            _ -> Base#{joinable => Joinable}
+        end,
     All =
         case asobi_discovery:cache_lookup(Key, Now) of
             {hit, Matches} ->
                 Matches;
             miss ->
-                Matches = list_matches(#{has_capacity => HasCapacity, listed => true}),
+                Matches = list_matches(Inner),
                 asobi_world_lobby_server:cache_listing(Key, Matches, Now + ?LIST_CACHE_TTL_MS),
                 Matches
         end,
@@ -79,6 +93,11 @@ matches_filters(Info, Filters) ->
             {ok, Want} -> maps:get(listed, Info, false) =:= Want;
             error -> true
         end,
+    JoinableOk =
+        case maps:find(joinable, Filters) of
+            {ok, WantJoin} -> maps:get(joinable, Info, true) =:= WantJoin;
+            error -> true
+        end,
     Status = maps:get(status, Info, undefined),
     StatusOk = Status =:= waiting orelse Status =:= running,
-    ModeOk andalso CapOk andalso ListedOk andalso StatusOk.
+    ModeOk andalso CapOk andalso ListedOk andalso JoinableOk andalso StatusOk.

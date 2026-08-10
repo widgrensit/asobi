@@ -38,6 +38,7 @@ clauses against the same named type rather than an ad-hoc guess.
 
 -export([start_link/0]).
 -export([track/2, track_bot/2, untrack/1, untrack_bot/2, update/2, get_status/1, send/2]).
+-export([bot_pids/1]).
 -export([send_match_state/3]).
 -export([online_count/0]).
 -export([disconnect/2, revoke_session/2]).
@@ -50,6 +51,7 @@ clauses against the same named type rather than an ad-hoc guess.
 -type event_name() :: atom() | binary().
 -type message() ::
     {match_joined, pid()}
+    | {match_left, pid()}
     | {match_state, map()}
     | {match_state_raw, binary()}
     | {match_event, event_name(), map()}
@@ -92,6 +94,11 @@ track_bot(BotId, Pid) ->
     join_delivery_group(BotId, Pid),
     pg:join(?PG_SCOPE, ?BOT_GROUP(BotId), Pid),
     ok.
+
+-doc "The live processes tracked as bot `BotId`, if any.".
+-spec bot_pids(binary()) -> [pid()].
+bot_pids(BotId) ->
+    [Pid || Pid <- pg:get_members(?PG_SCOPE, ?BOT_GROUP(BotId)), is_pid(Pid)].
 
 -spec untrack(binary()) -> ok.
 untrack(PlayerId) ->

@@ -107,7 +107,18 @@ match_server_test_() ->
                 fun grace_expiry_of_last_player_stops_match/0}},
         {timeout, 15,
             {"grace expiry with players left keeps the match running",
-                fun grace_expiry_with_players_left_keeps_match/0}}
+                fun grace_expiry_with_players_left_keeps_match/0}},
+        {"join tells the session which match it joined", fun join_notifies_session/0},
+        {"leave tells the session it is out", fun leave_notifies_session/0},
+        {"a refused join notifies nobody", fun refused_join_notifies_nobody/0},
+        {"a match defaults to joinable", fun joinable_by_default/0},
+        {"set_joinable(false) closes the match to new joins", fun set_joinable_closes/0},
+        {"a locked match reopens on set_joinable(true)", fun set_joinable_reopens/0},
+        {"locked beats full", fun locked_reported_before_full/0},
+        {"a locked match keeps the players it has", fun locked_keeps_roster/0},
+        {"joinable survives a pause", fun set_joinable_while_paused/0},
+        {"backfill into a running match does not restart the clock",
+            fun backfill_keeps_started_at/0}
     ]}.
 
 %% --- Tests ---
@@ -807,6 +818,118 @@ fake_session(PlayerId) ->
     end),
     ok = pg:join(nova_scope, {player, PlayerId}, Pid),
     Pid.
+
+%% --- session notification, joinable, backfill ---
+
+%% asobi#423: the session used to learn its match_pid only from the
+%% matchmaker, so a player who found a match with match.list and joined it by
+%% id held no match_pid at all - their input was answered `not_in_match` and
+%% their leave did nothing.
+join_notifies_session() ->
+    meck:reset(asobi_presence),
+    Pid = start_match(),
+    ok = asobi_match_server:join(Pid, ~"p_notify"),
+    ?assert(meck:called(asobi_presence, send, [~"p_notify", {match_joined, Pid}])),
+    stop(Pid).
+
+leave_notifies_session() ->
+    Pid = start_match(),
+    ok = asobi_match_server:join(Pid, ~"p_left_a"),
+    ok = asobi_match_server:join(Pid, ~"p_left_b"),
+    meck:reset(asobi_presence),
+    ok = asobi_match_server:leave(Pid, ~"p_left_a"),
+    timer:sleep(50),
+    ?assert(meck:called(asobi_presence, send, [~"p_left_a", {match_left, Pid}])),
+    stop(Pid).
+
+refused_join_notifies_nobody() ->
+    meck:reset(asobi_presence),
+    Pid = start_match(),
+    ?assertMatch(
+        {error, {join_refused, ~"not_today"}}, asobi_match_server:join(Pid, ~"refuse_me")
+    ),
+    ?assertEqual(0, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    ?assertNot(meck:called(asobi_presence, send, [~"refuse_me", {match_joined, Pid}])),
+    stop(Pid).
+
+joinable_by_default() ->
+    Pid = start_match(),
+    ?assert(maps:get(joinable, asobi_match_server:get_info(Pid))),
+    stop(Pid).
+
+set_joinable_closes() ->
+    Pid = start_match(),
+    ok = asobi_match_server:join(Pid, ~"p_lock1"),
+    ok = asobi_match_server:set_joinable(Pid, false),
+    ?assertMatch({error, match_locked}, asobi_match_server:join(Pid, ~"p_lock2")),
+    ?assertNot(maps:get(joinable, asobi_match_server:get_info(Pid))),
+    stop(Pid).
+
+set_joinable_reopens() ->
+    Pid = start_match(),
+    ok = asobi_match_server:set_joinable(Pid, false),
+    ?assertMatch({error, match_locked}, asobi_match_server:join(Pid, ~"p_reopen1")),
+    ok = asobi_match_server:set_joinable(Pid, true),
+    ?assertEqual(ok, asobi_match_server:join(Pid, ~"p_reopen2")),
+    stop(Pid).
+
+%% A closed match and a full one are different states and a client acts on
+%% them differently: full may free a slot on the next leave, locked will not.
+locked_reported_before_full() ->
+    Pid = start_match(#{min_players => 1, max_players => 1}),
+    ok = asobi_match_server:join(Pid, ~"p_lf1"),
+    ok = asobi_match_server:set_joinable(Pid, false),
+    ?assertMatch({error, match_locked}, asobi_match_server:join(Pid, ~"p_lf2")),
+    stop(Pid).
+
+locked_keeps_roster() ->
+    Pid = start_match(),
+    ok = asobi_match_server:join(Pid, ~"p_keep1"),
+    ok = asobi_match_server:join(Pid, ~"p_keep2"),
+    ok = asobi_match_server:set_joinable(Pid, false),
+    timer:sleep(50),
+    Info = asobi_match_server:get_info(Pid),
+    ?assertEqual(2, maps:get(player_count, Info)),
+    ?assertEqual(running, maps:get(status, Info)),
+    stop(Pid).
+
+set_joinable_while_paused() ->
+    Pid = start_match(#{min_players => 1}),
+    ok = asobi_match_server:join(Pid, ~"p_pause_lock"),
+    timer:sleep(50),
+    ok = asobi_match_server:pause(Pid),
+    ok = asobi_match_server:set_joinable(Pid, false),
+    timer:sleep(50),
+    ok = asobi_match_server:resume(Pid),
+    ?assertMatch({error, match_locked}, asobi_match_server:join(Pid, ~"p_pause_lock2")),
+    stop(Pid).
+
+%% started_at is the match clock the persisted record reports a duration
+%% from. Stamping it on every join past min_players meant each backfill
+%% joiner restarted it.
+backfill_keeps_started_at() ->
+    Self = self(),
+    meck:new(asobi_telemetry, [passthrough, no_link]),
+    meck:expect(asobi_telemetry, match_finished, fun(_MatchId, DurationMs, _Result) ->
+        Self ! {duration, DurationMs},
+        ok
+    end),
+    try
+        Pid = start_match(#{min_players => 1, max_players => 4}),
+        ok = asobi_match_server:join(Pid, ~"p_clock1"),
+        timer:sleep(120),
+        ok = asobi_match_server:join(Pid, ~"p_clock2"),
+        ok = asobi_match_server:cancel(Pid),
+        receive
+            {duration, DurationMs} ->
+                ?assert(DurationMs >= 100)
+        after 5000 ->
+            ?assert(false)
+        end,
+        stop(Pid)
+    after
+        meck:unload(asobi_telemetry)
+    end.
 
 stop(Pid) ->
     case is_process_alive(Pid) of

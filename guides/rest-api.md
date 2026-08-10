@@ -220,10 +220,16 @@ matches, an audit trail, nothing you can join. It accepts `mode`, `status`
 and `limit` (1-200, default 50), newest first.
 
 `GET /api/v1/matches/live` enumerates running match processes and is what a
-lobby browser wants. It accepts `mode` and `has_capacity=true`. Matches are
-**unlisted by default** - a mode opts in with `listed = true` (a Lua global, or
-`listed => true` in the operator's `game_modes` config) - so an empty result
-usually means no mode has opted in yet.
+lobby browser wants. It accepts `mode`, `has_capacity=true` and
+`joinable=true|false`. Matches are **unlisted by default** - a mode opts in
+with `listed = true` (a Lua global, or `listed => true` in the operator's
+`game_modes` config) - so an empty result usually means no mode has opted in
+yet.
+
+Every entry carries `joinable`, and a browser looking for somewhere to play
+should filter on both it and `has_capacity`: a match with room may have closed
+itself to new players, and a full one has not closed. `running` matches are
+included, because a running match takes joins - that is how backfill works.
 
 Neither returns the player roster. As with worlds, joining is `match.join`
 over WS.

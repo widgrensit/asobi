@@ -38,7 +38,14 @@ match_exits_mid_fanout() ->
     ?assertEqual(
         ok, asobi_matchmaker:join_matched_players(Match, ~"m1", [~"p1", ~"p2", ~"p3"])
     ),
-    ?assert(meck:called(asobi_presence, send, [~"p1", {match_joined, Match}])),
+    %% `match_joined` is the match server's to send, on the join it accepted.
+    %% What the fan-out owns is the `matched` event, so that is what is
+    %% asserted here - a fake match never sends the other half.
+    ?assert(
+        meck:called(asobi_presence, send, [
+            ~"p1", {match_event, matched, '_'}
+        ])
+    ),
     ?assert(failed_notified(~"p1")),
     ?assert(failed_notified(~"p3")).
 
@@ -49,7 +56,14 @@ live_match_notifies_all() ->
         ({join, _, _}) -> {reply, ok}
     end),
     ?assertEqual(ok, asobi_matchmaker:join_matched_players(Match, ~"m1", [~"p1", ~"p2"])),
-    ?assert(meck:called(asobi_presence, send, [~"p1", {match_joined, Match}])),
+    %% `match_joined` is the match server's to send, on the join it accepted.
+    %% What the fan-out owns is the `matched` event, so that is what is
+    %% asserted here - a fake match never sends the other half.
+    ?assert(
+        meck:called(asobi_presence, send, [
+            ~"p1", {match_event, matched, '_'}
+        ])
+    ),
     ?assert(
         meck:called(asobi_presence, send, [
             ~"p2", {match_event, matched, #{match_id => ~"match-2", players => [~"p1", ~"p2"]}}

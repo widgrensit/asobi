@@ -29,10 +29,16 @@ live(#{qs := Qs} = _Req) when is_binary(Qs) ->
             undefined -> Filters0;
             Mode -> Filters0#{mode => Mode}
         end,
-    Filters =
+    Filters2 =
         case proplists:get_value(~"has_capacity", Params) of
             ~"true" -> Filters1#{has_capacity => true};
             _ -> Filters1
+        end,
+    Filters =
+        case proplists:get_value(~"joinable", Params) of
+            ~"true" -> Filters2#{joinable => true};
+            ~"false" -> Filters2#{joinable => false};
+            _ -> Filters2
         end,
     {json, #{matches => asobi_match_lobby:list_matches_cached(Filters)}};
 live(_Req) ->

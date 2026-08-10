@@ -33,6 +33,8 @@ Three things live here, and only here:
 %% exists, so the root leads and every nested namespace follows it.
 -define(RESERVED_NAMESPACES, [
     [~"game"],
+    [~"game", ~"match"],
+    [~"game", ~"bots"],
     [~"game", ~"economy"],
     [~"game", ~"leaderboard"],
     [~"game", ~"storage"],

@@ -53,8 +53,60 @@ match_lobby_test_() ->
         {"listed => true opts a match into discovery", fun listed_opts_in/0},
         {"listing drops the roster and the flag", fun listing_drops_roster/0},
         {"filters by mode", fun filters_by_mode/0},
-        {"has_capacity excludes a full match", fun filters_by_capacity/0}
+        {"has_capacity excludes a full match", fun filters_by_capacity/0},
+        {"a listing says whether the match will take a player", fun listing_carries_joinable/0},
+        {"joinable => true excludes a closed match", fun filters_by_joinable/0},
+        {"joinable => false finds only the closed ones", fun filters_by_not_joinable/0},
+        {"a closed match with room is still excluded by joinable",
+            fun capacity_and_joinable_are_separate/0}
     ]}.
+
+listing_carries_joinable() ->
+    Pid = start_match(#{mode => ~"joinable_mode", listed => true}),
+    [M] = asobi_match_lobby:list_matches(#{listed => true, mode => ~"joinable_mode"}),
+    ?assert(maps:get(joinable, M)),
+    stop_match(Pid).
+
+filters_by_joinable() ->
+    Open = start_match(#{mode => ~"jf_open", listed => true}),
+    Closed = start_match(#{mode => ~"jf_closed", listed => true}),
+    ok = asobi_match_server:set_joinable(Closed, false),
+    timer:sleep(50),
+    Modes = [maps:get(mode, M) || M <- asobi_match_lobby:list_matches(#{joinable => true})],
+    ?assert(lists:member(~"jf_open", Modes)),
+    ?assertNot(lists:member(~"jf_closed", Modes)),
+    stop_match(Open),
+    stop_match(Closed).
+
+filters_by_not_joinable() ->
+    Open = start_match(#{mode => ~"jn_open", listed => true}),
+    Closed = start_match(#{mode => ~"jn_closed", listed => true}),
+    ok = asobi_match_server:set_joinable(Closed, false),
+    timer:sleep(50),
+    Modes = [maps:get(mode, M) || M <- asobi_match_lobby:list_matches(#{joinable => false})],
+    ?assert(lists:member(~"jn_closed", Modes)),
+    ?assertNot(lists:member(~"jn_open", Modes)),
+    stop_match(Open),
+    stop_match(Closed).
+
+%% Room and willingness are different questions: a match with three free
+%% slots that has closed itself must not come back as somewhere to join.
+capacity_and_joinable_are_separate() ->
+    Pid = start_match(#{mode => ~"cj_mode", listed => true, max_players => 4}),
+    ok = asobi_match_server:join(Pid, ~"p1"),
+    ok = asobi_match_server:set_joinable(Pid, false),
+    timer:sleep(50),
+    ?assertEqual(
+        1,
+        length(asobi_match_lobby:list_matches(#{mode => ~"cj_mode", has_capacity => true}))
+    ),
+    ?assertEqual(
+        [],
+        asobi_match_lobby:list_matches(#{
+            mode => ~"cj_mode", has_capacity => true, joinable => true
+        })
+    ),
+    stop_match(Pid).
 
 unlisted_by_default() ->
     Pid = start_match(#{mode => ~"unlisted_mode"}),
@@ -78,7 +130,7 @@ listing_drops_roster() ->
     ok = asobi_match_server:join(Pid, ~"p1"),
     [M] = asobi_match_lobby:list_matches(#{listed => true, mode => ~"roster_mode"}),
     ?assertEqual(
-        lists:sort([match_id, status, player_count, max_players, mode]),
+        lists:sort([match_id, status, player_count, max_players, mode, joinable]),
         lists:sort(maps:keys(M)),
         "listing key set is a security contract - widen it deliberately"
     ),

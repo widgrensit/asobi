@@ -206,7 +206,8 @@ listing_fixtures_match_the_projection_test() ->
         max_players => 2,
         mode => ~"m",
         players => [~"p"],
-        listed => true
+        listed => true,
+        joinable => true
     }),
     ?assertEqual(
         MatchKeys,

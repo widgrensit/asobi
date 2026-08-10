@@ -854,6 +854,15 @@ join_match_and_reply(Cid, MatchPid, PlayerId, Ctx, State) ->
             Info = asobi_match_server:get_info(MatchPid),
             Reply = encode_reply(Cid, ~"match.joined", Info),
             {reply, {text, Reply}, State};
+        %% The game refused this player. The reason is the script's own
+        %% vocabulary, so it travels as a detail under a fixed asobi reason -
+        %% a script must not be able to mint an error code (see m:asobi_error).
+        {error, {join_refused, undefined}} ->
+            Reply = encode_error(Cid, ~"join_refused"),
+            {reply, {text, Reply}, State};
+        {error, {join_refused, Detail}} when is_binary(Detail) ->
+            Reply = encode_error(Cid, ~"join_refused", #{}, #{refused_reason => Detail}),
+            {reply, {text, Reply}, State};
         {error, Reason} ->
             Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
@@ -980,12 +989,25 @@ encode_error(Cid, Reason) ->
     encode_error(Cid, Reason, #{}).
 
 encode_error(Cid, Reason, Extra) when is_map(Extra) ->
+    encode_error(Cid, Reason, Extra, #{}).
+
+%% `Extra` sits at the top of the payload, where the pre-object dialect put
+%% its per-reason keys; `Details` goes inside the error object, where a client
+%% reading only `error` can still see it. New context belongs in `Details`.
+encode_error(Cid, Reason, Extra, Details) when is_map(Extra), is_map(Details) ->
     Bin = to_reason_binary(Reason),
-    Payload = maps:merge(Extra#{reason => Bin}, asobi_error:from_ws_reason(Bin)),
+    Payload = maps:merge(Extra#{reason => Bin}, asobi_error:from_ws_reason(Bin, Details)),
     encode_reply(Cid, ~"error", Payload).
 
 to_reason_binary(R) when is_atom(R) -> atom_to_binary(R, utf8);
-to_reason_binary(R) when is_binary(R) -> R.
+to_reason_binary(R) when is_binary(R) -> R;
+%% Anything else is a term from deeper in the stack - a crashed Lua callback's
+%% `{lua_error, _}`, say. It reached here with no clause, and
+%% safe_handle_message/2 turned the function_clause into `invalid_payload`,
+%% blaming the client for a fault on the server. A structured term is never
+%% safe to forward (it can carry script internals), so it is reported as what
+%% it is and the detail stays in the logs.
+to_reason_binary(_) -> ~"internal".
 
 -spec reserved_event_names() -> [binary()].
 reserved_event_names() -> ?RESERVED_EVENT_NAMES.
@@ -1052,10 +1074,25 @@ build_listing_filters(Payload) ->
         {error, _} = E1 ->
             E1;
         {ok, A1} ->
-            case maps:find(~"has_capacity", Payload) of
-                error -> {ok, A1};
-                {ok, true} -> {ok, A1#{has_capacity => true}};
-                {ok, false} -> {ok, A1};
-                _ -> {error, ~"invalid_has_capacity_filter"}
+            Acc2 =
+                case maps:find(~"has_capacity", Payload) of
+                    error -> {ok, A1};
+                    {ok, true} -> {ok, A1#{has_capacity => true}};
+                    {ok, false} -> {ok, A1};
+                    _ -> {error, ~"invalid_has_capacity_filter"}
+                end,
+            case Acc2 of
+                {error, _} = E2 ->
+                    E2;
+                %% Unlike has_capacity, `false` is a filter and not the
+                %% absence of one: "show me the matches that have closed" is
+                %% a question a spectator browser asks. Worlds have no
+                %% joinable flag and ignore the key.
+                {ok, A2} ->
+                    case maps:find(~"joinable", Payload) of
+                        error -> {ok, A2};
+                        {ok, J} when is_boolean(J) -> {ok, A2#{joinable => J}};
+                        _ -> {error, ~"invalid_joinable_filter"}
+                    end
             end
     end.

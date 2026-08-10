@@ -530,7 +530,10 @@ join_matched_players(MatchPid, Mode, PlayerIds) ->
         lists:foreach(
             fun(PlayerId) when is_binary(PlayerId) ->
                 _ = asobi_match_server:join(MatchPid, PlayerId),
-                asobi_presence:send(PlayerId, {match_joined, MatchPid}),
+                %% `match_joined` is sent by asobi_match_server itself, on the
+                %% join it accepted. Sending it here as well announced a join
+                %% this fan-out never checked the result of, so a player whose
+                %% join was refused still ended up holding a match_pid.
                 asobi_presence:send(
                     PlayerId,
                     {match_event, matched, #{match_id => MatchId, players => PlayerIds}}

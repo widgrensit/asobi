@@ -163,13 +163,20 @@ the node count. See [Clustering](clustering.md).
 Browse live, joinable matches. Filters are optional.
 
 ```json
-{"type": "match.list", "payload": {"mode": "arena", "has_capacity": true}}
+{"type": "match.list", "payload": {"mode": "arena", "has_capacity": true, "joinable": true}}
 ```
 
 Reply payload is `{"matches": [...]}`, each entry carrying `match_id`,
-`mode`, `status`, `player_count` and `max_players`. The roster is not
-included; see [World Server](world-server.md) for why discovery and
+`mode`, `status`, `player_count`, `max_players` and `joinable`. The roster is
+not included; see [World Server](world-server.md) for why discovery and
 membership are separate surfaces.
+
+`has_capacity` and `joinable` are separate questions and a client looking for
+somewhere to play should ask both: a match with room may have closed itself to
+new players, and a full one has not closed - it may free a slot on the next
+leave. `joinable` accepts `false` too, for a browser that wants to show
+in-progress matches it cannot enter. A filter of the wrong type is rejected
+with `invalid_joinable_filter`.
 
 **Matches are unlisted by default.** A matchmaker-spawned match is already
 assigned to its players, so it has no reason to appear in a browser. A mode
@@ -194,17 +201,34 @@ Joining is WebSocket-only by design: the join binds the match to your
 session so subsequent `match.input` is routed. There is no REST join, the
 same as for worlds.
 
+A `running` match takes joins exactly as a `waiting` one does, so this is also
+how a player backfills into a game already in progress. There is no separate
+backfill call.
+
 #### `match.joined` (reply)
 
 The full match info, including the roster:
 
 ```json
-{"type": "match.joined", "cid": "j-1", "payload": {"match_id": "...", "mode": "arena", "status": "waiting", "player_count": 1, "max_players": 4, "players": ["..."], "listed": false}}
+{"type": "match.joined", "cid": "j-1", "payload": {"match_id": "...", "mode": "arena", "status": "waiting", "player_count": 1, "max_players": 4, "players": ["..."], "listed": false, "joinable": true}}
 ```
 
-An unknown id is `match_not_found` (`match.not_found`); over the join rate
-it is `join_rate_limited`; a game module that refuses the join answers with
-whatever reason it returned, wrapped as `ws.request_failed`.
+| Reason | Code | Means |
+|---|---|---|
+| `match_not_found` | `match.not_found` | No live match with that id |
+| `join_rate_limited` | `join_rate_limited` | Over 10 joins per 60 seconds |
+| `match_full` | `match.full` | No room. May free a slot on the next leave |
+| `match_locked` | `match.locked` | The game closed the match to new players |
+| `join_refused` | `match.join_refused` | The game turned this player away |
+
+`join_refused` carries the game's own reason string in
+`error.details.refused_reason` when the script gave one. It is game
+vocabulary, never an asobi code - see
+[Refusing a join](lua-scripting.md#refusing-a-join).
+
+```json
+{"type": "error", "cid": "j-1", "payload": {"reason": "join_refused", "error": {"code": "match.join_refused", "message": "The game refused this join. See `details.refused_reason`.", "details": {"refused_reason": "wrong_code"}}}}
+```
 
 #### Join context
 

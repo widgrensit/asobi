@@ -32,6 +32,121 @@ fill_mode_test_() ->
             fun fill_stops_on_queue_full_immediately/0}
     ]}.
 
+%% Script-driven bots: a match script placing one itself rather than the
+%% matchmaker topping up the queue.
+add_bot_test_() ->
+    {foreach, fun add_setup/0, fun add_cleanup/1, [
+        {"a bare name gets the bot_ prefix and starts", fun add_bot_prefixes_and_starts/0},
+        {"the mode's bot script is handed to the new bot", fun add_bot_uses_mode_script/0},
+        {"a bot already in the match is not added twice", fun add_bot_skips_duplicate/0},
+        {"a full match takes no bot", fun add_bot_skips_full_match/0},
+        {"the bot ceiling bounds a script that keeps adding", fun add_bot_stops_at_ceiling/0},
+        {"a match that ended between call and cast is not an error",
+            fun add_bot_tolerates_dead_match/0},
+        {"remove stops the bot process", fun remove_bot_stops_process/0},
+        {"remove accepts the prefixed id from the roster", fun remove_bot_accepts_prefixed/0},
+        {"removing a bot with no live process still leaves the match",
+            fun remove_bot_without_process_leaves/0}
+    ]}.
+
+name_test_() ->
+    [
+        ?_assertEqual(ok, asobi_bot_spawner:validate_bot_name(~"Spark")),
+        ?_assertEqual(ok, asobi_bot_spawner:validate_bot_name(~"a-b_9")),
+        ?_assertMatch({error, _}, asobi_bot_spawner:validate_bot_name(<<>>)),
+        ?_assertMatch({error, _}, asobi_bot_spawner:validate_bot_name(~"has space")),
+        ?_assertMatch({error, _}, asobi_bot_spawner:validate_bot_name(~"dotted.name")),
+        ?_assertMatch(
+            {error, _}, asobi_bot_spawner:validate_bot_name(binary:copy(~"x", 33))
+        )
+    ].
+
+add_setup() ->
+    case whereis(nova_scope) of
+        undefined -> pg:start_link(nova_scope);
+        _ -> ok
+    end,
+    application:set_env(asobi, game_modes, #{}),
+    meck:new(asobi_match_server, [non_strict, no_link]),
+    meck:new(asobi_bot_sup, [non_strict, no_link]),
+    meck:expect(asobi_bot_sup, start_bot, fun(_MatchPid, _BotId, _Script) -> {ok, self()} end),
+    meck:new(asobi_presence, [non_strict, no_link]),
+    meck:expect(asobi_presence, bot_pids, fun(_BotId) -> [] end),
+    ok.
+
+add_cleanup(_) ->
+    meck:unload(asobi_presence),
+    meck:unload(asobi_bot_sup),
+    meck:unload(asobi_match_server),
+    application:unset_env(asobi, game_modes).
+
+expect_match(Players, Mode, Max) ->
+    meck:expect(asobi_match_server, get_info, fun(_Pid) ->
+        #{players => Players, mode => Mode, max_players => Max}
+    end),
+    meck:expect(asobi_match_server, leave, fun(_Pid, _PlayerId) -> ok end).
+
+add_bot_prefixes_and_starts() ->
+    expect_match([~"p1"], ~"arena", 4),
+    asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
+    ?assert(meck:called(asobi_bot_sup, start_bot, [self(), ~"bot_Spark", '_'])).
+
+add_bot_uses_mode_script() ->
+    application:set_env(asobi, game_modes, #{
+        ~"arena" => #{bots => #{script => ~"priv/lua/bot.lua"}}
+    }),
+    expect_match([~"p1"], ~"arena", 4),
+    asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
+    ?assert(
+        meck:called(asobi_bot_sup, start_bot, [self(), ~"bot_Spark", ~"priv/lua/bot.lua"])
+    ).
+
+add_bot_skips_duplicate() ->
+    expect_match([~"p1", ~"bot_Spark"], ~"arena", 4),
+    asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
+    ?assertEqual(0, meck:num_calls(asobi_bot_sup, start_bot, '_')).
+
+add_bot_skips_full_match() ->
+    expect_match([~"p1", ~"p2"], ~"arena", 2),
+    asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
+    ?assertEqual(0, meck:num_calls(asobi_bot_sup, start_bot, '_')).
+
+add_bot_stops_at_ceiling() ->
+    Bots = [<<"bot_", (integer_to_binary(N))/binary>> || N <- lists:seq(1, ?MAX_BOT_FILL)],
+    expect_match(Bots, ~"arena", 1000),
+    asobi_bot_spawner:do_add_bot(self(), ~"OneTooMany"),
+    ?assertEqual(0, meck:num_calls(asobi_bot_sup, start_bot, '_')).
+
+add_bot_tolerates_dead_match() ->
+    meck:expect(asobi_match_server, get_info, fun(_Pid) -> exit({noproc, get_info}) end),
+    ?assertEqual(ok, asobi_bot_spawner:do_add_bot(self(), ~"Spark")),
+    ?assertEqual(0, meck:num_calls(asobi_bot_sup, start_bot, '_')).
+
+remove_bot_stops_process() ->
+    Bot = spawn_bot(),
+    meck:expect(asobi_presence, bot_pids, fun(~"bot_Spark") -> [Bot] end),
+    expect_match([~"bot_Spark"], ~"arena", 4),
+    asobi_bot_spawner:do_remove_bot(self(), ~"Spark"),
+    ?assertNot(is_process_alive(Bot)).
+
+remove_bot_accepts_prefixed() ->
+    Bot = spawn_bot(),
+    meck:expect(asobi_presence, bot_pids, fun(~"bot_Spark") -> [Bot] end),
+    expect_match([~"bot_Spark"], ~"arena", 4),
+    asobi_bot_spawner:do_remove_bot(self(), ~"bot_Spark"),
+    ?assertNot(is_process_alive(Bot)).
+
+remove_bot_without_process_leaves() ->
+    expect_match([~"bot_Ghost"], ~"arena", 4),
+    asobi_bot_spawner:do_remove_bot(self(), ~"Ghost"),
+    ?assert(meck:called(asobi_match_server, leave, [self(), ~"bot_Ghost"])).
+
+%% A stand-in for asobi_bot: gen_server:stop/3 is how removal works, so the
+%% double has to be a real gen_server.
+spawn_bot() ->
+    {ok, Pid} = gen_server:start(asobi_bot_spawner_tests_stub, [], []),
+    Pid.
+
 setup() ->
     application:set_env(asobi, game_modes, #{}),
     meck:new(asobi_matchmaker, [non_strict, no_link]),

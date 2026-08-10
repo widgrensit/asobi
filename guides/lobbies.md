@@ -59,13 +59,42 @@ GET /api/v1/matches/live        REST
 match.list                      WebSocket
 ```
 
-Both filter on `mode` and `has_capacity`. Matches are unlisted by default - a
-matchmaker-spawned match is already assigned to its players and has no reason to
-be browsable - so a mode opts in with `listed = true`.
+Both filter on `mode`, `has_capacity` and `joinable`. Matches are unlisted by
+default - a matchmaker-spawned match is already assigned to its players and has
+no reason to be browsable - so a mode opts in with `listed = true`.
 
 Do not use `GET /api/v1/matches` for this. It reads the match record table:
 finished matches, an audit trail, nothing joinable. See
 [REST API](rest-api.md).
+
+### Joining a match already in progress
+
+A `running` match accepts joins exactly as a `waiting` one does, so backfill is
+`match.list` then `match.join` with the `match_id` - there is no separate call
+and no backfill mode to turn on. Your `join` callback runs mid-match, so it has
+to cope with a player arriving into a live game state.
+
+Ask for both filters when you are looking for somewhere to play:
+
+```json
+{"type": "match.join", "payload": {"match_id": "..."}}
+```
+
+```
+match.list  { "has_capacity": true, "joinable": true }
+```
+
+They are different questions. A match with three free slots may have closed
+itself to new players; a full one has not closed, and may free a slot on the
+next leave. Every listing carries `joinable`, so a browser can show both and
+grey one out.
+
+To close a match to backfill, call
+[`game.match.set_joinable(false)`](lua-api.md#match) from the script - at the
+end of round one, once the objective spawns, whenever the game says so. A
+closed match answers `match.locked`; a full one answers `match.full`. To turn
+away one specific player rather than everybody, return `nil` from
+[`join`](lua-scripting.md#refusing-a-join) instead.
 
 ### The 60-second timeout
 
@@ -171,9 +200,12 @@ There is no worlds screen either; use `GET /api/v1/worlds`. See
 - **Party.** You cannot queue as a group through the matchmaker. Play with
   specific people by sharing a world id or a join code, or add party grouping as
   an extension.
-- **Rich filters.** Discovery filters on `mode` and `has_capacity` only.
-  Anything richer belongs in your strategy module, or in an extension method
-  that returns the filtered list.
+- **Rich filters.** Discovery filters on `mode`, `has_capacity` and `joinable`
+  only. Anything richer belongs in your strategy module, or in an extension
+  method that returns the filtered list.
+- **Backfill matchmaking.** The matchmaker builds matches out of the queue; it
+  never routes a queued player into a match that is already running. Backfill
+  is a client browsing and joining, not a strategy the matchmaker runs.
 - **Member roster API.** The joiner receives the roster on `match.joined` /
   `world.joined`; there is no separate "who is here" call. Keep the list in your
   game state, or expose it as an extension method.

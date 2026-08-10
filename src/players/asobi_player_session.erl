@@ -88,6 +88,12 @@ handle_info({session_revoked, Reason}, #{ws_pid := WsPid} = State) ->
     {stop, {shutdown, session_revoked}, State};
 handle_info({asobi_message, {match_joined, MatchPid}}, State) ->
     {noreply, State#{match_pid => MatchPid}};
+%% Guarded on the pid: a leave from a match this session already moved on
+%% from would otherwise clear the match it is actually in.
+handle_info({asobi_message, {match_left, MatchPid}}, #{match_pid := MatchPid} = State) ->
+    {noreply, State#{match_pid => undefined}};
+handle_info({asobi_message, {match_left, _MatchPid}}, State) ->
+    {noreply, State};
 handle_info({asobi_message, {world_joined, WorldPid, ZonePid}}, State) ->
     {noreply, State#{world_pid => WorldPid, zone_pid => ZonePid}};
 handle_info({asobi_message, {world_zone_changed, ZonePid}}, State) ->

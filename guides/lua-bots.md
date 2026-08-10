@@ -11,7 +11,12 @@ are no fake clients and no network hop; a bot's decisions go through the same
 - Load-testing a tick loop without spawning real WebSocket sessions.
 - Replay and record-and-replay testing.
 
-## How it works
+There are two ways a bot gets into a match. **Queue fill** is automatic and
+answers "not enough humans are waiting". **`game.bots.add`** is your script
+placing one deliberately, at any point in the match. They are independent:
+leave `bots.enabled` off and nothing arrives that your script did not ask for.
+
+## How queue fill works
 
 1. A player queues for matchmaking.
 2. Every 8 seconds the spawner looks at each mode with someone queued. If
@@ -33,6 +38,30 @@ instead - it does not trigger bot fill.
 
 Bot fill is per node, because the matchmaker queue is per node. Each node
 fills its own queue from its own view. See [Clustering](clustering.md).
+
+## Placing a bot from a match script
+
+```lua
+game.bots.add("Spark")        -- bot_Spark joins this match
+game.bots.remove("bot_Spark") -- and leaves
+```
+
+This is the route to take when the *game* decides, not the queue: a co-op
+mission that needs an escort, a boss that fights alongside the players, a
+practice mode with no queue at all, a slot backfilled the moment a human
+drops. It works in `waiting` and in `running`, so a bot can arrive mid-match.
+
+`name` is bare and gets the `bot_` prefix here, so the roster shows
+`bot_Spark`; `remove` takes either form. Names are 1-32 characters of
+`[A-Za-z0-9_-]`. The bot runs the mode's `bots.script` if the mode has one and
+the built-in AI otherwise, so a mode can leave `bots.enabled` off - that flag
+governs queue fill only - and still configure a script.
+
+Both calls are asynchronous and neither fails at the call site. A match that is
+full, already holds that bot, or is at the 64-bot ceiling is a no-op with a line
+in the node log. The bot appears in your `players` table through the same `join`
+callback a human goes through, so a script that rejects unknown players will
+reject bots too.
 
 ## Configuration
 
