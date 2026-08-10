@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { HashRouter, NavLink, Route, Routes } from 'react-router-dom';
 import { config } from './config.js';
 import { features as readFeatures, logout, whoami } from './api.js';
@@ -103,25 +103,29 @@ export default function App() {
                 <span className={config.production ? 'target target-prod' : 'target'}>{config.label}</span>
               ) : null}
             </div>
-            {SECTIONS.map((section) => {
-              const items = registry.nav.filter((item) => item.section === section);
-              if (items.length === 0) return null;
-              return (
-                <ul className="nav-list" key={section}>
-                  {items.map((item) => (
-                    <li key={item.path}>
-                      <NavLink
-                        to={item.path}
-                        end={item.path === '/'}
-                        className={({ isActive }) => (isActive ? 'nav-link on' : 'nav-link')}
-                      >
-                        {item.label}
-                      </NavLink>
-                    </li>
-                  ))}
-                </ul>
-              );
-            })}
+            {/* One list, not one per section. `.nav-list` carries `flex: 1` so
+                it fills the column and holds the footer at the bottom, and
+                several of them would share that space between themselves
+                instead. Sections are a rule about order and a hairline, not a
+                second element. */}
+            <ul className="nav-list">
+              {registry.nav.map((item, index) => (
+                <Fragment key={item.path}>
+                  {index > 0 && item.section !== registry.nav[index - 1].section ? (
+                    <li className="nav-gap" aria-hidden="true" />
+                  ) : null}
+                  <li>
+                    <NavLink
+                      to={item.path}
+                      end={item.path === '/'}
+                      className={({ isActive }) => (isActive ? 'nav-link on' : 'nav-link')}
+                    >
+                      {item.label}
+                    </NavLink>
+                  </li>
+                </Fragment>
+              ))}
+            </ul>
             <div className="nav-foot">
               <div className="who">
                 <span className="who-name">{actor.display}</span>

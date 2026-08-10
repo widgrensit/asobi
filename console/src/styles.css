@@ -161,6 +161,16 @@ a {
   flex: 1;
 }
 
+/* The break between core's screens and whatever an installed extension added.
+   A hairline rather than a heading: the sections are not named anywhere an
+   operator reads, and a label per group would cost more room than it explains
+   in a column this narrow. */
+.nav-gap {
+  height: 1px;
+  margin: 7px 10px;
+  background: var(--line);
+}
+
 .nav-link {
   display: block;
   padding: 6px 10px;
@@ -722,6 +732,11 @@ a {
     flex-direction: row;
     flex-wrap: wrap;
     gap: 4px;
+  }
+
+  /* Wrapped into a row, a horizontal rule between two links is a stray dash. */
+  .nav-gap {
+    display: none;
   }
 
   .nav-foot {
