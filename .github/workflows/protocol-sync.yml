@@ -61,7 +61,7 @@ jobs:
             repo: widgrensit/asobi-unreal
     steps:
       - name: Check out asobi
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Check the App credentials are present
         env:
@@ -87,7 +87,7 @@ jobs:
           repositories: asobi-${{ matrix.sdk }}
 
       - name: Check out ${{ matrix.repo }}
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: ${{ matrix.repo }}
           token: ${{ steps.app-token.outputs.token }}
