@@ -11,8 +11,10 @@
 -spec info() -> asobi_extension:info().
 info() -> #{name => notes, extension_version => 1}.
 
-%% Two actions, two classes. `read` is what a console session holds by default;
-%% `config` is what writing one needs. Anything but `get` is wrapped in
+%% Two actions, two classes. A console session holds every class but `erasure`,
+%% so both are reachable from the console; the split is what makes the write
+%% refusable for a minted bearer token that holds `read` alone. Anything but
+%% `get` is wrapped in
 %% asobi_ops_audit:mutation/4 by core before it runs, so every note written from
 %% the console has a durable row naming the operator - the extension does
 %% nothing to arrange that and cannot opt out of it.

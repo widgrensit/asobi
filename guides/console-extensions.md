@@ -149,15 +149,15 @@ nav: [
 | --- | --- | --- |
 | `path` | required | Relative, under `/ext/<name>`. `''` is the extension's own root |
 | `label` | required | What the operator reads |
-| `section` | optional | `core`, `game` or `ops`. Anything else, including an absent value, becomes `game` |
+| `section` | optional | `game` or `ops`. Anything else, including `core` and an absent value, becomes `game` |
 | `order` | optional | Within the section. Default 100, ties break on label |
 | `caps` | optional | Capability classes the session must hold for the item to render at all |
 
 Sections render in the order `core`, `game`, `ops`, and core's own screens are
-all in `core`. An extension cannot place itself above the screens an operator
-navigates by muscle memory, whatever `order` it declares - which is deliberate,
-because the ordering an operator relies on is not something an installed
-extension should be able to rearrange.
+all in `core` - which is why `core` is not a section an extension may name. An
+extension cannot place itself above the screens an operator navigates by muscle
+memory, whatever `order` it declares, because the ordering an operator relies on
+is not something an installed extension should be able to rearrange.
 
 `caps` does not authorise anything. The ops plane already refuses a call whose
 class the session does not hold; this is so an operator is not offered a door
@@ -312,7 +312,7 @@ Name it in `rebar.config`, which is where the build looks:
 {asobi, [{console_bundle_app, game_console}]}.
 
 {project_plugins, [
-    {asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.72.5"}}}
+    {asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.74.0"}}}
 ]}.
 ```
 
@@ -322,7 +322,7 @@ and in `sys.config`, which is what makes the node serve it:
 {asobi, [
     {console, true},
     {console_bundle_app, game_console},
-    {ops_secret, <<"...">>}
+    {ops_secret, ~"..."}
 ]}.
 ```
 
@@ -402,7 +402,7 @@ source. Your code lives under the same policy as core's:
 - **No dynamic `import()`, and no lazy screens.** A nonce does not propagate to
   a module's static imports, so a second chunk would be refused by the browser.
   This is also why the composition is a build step: see
-  [ADR 0009](../docs/adr/0009-console-extensions-compose-at-build-time.md).
+  [ADR 0009](https://github.com/widgrensit/asobi/blob/main/docs/adr/0009-console-extensions-compose-at-build-time.md).
 - **No remote anything.** `default-src 'none'`; `connect-src` is the ops API and
   nothing else. No font CDN, no analytics, no image host. Inline small images as
   `data:` URIs and the bundler will handle it.
@@ -419,10 +419,13 @@ one line in the browser console naming it, rather than rendered half-working.
 The version bumps when the frozen surface changes shape in a way an existing
 extension would not survive. Adding an export does not bump it.
 
-The other version to keep straight is the plugin: `rebar3 asobi console` builds
-against the copy of asobi in `project_plugins`, and the node runs the one in
-`deps`. Pin them to the same tag, for the same reason
-[`rebar3 asobi check`](extensions.md) does.
+The other version to keep straight is the plugin. `rebar3 asobi console` runs
+from the copy of asobi in `project_plugins`, but it composes the console out of
+the `console/` source of the copy in `deps` - so the surface your screens
+compile against, `CONSOLE_API_VERSION` included, is the dependency's, and the
+plugin supplies only the provider itself. Pin both to the same tag, for the
+same reason [`rebar3 asobi check`](extensions.md) does: a plugin older than the
+dependency composes a console the node's own extension set may not match.
 
 ## When something does not appear
 
@@ -432,15 +435,19 @@ against the copy of asobi in `project_plugins`, and the node runs the one in
 | Nav item missing, `/features` does not list the extension at all | The extension is not in the release. It is an OTP application dependency question, not a console one |
 | `/console` answers 503, log says `bundle_app_unavailable` | `console_bundle_app` names an application that is not in this release |
 | `/console` answers 503, log says `manifest_unreadable` | The named application is in the release but its `priv/console` is empty. The build never ran, or ran with `--out` pointing elsewhere |
-| Screen is blank, browser console says an extension was refused | `apiVersion` mismatch, or a manifest whose `name` is not the extension's name |
+| Screen is blank, browser console says an extension was refused | `apiVersion` mismatch, or a `name` that is not `^[a-z][a-z0-9_]*$` |
+| Nav item missing, nothing refused and nothing logged | A well-formed `name` that is not this extension's. It does not match what `/features` reports, so it is treated as an extension this node does not have - which is silent on purpose, because that is the normal case |
 | Panel shows an error banner naming your extension | Your component threw. The boundary caught it; the message is in the banner and the stack is in the browser console |
-| Everything renders, every request answers 403 | The action's `class` is not one the session holds. `erasure` needs `console_erasure` set on the deployment |
+| A request answers 403 and the console returns to the sign-in screen | The action's `class` is not one the session holds - every 401 and 403 is read as a lost session. `erasure` needs `console_erasure` set on the deployment |
 
 ## Also
 
+- [A worked example](https://github.com/widgrensit/asobi/tree/main/examples/console-extension) -
+  a release with one extension that ships screens, an application to build the
+  bundle into, and the `rebar.config` and `sys.config` that wire the two
 - [Writing an extension](extensions.md) - the manifest, `ops/0`, and what a
   handler is given
 - [Operator console](console.md) - turning the console on, and what the ops
   plane is
-- [ADR 0009](../docs/adr/0009-console-extensions-compose-at-build-time.md) - why
+- [ADR 0009](https://github.com/widgrensit/asobi/blob/main/docs/adr/0009-console-extensions-compose-at-build-time.md) - why
   this is a build step and not a runtime plugin loader

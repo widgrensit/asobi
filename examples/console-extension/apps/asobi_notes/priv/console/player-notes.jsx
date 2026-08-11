@@ -13,8 +13,10 @@ export default function PlayerNotes({ player }) {
   const [failed, setFailed] = useState(null);
   const actor = useActor();
 
-  // `config` is not held by every session, and the ops plane would answer 403.
-  // Asking here is so the form is not offered to somebody it will refuse.
+  // A console session holds `config`, so this is true in the console today.
+  // It is asked anyway because a session is not the only thing that reaches a
+  // screen's actions, and the ops plane answers 403 to one that lacks the
+  // class - this is so the form is not offered to somebody it will refuse.
   const mayWrite = actor.caps.includes('config');
 
   async function submit(event) {

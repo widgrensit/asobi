@@ -135,7 +135,7 @@ UDP relay if you need sub-3ms physics.
 - [**Economy**](guides/economy.md) · [**Authentication**](guides/authentication.md) · [**IAP**](guides/iap.md)
 - [**Lua scripting**](guides/lua-scripting.md) · [**Lua API reference**](guides/lua-api.md) · [**Lua bots**](guides/lua-bots.md)
 - [**Extensions**](guides/extensions.md) - add your own RPC methods and ops actions
-- [**Configuration**](guides/configuration.md) · [**Operator console**](guides/console.md) · [**Clustering**](guides/clustering.md) · [**Performance tuning**](guides/performance-tuning.md)
+- [**Configuration**](guides/configuration.md) · [**Operator console**](guides/console.md) · [**Extending the console**](guides/console-extensions.md) · [**Clustering**](guides/clustering.md) · [**Performance tuning**](guides/performance-tuning.md)
 - [**Benchmarks**](guides/benchmarks.md) · [**Comparison vs Nakama / Colyseus / SpacetimeDB**](guides/comparison.md)
 - [**HexDocs**](https://hexdocs.pm/asobi) - full API reference
 

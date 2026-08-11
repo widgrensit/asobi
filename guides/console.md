@@ -189,9 +189,11 @@ PlayFab Game Manager or the Hathora console, that expectation gap is real and
 this is where it is.
 
 The third mutating route takes its method, its handler and its capability class
-from an installed extension's manifest. The console cannot invoke it today;
-that surface is HTTP only. See [Extensions](extensions.md) for how an extension
-declares one.
+from an installed extension's manifest. An extension that ships its own
+operator screens calls it from them, in a console composed with
+`rebar3 asobi console` - see
+[Extending the operator console](console-extensions.md). See
+[Extensions](extensions.md) for how an extension declares one.
 
 ## Capability classes
 

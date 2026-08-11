@@ -708,17 +708,20 @@ same shape as `core`, so a client reads one row type:
 
 ```json
 { "name": "quests", "version": "1.0.0",
-  "capabilities": [{ "name": "lua", "enabled": true },
+  "capabilities": [{ "name": "console", "enabled": true },
+                   { "name": "lua", "enabled": true },
+                   { "name": "ops", "enabled": true },
                    { "name": "rpc", "enabled": true },
                    { "name": "tables", "enabled": true }] }
 ```
 
-An extension's capabilities are the manifest keys it declares something under.
-They say what it contributes, never what it contains - no method name, no
-table name. `[]` when nothing is installed.
+An extension's capabilities are the seams it declares something under, plus
+`console` for one that ships operator screens - which is a file check rather
+than a manifest key. They say what it contributes, never what it contains - no
+method name, no action name, no table name. `[]` when nothing is installed.
 
-This is what a console reads to decide which of its built-in screens to
-render, and to surface a version it was not built against.
+This is what a console reads to decide which of its screens to render, and to
+surface a version it was not built against.
 
 ### Stats
 
