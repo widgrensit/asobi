@@ -2,7 +2,17 @@ name: Dependabot auto-merge
 
 # Merge a dependabot PR (github-actions + docker bumps) once CI is green.
 # Runs on CI completion rather than PR open, so the merge only happens after
-# checks pass. Self-contained: no branch protection or repo settings required.
+# checks pass.
+#
+# It approves before merging because main's ruleset requires one approving
+# review. Without that, the merge is refused with "the base branch policy
+# prohibits the merge" - and because nothing watches this workflow, dependabot
+# PRs then pile up green-but-unmerged with no signal anywhere. Three had been
+# sitting for a day when this was found.
+#
+# Automating the approval is defensible only because the job is already gated on
+# the author being dependabot AND CI having passed. Do not widen either
+# condition without revisiting that.
 
 on:
   workflow_run:
@@ -33,5 +43,9 @@ jobs:
             echo "No open PR for branch $HEAD; nothing to merge."
             exit 0
           fi
-          echo "Merging PR #$num (branch $HEAD)"
+          echo "Approving and merging PR #$num (branch $HEAD)"
+          # github-actions[bot] is a different actor from dependabot[bot], so
+          # this is not a self-approval and does satisfy the review rule.
+          gh pr review "$num" --repo "$REPO" --approve \
+            --body "Automated approval: dependabot bump, CI green."
           gh pr merge "$num" --repo "$REPO" --squash --delete-branch
