@@ -442,7 +442,7 @@ Submit a matchmaking ticket.
 #### `matchmaker.queued` (reply)
 
 ```json
-{"type": "matchmaker.queued", "cid": "q-1", "payload": {"ticket_id": "...", "status": "pending", "players_needed": 4}}
+{"type": "matchmaker.queued", "cid": "q-1", "payload": {"ticket_id": "...", "status": "pending", "players_needed": 4, "already_queued": false}}
 ```
 
 `players_needed` is the mode's configured `match_size`, or `null` when the
@@ -452,7 +452,13 @@ reported.
 A mode that resolves to no game module is `unknown_mode`
 (`matchmaker.unknown_mode`); a full queue is `queue_full`
 (`matchmaker.queue_full`). Re-adding for a mode you already have an open
-ticket for returns that same ticket rather than a second one.
+ticket for returns that same ticket rather than a second one, and sets
+`already_queued` to `true`.
+
+`already_queued` exists so a reconnecting client can tell "my resubmit was
+absorbed, my original wait still stands" from "freshly queued". Keep the
+elapsed timer running on `true` - `max_wait_seconds` counts from the ticket's
+original submission, not from the resubmit.
 
 ### `matchmaker.remove`
 

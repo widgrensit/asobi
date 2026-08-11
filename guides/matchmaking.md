@@ -46,10 +46,22 @@ curl -X POST http://localhost:8084/api/v1/matchmaker \
 <!-- /tabs -->
 
 The reply - the `matchmaker.queued` frame over WS, the JSON body over REST -
-carries `ticket_id`, `status: "pending"` and `players_needed`: the mode's
-`match_size`, or `null` if the mode declares none. Show it as "waiting for N
-players" so a queued client is not staring at silence. The `Meta` map in the
-Erlang return holds the same `players_needed`.
+carries `ticket_id`, `status: "pending"`, `players_needed` (the mode's
+`match_size`, or `null` if the mode declares none) and `already_queued`. Show
+`players_needed` as "waiting for N players" so a queued client is not staring
+at silence. The `Meta` map in the Erlang return holds the same fields.
+
+`already_queued` is `true` when you already had an open ticket for that mode
+and got it back rather than a new one. One live ticket per (player, mode) is
+deliberate, and it is what makes `add` safe to retry: a client that resumes a
+backgrounded socket can resubmit without minting a second ticket that would
+fill into a self-match.
+
+Use it to decide what your UI does with the reply. On `false`, start the wait
+from now. On `true`, you are re-attaching to a wait already in progress - keep
+the elapsed timer running rather than resetting it, since the ticket's
+`max_wait_seconds` is counted from its original submission, not from your
+resubmit.
 
 ### Testing solo
 
@@ -210,6 +222,14 @@ spawning a degenerate self-match, whatever a strategy returns.
     }}
 ]}
 ```
+
+`max_queue` also bounds the worst tick. Expiry is swept in one pass, and each
+expired ticket costs a `matchmaker.removed` telemetry emit plus a push to its
+player, all inside the tick - so if something stops matches forming entirely,
+one sweep can walk the whole queue while the matchmaker answers nothing else.
+The default is comfortable; if you raise it a long way, raise `tick_interval`
+with it and keep telemetry handlers on these events cheap (they run
+synchronously in the matchmaker's own process).
 
 `match_size`, `strategy` and the rest of a mode's shape are read into
 `game_modes` at boot, and a config watcher polls the manifest and each mode

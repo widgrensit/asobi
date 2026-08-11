@@ -11,7 +11,7 @@ spawns a match, and pushes `match.matched` to each player. A single
 -export([known_mode/1, snapshot/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -ifdef(TEST).
--export([next_spawn_attempt/1, join_matched_players/3, tally/1, render/3]).
+-export([next_spawn_attempt/1, join_matched_players/3, tally/1, render/3, notify_expired/1]).
 -endif.
 
 -export_type([snapshot/0, mode_queue/0]).
@@ -74,11 +74,21 @@ known_mode(_) ->
 %% match_size (null if the mode declares none). players_waiting (a count of
 %% others queued) is deliberately not exposed by default - it is a per-mode
 %% opt-in, tracked in asobi#232's follow-up.
--spec queue_meta(binary()) -> map().
-queue_meta(Mode) ->
+%%
+%% `already_queued' says whether this reply carries a ticket the caller already
+%% held rather than a new one. `add' is idempotent per (player, mode) precisely
+%% so a reconnect resubmit is safe (asobi#230); without this flag a client
+%% resuming a backgrounded socket cannot tell "my resubmit was absorbed and my
+%% original wait still stands" from "freshly queued", so it restarts its wait
+%% UI. Named for what the client observes, not for the server mechanism - the
+%% telemetry event keeps the mechanism name. Additive field: clients that ignore
+%% it behave exactly as before.
+-spec queue_meta(binary(), boolean()) -> map().
+queue_meta(Mode, AlreadyQueued) ->
+    Meta = #{already_queued => AlreadyQueued},
     case maps:get(match_size, asobi_game_modes:mode_config(Mode), undefined) of
-        N when is_integer(N) -> #{players_needed => N};
-        _ -> #{players_needed => null}
+        N when is_integer(N) -> Meta#{players_needed => N};
+        _ -> Meta#{players_needed => null}
     end.
 
 -spec remove(binary(), binary()) -> ok | {error, not_found | not_owner}.
@@ -248,7 +258,8 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
     %% self-match (asobi#230). A full queue is rejected before minting.
     case find_player_ticket(PlayerId, Mode, Tickets) of
         {ok, ExistingId} ->
-            {reply, {ok, ExistingId, queue_meta(Mode)}, State};
+            asobi_telemetry:matchmaker_deduped(PlayerId, Mode),
+            {reply, {ok, ExistingId, queue_meta(Mode, true)}, State};
         error when map_size(Tickets) >= MaxQueue ->
             {reply, {error, queue_full}, State};
         error ->
@@ -263,7 +274,7 @@ handle_call({add, PlayerId, Params}, _From, #{tickets := Tickets} = State) when
                 attempts => 0
             },
             asobi_telemetry:matchmaker_queued(PlayerId, Mode),
-            {reply, {ok, TicketId, queue_meta(Mode)}, State#{
+            {reply, {ok, TicketId, queue_meta(Mode, false)}, State#{
                 tickets => Tickets#{TicketId => Ticket}
             }}
     end;
@@ -717,6 +728,11 @@ notify_matchmaker_failed(PlayerIds, Reason) ->
 notify_expired([]) ->
     ok;
 notify_expired([#{player_id := PlayerId, id := TicketId} | Rest]) ->
+    %% Only `cancelled' was ever reported here, so removed{reason=expired} read
+    %% as zero and an operator's removal rate looked complete while omitting
+    %% every timeout. Expiry against flat `formed' is the unambiguous form of
+    %% "players waited the full max_wait and got nothing".
+    asobi_telemetry:matchmaker_removed(PlayerId, expired),
     asobi_presence:send(PlayerId, {match_event, matchmaker_expired, #{ticket_id => TicketId}}),
     notify_expired(Rest).
 

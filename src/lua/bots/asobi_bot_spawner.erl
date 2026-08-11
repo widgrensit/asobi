@@ -110,22 +110,36 @@ clamp_fill_target(Target) ->
 %% lists:seq(1, Target - Count) up front) and stops as soon as the
 %% matchmaker reports its queue is full, instead of discarding that error
 %% and letting ?CHECK_INTERVAL retry the same unreachable target forever.
+%% The name index restarts at 1 each cycle, so low-numbered bots get re-offered
+%% while still queued from the last one; `add' hands back their existing ticket
+%% and nobody joins. Counting those as progress left the queue permanently short
+%% of Target. Skip them and keep walking.
+%%
+%% At most `Count' of the ids probed can already be queued, so probing
+%% Needed + Count of them always reaches Needed free ones. Bounding on Needed
+%% alone is what made the original bug: with three bots live and one slot to
+%% fill, the walk gives up on the two taken ids before reaching a free one.
 fill_until(Mode, Count, Target, Names) ->
-    fill_until_loop(Mode, 1, Target - Count, Names).
+    Needed = Target - Count,
+    fill_until_loop(Mode, 1, 0, Needed + min(Count, ?MAX_BOT_FILL), Needed, Names).
 
-fill_until_loop(_Mode, N, Needed, _Names) when N > Needed ->
+fill_until_loop(_Mode, _Index, Added, _Limit, Needed, _Names) when Added >= Needed ->
     ok;
-fill_until_loop(Mode, N, Needed, Names) ->
-    BotId = bot_name(N, Names),
+fill_until_loop(_Mode, Index, _Added, Limit, _Needed, _Names) when Index > Limit ->
+    ok;
+fill_until_loop(Mode, Index, Added, Limit, Needed, Names) ->
+    BotId = bot_name(Index, Names),
     case asobi_matchmaker:add(BotId, #{mode => Mode}) of
         {error, queue_full} ->
             ?LOG_WARNING(#{
                 msg => ~"bot fill stopped: matchmaker queue full",
                 mode => Mode,
-                bots_added => N - 1
+                bots_added => Added
             });
+        {ok, _TicketId, #{already_queued := true}} ->
+            fill_until_loop(Mode, Index + 1, Added, Limit, Needed, Names);
         _ ->
-            fill_until_loop(Mode, N + 1, Needed, Names)
+            fill_until_loop(Mode, Index + 1, Added + 1, Limit, Needed, Names)
     end.
 
 %% --- Match Scanning ---

@@ -13,7 +13,7 @@ which is a different question with a different tool. See
 
 ## What you get
 
-- **37 telemetry events**, listed below. Stable names; the measurement and
+- **40 telemetry events**, listed below. Stable names; the measurement and
   metadata keys are documented per-event in `m:asobi_telemetry`.
 - **Structured JSON logs** on stdout, one object per line, via
   `nova_jsonlogger`. No configuration needed - a container log shipper reads
@@ -109,7 +109,7 @@ both are the kind of thing that is otherwise noticed a day later.
 
 ## The events
 
-Thirty-nine, grouped by what they are about. Measurement and metadata keys
+Forty, grouped by what they are about. Measurement and metadata keys
 are in `m:asobi_telemetry`, which is also the list `asobi_telemetry:events/0`
 returns - attach to that rather than restating the names.
 
@@ -133,12 +133,44 @@ misconfiguration, and both are invisible in game metrics.
 asobi.match.started              asobi.match.finished
 asobi.match.player_joined        asobi.match.player_left
 asobi.matchmaker.queued          asobi.matchmaker.removed
-asobi.matchmaker.formed          asobi.matchmaker.failed
+asobi.matchmaker.deduped         asobi.matchmaker.formed
+asobi.matchmaker.failed
 ```
 
 Queue depth is the number worth watching, and in a cluster it is per-node -
 each node's matchmaker holds its own tickets, so a fleet-wide total is a sum
 across nodes, not a reading from one. See [Clustering](clustering.md).
+
+**The alert worth having is `removed{reason=expired}` rising while `formed`
+stays flat.** That pair says exactly one thing, with no interpretation needed:
+players waited the full `max_wait_seconds` and got nothing. Removals carry
+`reason` - `cancelled` when a client withdraws, `expired` when the ticket times
+out - and only `expired` means the matchmaker failed to do its job.
+
+`deduped` fires when a player asks to queue for a mode they already have an
+open ticket on and gets that ticket back. (The client-facing field on the reply
+is named `already_queued`; the metric keeps the mechanism's name.) Some of it
+is routine: a double-tapped *find match*, and reconnect resubmits, which are
+idempotent by design. It is a hint, not a diagnosis. A sustained rate is worth looking at -
+one cause is several clients authenticated as the same player, which no amount
+of waiting will fix because one player cannot fill a two-player match - but a
+bored player re-tapping in an empty queue produces the same shape.
+
+Note what this view **cannot** tell you. Distinguishing "one player re-tapping"
+from "several clients sharing one identity" needs a distinct-player count, and
+`player_id` is unbounded so an exporter must never make it a label (see
+[ADR 0005](https://github.com/widgrensit/asobi/blob/main/docs/adr/0005-telemetry-event-surface.md)).
+`queued` and `deduped` are counters of events, not a live-ticket count - queue
+depth is the snapshot gauge described above. To separate those two cases you
+need the node's queue snapshot or its logs, not Prometheus.
+
+Handlers run **synchronously in the process that emitted the event**, so a
+handler attached to a matchmaker event runs inside the matchmaker's own message
+loop. Never call `asobi_matchmaker:get_queue_stats/0` from one - that is a
+`gen_server:call` to the process currently executing your handler, so it
+deadlocks until the call times out and stalls matchmaking for every player
+meanwhile. Read `asobi_matchmaker:snapshot/0` instead: it reads ETS and never
+messages the matchmaker.
 
 ### Worlds and zones
 

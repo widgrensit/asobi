@@ -29,7 +29,11 @@ fill_mode_test_() ->
         {"fill stops incrementally as soon as the matchmaker reports queue_full",
             fun fill_stops_on_queue_full/0},
         {"fill_mode returns cleanly (no crash) when the very first add hits queue_full",
-            fun fill_stops_on_queue_full_immediately/0}
+            fun fill_stops_on_queue_full_immediately/0},
+        {"fill walks past bot ids that are still queued from the last cycle",
+            fun fill_skips_already_queued_bots/0},
+        {"fill gives up rather than spinning when every id comes back already queued",
+            fun fill_gives_up_when_all_ids_taken/0}
     ]}.
 
 setup() ->
@@ -129,3 +133,53 @@ fill_stops_on_queue_full_immediately() ->
     meck:expect(asobi_matchmaker, add, fun(_BotId, _Opts) -> {error, queue_full} end),
     ?assertEqual(ok, asobi_bot_spawner:fill_mode(~"arena", 1)),
     ?assertEqual(1, meck:num_calls(asobi_matchmaker, add, '_')).
+
+%% The incident: the name index restarts at 1 each cycle, so low-numbered bots
+%% are re-offered while still queued from the last one. `add' is idempotent per
+%% (player, mode), so those re-offers hand back the existing ticket and nobody
+%% joins. Counting them as progress left the queue permanently short.
+%%
+%% Three queued (one human, bot_Spark, bot_Blitz) against a target of 4 is the
+%% case that bounding the walk on `Needed' alone gets wrong: it probes the two
+%% taken ids and gives up before reaching a free one, adding nobody, forever.
+fill_skips_already_queued_bots() ->
+    application:set_env(asobi, game_modes, #{
+        ~"arena" => #{
+            match_size => 4,
+            max_players => 10,
+            bots => #{enabled => true, min_players => 4}
+        }
+    }),
+    meck:expect(asobi_matchmaker, add, fun(BotId, _Opts) ->
+        Taken = lists:member(BotId, [~"bot_Spark", ~"bot_Blitz"]),
+        {ok, ~"ticket", #{already_queued => Taken}}
+    end),
+    asobi_bot_spawner:fill_mode(~"arena", 3),
+    ?assertEqual(3, meck:num_calls(asobi_matchmaker, add, '_')),
+    ?assertEqual(1, length(added_bots())).
+
+%% If every id it can reach is already queued the walk must terminate, not spin
+%% until the next tick.
+fill_gives_up_when_all_ids_taken() ->
+    application:set_env(asobi, game_modes, #{
+        ~"arena" => #{
+            match_size => 4,
+            max_players => 10,
+            bots => #{enabled => true, min_players => 4}
+        }
+    }),
+    meck:expect(asobi_matchmaker, add, fun(_BotId, _Opts) ->
+        {ok, ~"ticket", #{already_queued => true}}
+    end),
+    %% Needed 3 + Count 1 probes, then it stops rather than walking forever.
+    ?assertEqual(ok, asobi_bot_spawner:fill_mode(~"arena", 1)),
+    ?assertEqual(4, meck:num_calls(asobi_matchmaker, add, '_')),
+    ?assertEqual(0, length(added_bots())).
+
+added_bots() ->
+    [
+        BotId
+     || {_, {_, add, [BotId, _]}, {ok, _, #{already_queued := false}}} <- meck:history(
+            asobi_matchmaker
+        )
+    ].

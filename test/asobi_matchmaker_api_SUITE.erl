@@ -5,6 +5,7 @@
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([
     add_ticket/1,
+    add_ticket_reports_already_queued/1,
     add_ticket_omitted_mode_rejected/1,
     get_ticket/1,
     get_ticket_not_found/1,
@@ -17,6 +18,7 @@
 all() ->
     [
         add_ticket,
+        add_ticket_reports_already_queued,
         add_ticket_omitted_mode_rejected,
         get_ticket,
         get_ticket_not_found,
@@ -103,6 +105,33 @@ add_ticket(Config) ->
     ?assertMatch(#{~"ticket_id" := _, ~"status" := ~"pending"}, Body),
     #{~"ticket_id" := TicketId} = Body,
     true = is_binary(TicketId),
+    _ = nova_test:delete(
+        "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
+        #{headers => auth(Config)},
+        Config
+    ),
+    Config.
+
+%% The reply metadata has to survive the controller's JSON projection, not just
+%% asobi_matchmaker:add/2's return map - and `already_queued' has to encode as a
+%% JSON boolean rather than a string. Asserted at the edge a client actually
+%% talks to.
+add_ticket_reports_already_queued(Config) ->
+    Post = fun() ->
+        {ok, Resp} = nova_test:post(
+            "/api/v1/matchmaker",
+            #{headers => auth(Config), json => #{~"mode" => ~"ranked"}},
+            Config
+        ),
+        ?assertStatus(200, Resp),
+        nova_test:json(Resp)
+    end,
+    Body1 = Post(),
+    ?assertMatch(#{~"already_queued" := false}, Body1),
+    Body2 = Post(),
+    ?assertMatch(#{~"already_queued" := true}, Body2),
+    #{~"ticket_id" := TicketId} = Body1,
+    ?assertEqual(TicketId, maps:get(~"ticket_id", Body2)),
     _ = nova_test:delete(
         "/api/v1/matchmaker/" ++ binary_to_list(TicketId),
         #{headers => auth(Config)},

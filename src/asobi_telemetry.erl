@@ -1,11 +1,18 @@
 -module(asobi_telemetry).
+-include_lib("kernel/include/logger.hrl").
 
 -export([setup/0]).
 -export([match_started/2, match_finished/3, match_player_joined/2, match_player_left/2]).
 -export([world_started/2, world_finished/3, world_player_joined/2, world_player_left/2]).
 -export([world_phase_changed/3, world_tick/4]).
 -export([zone_opened/2, zone_closed/2, zone_tick_skipped/2]).
--export([matchmaker_queued/2, matchmaker_removed/2, matchmaker_formed/3, matchmaker_failed/2]).
+-export([
+    matchmaker_queued/2,
+    matchmaker_deduped/2,
+    matchmaker_removed/2,
+    matchmaker_formed/3,
+    matchmaker_failed/2
+]).
 -export([session_connected/1, session_disconnected/2]).
 -export([
     ws_connected/0,
@@ -60,6 +67,7 @@ events() ->
         [asobi, zone, closed],
         [asobi, zone, tick_skipped],
         [asobi, matchmaker, queued],
+        [asobi, matchmaker, deduped],
         [asobi, matchmaker, removed],
         [asobi, matchmaker, formed],
         [asobi, matchmaker, failed],
@@ -220,6 +228,17 @@ zone_tick_skipped(WorldId, Count) ->
 -spec matchmaker_queued(binary(), binary() | undefined) -> ok.
 matchmaker_queued(PlayerId, Mode) ->
     telemetry:execute([asobi, matchmaker, queued], #{count => 1}, #{
+        player_id => PlayerId, mode => Mode
+    }).
+
+%% An `add' that returned the caller's existing ticket instead of minting one,
+%% per the (player, mode) self-match guard (asobi#230). That branch emitted
+%% nothing before, so a queue that never paired looked identical to an idle one.
+%% A hint rather than a diagnosis - a double-tapped "find match" dedupes exactly
+%% like two clients sharing an identity.
+-spec matchmaker_deduped(binary(), binary()) -> ok.
+matchmaker_deduped(PlayerId, Mode) ->
+    telemetry:execute([asobi, matchmaker, deduped], #{count => 1}, #{
         player_id => PlayerId, mode => Mode
     }).
 
@@ -412,7 +431,10 @@ auth_cache_sweep() ->
     telemetry:handler_config()
 ) -> ok.
 handle_event(EventName, Measurements, Metadata, _Config) ->
-    logger:debug(#{
+    %% Macro, not logger:debug/1: the macro's logger:allow/2 guard skips building
+    %% this report entirely when debug is off. This runs synchronously inside the
+    %% emitting process, which for the matchmaker events is its message loop.
+    ?LOG_DEBUG(#{
         msg => ~"telemetry_event",
         event => EventName,
         measurements => Measurements,

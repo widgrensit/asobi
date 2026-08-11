@@ -17,6 +17,9 @@
     remove_then_readd_new_ticket/1,
     selfmatch_group_rejected/1,
     add_reply_reports_players_needed/1,
+    add_reply_reports_already_queued/1,
+    dedup_emits_telemetry/1,
+    expiry_emits_removed_telemetry/1,
     spawn_retry_bounded_then_gives_up/1,
     queue_snapshot_reports_waiting_by_mode/1,
     queue_snapshot_never_waits_on_the_matchmaker/1
@@ -37,6 +40,9 @@ all() ->
         remove_then_readd_new_ticket,
         selfmatch_group_rejected,
         add_reply_reports_players_needed,
+        add_reply_reports_already_queued,
+        dedup_emits_telemetry,
+        expiry_emits_removed_telemetry,
         spawn_retry_bounded_then_gives_up,
         queue_snapshot_reports_waiting_by_mode,
         queue_snapshot_never_waits_on_the_matchmaker
@@ -160,6 +166,83 @@ selfmatch_group_rejected(Config) ->
             {ok, V} -> application:set_env(asobi, game_modes, V);
             undefined -> application:unset_env(asobi, game_modes)
         end
+    end,
+    Config.
+
+%% A reconnecting client resubmits, and must be able to tell that its resubmit
+%% was absorbed into the wait already running rather than starting a new one.
+add_reply_reports_already_queued(Config) ->
+    {ok, T1, Meta1} = asobi_matchmaker:add(~"player_dedup_meta", #{mode => ~"ranked"}),
+    ?assertEqual(false, maps:get(already_queued, Meta1)),
+    {ok, T2, Meta2} = asobi_matchmaker:add(~"player_dedup_meta", #{mode => ~"ranked"}),
+    ?assertEqual(T1, T2),
+    ?assertEqual(true, maps:get(already_queued, Meta2)),
+    %% A different player in the same mode is a fresh ticket, not a dedupe.
+    {ok, T3, Meta3} = asobi_matchmaker:add(~"player_dedup_other", #{mode => ~"ranked"}),
+    ?assertEqual(false, maps:get(already_queued, Meta3)),
+    asobi_matchmaker:remove(~"player_dedup_meta", T1),
+    asobi_matchmaker:remove(~"player_dedup_other", T3),
+    Config.
+
+%% The dedupe branch used to emit nothing at all, so "players are queueing and
+%% nothing is pairing" produced no signal anywhere on the node.
+dedup_emits_telemetry(Config) ->
+    Self = self(),
+    Ref = make_ref(),
+    Handler = {?MODULE, Ref},
+    ok = telemetry:attach(
+        Handler,
+        [asobi, matchmaker, deduped],
+        fun(_Event, Measurements, Meta, _) -> Self ! {Ref, Measurements, Meta} end,
+        undefined
+    ),
+    try
+        {ok, T1, _} = asobi_matchmaker:add(~"player_dedup_tel", #{mode => ~"ranked"}),
+        %% A fresh enqueue must NOT emit it.
+        receive
+            {Ref, _, #{player_id := ~"player_dedup_tel"}} ->
+                ct:fail(dedup_emitted_for_fresh_ticket)
+        after 200 -> ok
+        end,
+        {ok, T1, _} = asobi_matchmaker:add(~"player_dedup_tel", #{mode => ~"ranked"}),
+        receive
+            {Ref, Measurements, #{player_id := ~"player_dedup_tel"} = Meta} ->
+                ?assertEqual(1, maps:get(count, Measurements)),
+                ?assertEqual(~"ranked", maps:get(mode, Meta))
+        after 2000 -> ct:fail(no_dedup_telemetry)
+        end,
+        asobi_matchmaker:remove(~"player_dedup_tel", T1)
+    after
+        telemetry:detach(Handler)
+    end,
+    Config.
+
+%% Expiry used to notify only the player. `removed' therefore reported
+%% `cancelled' alone, so an operator's removal rate looked complete while
+%% silently omitting every timeout - and "everyone waited the full max_wait and
+%% got nothing" is the one unambiguous symptom of a matchmaker that is not
+%% pairing.
+expiry_emits_removed_telemetry(Config) ->
+    Self = self(),
+    Ref = make_ref(),
+    Handler = {?MODULE, Ref},
+    ok = telemetry:attach(
+        Handler,
+        [asobi, matchmaker, removed],
+        fun(_Event, _Measurements, Meta, _) -> Self ! {Ref, Meta} end,
+        undefined
+    ),
+    try
+        asobi_matchmaker:notify_expired([
+            #{player_id => ~"player_expiry_tel", id => ~"ticket-expired"}
+        ]),
+        receive
+            {Ref, #{player_id := ~"player_expiry_tel"} = Meta} ->
+                ?assertEqual(expired, maps:get(reason, Meta))
+        after 2000 -> ct:fail(no_expiry_telemetry)
+        end
+    after
+        telemetry:detach(Handler)
     end,
     Config.
 

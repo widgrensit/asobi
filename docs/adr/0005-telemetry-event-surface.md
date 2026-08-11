@@ -45,12 +45,18 @@ building an exporter safely - not a step to defer until after one is built.
   Prometheus label. This is a per-key, per-event classification, not a
   blanket claim on a key name:
   - `mode` (`match/started`, `world/started`, `matchmaker/*`). Bounded
-    because every entry point rejects an unknown mode before it can be
-    queued, via `asobi_matchmaker:known_mode/1`
-    (`src/ws/asobi_ws_handler.erl:450`,
-    `src/controllers/asobi_matchmaker_controller.erl:10`), which caps it at
-    64 bytes and requires it to resolve to a configured game module.
-  - `reason` on `matchmaker/removed` - an `atom()` chosen by core.
+    because every shipped entry point rejects an unknown mode before it can
+    be queued, via `asobi_matchmaker:known_mode/1`
+    (`asobi_ws_handler:handle_message/2`, `asobi_matchmaker_controller:add/1`
+    - referenced by function, not line, so the citation cannot rot), which
+    caps it at 64 bytes and requires it to resolve to a configured game
+    module. The gate is at those ingresses rather than in
+    `asobi_matchmaker:add/2` itself, so this bound is a property of the
+    shipped edges, not of the API: an embedder writing its own controller
+    over `add/2` must call `known_mode/1` or it re-opens the cardinality
+    hole for every `matchmaker/*` event.
+  - `reason` on `matchmaker/removed` - an `atom()` chosen by core
+    (`cancelled | expired`).
   - `type` on `anticheat/violation` - an `atom()` chosen by core, never
     derived from client input. This does **not** extend to the `ws` `type`,
     which is a different key on a different event; see below.
@@ -124,9 +130,14 @@ building an exporter safely - not a step to defer until after one is built.
   on a sustained non-zero rate, not on a single event - one skipped tick is a
   zone that ran long once, which is normal.
 
-#### Matchmaker - `[asobi, matchmaker, queued | removed | formed | failed]`
+#### Matchmaker - `[asobi, matchmaker, queued | deduped | removed | formed | failed]`
 
 - `queued`: metadata `#{player_id, mode}`
+- `deduped`: metadata `#{player_id, mode}`. An `add` answered with the
+  caller's existing ticket instead of a new one, per the one-live-ticket-per
+  (player, mode) guard. `mode` is label-safe on the same grounds as `queued`
+  (rejected at the edge by `asobi_matchmaker:known_mode/1`); `player_id` is
+  unbounded and must never be a label.
 - `removed`: metadata `#{player_id, reason}`
 - `formed`: measurements `#{player_count, wait_ms, count}`; metadata `#{mode}`
 - `failed`: measurements `#{player_count, count}`; metadata `#{mode}`
@@ -223,7 +234,7 @@ building an exporter safely - not a step to defer until after one is built.
 - `hit` / `miss`: metadata `#{kind :: positive | negative}`
 - `sweep`: no metadata
 
-That is 39 events across 14 domains (match, world, zone, matchmaker, session,
+That is 40 events across 14 domains (match, world, zone, matchmaker, session,
 ws, join, rehome, anticheat, error, economy, store, chat, vote, auth_cache -
 15 domains if `join`/`rehome` are counted separately from `ws`, as they are
 distinct top-level event-name prefixes).
@@ -266,7 +277,7 @@ minor release.
   and shigoto's telemetry surfaces respectively, not asobi's.
   `asobi_zone_spawner` is a pure entity-template registry, not a zone
   lifecycle owner, and still emits nothing by design.
-- Four of the 39 events are declared API with no in-tree emitter today -
+- Four of the 40 events are declared API with no in-tree emitter today -
   the `asobi_telemetry` function exists and is exported, but nothing in
   `src/` or `test/` calls it: `session_disconnected/2`
   (`[asobi, session, disconnected]`), `ws_message_out/1`
