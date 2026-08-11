@@ -102,10 +102,13 @@ init(State) ->
         {opts, [
             {dev, $d, "dev", boolean,
                 "Run the Vite dev server with hot reload instead of building, proxied at a running node"},
-            {target, $t, "target", string, "Node the dev server proxies the ops API at (default " ?DEFAULT_TARGET ")"},
+            {target, $t, "target", string,
+                "Node the dev server proxies the ops API at (default " ?DEFAULT_TARGET ")"},
             {port, $p, "port", integer, "Port the dev server listens on (default 5173)"},
-            {out, $o, "out", string, "Write the bundle here instead of the console_bundle_app's priv/console"},
-            {reinstall, undefined, "reinstall", boolean, "Re-run npm ci even when node_modules is present"}
+            {out, $o, "out", string,
+                "Write the bundle here instead of the console_bundle_app's priv/console"},
+            {reinstall, undefined, "reinstall", boolean,
+                "Re-run npm ci even when node_modules is present"}
         ]},
         {short_desc, "Build an operator console including every extension's screens"},
         {desc,
@@ -221,7 +224,10 @@ extensions(Dirs) ->
         {ok, Resolved} ->
             {ok, [Found || Extension <- Resolved, {ok, Found} <- [with_console(Extension, Dirs)]]};
         {error, Problems} ->
-            _ = [rebar_api:error("asobi: ~ts", [Line]) || Line <- asobi_extensions:describe(Problems)],
+            _ = [
+                rebar_api:error("asobi: ~ts", [Line])
+             || Line <- asobi_extensions:describe(Problems)
+            ],
             {error, invalid_extension_set}
     end.
 
@@ -298,7 +304,8 @@ link_each(Root, [#{name := Name, dir := Dir} | Rest]) ->
 
 generate(Workspace, Extensions, Out, Args) ->
     maybe
-        ok ?= write(filename:join([Workspace, "src", "registry.generated.js"]), registry(Extensions)),
+        ok ?=
+            write(filename:join([Workspace, "src", "registry.generated.js"]), registry(Extensions)),
         ok ?= write(filename:join(Workspace, "vite.host.config.js"), host_config(Out, Args)),
         ok ?= write(filename:join(Workspace, "index.html"), dev_document()),
         ok
@@ -318,8 +325,10 @@ registry(Extensions) ->
         "// because the console is one chunk: the CSP's nonce does not reach a\n",
         "// dynamically imported module, so a lazily loaded screen would be refused by\n",
         "// the browser rather than merely arriving late.\n",
-        [io_lib:format("import ~ts from '../extensions/~ts/index.jsx';\n", [binding(Name), Name]) ||
-            #{name := Name} <- Extensions],
+        [
+            io_lib:format("import ~ts from '../extensions/~ts/index.jsx';\n", [binding(Name), Name])
+         || #{name := Name} <- Extensions
+        ],
         "\nexport const extensions = [",
         lists:join(", ", [binding(Name) || #{name := Name} <- Extensions]),
         "];\n"
@@ -341,16 +350,24 @@ host_config(Out, Args) ->
         "  // would put their source outside Vite's root, and the dev server refuses to\n",
         "  // serve what is outside its root.\n",
         "  resolve: { ...base.resolve, preserveSymlinks: true },\n",
-        "  build: { ...base.build, outDir: ", quote(Out), " },\n",
+        "  build: { ...base.build, outDir: ",
+        quote(Out),
+        " },\n",
         "  server: {\n",
-        "    port: ", integer_to_list(proplists:get_value(port, Args, ?DEFAULT_PORT)), ",\n",
+        "    port: ",
+        integer_to_list(proplists:get_value(port, Args, ?DEFAULT_PORT)),
+        ",\n",
         "    strictPort: true,\n",
         "    // Same-origin through the proxy, so config.js reads no api base and takes\n",
         "    // the same path a self-hosted node takes. cookieDomainRewrite is what lets\n",
         "    // the node's HttpOnly session cookie survive the hop to localhost.\n",
         "    proxy: {\n",
-        "      '/api/v1/ops': ", proxy(Args), ",\n",
-        "      '/console/session': ", proxy(Args), ",\n",
+        "      '/api/v1/ops': ",
+        proxy(Args),
+        ",\n",
+        "      '/console/session': ",
+        proxy(Args),
+        ",\n",
         "    },\n",
         "  },\n",
         "};\n"
@@ -398,7 +415,9 @@ run(Workspace, Out, Args) ->
         true ->
             Port = integer_to_list(proplists:get_value(port, Args, ?DEFAULT_PORT)),
             Target = proplists:get_value(target, Args, ?DEFAULT_TARGET),
-            rebar_api:info("asobi: dev server on http://localhost:~ts, ops API proxied at ~ts", [Port, Target]),
+            rebar_api:info("asobi: dev server on http://localhost:~ts, ops API proxied at ~ts", [
+                Port, Target
+            ]),
             sh("npx vite --config vite.host.config.js", Workspace);
         false ->
             case sh("npx vite build --config vite.host.config.js", Workspace) of

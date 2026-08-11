@@ -487,7 +487,13 @@ features_reports_the_resolved_extension_set_test() ->
         ?assert(is_binary(maps:get(version, Extension))),
         ?assertNotEqual(~"unknown", maps:get(version, Extension)),
         ?assertEqual(
-            [{~"console", false}, {~"lua", false}, {~"ops", false}, {~"rpc", true}, {~"tables", true}],
+            [
+                {~"console", false},
+                {~"lua", false},
+                {~"ops", false},
+                {~"rpc", true},
+                {~"tables", true}
+            ],
             [{N, E} || #{name := N, enabled := E} <- maps:get(capabilities, Extension)]
         )
     after
@@ -527,11 +533,19 @@ fake_extension() ->
 features_reports_the_ops_and_console_seams_test() ->
     meck:new(asobi_extensions, [passthrough]),
     try
-        WithOps = (fake_extension())#{ops => #{~"define" => #{method => post, mfa => {m, f, 2}, class => config}}},
+        WithOps = (fake_extension())#{
+            ops => #{~"define" => #{method => post, mfa => {m, f, 2}, class => config}}
+        },
         meck:expect(asobi_extensions, resolve, fun() -> [WithOps] end),
         #{data := #{extensions := [Extension]}} = asobi_ops_features:features(),
         ?assertEqual(
-            [{~"console", false}, {~"lua", false}, {~"ops", true}, {~"rpc", true}, {~"tables", true}],
+            [
+                {~"console", false},
+                {~"lua", false},
+                {~"ops", true},
+                {~"rpc", true},
+                {~"tables", true}
+            ],
             [{N, E} || #{name := N, enabled := E} <- maps:get(capabilities, Extension)]
         )
     after

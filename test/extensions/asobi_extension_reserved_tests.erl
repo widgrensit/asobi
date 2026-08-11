@@ -54,6 +54,17 @@ rpc_prefixes_cover_error_domains_and_lua_test() ->
 the_build_time_gate_is_declared_to_rebar3_test() ->
     _ = application:load(asobi),
     {ok, Env} = application:get_key(asobi, env),
-    ?assertEqual([rebar3_asobi_check], proplists:get_value(providers, Env)),
+    Providers = proplists:get_value(providers, Env),
+    ?assert(lists:member(rebar3_asobi_check, Providers)),
     Exports = rebar3_asobi_check:module_info(exports),
+    [?assert(lists:member(E, Exports)) || E <- [{init, 1}, {do, 1}, {format_error, 1}]].
+
+%% The console builder ships through the same env key, so dropping it would
+%% silently remove `rebar3 asobi console` the same way.
+the_console_builder_is_declared_to_rebar3_test() ->
+    _ = application:load(asobi),
+    {ok, Env} = application:get_key(asobi, env),
+    Providers = proplists:get_value(providers, Env),
+    ?assert(lists:member(rebar3_asobi_console, Providers)),
+    Exports = rebar3_asobi_console:module_info(exports),
     [?assert(lists:member(E, Exports)) || E <- [{init, 1}, {do, 1}, {format_error, 1}]].
