@@ -44,9 +44,11 @@ features() ->
 -doc """
 Installed extensions, in dependency order, in the same shape as `core`.
 
-Read from `asobi_extensions:resolve/0`'s memoised result, so this costs a
-`persistent_term` read and can never disagree with the set the node actually
-booted with.
+The set is read from `asobi_extensions:resolve/0`'s memoised result, so it can
+never disagree with the set the node actually booted with. `console` is the
+one capability that is not read from there: it is a file check, so it costs a
+stat per extension and it reports what is on disk now rather than what was
+resolved at boot. That is what makes it a diagnosis - see `ships_console/1`.
 
 An extension's capabilities are the seams it declares something under -
 `rpc`, `ops`, `lua`, `tables`, plus `console` for one that ships operator

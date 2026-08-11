@@ -568,6 +568,37 @@ features_console_capability_is_the_extensions_own_source_test() ->
         meck:unload(asobi_extensions)
     end.
 
+%% The other side of the check above. Without this, `index.jsx` could be
+%% misspelt in the join and every extension would report `false` for ever -
+%% which is exactly the diagnosis the capability exists to give.
+features_console_capability_is_true_for_an_extension_that_ships_screens_test() ->
+    App = console_fixture_app(),
+    meck:new(asobi_extensions, [passthrough]),
+    try
+        meck:expect(asobi_extensions, resolve, fun() -> [(fake_extension())#{app => App}] end),
+        #{data := #{extensions := [Extension]}} = asobi_ops_features:features(),
+        ?assertEqual(
+            [true],
+            [E || #{name := ~"console", enabled := E} <- maps:get(capabilities, Extension)]
+        )
+    after
+        meck:unload(asobi_extensions)
+    end.
+
+%% An application on the code path whose priv/console/index.jsx exists, which
+%% is the whole of what the capability answers.
+console_fixture_app() ->
+    App = list_to_atom(
+        "asobi_fixture_console_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    Root = filename:join(["/tmp", "asobi_ops_tests", atom_to_list(App)]),
+    Console = filename:join([Root, "priv", "console"]),
+    ok = filelib:ensure_path(Console),
+    ok = filelib:ensure_path(filename:join(Root, "ebin")),
+    ok = file:write_file(filename:join(Console, "index.jsx"), ~"export default {};"),
+    true = code:add_pathz(filename:join(Root, "ebin")),
+    App.
+
 features_capabilities_are_name_and_boolean_only_test() ->
     Capabilities = asobi_ops_features:capabilities(),
     ?assert(Capabilities =/= []),
