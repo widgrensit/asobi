@@ -1,1 +1,8 @@
-* @Taure
+# Review is for changes that can break a deployment or the runtime. A rule
+# matching every path blocked dependency bumps as hard as it blocked source
+# changes, and caught neither: the only owner cannot approve their own pull
+# request, so every one of them landed through an admin override. A gate that
+# is always overridden stops meaning anything the day it matters.
+
+/src/ @Taure
+/deploy/ @Taure
