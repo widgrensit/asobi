@@ -69,6 +69,8 @@ init(Config) ->
         cold_tick_divisor => ColdTickDivisor,
         tick_count => 0,
         pending => #{},
+        outstanding => 0,
+        last_post_tick => 0,
         running => false,
         tick_started_at => undefined,
         tick_zone_count => 0,
@@ -90,12 +92,10 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({set_zones, Zones, WorldPid}, #{tick_rate := TickRate} = State) ->
-    erlang:send_after(TickRate, self(), tick),
-    {noreply, State#{hot_zones => Zones, world_pid => WorldPid, running => true}};
-handle_cast({set_zone_manager, ZoneManagerPid, WorldPid}, #{tick_rate := TickRate} = State) ->
-    erlang:send_after(TickRate, self(), tick),
-    {noreply, State#{zone_manager => ZoneManagerPid, world_pid => WorldPid, running => true}};
+handle_cast({set_zones, Zones, WorldPid}, State) ->
+    {noreply, start_ticking(State#{hot_zones => Zones, world_pid => WorldPid})};
+handle_cast({set_zone_manager, ZoneManagerPid, WorldPid}, State) ->
+    {noreply, start_ticking(State#{zone_manager => ZoneManagerPid, world_pid => WorldPid})};
 handle_cast({promote_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = State) ->
     Cold1 = lists:delete(ZonePid, Cold),
     Hot1 =
@@ -117,26 +117,25 @@ handle_cast({remove_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = St
         hot_zones => lists:delete(ZonePid, Hot),
         cold_zones => lists:delete(ZonePid, Cold)
     }};
+%% A reply frees the zone whatever tick it carries: a zone only ever has one
+%% tick in flight, so `tick_done` means "this zone is idle again". Matching the
+%% reply against the ticker's current tick instead - as this did before #426 -
+%% would leave a zone that replied late stuck in `pending` forever, and a
+%% zone stuck in `pending` is a zone that never ticks again. The tick number
+%% still decides which *tick* retired, just not which *zone* did.
 handle_cast(
     {tick_done, ZonePid, TickN},
-    #{
-        tick := CurrentTick,
-        pending := Pending,
-        world_pid := WorldPid
-    } = State
+    #{tick := CurrentTick, pending := Pending} = State
 ) when is_integer(TickN) ->
-    case TickN =:= CurrentTick of
-        true ->
-            Pending1 = maps:remove(ZonePid, Pending),
-            case map_size(Pending1) of
-                0 ->
-                    asobi_world_server:post_tick(WorldPid, TickN),
-                    {noreply, complete_tick(State#{pending => #{}})};
-                _ ->
-                    {noreply, State#{pending => Pending1}}
-            end;
-        false ->
-            {noreply, State}
+    case maps:take(ZonePid, Pending) of
+        error ->
+            {noreply, State};
+        {DispatchedTick, Pending1} ->
+            State1 = State#{pending => Pending1},
+            case DispatchedTick =:= TickN andalso TickN =:= CurrentTick of
+                true -> {noreply, retire_outstanding(TickN, State1)};
+                false -> {noreply, State1}
+            end
     end;
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -153,7 +152,9 @@ handle_info(
         cold_tick_divisor := ColdTickDivisor,
         hot_zones := StaticHot,
         cold_zones := StaticCold,
-        zone_manager := ZoneManager
+        zone_manager := ZoneManager,
+        pending := Pending,
+        world_id := WorldId
     } = State
 ) ->
     NextTick = Tick + 1,
@@ -167,29 +168,72 @@ handle_info(
                 {AllZones, []}
         end,
     TickCold = (NextTickCount rem ColdTickDivisor) =:= 0,
-    ZonesToTick =
+    %% `uniq` because a zone dispatched twice in one tick replies twice, and
+    %% the second reply finds nothing left in `pending` to retire - the tick
+    %% would then never complete and the world would stop posting.
+    Candidates =
         case TickCold of
-            true -> Hot ++ Cold;
-            false -> Hot
+            true -> lists:uniq(Hot ++ Cold);
+            false -> lists:uniq(Hot)
         end,
-    Pending = maps:from_keys(ZonesToTick, true),
+    %% #426: a zone that has not retired its previous tick is skipped rather
+    %% than sent another one. Without this the fan-out is open-loop - a zone
+    %% whose `zone_tick` outruns `tick_rate` takes casts faster than it can
+    %% retire them and its mailbox grows without bound, which on a Lua world
+    %% is terminal: the upkeep that would recover it (a `collectgarbage/0`,
+    %% releasing entities so the reaper can stop the zone) is itself carried
+    %% by a tick, so it queues behind the backlog exactly when it is needed.
+    %% Dropping a tick is strictly better than queueing one - the zone tick is
+    %% idempotent upkeep and the next tick carries the same work.
+    Pending0 = maps:with(Candidates, Pending),
+    {ZonesToTick, Skipped} = lists:partition(
+        fun(Z) -> not maps:is_key(Z, Pending0) end, Candidates
+    ),
+    report_skipped(WorldId, Skipped),
     tick_zones(ZonesToTick, NextTick),
     erlang:send_after(TickRate, self(), tick),
     State1 = State#{
         tick => NextTick,
         tick_count => NextTickCount,
         tick_started_at => erlang:monotonic_time(millisecond),
-        tick_zone_count => length(ZonesToTick)
+        tick_zone_count => length(ZonesToTick),
+        pending => maps:merge(Pending0, maps:from_keys(ZonesToTick, NextTick)),
+        outstanding => length(ZonesToTick)
     },
-    case map_size(Pending) of
-        0 ->
-            asobi_world_server:post_tick(maps:get(world_pid, State), NextTick),
-            {noreply, complete_tick(State1#{pending => #{}})};
-        _ ->
-            {noreply, State1#{pending => Pending}}
+    case ZonesToTick of
+        [] -> {noreply, complete_tick(maybe_post_tick(NextTick, State1))};
+        _ -> {noreply, State1}
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
+
+start_ticking(#{running := true} = State) ->
+    State;
+start_ticking(#{tick_rate := TickRate} = State) ->
+    erlang:send_after(TickRate, self(), tick),
+    State#{running => true}.
+
+retire_outstanding(TickN, #{outstanding := Outstanding} = State) ->
+    case max(0, Outstanding - 1) of
+        0 -> complete_tick(maybe_post_tick(TickN, State#{outstanding => 0}));
+        N -> State#{outstanding => N}
+    end.
+
+%% The world's `post_tick` drives phase timers and reconnect deadlines, so it
+%% must never run backwards or twice for the same tick. A tick whose fan-in
+%% completes after a later tick has already posted is simply not posted.
+maybe_post_tick(TickN, #{last_post_tick := Last, world_pid := WorldPid} = State) when
+    TickN > Last
+->
+    asobi_world_server:post_tick(WorldPid, TickN),
+    State#{last_post_tick => TickN};
+maybe_post_tick(_TickN, State) ->
+    State.
+
+report_skipped(_WorldId, []) ->
+    ok;
+report_skipped(WorldId, Skipped) ->
+    asobi_telemetry:zone_tick_skipped(WorldId, length(Skipped)).
 
 %% A tick that never fans in (a zone died mid-tick) is simply never sampled -
 %% the next fan-out overwrites tick_started_at. Emitting a bogus duration for

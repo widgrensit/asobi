@@ -98,9 +98,9 @@ building an exporter safely - not a step to defer until after one is built.
   that never fans in (a zone died mid-tick) is not sampled at all rather
   than being reported with a fabricated duration.
 
-#### Zone - `[asobi, zone, opened | closed]`
+#### Zone - `[asobi, zone, opened | closed | tick_skipped]`
 
-- Both: metadata `#{world_id, coords :: {integer(), integer()}}`, both
+- `opened` / `closed`: metadata `#{world_id, coords :: {integer(), integer()}}`, both
   unbounded (one per live world, one per grid cell) - never a label. Zones
   are lazy, so a live-zone count is not derivable from world count; subtract
   the two counters for a gauge. `closed` is gated on the zone still being in
@@ -115,6 +115,14 @@ building an exporter safely - not a step to defer until after one is built.
   keeping one global counter pair. Making the manager trap exits to close the
   difference is a supervision-tree change with its own shutdown-latency cost
   and was deliberately not made here.
+- `tick_skipped`: measurements `#{count}` - how many zones one world tick
+  skipped because they had not retired the previous tick; metadata
+  `#{world_id}`, unbounded, never a label. Added by asobi#426 alongside the
+  ticker's back-pressure. Unlike `[asobi, world, tick]` this is not sampled,
+  because it is emitted only on a tick that actually skipped: a healthy world
+  is silent, and an unsampled counter is what makes the onset visible. Alert
+  on a sustained non-zero rate, not on a single event - one skipped tick is a
+  zone that ran long once, which is normal.
 
 #### Matchmaker - `[asobi, matchmaker, queued | removed | formed | failed]`
 
@@ -215,7 +223,7 @@ building an exporter safely - not a step to defer until after one is built.
 - `hit` / `miss`: metadata `#{kind :: positive | negative}`
 - `sweep`: no metadata
 
-That is 38 events across 14 domains (match, world, zone, matchmaker, session,
+That is 39 events across 14 domains (match, world, zone, matchmaker, session,
 ws, join, rehome, anticheat, error, economy, store, chat, vote, auth_cache -
 15 domains if `join`/`rehome` are counted separately from `ws`, as they are
 distinct top-level event-name prefixes).
@@ -258,7 +266,7 @@ minor release.
   and shigoto's telemetry surfaces respectively, not asobi's.
   `asobi_zone_spawner` is a pure entity-template registry, not a zone
   lifecycle owner, and still emits nothing by design.
-- Four of the 38 events are declared API with no in-tree emitter today -
+- Four of the 39 events are declared API with no in-tree emitter today -
   the `asobi_telemetry` function exists and is exported, but nothing in
   `src/` or `test/` calls it: `session_disconnected/2`
   (`[asobi, session, disconnected]`), `ws_message_out/1`

@@ -4,7 +4,7 @@
 -export([match_started/2, match_finished/3, match_player_joined/2, match_player_left/2]).
 -export([world_started/2, world_finished/3, world_player_joined/2, world_player_left/2]).
 -export([world_phase_changed/3, world_tick/4]).
--export([zone_opened/2, zone_closed/2]).
+-export([zone_opened/2, zone_closed/2, zone_tick_skipped/2]).
 -export([matchmaker_queued/2, matchmaker_removed/2, matchmaker_formed/3, matchmaker_failed/2]).
 -export([session_connected/1, session_disconnected/2]).
 -export([
@@ -58,6 +58,7 @@ events() ->
         [asobi, world, tick],
         [asobi, zone, opened],
         [asobi, zone, closed],
+        [asobi, zone, tick_skipped],
         [asobi, matchmaker, queued],
         [asobi, matchmaker, removed],
         [asobi, matchmaker, formed],
@@ -199,6 +200,20 @@ zone_closed(WorldId, Coords) ->
     telemetry:execute([asobi, zone, closed], #{count => 1}, #{
         world_id => WorldId, coords => Coords
     }).
+
+-doc """
+asobi#426: `count` zones were skipped by this world tick because they had not
+yet retired the previous one.
+
+This is the back-pressure signal. A steady trickle is a world running close to
+its tick budget; a count that climbs toward the world's zone count and stays
+there is a world that can no longer keep up, and before #426 the only symptom
+of that was CPU. Unlike `world_tick/4` this is **not** sampled - it is emitted
+only on a tick that actually skipped, so a healthy world emits nothing at all.
+""".
+-spec zone_tick_skipped(binary() | undefined, pos_integer()) -> ok.
+zone_tick_skipped(WorldId, Count) ->
+    telemetry:execute([asobi, zone, tick_skipped], #{count => Count}, #{world_id => WorldId}).
 
 %% --- Matchmaker Events ---
 
