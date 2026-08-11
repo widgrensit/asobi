@@ -399,9 +399,20 @@ shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Sup) ->
 info_problems(#{name := Name, extension_version := Version}) when
     is_atom(Name), Name =/= undefined, is_integer(Version), Version > 0
 ->
-    [];
+    name_problems(Name);
 info_problems(Info) ->
     [{info, ~"must be #{name := atom(), extension_version := pos_integer()}", Info}].
+
+%% The name is a path segment in `/ext/<name>`, a symlink under the console
+%% build workspace, and a JavaScript import binding in the generated registry.
+%% Holding it to an identifier here is what lets each of those interpolate it
+%% without escaping, and it is the same shape the console's own registry
+%% applies to a manifest before it renders one.
+name_problems(Name) ->
+    case re:run(atom_to_binary(Name, utf8), ~"^[a-z][a-z0-9_]*$", [{capture, none}]) of
+        match -> [];
+        nomatch -> [{info, ~"name must match ^[a-z][a-z0-9_]*$", Name}]
+    end.
 
 rpc_problems(Rpc) when is_map(Rpc) ->
     [

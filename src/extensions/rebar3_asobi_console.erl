@@ -76,6 +76,14 @@ See `guides/console-extensions.md`.
 
 -export([init/1, do/1, format_error/1]).
 
+%% The generated JavaScript and the discovery predicates are pure and are what
+%% a broken build would come from, but `exclude_mods` takes dialyzer off this
+%% module - it calls rebar3's own modules, which are absent from the PLT - so
+%% tests are the only cover they have.
+-ifdef(TEST).
+-export([registry/1, host_config/2, quote/1, with_console/2, console_source/1]).
+-endif.
+
 -define(PROVIDER, console).
 -define(NAMESPACE, asobi).
 %% A manifest is a module, so it has to exist as a beam before `info/0` can be
@@ -312,9 +320,17 @@ generate(Workspace, Extensions, Out, Args) ->
     end.
 
 write(Path, Contents) ->
-    case file:write_file(Path, unicode:characters_to_binary(Contents)) of
-        ok -> ok;
-        {error, Reason} -> {error, {write_failed, Path, Reason}}
+    case unicode:characters_to_binary(Contents) of
+        Binary when is_binary(Binary) ->
+            case file:write_file(Path, Binary) of
+                ok -> ok;
+                {error, Reason} -> {error, {write_failed, Path, Reason}}
+            end;
+        %% `{error, _, _}` or `{incomplete, _, _}` reaching `file:write_file/2`
+        %% is a `badarg` raised from inside here, which is the one failure this
+        %% module would report as a crash rather than as a sentence.
+        _ ->
+            {error, {write_failed, Path, invalid_unicode}}
     end.
 
 registry(Extensions) ->
@@ -334,9 +350,10 @@ registry(Extensions) ->
         "];\n"
     ].
 
-%% `info().name` is already a lowercase atom that is a legal identifier - the
-%% extension registry refuses anything else - so the import binding is the name
-%% with one prefix to keep it away from anything this module might add later.
+%% `info().name` matched `^[a-z][a-z0-9_]*$` to get past
+%% `asobi_extensions:check/0` above, so it is already a legal identifier and a
+%% legal path segment. The import binding is that name with one prefix, to keep
+%% it away from anything this module might add later.
 binding(Name) ->
     "ext_" ++ Name.
 
@@ -392,8 +409,13 @@ dev_document() ->
         "</body>\n</html>\n"
     ].
 
+%% A JSON string is a valid JS string literal, and `json:encode/1` escapes the
+%% backslash, the control characters and the newline as well as the quote.
+%% Escaping only the quote left `--out 'x\'` closing the literal it was meant
+%% to sit inside, which put the rest of the argument in the generated config as
+%% JavaScript that `vite` then ran.
 quote(Value) ->
-    ["'", string:replace(Value, "'", "\\'", all), "'"].
+    json:encode(unicode:characters_to_binary(Value)).
 
 %%====================================================================
 %% npm and Vite

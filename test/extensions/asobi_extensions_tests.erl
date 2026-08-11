@@ -33,6 +33,8 @@ extensions_test_() ->
         fun a_derived_queue_matches_its_own_owns/0,
         fun duplicate_extension_names_refused/0,
         fun malformed_info_refused/0,
+        fun a_name_that_is_not_an_identifier_is_refused/0,
+        fun a_name_that_is_an_identifier_is_accepted/0,
         fun a_raising_manifest_is_reported_not_propagated/0,
         fun invalid_child_specs_caught_before_boot/0,
         fun unknown_owns_key_refused/0,
@@ -248,6 +250,26 @@ malformed_info_refused() ->
         [{bad_manifest, ?TUNABLE, asobi_fixture_tunable_extension, {info, _, _}}],
         check_problems()
     ).
+
+%% The name is a path segment in `/ext/<name>`, a symlink in the console build
+%% workspace and a JavaScript import binding in its generated registry, each of
+%% which interpolates it without escaping.
+a_name_that_is_not_an_identifier_is_refused() ->
+    tunable(#{info => #{name => tunable, extension_version => 1}}),
+    [
+        begin
+            retune(#{info => #{name => Name, extension_version => 1}}),
+            ?assertMatch(
+                [{bad_manifest, ?TUNABLE, _, {info, ~"name must match ^[a-z][a-z0-9_]*$", Name}}],
+                check_problems()
+            )
+        end
+     || Name <- ['my-quests', 'a/../x', 'Quests', '1st', 'has space', '']
+    ].
+
+a_name_that_is_an_identifier_is_accepted() ->
+    tunable(#{info => #{name => tunable_2, extension_version => 1}}),
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
 
 a_raising_manifest_is_reported_not_propagated() ->
     tunable(#{owns => {raise, boom}}),
