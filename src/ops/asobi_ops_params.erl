@@ -159,9 +159,17 @@ like_pattern(Params, Key) ->
 %% unescaped search term changes what the query means - a lone `%` matches
 %% every row. Escape the backslash first, or the escapes added below get
 %% escaped in turn.
+%% The two backslash literals are `<<>>` rather than the `~""` sigil this
+%% codebase uses everywhere else, and have to stay that way: ELP's lexer does
+%% not terminate a `~"..."` whose content ends in an escaped backslash. It
+%% treats the closing quote as escaped, runs on into the following tokens and
+%% reports a syntax error several lines later. These three lines were the only
+%% ELP lint errors in the tree and the reason the lint job could not be turned
+%% on. Erlang itself parses either form; `~"%"` and `~"\\%"` are unaffected
+%% because they do not end in a backslash.
 -spec escape_like(binary()) -> binary().
 escape_like(Term) ->
-    Backslashes = binary:replace(Term, ~"\\", ~"\\\\", [global]),
+    Backslashes = binary:replace(Term, <<"\\">>, <<"\\\\">>, [global]),
     Percents = binary:replace(Backslashes, ~"%", ~"\\%", [global]),
     binary:replace(Percents, ~"_", ~"\\_", [global]).
 

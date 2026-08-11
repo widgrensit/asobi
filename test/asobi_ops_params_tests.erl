@@ -239,6 +239,18 @@ like_pattern_escapes_wildcards_test() ->
 like_pattern_escapes_backslash_first_test() ->
     ?assertEqual({ok, ~"%\\\\\\%%"}, asobi_ops_params:like_pattern(#{~"q" => ~"\\%"}, ~"q")).
 
+%% A backslash with no wildcard after it still doubles. Pins the two literals
+%% that had to move off the `~""` sigil to keep ELP's lexer able to read this
+%% module - see escape_like/1.
+%% Every sigil here deliberately ends in something other than a backslash;
+%% one that ends in a backslash is unreadable to ELP and would put this module
+%% back on the lint job's error list.
+like_pattern_escapes_lone_backslash_test() ->
+    ?assertEqual({ok, ~"%a\\\\b%"}, asobi_ops_params:like_pattern(#{~"q" => ~"a\\b"}, ~"q")),
+    ?assertEqual(
+        {ok, ~"%a\\\\\\\\b%"}, asobi_ops_params:like_pattern(#{~"q" => ~"a\\\\b"}, ~"q")
+    ).
+
 %%--------------------------------------------------------------------
 %% Cursors
 %%--------------------------------------------------------------------

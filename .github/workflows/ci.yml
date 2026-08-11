@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.4
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.5
     permissions:
       contents: write
       pull-requests: write
@@ -32,7 +32,8 @@ jobs:
       enable-audit: true
       enable-ct: true
       enable-coverage: true
-      # The four quality gates still off, and what each is waiting on:
+      enable-elp-lint: true
+      # The three quality gates still off, and what each is waiting on:
       #
       # enable-sbom / enable-sbom-scan - `rebar3 sbom` crashes on this repo
       #   with `badarg` in `unicode:characters_to_binary(git)`
@@ -44,21 +45,26 @@ jobs:
       #   without a human call, and the plugin should handle the atom anyway
       #   (filed upstream).
       #
-      # enable-elp-lint - the job fails on any error, and elp 1.1.0 reports
-      #   twelve on this tree, none of them an asobi defect:
-      #     - nine L0002 from an ELP internal crash
-      #       (`elp_lint:deprecated_function/5` case_clause {unsafe,possibly}),
-      #       spread across src/ and test/;
-      #     - three parse errors in src/ops/asobi_ops_params.erl, where ELP
-      #       cannot read `~"\\"` - an escaped backslash inside the OTP 27
-      #       sigil this codebase uses everywhere. It compiles fine.
-      #   Two more (`undefined function proper_transformer:parse_transform/2`
-      #   on test/prop_*.erl) appear only in CI, because Taure/erlang-ci's elp
-      #   action runs `rebar3 compile` and proper is a test-profile dep; they
-      #   go away under `rebar3 as test compile`.
-      # enable-elp-eqwalize - eqwalizer panics on OTP behaviour result
-      #   types under OTP 29; it has to run on 28.x. kura and shigoto pin
-      #   this false for the same reason.
+      # enable-elp-eqwalize - 312 eqwalizer errors on this tree (asobi#435),
+      #   so the job would fail on merge day. 310 of them are
+      #   `incompatible_types`, and 172 of those are a `term()` - out of
+      #   `maps:get/2`, `persistent_term:get/1`, ETS, or Luerl's `dynamic()` -
+      #   reaching a typed context with no narrowing clause. Weighted to
+      #   test/ (127) but present across src/console, src/lua, src/world and
+      #   src/ops. Cleaning it is a real project, tracked in the issue; the
+      #   tooling to run it is in place now, so it can go on per-area as the
+      #   count comes down.
+      #
+      #   Two reasons previously recorded here were wrong and cost time twice
+      #   over, so for the record: eqwalizer does NOT panic on OTP 29 (that
+      #   theory was superseded - the root cause was the `record()` builtin,
+      #   since fixed), and ELP does not need to run on 28.x. The real blocker
+      #   for both ELP jobs was that Taure/erlang-ci's elp action mapped OTP
+      #   majors to hardcoded asset names and stopped at 28, so on OTP 29 it
+      #   failed before downloading ELP at all - fixed in erlang-ci#71, which
+      #   also moved its compile step to `rebar3 as test compile` so
+      #   test-profile parse transforms (proper) resolve.
+      #
       # enable-mutate - needs the rebar3_mutate plugin, and a full-tree
       #   run over 134 modules is far too slow for per-PR CI. Wants
       #   mutate-diff (changed lines only) and a measured baseline first.
