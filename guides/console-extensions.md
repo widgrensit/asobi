@@ -320,7 +320,7 @@ Name it in `rebar.config`, which is where the build looks:
 {asobi, [{console_bundle_app, game_console}]}.
 
 {project_plugins, [
-    {asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.74.0"}}}
+    {asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.75.0"}}}
 ]}.
 ```
 
