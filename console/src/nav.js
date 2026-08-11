@@ -10,6 +10,12 @@
 // above the screens an operator navigates by muscle memory.
 export const SECTIONS = ['core', 'game', 'ops'];
 
+// The sections an extension may put itself in. `core` is missing on purpose:
+// it is the section the shell's own screens are in, and a manifest that named
+// it with a low enough `order` sorted itself above Overview, which is the one
+// thing the ordering above says it cannot do.
+export const EXTENSION_SECTIONS = ['game', 'ops'];
+
 export const CORE_NAV = [
   { path: '/', label: 'Overview', section: 'core', order: 0 },
   { path: '/players', label: 'Players', section: 'core', order: 10 },

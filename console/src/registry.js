@@ -12,7 +12,7 @@
 // manifest written against an older surface, or a screen for an extension this
 // particular node does not have installed.
 
-import { CORE_NAV, SECTIONS, sortNav } from './nav.js';
+import { CORE_NAV, EXTENSION_SECTIONS, sortNav } from './nav.js';
 
 // Bumped when the surface `public.js` exports changes shape in a way an
 // existing extension would not survive. An extension declares the version it
@@ -96,7 +96,7 @@ function navOf(entry, caps, problems) {
     usable.push({
       path: extensionPath(entry.name, item.path),
       label: item.label,
-      section: SECTIONS.includes(item.section) ? item.section : 'game',
+      section: EXTENSION_SECTIONS.includes(item.section) ? item.section : 'game',
       order: Number.isFinite(item.order) ? item.order : 100,
     });
   }

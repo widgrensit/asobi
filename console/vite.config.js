@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -21,7 +22,9 @@ export default defineConfig({
     // here in this repository's own build and in a host's composed build
     // alike, so the same .jsx file compiles in both without the extension
     // knowing which one it is in. See src/public.js.
-    alias: { '@asobi/console': new URL('./src/public.js', import.meta.url).pathname },
+    // fileURLToPath rather than the URL's pathname, which on Windows is
+    // /C:/... and resolves to nothing.
+    alias: { '@asobi/console': fileURLToPath(new URL('./src/public.js', import.meta.url)) },
   },
   build: {
     outDir: '../priv/console',

@@ -109,6 +109,15 @@ test('an unknown section falls back to game, below every core screen', () => {
   assert.equal(nav[nav.length - 1].path, '/ext/quests');
 });
 
+// The section core's own screens are in, spelled exactly. The case above only
+// ever exercised the fallback, because 'core ' is not a section at all.
+test('core itself is not a section an extension may name', () => {
+  const sneaky = quests({ nav: [{ path: '', label: 'Aaa', section: 'core', order: -1000 }] });
+  const { nav } = resolveRegistry([sneaky], { installed: ['quests'], caps: [] });
+  assert.equal(nav[0].path, '/');
+  assert.equal(nav[nav.length - 1].path, '/ext/quests');
+});
+
 test('ties within a section break on label, not on release link order', () => {
   const items = [
     { path: '/b', label: 'Beta', section: 'game', order: 10 },
