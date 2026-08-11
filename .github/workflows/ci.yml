@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.5
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.7
     permissions:
       contents: write
       pull-requests: write
@@ -61,9 +61,9 @@ jobs:
       #   since fixed), and ELP does not need to run on 28.x. The real blocker
       #   for both ELP jobs was that Taure/erlang-ci's elp action mapped OTP
       #   majors to hardcoded asset names and stopped at 28, so on OTP 29 it
-      #   failed before downloading ELP at all - fixed in erlang-ci#71, which
-      #   also moved its compile step to `rebar3 as test compile` so
-      #   test-profile parse transforms (proper) resolve.
+      #   failed before downloading ELP at all. Fixed across erlang-ci#71, #72
+      #   and #73 (v2.1.7), which also moved its compile step to
+      #   `rebar3 as test compile` so test-profile parse transforms resolve.
       #
       # enable-mutate - needs the rebar3_mutate plugin, and a full-tree
       #   run over 134 modules is far too slow for per-PR CI. Wants
