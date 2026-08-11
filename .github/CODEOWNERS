@@ -3,6 +3,15 @@
 # changes, and caught neither: the only owner cannot approve their own pull
 # request, so every one of them landed through an admin override. A gate that
 # is always overridden stops meaning anything the day it matters.
+#
+# `config` and the Dockerfile are here because they are where a deployment
+# actually breaks. minato 1.0.1 refused the address family that
+# `prod_sys.config.src` splices in from `ASOBI_DB_SOCKET_OPTS`, which the
+# Dockerfile defaults to `inet`, and the result was an environment that boots
+# and never becomes ready. Neither file is source, and both decide whether the
+# thing runs.
 
 /src/ @Taure
+/config/ @Taure
+/Dockerfile @Taure
 /deploy/ @Taure
