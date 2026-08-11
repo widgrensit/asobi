@@ -94,7 +94,27 @@ jobs:
       # key never reflects its version; a stale OTP-28-era meck gets restored
       # and fails to compile on OTP 29 (deprecated catch). Drop it so it
       # re-resolves.
-      pre-test-command: 'rm -rf _build/default/lib/asobi/ebin _build/test/lib/asobi/ebin _build/default/lib/asobi/test _build/test/lib/asobi/test _build/test/lib/meck'
+      #
+      # `rebar3 kura check` rides along on the same hook because erlang-ci has
+      # no general escape hatch for an extra step, and the alternative - a
+      # bespoke job here - would re-do checkout, setup and compile just to run
+      # one command. It diffs the kura_schema modules against src/migrations/
+      # and exits non-zero on drift, so editing a schema without generating a
+      # migration goes red at PR time instead of surviving to
+      # kura_schema_verify at boot. It generates nothing (that's `kura
+      # compile`, which writes a wall-clock-named file into src/ and so must
+      # never run unattended in CI) and needs no database, only the
+      # rebar3_kura project plugin. Runs after the rm above and does not
+      # depend on it: the provider compiles the schema and migration sources
+      # itself rather than reading asobi's ebin.
+      #
+      # Trial placement. If this earns its keep, the permanent home is an
+      # `enable-kura-check` flag in erlang-ci's prepare-checks matrix, which
+      # the other 13 rebar3_kura repos could then opt into with one line. The
+      # cost of leaving it here is that it runs once per test job (eunit and
+      # ct) rather than once, and that a drift failure is reported under a
+      # test job's name - look for the "Pre-test setup" step, not EUnit.
+      pre-test-command: 'rm -rf _build/default/lib/asobi/ebin _build/test/lib/asobi/ebin _build/default/lib/asobi/test _build/test/lib/asobi/test _build/test/lib/meck && rebar3 kura check'
       # Non-verbose eunit names a cancelled test as `undefined`, so a timeout
       # (#279) is indistinguishable from a real regression in the log. Verbose
       # names each test and prints its wall time, which also surfaces tests
