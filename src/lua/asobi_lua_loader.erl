@@ -31,12 +31,17 @@ load a specific script and pin its base directory for `require`.
 
 -export([new/1, new/2, new/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
 -export([is_defined/2]).
+-export([collect_state/1]).
+-ifdef(TEST).
+-export([next_gc/3]).
+-endif.
 
 -export_type([pre_install/0]).
 
 -type pre_install() :: fun((dynamic()) -> dynamic()).
 
 -include_lib("kernel/include/file.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -define(LOADED_TABLE, ~"_ASOBI_LOADED").
 %% M-2/M-3/H-1: any luerl:do/2 invocation that runs script-author code
@@ -75,6 +80,31 @@ load a specific script and pin its base directory for `require`.
 %% bounded by one interval's worth of work (~2.8M reductions at the rate
 %% above), an order of magnitude under the smallest budget this produces.
 -define(REDUCTION_POLL_MS, 10).
+
+%% #426: Luerl never collects a long-lived state on its own - only an explicit
+%% `collectgarbage()` from Lua or `luerl:gc/1` from Erlang reclaims anything.
+%% Every per-tick `luerl:encode/2` therefore leaks: measured at ~3900 words per
+%% tick for a 50-entity zone, which is ~625 KB/s per zone at a 50 ms tick, and
+%% `bounded_eval` copies the whole state into the eval worker and back on every
+%% call, so the cost of a tick grows with everything the zone has ever
+%% allocated. Left alone a busy zone reaches a tick that outruns `tick_rate`
+%% and the world ticker's back-pressure starts dropping its ticks.
+%%
+%% The interval adapts on measured cost rather than being fixed, because
+%% Luerl's mark phase is an `ordsets` list insert per live object - quadratic
+%% in the live set. A zone holding little across ticks wants to collect often
+%% (the state stays small, so both the collection and the per-tick copies stay
+%% cheap); a zone holding a large persistent Lua table wants to collect rarely
+%% (each collection is expensive and reclaims the same per-tick garbage either
+%% way). Measured per-tick cost for a 50-entity zone: 6.09 ms uncollected and
+%% still climbing, 0.10 ms adaptive.
+-define(GC_MIN_INTERVAL, 8).
+-define(GC_MAX_INTERVAL, 1024).
+-define(GC_BUDGET_US, 5_000).
+%% Past this a single collection costs more than the leak does over the
+%% interval that would follow it, so stop rather than freeze the zone.
+-define(GC_ABANDON_US, 500_000).
+-define(GC_ANCHOR, ~"__asobi_gc_anchor").
 
 -spec new(binary() | string()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath) ->
@@ -288,6 +318,91 @@ max_heap_words() ->
         {ok, N} when is_integer(N), N > 0 -> N;
         _ -> ?DEFAULT_MAX_HEAP_WORDS
     end.
+
+-doc """
+Collect the Luerl state carried in a bridge state map, every so often.
+
+Call this once per tick from a bridge that holds a long-lived `lua_state`.
+Luerl never collects such a state on its own, so without this the per-tick
+`luerl:encode/2` of entities or inputs accumulates in it forever - and
+`call/4` copies the whole state into its eval worker and back on every
+callback, so the cost of a tick grows with everything the state has ever
+allocated. Collect on the calling process: it costs no extra copy there, and
+`luerl:gc/1` runs no Lua code so it cannot hang on a script.
+
+`game_state` is the one Luerl value asobi holds between callbacks. It is
+unreachable from the Lua root set while Erlang is between them, so the
+collector would free the tables underneath it and the next `luerl:decode/2`
+on it would crash. It is rooted in a global for the duration of the collection
+and unrooted again straight after, so a script never observes the anchor.
+
+Bookkeeping is kept under `lua_gc` in the same map. Set
+`{asobi, [{lua_gc, false}]}` to turn the collector off entirely.
+""".
+-spec collect_state(map()) -> map().
+collect_state(#{lua_state := St} = State) ->
+    Gc = maps:get(lua_gc, State, new_gc()),
+    Anchor = maps:get(game_state, State, nil),
+    {St1, Gc1} = maybe_gc(St, Anchor, Gc),
+    State#{lua_state => St1, lua_gc => Gc1};
+collect_state(State) ->
+    State.
+
+new_gc() ->
+    #{interval => ?GC_MIN_INTERVAL, countdown => ?GC_MIN_INTERVAL, enabled => true}.
+
+maybe_gc(St, _Anchor, #{enabled := false} = Gc) ->
+    {St, Gc};
+maybe_gc(St, _Anchor, #{countdown := N} = Gc) when N > 1 ->
+    {St, Gc#{countdown := N - 1}};
+maybe_gc(St, Anchor, #{interval := Interval} = Gc) ->
+    case gc_disabled() of
+        true ->
+            {St, Gc#{enabled := false}};
+        false ->
+            {Us, St1} = timer:tc(fun() -> collect(St, Anchor) end),
+            {St1, next_gc(Us, Interval, Gc)}
+    end.
+
+next_gc(Us, Interval, Gc) when Us > ?GC_ABANDON_US ->
+    ?LOG_WARNING(#{
+        event => lua_gc_abandoned,
+        duration_ms => Us div 1000,
+        msg =>
+            ~"Luerl collection outran a tick budget and is now off for this state. Luerl's collector is quadratic in the live set, so a script holding a large table across callbacks cannot be collected cheaply. Lua memory here will grow unbounded until the script keeps less alive across callbacks."
+    }),
+    Gc#{enabled := false, countdown := Interval};
+next_gc(Us, Interval, Gc) ->
+    Interval1 =
+        if
+            Us > ?GC_BUDGET_US -> min(?GC_MAX_INTERVAL, Interval * 2);
+            Us < ?GC_BUDGET_US div 4 -> max(?GC_MIN_INTERVAL, Interval div 2);
+            true -> Interval
+        end,
+    Gc#{interval := Interval1, countdown := Interval1}.
+
+%% A failed anchor leaves the state exactly as it was: skipping a collection
+%% costs memory, collecting without the anchor corrupts the caller's refs.
+collect(St, Anchor) ->
+    case anchor(Anchor, St) of
+        {ok, St1} -> unanchor(luerl:gc(St1));
+        error -> St
+    end.
+
+anchor(Anchor, St) ->
+    case luerl:set_table_keys([?GC_ANCHOR], Anchor, St) of
+        {ok, St1} -> {ok, St1};
+        _ -> error
+    end.
+
+unanchor(St) ->
+    case luerl:set_table_keys([?GC_ANCHOR], nil, St) of
+        {ok, St1} -> St1;
+        _ -> St
+    end.
+
+gc_disabled() ->
+    asobi_lua_env:get_env(lua_gc) =:= {ok, false}.
 
 %% --- Internal: state construction & sandbox ---
 

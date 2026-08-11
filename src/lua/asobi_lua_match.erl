@@ -173,11 +173,14 @@ tick(State0) ->
     #{lua_state := LuaSt, game_state := GS} = State = asobi_lua_reload:maybe_hot_reload(State0),
     case asobi_lua_loader:call(tick, [GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
-            case is_finished(GS1, LuaSt1) of
-                {true, Result} ->
-                    {finished, Result, State#{lua_state => LuaSt1, game_state => GS1}};
-                false ->
-                    {ok, State#{lua_state => LuaSt1, game_state => GS1}}
+            Finished = is_finished(GS1, LuaSt1),
+            %% #426: same per-tick Luerl leak as the zone path.
+            State1 = asobi_lua_loader:collect_state(State#{
+                lua_state => LuaSt1, game_state => GS1
+            }),
+            case Finished of
+                {true, Result} -> {finished, Result, State1};
+                false -> {ok, State1}
             end;
         {error, timeout} ->
             log_match_lua_error(error, tick, timeout, State),

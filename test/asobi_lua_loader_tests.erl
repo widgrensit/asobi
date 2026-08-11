@@ -44,6 +44,150 @@ loader_test_() ->
             fun is_defined_true_for_non_function_global/0}
     ].
 
+%% --- #426: the periodic Luerl collector ---
+%%
+%% Luerl never collects a long-lived state on its own, so every per-tick
+%% `luerl:encode/2` accumulated in it forever and `call/4` copied the lot into
+%% its eval worker twice per tick. These pin the three properties that make
+%% collecting safe: it actually reclaims, the caller's `game_state` survives
+%% it, and it stops collecting rather than freezing a zone whose live set is
+%% too large for Luerl's quadratic mark.
+
+collector_test_() ->
+    {foreach, fun unset_gc_env/0, fun(_) -> unset_gc_env() end, [
+        {"collecting reclaims the per-tick encode garbage", fun collect_reclaims/0},
+        {"game_state survives a collection", fun game_state_survives/0},
+        {"the anchor is invisible to the script", fun anchor_is_not_left_behind/0},
+        {"a collected state keeps ticking", fun collected_state_keeps_ticking/0},
+        {"the state reaches a steady size", fun steady_state_size/0},
+        {"a state with no lua_state is untouched", fun no_lua_state_is_untouched/0},
+        {"lua_gc=false disables the collector", fun env_disables_collector/0},
+        {"the interval adapts to measured collection cost", fun interval_adapts_to_cost/0},
+        {"an uncollectable live set abandons the collector", fun huge_live_set_abandons/0}
+    ]}.
+
+unset_gc_env() ->
+    application:unset_env(asobi_lua, lua_gc),
+    application:unset_env(asobi, lua_gc),
+    ok.
+
+collect_reclaims() ->
+    S0 = gc_zone_state(),
+    Ticked = tick_n(S0, 200),
+    Uncollected = erts_debug:flat_size(maps:get(lua_state, Ticked)),
+    Collected = erts_debug:flat_size(maps:get(lua_state, collect(Ticked))),
+    ?assert(Collected * 4 < Uncollected).
+
+%% The collector frees anything the Lua root set cannot reach. game_state is
+%% held only by asobi between callbacks, so without the anchor this decode
+%% crashes on a freed table - the failure mode that makes a naive `luerl:gc/1`
+%% here worse than the leak.
+game_state_survives() ->
+    S = collect(tick_n(gc_zone_state(), 50)),
+    #{lua_state := St, game_state := GS} = S,
+    ?assertEqual([{~"n", 50}], luerl:decode(GS, St)).
+
+anchor_is_not_left_behind() ->
+    #{lua_state := St} = collect(tick_n(gc_zone_state(), 20)),
+    ?assertMatch({ok, nil, _}, luerl:get_table_keys([~"__asobi_gc_anchor"], St)).
+
+collected_state_keeps_ticking() ->
+    S = tick_n(collect(tick_n(gc_zone_state(), 50)), 25),
+    #{lua_state := St, game_state := GS} = S,
+    ?assertEqual([{~"n", 75}], luerl:decode(GS, St)).
+
+%% The point of the fix: size stops tracking total ticks taken. Without the
+%% collector this grows without bound for as long as the zone is occupied.
+steady_state_size() ->
+    S1 = collect_every_tick(gc_zone_state(), 300),
+    S2 = collect_every_tick(S1, 300),
+    Size1 = erts_debug:flat_size(maps:get(lua_state, S1)),
+    Size2 = erts_debug:flat_size(maps:get(lua_state, S2)),
+    ?assert(Size2 < Size1 * 2).
+
+no_lua_state_is_untouched() ->
+    ?assertEqual(#{some => thing}, asobi_lua_loader:collect_state(#{some => thing})).
+
+env_disables_collector() ->
+    application:set_env(asobi, lua_gc, false),
+    Ticked = tick_n(gc_zone_state(), 200),
+    Before = erts_debug:flat_size(maps:get(lua_state, Ticked)),
+    Collected = collect(Ticked),
+    ?assertEqual(Before, erts_debug:flat_size(maps:get(lua_state, Collected))),
+    ?assertMatch(#{lua_gc := #{enabled := false}}, Collected).
+
+%% Luerl's mark phase is an ordsets list insert per live object, so collecting
+%% a large persistent table is quadratic. Collecting one of those every
+%% interval is worse than the leak, so the interval has to grow when a
+%% collection turns out to be expensive. Driven directly rather than through a
+%% live set sized to overrun the budget, which would make the assertion a bet
+%% on how fast the machine running it is.
+interval_adapts_to_cost() ->
+    Gc = #{interval => 64, countdown => 0, enabled => true},
+    Doubled = asobi_lua_loader:next_gc(20_000, 64, Gc),
+    ?assertMatch(#{interval := 128, countdown := 128, enabled := true}, Doubled),
+    Halved = asobi_lua_loader:next_gc(100, 64, Gc),
+    ?assertMatch(#{interval := 32, countdown := 32}, Halved),
+    ?assertMatch(#{interval := 64}, asobi_lua_loader:next_gc(3_000, 64, Gc)),
+    %% Both ends are clamped, so a cheap state does not collect every tick and
+    %% an expensive one still collects eventually.
+    ?assertMatch(
+        #{interval := 8}, asobi_lua_loader:next_gc(1, 8, Gc#{interval => 8})
+    ),
+    ?assertMatch(
+        #{interval := 1024},
+        asobi_lua_loader:next_gc(20_000, 1024, Gc#{interval => 1024})
+    ).
+
+%% Past the abandon ceiling a single collection costs more than the leak it
+%% prevents, so the collector stops rather than freezing the zone for seconds
+%% at a time. The state is left exactly as the collection found it.
+huge_live_set_abandons() ->
+    S = collect(big_state(20000)),
+    ?assertMatch(#{lua_gc := #{enabled := false}}, S),
+    ?assert(is_list(gs_world(S))).
+
+big_state(Rows) ->
+    #{lua_state := St0} = S0 = gc_zone_state(),
+    {ok, [Big | _], St1} = asobi_lua_loader:call(big_state, [Rows], St0),
+    S0#{lua_state => St1, game_state => Big}.
+
+%% Proves the anchor held: the persistent table is still reachable through the
+%% ref asobi kept, whether the collection ran or was abandoned.
+gs_world(#{lua_state := St, game_state := GS}) ->
+    {ok, World, _} = luerl:get_table_key(GS, ~"world", St),
+    luerl:decode(World, St).
+
+gc_zone_state() ->
+    {ok, St} = asobi_lua_loader:new(fixture("gc_zone.lua")),
+    {ok, [GS | _], St1} = asobi_lua_loader:call(init, [nil], St),
+    #{lua_state => St1, game_state => GS}.
+
+%% Mirrors what asobi_lua_world:zone_tick/2 does per tick: encode the entity
+%% map fresh (this is the garbage) and call into the script.
+tick_n(State, 0) ->
+    State;
+tick_n(#{lua_state := St, game_state := GS} = State, N) ->
+    {Enc, St1} = luerl:encode(entities(), St),
+    {ok, [_Ents, GS1 | _], St2} = asobi_lua_loader:call(zone_tick, [Enc, GS], St1),
+    tick_n(State#{lua_state => St2, game_state => GS1}, N - 1).
+
+collect_every_tick(State, 0) ->
+    State;
+collect_every_tick(State, N) ->
+    collect_every_tick(collect(tick_n(State, 1)), N - 1).
+
+collect(State) ->
+    asobi_lua_loader:collect_state(State#{
+        lua_gc => #{interval => 1, countdown => 1, enabled => true}
+    }).
+
+entities() ->
+    #{
+        integer_to_binary(I) => #{~"x" => I, ~"y" => I, ~"type" => ~"npc", ~"hp" => 100}
+     || I <- lists:seq(1, 20)
+    }.
+
 loads_valid_script() ->
     {ok, _St} = asobi_lua_loader:new(fixture("test_match.lua")).
 

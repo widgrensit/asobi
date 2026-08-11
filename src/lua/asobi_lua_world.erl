@@ -248,13 +248,14 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                     )
                 of
                     {ok, [Ents1, ZS1 | _], LuaSt2} ->
-                        {asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)), ZoneState#{
-                            lua_state => LuaSt2, game_state => ZS1
-                        }};
+                        Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
+                        {Ents2,
+                            asobi_lua_loader:collect_state(ZoneState#{
+                                lua_state => LuaSt2, game_state => ZS1
+                            })};
                     {ok, [Ents1 | _], LuaSt2} ->
-                        {asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)), ZoneState#{
-                            lua_state => LuaSt2
-                        }};
+                        Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
+                        {Ents2, asobi_lua_loader:collect_state(ZoneState#{lua_state => LuaSt2})};
                     {error, Reason} ->
                         log_lua_error(zone_tick, Reason, ZoneState),
                         {Entities, ZoneState}
@@ -302,8 +303,9 @@ post_tick(TickN, State0) ->
     #{lua_state := LuaSt, game_state := GS} = State = asobi_lua_reload:maybe_hot_reload(State0),
     case asobi_lua_loader:call(post_tick, [TickN, GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
-            State1 = State#{lua_state => LuaSt1, game_state => GS1},
-            case check_post_tick_result(GS1, LuaSt1) of
+            Outcome = check_post_tick_result(GS1, LuaSt1),
+            State1 = asobi_lua_loader:collect_state(State#{lua_state => LuaSt1, game_state => GS1}),
+            case Outcome of
                 ok ->
                     {ok, State1};
                 {vote, VoteConfig} ->
