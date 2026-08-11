@@ -7,10 +7,20 @@ name: Console
 on:
   push:
     branches: [main]
-    paths: ['console/**', 'priv/console/**', '.github/workflows/console.yml']
+    paths:
+      - 'console/**'
+      - 'priv/console/**'
+      - 'src/extensions/rebar3_asobi_console.erl'
+      - 'examples/console-extension/**'
+      - '.github/workflows/console.yml'
   pull_request:
     branches: [main]
-    paths: ['console/**', 'priv/console/**', '.github/workflows/console.yml']
+    paths:
+      - 'console/**'
+      - 'priv/console/**'
+      - 'src/extensions/rebar3_asobi_console.erl'
+      - 'examples/console-extension/**'
+      - '.github/workflows/console.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -61,5 +71,92 @@ jobs:
         run: |
           if grep -qE "eval\(|new Function\(" priv/console/assets/*.js; then
             echo "::error::The bundle needs 'unsafe-eval'. Drop the dependency, do not widen the CSP."
+            exit 1
+          fi
+
+  # The `reproducible` job above builds the console with the committed stub
+  # registry, which exports no extensions - so nothing in it ever runs the
+  # generator. That is the gap this job closes: rename the `extensions` export
+  # in `registry.generated.js` or in `app.jsx` and `reproducible` stays green
+  # while every host's composed build breaks.
+  #
+  # It composes the shipped example, which is a release with one extension that
+  # ships screens, and asserts the screens reached the bundle.
+  composed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: '.tool-versions'
+          version-type: strict
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      # The example pins the release this feature ships in, which does not
+      # exist while that release is still this branch. A checkout shadows both
+      # the dependency and the plugin, so the job composes the console out of
+      # the tree under test rather than out of Hex.
+      - name: Point the example at this checkout
+        working-directory: examples/console-extension
+        run: |
+          mkdir -p _checkouts
+          ln -s "$GITHUB_WORKSPACE" _checkouts/asobi
+
+      # The example's _build is deliberately not cached. This job exists to
+      # catch drift between the generator and the console it generates into,
+      # and a cache that restored an older asobi would hide exactly that.
+      - name: Compose the console
+        working-directory: examples/console-extension
+        run: rebar3 asobi console --out "$RUNNER_TEMP/composed"
+
+      - name: The extension is in the generated registry
+        working-directory: examples/console-extension
+        run: |
+          registry=_build/default/asobi_console/src/registry.generated.js
+          if ! grep -q "import ext_notes from '../extensions/notes/index.jsx';" "$registry"; then
+            echo "::error::The generator did not import the example's screens."
+            cat "$registry"
+            exit 1
+          fi
+          if ! grep -q 'export const extensions = \[ext_notes\];' "$registry"; then
+            echo "::error::The generator's export does not name the extension."
+            cat "$registry"
+            exit 1
+          fi
+
+      # The assertion the registry check cannot make: that the import chain
+      # compiled, rather than being generated and then dropped. These strings
+      # exist only in the example's own screens.
+      - name: The extension's screens are in the bundle
+        run: |
+          for needle in 'Operator notes' '/ext/notes/list' 'No notes yet'; do
+            if ! grep -qF "$needle" "$RUNNER_TEMP"/composed/assets/*.js; then
+              echo "::error::'$needle' is missing: the composed bundle carries no extension code."
+              exit 1
+            fi
+          done
+
+      # Load-bearing for the CSP, and the property most at risk from composing:
+      # script-src is a bare nonce with no host source, so a second chunk is
+      # refused by the browser rather than merely arriving late.
+      - name: The composed bundle is still one chunk
+        run: |
+          chunks=$(ls -1 "$RUNNER_TEMP"/composed/assets/*.js | wc -l)
+          if [ "$chunks" -ne 1 ]; then
+            echo "::error::Composing split the bundle into $chunks chunks. The CSP serves one."
+            ls -l "$RUNNER_TEMP"/composed/assets/
+            exit 1
+          fi
+
+      - name: No string-to-code in the composed bundle
+        run: |
+          if grep -qE "eval\(|new Function\(" "$RUNNER_TEMP"/composed/assets/*.js; then
+            echo "::error::The composed bundle needs 'unsafe-eval'. An extension pulled in a dependency that compiles strings to code."
             exit 1
           fi
