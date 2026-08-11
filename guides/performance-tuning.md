@@ -96,6 +96,11 @@ Every active zone in a world ticks at the world's `tick_rate`. There is no hot
 and cold split and nothing promotes or demotes a zone; if the zone is active,
 it ticks.
 
+The one exception is a zone that has not finished its previous tick: it is
+skipped rather than sent another one, so `tick_rate` is a ceiling on how often
+a zone ticks, not a promise. A zone consistently missing ticks is a zone whose
+`zone_tick` is over budget, and `[asobi, zone, tick_skipped]` counts it.
+
 What does happen automatically:
 
 - A zone whose subscribers have dropped to zero **and** which holds no NPC

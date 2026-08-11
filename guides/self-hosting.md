@@ -330,16 +330,17 @@ Both share the game port, so anyone who can reach your game can reach
 
 ## Tuning knobs
 
-All four go under `{asobi, [...]}`; an existing `{asobi_lua, [...]}` block also
+All five go under `{asobi, [...]}`; an existing `{asobi_lua, [...]}` block also
 still works, see
 [Which application key](configuration.md#which-application-key).
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `max_heap_words` | `5_000_000` | Per-eval heap cap, in Erlang words, for every Lua callback. An eval that allocates past it is killed by the VM and the runtime returns `{error, heap_exhausted}`; persistent state held by the gen_server is untouched. Raise it only if a single tick legitimately builds a very large local structure. Long-lived tables belong in the persistent Luerl state and cost nothing per eval |
+| `max_heap_words` | `5_000_000` | Per-eval heap cap, in Erlang words, for every Lua callback. An eval that allocates past it is killed by the VM and the runtime returns `{error, heap_exhausted}`; persistent state held by the gen_server is untouched. Raise it only if a single tick legitimately builds a very large local structure. A long-lived table does belong in the persistent Luerl state rather than being rebuilt per call, but it is not free there either - see `lua_gc` below |
 | `max_reductions_per_ms` | `50_000` | Per-eval CPU cap, as BEAM reductions per millisecond of that callback's own budget, so `tick` (500 ms) gets 25,000,000 and a bot's `think` (50 ms) gets 2,500,000. A timeout bounds latency but not work: without this, a script that spins is killed at its deadline and does it again next tick. Overrun returns `{error, reductions_exhausted}`, the result is discarded and the previous Lua state kept, so the match or zone survives. Sampled every 10 ms. `0` disables it |
 | `reload_mode` (or `ASOBI_LUA_RELOAD`) | `auto` | `auto` mtime-polls the script on every tick. `off` skips the poll entirely, which is right for a sealed bundle where new code is a container restart. Anything unrecognised falls back to `auto`, so a typo cannot silently disable reload |
 | `config_watch_interval` | `1500` | Milliseconds between mode-shape scans (above) |
+| `lua_gc` | `true` | Whether asobi periodically collects each Lua state. Luerl never collects one on its own, and asobi encodes fresh tables into it on every tick, so with this off a zone's Lua memory grows for as long as anyone is in it. The interval is not configurable: it adapts to how long a collection actually takes, because Luerl's collector cost grows faster than linearly in what the script keeps alive between callbacks. Set it to `false` only to diagnose a problem with the collector itself. See [Performance tuning](performance-tuning.md#lua-memory) |
 
 ```erlang
 %% sys.config
@@ -352,8 +353,8 @@ still works, see
 ].
 ```
 
-The first three are read per call, not at boot, so changing one through
-`application:set_env/3` takes effect without a restart.
+All but `config_watch_interval` are read per call, not at boot, so changing
+one through `application:set_env/3` takes effect without a restart.
 `config_watch_interval` is read once, when the watcher starts. In a Docker
 deploy, `ASOBI_LUA_RELOAD=off` in the container environment is the usual route.
 

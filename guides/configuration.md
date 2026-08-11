@@ -93,7 +93,8 @@ Everything below goes under `{asobi, [...]}`.
 
 The Lua runtime used to be its own OTP application, so the keys it owns -
 `max_heap_words`, `max_reductions_per_ms`, `reload_mode`,
-`config_watch_interval`, `dev_errors`, `terrain_providers` and `rate_limits` -
+`config_watch_interval`, `dev_errors`, `terrain_providers`, `lua_gc` and
+`rate_limits` -
 are still read from `asobi_lua` first and `asobi` second
 (`asobi_lua_env:get_env/2`). An existing `{asobi_lua, [...]}` block keeps
 working and there is nothing to migrate. Put new configuration under `{asobi,

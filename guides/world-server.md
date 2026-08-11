@@ -60,12 +60,25 @@ before a single zone beyond the first.
 
 Every tick (default 20 Hz, 50ms):
 
-1. The ticker sends `tick(N)` to every zone in parallel.
+1. The ticker sends `tick(N)` in parallel to every zone that has acked its
+   previous tick. A zone still working on the last one is skipped for this
+   tick rather than sent another - see below.
 2. Each zone applies queued player inputs, runs `zone_tick/2`, computes deltas
    from the previous state and broadcasts them to its subscribers.
 3. Each zone acks back to the ticker.
-4. When every zone has acked, the ticker calls `post_tick/2` on the world
-   server for global events: boss phases, quest triggers, vote requests.
+4. When every zone sent this tick has acked, the ticker calls `post_tick/2` on
+   the world server for global events: boss phases, quest triggers, vote
+   requests. `post_tick/2` runs at most once per tick and never runs
+   backwards, so a zone acking late cannot replay an earlier tick's global
+   events.
+
+A zone whose `zone_tick/2` takes longer than `tick_rate` is skipped, not
+queued. Sending it another tick would only grow its mailbox: it cannot catch
+up by definition, the zone tick is idempotent upkeep, and the next tick
+carries the same work. Without this a slow zone accumulates ticks without
+bound until the node runs out of memory. Each skip increments
+`[asobi, zone, tick_skipped]`; see [Observability](observability.md#the-events)
+for what to alert on.
 
 ### Delta compression
 

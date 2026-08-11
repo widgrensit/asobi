@@ -109,8 +109,9 @@ both are the kind of thing that is otherwise noticed a day later.
 
 ## The events
 
-Thirty-seven, grouped by what they are about. Measurement and metadata keys
-are in `m:asobi_telemetry`.
+Thirty-nine, grouped by what they are about. Measurement and metadata keys
+are in `m:asobi_telemetry`, which is also the list `asobi_telemetry:events/0`
+returns - attach to that rather than restating the names.
 
 ### Sessions and the socket
 
@@ -146,11 +147,21 @@ asobi.world.started              asobi.world.finished
 asobi.world.player_joined        asobi.world.player_left
 asobi.world.phase_changed        asobi.world.tick
 asobi.zone.opened                asobi.zone.closed
-asobi.join.rate_limited          asobi.rehome.rate_limited
+asobi.zone.tick_skipped          asobi.join.rate_limited
+asobi.rehome.rate_limited
 ```
 
 `asobi.world.tick` is sampled rather than emitted every tick - at 20 Hz per
 world an unsampled event is a metrics pipeline of its own.
+
+`asobi.zone.tick_skipped` is the one to alert on. It counts zones the world
+tick skipped because they had not finished the previous one, so a healthy
+world never emits it at all and a sustained non-zero rate means a world that
+can no longer keep up. A single event is a zone that ran long once, which is
+normal; alert on the rate, not the event. Rising counts here usually mean a
+`zone_tick` doing too much, too many entities in one zone, or Lua memory that
+is no longer being collected - see
+[Performance tuning](performance-tuning.md#lua-memory).
 
 ### Gameplay systems
 
@@ -158,8 +169,13 @@ world an unsampled event is a metrics pipeline of its own.
 asobi.vote.started               asobi.vote.cast
 asobi.vote.resolved              asobi.chat.message_sent
 asobi.economy.transaction        asobi.store.purchase
-asobi.anticheat.violation
+asobi.anticheat.violation        asobi.error
 ```
+
+`asobi.error` is game-code failing rather than asobi failing - a Lua callback
+raising, a spawn naming a template that does not exist, a zone that could not
+be reached. Its `kind` is a fixed enum and safe as a label; its `details` are
+not.
 
 ### Auth cache
 
