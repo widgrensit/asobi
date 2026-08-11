@@ -24,6 +24,36 @@
     %% special name.
     {env, [{providers, [rebar3_asobi_check, rebar3_asobi_console]}]},
     {modules, []},
+    %% Added to the file set rebar3_hex ships, not a replacement for it:
+    %% `include_paths` merges over the defaults, which already carry src, priv,
+    %% include and the two rebar files.
+    %%
+    %% The console's *source*. A host whose extensions ship operator screens
+    %% composes its own bundle out of this tree with `rebar3 asobi console`,
+    %% and a consumer who installed from Hex without it gets
+    %% `no_console_source` from a command the guides tell them to run.
+    %%
+    %% Spelled out rather than `"console"`, and this is load-bearing:
+    %% `rebar3_hex_build:include_files/3` applies the excludes to the default
+    %% file set and only then merges the included paths over the result, so an
+    %% `exclude_paths` for `console/node_modules` would not be consulted. A
+    %% whole-directory include therefore ships whatever npm left in the tree of
+    %% whoever published - measured at 556 files. These four are what the
+    %% provider copies into its workspace (`?SOURCES`), and no wildcard can
+    %% reach node_modules.
+    %%
+    %% It has to be here rather than in rebar.config's `{hex, ...}`, which is
+    %% where it was first written: rebar3_hex reads the file list out of this
+    %% file's own terms, so the key is silently inert anywhere else.
+    %% `{hex, [{doc, ...}]}` in rebar.config is read, which is what made the
+    %% mistake look like it worked.
+    {include_paths, [
+        "console/src",
+        "console/package.json",
+        "console/package-lock.json",
+        "console/vite.config.js",
+        "console/README.md"
+    ]},
     {licenses, ["Apache-2.0"]},
     {links, [{"GitHub", "https://github.com/widgrensit/asobi"}]}
 ]}.
