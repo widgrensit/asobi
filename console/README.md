@@ -26,8 +26,9 @@ keeps the committed `priv/console` reproducible and the drift gate below a real
 check. Never commit a non-empty version of it.
 
 `src/public.js` is the surface an extension may import, aliased as
-`@asobi/console`. It is frozen the way the wire is frozen - everything it
-re-exports ends up compiled into releases this repository never sees - and
+`@asobi/console`. It is not frozen, but everything it re-exports ends up
+compiled into releases this repository never sees, so it changes shape only
+behind a version bump -
 `CONSOLE_API_VERSION` in `src/registry.js` is what an extension declares itself
 against. Everything this tree does not re-export through it stays free to
 change, which is the whole reason it exists rather than extensions importing

@@ -6,7 +6,7 @@ The ops plane's one extension seam: `/api/v1/ops/ext/:extension/:action`.
 action - `quests.define` was the first - had nowhere to put it. `ops/0` is
 that home, and this module is what makes it reachable.
 
-Extensions contribute no routes (ADR 0003). Core owns this one and dispatches
+Extensions contribute no routes of their own. Core owns this one and dispatches
 every declared action behind it, exactly as it owns one WebSocket frame type
 and dispatches `rpc/0` behind that. The route table stays core's.
 

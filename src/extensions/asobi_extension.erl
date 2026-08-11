@@ -332,7 +332,7 @@ vocabulary no player ever holds. So an extension with an admin surface - the
 first one hit it immediately with `quests.define` - had nowhere to put it.
 This is that home.
 
-Extensions still contribute **no routes** (ADR 0003). Core owns one route,
+Extensions still contribute **no routes** of their own. Core owns one route,
 `/api/v1/ops/ext/:extension/:action`, and dispatches it here exactly as it owns
 one WebSocket frame type and dispatches `rpc/0` behind it. An action is
 therefore reachable at:

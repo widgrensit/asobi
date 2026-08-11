@@ -52,7 +52,7 @@ export function resolveRegistry(declared, { installed, caps } = {}) {
       name: entry.name,
       nav: navOf(entry, caps, problems),
       routes: routesOf(entry, problems),
-      slots: entry.slots && typeof entry.slots === 'object' ? entry.slots : {},
+      slots: slotsOf(entry, problems),
     });
   }
 
@@ -116,6 +116,26 @@ function routesOf(entry, problems) {
       continue;
     }
     usable.push({ path: route.path.replace(/^\/+/, ''), element: route.element });
+  }
+  return usable;
+}
+
+// An id that is not in SLOTS is dropped and reported. Keeping it would be
+// worse than useless: nothing renders it, so a mistyped `player.details` looks
+// exactly like a panel that decided it had nothing to show, for ever.
+function slotsOf(entry, problems) {
+  const declared = entry.slots && typeof entry.slots === 'object' ? entry.slots : {};
+  const usable = {};
+  for (const [id, Component] of Object.entries(declared)) {
+    if (!SLOTS.includes(id)) {
+      problems.push(problem(entry.name, 'bad_slot', `${id} is not a slot this console renders`));
+      continue;
+    }
+    if (typeof Component !== 'function') {
+      problems.push(problem(entry.name, 'bad_slot', `slot ${id} is not a component`));
+      continue;
+    }
+    usable[id] = Component;
   }
   return usable;
 }

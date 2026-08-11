@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { CONSOLE_API_VERSION, extensionPath, resolveRegistry, slotEntries } from '../src/registry.js';
+import { CONSOLE_API_VERSION, SLOTS, extensionPath, resolveRegistry, slotEntries } from '../src/registry.js';
 import { CORE_NAV, sortNav } from '../src/nav.js';
 
 // This is the seam where code from outside this repository decides what an
@@ -145,4 +145,32 @@ test('slotEntries returns only extensions that filled the named slot', () => {
   );
   assert.deepEqual(slotEntries(extensions, 'match.detail'), []);
   assert.deepEqual(slotEntries(extensions, 'overview.stats'), []);
+});
+
+// A slot id that is not rendered is dropped and reported rather than kept. It
+// is the failure with no symptom otherwise: nothing renders it, so a mistyped
+// id looks exactly like a panel that decided it had nothing to show.
+test('a slot id this console does not render is refused and reported', () => {
+  const { extensions, problems } = resolveRegistry(
+    [quests({ slots: { 'player.details': panel, 'player.detail': panel } })],
+    { installed: ['quests'], caps: [] },
+  );
+  assert.deepEqual(Object.keys(extensions[0].slots), ['player.detail']);
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0].code, 'bad_slot');
+  assert.equal(problems[0].extension, 'quests');
+  assert.match(problems[0].message, /player\.details/);
+});
+
+test('a slot whose value is not a component is refused and reported', () => {
+  const { extensions, problems } = resolveRegistry(
+    [quests({ slots: { 'match.detail': 'not a component' } })],
+    { installed: ['quests'], caps: [] },
+  );
+  assert.deepEqual(Object.keys(extensions[0].slots), []);
+  assert.equal(problems[0].code, 'bad_slot');
+});
+
+test('every slot id the guide documents is one the console renders', () => {
+  assert.deepEqual(SLOTS, ['overview.stats', 'player.detail', 'player.actions', 'match.detail']);
 });

@@ -5,8 +5,10 @@ Date: 2026-08-10
 ## Status
 
 Accepted. Extends `asobi_extension` with a discovered UI seam alongside the
-declared `ops/0` seam that ADR 0003's no-routes rule already put behind
-`/api/v1/ops/ext/:extension/:action`.
+declared `ops/0` seam, which core already dispatches behind the one route it
+owns at `/api/v1/ops/ext/:extension/:action`. That extensions contribute no
+routes of their own is a standing rule with no ADR of its own; it is stated
+where it binds, in `m:asobi_router` and `m:asobi_ops_extension`.
 
 ## Context
 
@@ -73,7 +75,7 @@ composes core's screens and every installed extension's into one chunk.**
   any name that is not a plain content-hashed basename, same memoisation.
 - The composed bundle is still **one chunk**. The CSP is not touched.
 - `console/src/public.js`, aliased as `@asobi/console`, is the only surface an
-  extension may import, and is frozen. `CONSOLE_API_VERSION` in the manifest is
+  extension may import. `CONSOLE_API_VERSION` in the manifest is
   checked, and a mismatch refuses the extension entirely rather than rendering it
   half-working.
 - Everything an extension contributes hangs under `/ext/<name>`, keyed by
@@ -116,9 +118,17 @@ machines, so they are not merged. `asobi_console` refuses a configured
 application that is not in the release rather than falling back to asobi's own
 bundle, so the two disagreeing is loud rather than silently stock.
 
-**The frozen surface is now a compatibility obligation.** `public.js` and the
+**The import surface is now a compatibility obligation.** `public.js` and the
 slot id set are compiled into releases this repository never sees. Adding to
 either is additive; removing from either is a `CONSOLE_API_VERSION` bump.
+
+The obligation is wider than `public.js`, and this is the part easiest to
+forget: an extension's screens are compiled against React and react-router as
+well, because `public.js` re-exports the router's hooks rather than wrapping
+them and tells extensions to import React directly. Naming them is not the same
+as abstracting them - a major of either moves the surface an extension was
+written against, so `console/package.json` is part of what a version bump has
+to weigh.
 
 ## Alternatives considered
 

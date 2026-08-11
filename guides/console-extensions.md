@@ -205,6 +205,12 @@ Adding an id is a contract change and changing what an existing one passes is a
 breaking one, so the set grows deliberately. If you need one that is not here,
 say what screen and what context, and it can be added.
 
+The set is closed in the enforced sense: an id that is not in it is dropped and
+reported, because nothing renders it and a mistyped `player.details` would
+otherwise look exactly like a panel that decided it had nothing to show. Import
+`SLOTS` from `@asobi/console` to check against the console you are being
+composed into rather than against this table.
+
 A slot component that throws is caught: it renders an error banner naming your
 extension, and the rest of the console carries on. That boundary is the reason
 one extension's bad render does not take out the core screens an operator needs
@@ -212,8 +218,10 @@ during whatever incident produced the bad data.
 
 ## What you may import
 
-One specifier, `@asobi/console`. It is frozen the way the wire is frozen:
-everything it exports is compiled into somebody else's release.
+One specifier, `@asobi/console`. It is not frozen - the extension contract is
+experimental until a second consumer has said what it is missing - but
+everything it exports is compiled into somebody else's release, so it changes
+shape only behind a `CONSOLE_API_VERSION` bump.
 
 ```js
 // The ops plane
@@ -416,8 +424,10 @@ first time you run the dev server.
 `CONSOLE_API_VERSION`. A mismatch means the extension is refused entirely, with
 one line in the browser console naming it, rather than rendered half-working.
 
-The version bumps when the frozen surface changes shape in a way an existing
-extension would not survive. Adding an export does not bump it.
+The version bumps when the surface changes shape in a way an existing extension
+would not survive. Adding an export does not bump it. React and react-router
+count: your screens compile against those too, so a major of either is the same
+kind of move as renaming an export.
 
 The other version to keep straight is the plugin. `rebar3 asobi console` runs
 from the copy of asobi in `project_plugins`, but it composes the console out of
@@ -436,6 +446,7 @@ dependency composes a console the node's own extension set may not match.
 | `/console` answers 503, log says `bundle_app_unavailable` | `console_bundle_app` names an application that is not in this release |
 | `/console` answers 503, log says `manifest_unreadable` | The named application is in the release but its `priv/console` is empty. The build never ran, or ran with `--out` pointing elsewhere |
 | Screen is blank, browser console says an extension was refused | `apiVersion` mismatch, or a `name` that is not `^[a-z][a-z0-9_]*$` |
+| Your panel never appears, browser console names the slot | The slot id is not one this console renders. Check it against `SLOTS` |
 | Nav item missing, nothing refused and nothing logged | A well-formed `name` that is not this extension's. It does not match what `/features` reports, so it is treated as an extension this node does not have - which is silent on purpose, because that is the normal case |
 | Panel shows an error banner naming your extension | Your component threw. The boundary caught it; the message is in the banner and the stack is in the browser console |
 | A request answers 403 and the console returns to the sign-in screen | The action's `class` is not one the session holds - every 401 and 403 is read as a lost session. `erasure` needs `console_erasure` set on the deployment |

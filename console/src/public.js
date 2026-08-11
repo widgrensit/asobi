@@ -1,16 +1,21 @@
 // `@asobi/console` - the whole surface an extension's console source may
 // import, and the only one.
 //
-// This module is frozen the way the wire is frozen. Everything it re-exports
-// is compiled into somebody else's release; a rename here breaks a build in a
-// repository this one has never seen. Everything it does *not* re-export stays
-// free to change, which is the point of having it at all rather than letting
-// extensions import `./ui.jsx` directly.
+// This module is not frozen. The extension contract is experimental until a
+// real second consumer has said what it is missing - `guides/extensions.md`
+// says so of the manifest, and this surface is younger than the manifest. What
+// it has instead of a freeze is a version: everything here is compiled into
+// somebody else's release, so removing or changing the shape of an export is a
+// CONSOLE_API_VERSION bump, and `resolveRegistry` then refuses every extension
+// written against the older number rather than rendering it half-working.
+// Adding an export is additive and cheap. Everything this module does *not*
+// re-export stays free to change without any of that, which is the point of
+// having it at all rather than letting extensions import `./ui.jsx` directly.
 //
-// Adding an export is additive and cheap. Removing or changing the shape of
-// one is a CONSOLE_API_VERSION bump, and `resolveRegistry` then refuses every
-// extension written against the older number rather than rendering it
-// half-working.
+// The obligation is wider than this file. An extension's screens are compiled
+// against React and react-router too, so the versions in `package.json` are
+// part of what a bump has to weigh - a major of either moves the surface an
+// extension was written against just as surely as renaming an export here.
 //
 // Two things an extension imports from outside this module, on purpose:
 //
@@ -27,6 +32,11 @@
 // no dynamic `import()`.
 
 export { CONSOLE_API_VERSION } from './registry.js';
+
+// The slot ids this console renders. Exported so a screen can check an id
+// against the console it is being composed into rather than against the guide
+// it was written from; an id that is not here is dropped and reported.
+export { SLOTS } from './registry.js';
 
 // The ops plane. `opsExt` is how a screen reaches its own extension's `ops/0`
 // actions; `ops` is for core's read routes.

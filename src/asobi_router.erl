@@ -14,7 +14,7 @@
 %% list, so nova_sup:init/1 compiles this route table before asobi_app:start/2
 %% has run and before any asobi process exists. Resolving here validates the
 %% installed set at the earliest possible moment. Extensions contribute no
-%% routes (ADR 0003); core owns the whole table.
+%% routes at all; core owns the whole table.
 -spec routes(atom()) -> [map()].
 routes(_Environment) ->
     _ = asobi_extensions:resolve(),
@@ -285,7 +285,7 @@ ops_routes() ->
                 methods => [get, options]
             }},
             %% The one route core owns on behalf of extensions. Extensions
-            %% contribute no routes (ADR 0003); this dispatches every action an
+            %% contribute no routes at all; this dispatches every action an
             %% installed manifest declares, exactly as one WebSocket frame type
             %% dispatches `rpc/0`. Its class is per action and comes from that
             %% manifest, so it is deliberately absent from
