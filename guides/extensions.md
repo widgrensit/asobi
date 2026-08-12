@@ -799,6 +799,32 @@ than merely discouraged: a database cascade fires below the transaction's
 control flow, so `erase_player/1` would never be called at all and the receipts
 would be destroyed silently.
 
+### Removing the package, and the rows it leaves
+
+Uninstalling an extension does not drop its tables or delete its rows: a
+package removal is a code change, not a data migration, because destroying
+player progress stays a deliberate act. But the rows outlive the code that
+swept them. The foreign key into `players.id` is still `no_action`, and nothing
+runs the extension's `erase_player/1` any more, so the next erasure of a player
+those rows reference cannot delete the `players` row - and without the policy
+below that surfaces as a bare Postgres constraint error and leaves the player
+permanently un-eraseable.
+
+Core names the blocker instead. `asobi_player_erase` catches the
+`foreign_key_violation` and returns `{error, {orphaned_extension_rows, Table}}`,
+naming the referencing table the absent package owns; the ops route
+(`POST /api/v1/ops/players/:id/erase`) answers `ops.orphaned_extension_rows`
+(409) with that table in `details`, and the guest reaper logs it. The player is
+not erased and the transaction rolls back. There are two honest ways out:
+
+- **Keep the package installed.** Its `erase_player/1` stays on the erasure
+  path and keeps sweeping, so erasure never breaks in the first place.
+- **Purge its tables.** Delete the extension's rows deliberately -
+  `asobi ext remove` (asobi-cli) prints the per-table statements derived from
+  the package's `owns/0` table claims, run by the operator. Destroying player
+  progress stays a decision, never a side effect - but so does keeping GDPR
+  erase working.
+
 ### `export_player/1`
 
 Core exports a player - `GET /api/v1/ops/players/:id/export` - and the payload

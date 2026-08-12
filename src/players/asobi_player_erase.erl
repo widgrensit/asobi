@@ -48,6 +48,20 @@ that argument rather than by oversight:
   puts personal data in it owns erasing it, which is what
   `c:asobi_extension:erase_player/1` is for.
 
+## Rows a removed extension leaves behind
+
+Core clears its own children and each *installed* extension's `erase_player/1`
+clears the extension's. A package that has been **removed** runs neither: its
+tables and rows survive the uninstall, its foreign key into `players.id` is
+still `no_action`, and the parent delete this function ends on raises against
+them. Rather than surface that as a bare `{badmatch, {pgsql_error, ...}}`, the
+delete sequence is wrapped so a `foreign_key_violation` (SQLSTATE 23503)
+becomes `{error, {orphaned_extension_rows, Table}}` - `Table` is the referencing
+table the absent package owns, read from the Postgres error. The player is not
+erased, the transaction rolls back cleanly, and the operator learns which
+package to reinstall or purge instead of reading a constraint name off a
+stacktrace. `guides/extensions.md` documents the rule where it bites.
+
 ## Atomic, never best-effort
 
 One transaction, every result asserted, so a bare `{error, _}` becomes a
@@ -79,7 +93,7 @@ idempotent, so a retry is safe. See `after_commit/1`.
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kura/include/kura.hrl").
 
--export([steps/1, after_commit/1, run/1, run/2]).
+-export([steps/1, after_commit/1, run/1, run/2, orphan_blocker/1]).
 
 -define(ACTION, ~"players.erase").
 -define(CLASS, erasure).
@@ -159,7 +173,7 @@ run(PlayerId, #{caps := Caps} = Actor) when is_binary(PlayerId) ->
 -spec erase_player(binary(), asobi_ops_auth:actor()) -> {ok, map()} | {error, term()}.
 erase_player(PlayerId, Actor) ->
     try asobi_repo:transaction(fun() -> erase_txn(PlayerId, Actor) end) of
-        {ok, Summary} ->
+        {ok, Summary} when is_map(Summary) ->
             %% Not bare `after_commit(PlayerId)`: an exception raised in a
             %% `try ... of` body escapes the `catch` below, so a gen_server
             %% timeout in one of the three evictions would answer `{error, _}`
@@ -179,6 +193,23 @@ erase_player(PlayerId, Actor) ->
             {error, {unexpected, Other}}
     catch
         Class:Reason:Stacktrace ->
+            rolled_back(PlayerId, Class, Reason, Stacktrace)
+    end.
+
+%% A foreign_key_violation that survives the whole delete sequence is a table
+%% core does not sweep - a removed extension's rows. Name it; everything else
+%% keeps the raw class/reason.
+-spec rolled_back(binary(), atom(), term(), list()) -> {error, term()}.
+rolled_back(PlayerId, Class, Reason, Stacktrace) ->
+    case orphan_blocker(Reason) of
+        {orphaned_extension_rows, Table} = Orphaned ->
+            ?LOG_ERROR(#{
+                msg => ~"player erase blocked by orphaned extension rows",
+                player_id => PlayerId,
+                table => Table
+            }),
+            {error, Orphaned};
+        not_orphaned ->
             ?LOG_ERROR(#{
                 msg => ~"player erase rolled back",
                 player_id => PlayerId,
@@ -306,3 +337,39 @@ shell_actor() ->
         caps => asobi_ops_caps:class_names(),
         attested => false
     }.
+
+-doc """
+Classify an exception raised inside the erase transaction.
+
+`{orphaned_extension_rows, Table}` when the failure was a Postgres
+`foreign_key_violation` (SQLSTATE 23503): core clears every child it owns
+before deleting `players`, so a foreign key that still refuses the parent
+delete belongs to a table core does not know about - a removed extension's.
+`Table` is the referencing table read from the error, its constraint name when
+the table is absent, and `unknown` when neither is carried. Every other failure
+is `not_orphaned` and keeps its own path. Exported for the other callers of the
+delete sequence - `m:asobi_guest_reaper` - which wrap their own transaction.
+""".
+-spec orphan_blocker(term()) -> {orphaned_extension_rows, binary() | unknown} | not_orphaned.
+orphan_blocker({badmatch, Inner}) ->
+    orphan_blocker(Inner);
+orphan_blocker({error, Inner}) ->
+    orphan_blocker(Inner);
+orphan_blocker({pgsql_error, Fields}) when is_map(Fields) ->
+    orphan_from_fields(Fields);
+orphan_blocker(_Other) ->
+    not_orphaned.
+
+-spec orphan_from_fields(map()) -> {orphaned_extension_rows, binary() | unknown} | not_orphaned.
+orphan_from_fields(#{code := ~"23503"} = Fields) ->
+    {orphaned_extension_rows, blocker_name(Fields)};
+orphan_from_fields(_Fields) ->
+    not_orphaned.
+
+-spec blocker_name(map()) -> binary() | unknown.
+blocker_name(#{table := Table}) when is_binary(Table), Table =/= ~"" ->
+    Table;
+blocker_name(#{constraint := Constraint}) when is_binary(Constraint), Constraint =/= ~"" ->
+    Constraint;
+blocker_name(_Fields) ->
+    unknown.

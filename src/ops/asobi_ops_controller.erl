@@ -106,9 +106,20 @@ erased({error, forbidden}, _Id) ->
     {asobi_error, ~"forbidden"};
 erased({error, not_found}, _Id) ->
     {asobi_error, ~"ops.not_found"};
+erased({error, {orphaned_extension_rows, Blocker}}, Id) ->
+    ?LOG_ERROR(#{
+        msg => ~"ops player erase blocked by orphaned extension rows",
+        player_id => Id,
+        table => Blocker
+    }),
+    {asobi_error, ~"ops.orphaned_extension_rows", #{table => blocker_detail(Blocker)}};
 erased({error, Reason}, Id) ->
     ?LOG_ERROR(#{msg => ~"ops player erase failed", player_id => Id, reason => Reason}),
     {asobi_error, ~"ops.erase_failed"}.
+
+-spec blocker_detail(term()) -> binary().
+blocker_detail(Table) when is_binary(Table) -> Table;
+blocker_detail(_Blocker) -> ~"unknown".
 
 %% `undefined` is "no confirmation sent", which is a different answer from a
 %% confirmation that did not match - an operator who typed the wrong name

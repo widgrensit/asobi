@@ -196,6 +196,11 @@ working and a new one reads one place: see `legacy/2`.
     },
     {~"ops.erase_failed", 500, ~"The erasure was rolled back and nothing was deleted."},
     {
+        ~"ops.orphaned_extension_rows",
+        409,
+        ~"A removed extension's rows still reference this player and block the erase. Reinstall the package so its erase sweep runs, or purge its tables."
+    },
+    {
         ~"ops.export_incomplete",
         500,
         ~"An installed extension failed to export. No export was produced."
