@@ -64,7 +64,10 @@ clauses against the same named type rather than an ad-hoc guess.
     | {dm_message, map()}
     | {notification, map()}
     | {game_message, term()}
-    | {script_error, map()}.
+    | {game_message, atom(), term()}
+    | {script_error, map()}
+    | {script_error, atom(), map()}
+    | {extension_event, atom(), binary(), map()}.
 
 -export_type([event_name/0, message/0]).
 

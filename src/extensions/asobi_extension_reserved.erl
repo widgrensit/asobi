@@ -14,10 +14,14 @@ cannot drift:
 - **tables** from every core `kura_schema` module's `table/0`, found the same
   way asobi finds an extension's schemas.
 - **queues** from every core `shigoto_worker` module's `queue/0`.
-- **rpc** from the domains of `asobi_error:core_codes/0`, plus the Lua
-  namespaces. An RPC prefix and an error domain are the same token by
-  construction (`{"code": "quests.name_taken"}`), so an extension owning the
-  `storage` prefix would mint codes inside core's closed code set.
+- **rpc** from the domains of `asobi_error:core_codes/0`, the Lua namespaces,
+  and `core_wire_prefixes/0`. An RPC prefix and an error domain are the same
+  token by construction (`{"code": "quests.name_taken"}`), so an extension
+  owning the `storage` prefix would mint codes inside core's closed code set.
+  `core_wire_prefixes/0` adds the wire frame families a code domain and a Lua
+  namespace between them miss - `session`, `presence` and `module` - so an
+  extension can neither mint a `session.*` code nor emit a `session.connected`
+  event under `asobi_extensions:emit/4`.
 
   `core_codes/0` rather than `codes/0` on purpose: `codes/0` includes the codes
   the installed extensions declare, and reserving those would tell an extension
@@ -57,7 +61,13 @@ rather than by two that can disagree.
 """.
 
 -export([
-    namespaces/0, kinds/0, route_prefixes/0, core_capabilities/0, schema_tables/1, worker_queues/1
+    namespaces/0,
+    kinds/0,
+    route_prefixes/0,
+    core_capabilities/0,
+    core_wire_prefixes/0,
+    schema_tables/1,
+    worker_queues/1
 ]).
 
 -type kind() :: tables | rpc | lua | queues | http.
@@ -77,7 +87,7 @@ namespaces() ->
         tables => schema_tables(Modules),
         queues => worker_queues(Modules),
         lua => Lua,
-        rpc => lists:usort(error_domains() ++ Lua),
+        rpc => lists:usort(error_domains() ++ Lua ++ core_wire_prefixes()),
         http => core_route_paths()
     }.
 
@@ -135,6 +145,31 @@ core_capabilities() ->
         presence,
         timers
     ].
+
+-doc """
+The core wire frame-family prefixes with no error domain and no Lua namespace.
+
+`error_domains/0` and `lua/0` between them cover most core wire frame families -
+`match.*`, `world.*`, `chat.*`, `matchmaker.*` and the rest all have an error
+code or a `game.*` namespace under the same prefix. Three do not:
+
+- `session` (`session.connected`, `session.heartbeat`),
+- `presence` (`presence.updated`),
+- `module` (`module.message`, `module.error`, `module.event`, the frames an
+  extension pushes - the last through `asobi_extensions:emit/4`).
+
+An RPC prefix, an error-code domain and an event domain are one token by
+construction, so without reserving these an extension could own `session` in
+`owns/0` and mint a `session.*` code or emit a `session.connected` event,
+colliding with a core frame family. This constant is a documented list rather
+than a derivation precisely because no core artefact names these prefixes -
+they exist only as wire type literals in `m:asobi_ws_handler`. Folded into the
+reserved `rpc` union, so the gap closes for error codes and the `module.event`
+event seam alike.
+""".
+-spec core_wire_prefixes() -> [asobi_extension:token(), ...].
+core_wire_prefixes() ->
+    [~"session", ~"presence", ~"module"].
 
 %% Every path any co-mounted application serves, prefixed as it is mounted.
 %% The compiled dispatch is `[nova, BootstrapApp | nova_apps]` (nova_sup),

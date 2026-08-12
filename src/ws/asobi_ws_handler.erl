@@ -8,7 +8,10 @@
 %% match./world. event stays inside the reserved namespace (#303), and so
 %% asobi_lua_api can reject a bad game.broadcast name against these same
 %% rules at the script's call site instead of re-stating them.
--export([reserved_event_names/0, event_name_binary/1]).
+%% `is_event_name_char/1` is the charset predicate itself, reused by
+%% `asobi_extensions:emit/4` to validate a `module.event` name's bytes against
+%% the same allowlist rather than forking a second charset notion.
+-export([reserved_event_names/0, event_name_binary/1, is_event_name_char/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -283,6 +286,27 @@ websocket_info({asobi_message, {game_message, Extension, Payload}}, State) when
     %% breaking change.
     Body = #{~"module" => atom_to_binary(Extension), ~"message" => Payload},
     {reply, extension_frames(~"module.message", ~"game.message", Body), State};
+websocket_info({asobi_message, {extension_event, Extension, Event, Data}}, State) when
+    is_atom(Extension), is_binary(Event), is_map(Data)
+->
+    %% A named, routable server->client event an extension pushes from its own
+    %% Erlang code via asobi_extensions:emit/4. Distinct from module.message
+    %% (unnamed dev messages) and module.error (dev-mode only): the producer is
+    %% in `module`, the `<domain>.<name>` event in `event`, and `data` is always
+    %% an object. Emitted as a single frame - unlike module.message it has no
+    %% pre-S6 legacy alias, so it never routes through extension_frames/3.
+    %% emit/4 has already proven Data JSON-encodable, but the encode is still
+    %% wrapped like the script_error clause: a bad term reaching here must
+    %% degrade to an error frame, never crash this player's connection process
+    %% (send/2 fans out to every session pid, so a crash drops them all).
+    Payload = #{~"module" => atom_to_binary(Extension), ~"event" => Event, ~"data" => Data},
+    Reply =
+        try
+            encode_reply(undefined, ~"module.event", Payload)
+        catch
+            _:_ -> encode_error(undefined, ~"internal")
+        end,
+    {reply, {text, Reply}, State};
 websocket_info({asobi_message, {script_error, Payload}}, State) when is_map(Payload) ->
     websocket_info({asobi_message, {script_error, ?DEFAULT_EXTENSION, Payload}}, State);
 websocket_info({asobi_message, {script_error, Extension, Payload}}, State) when
@@ -1043,7 +1067,10 @@ event_name_binary(Event) when is_binary(Event) ->
     end.
 
 %% Deliberately excludes `.` — a script must not be able to mint a deeper
-%% `world.foo.bar` sub-namespace.
+%% `world.foo.bar` sub-namespace. Spec'd over `term()`, not `byte()`: it is a
+%% `lists:all/2` predicate and must stay `fun((term()) -> boolean())` for
+%% eqwalizer, which its `_ -> false` total clause honours for any term.
+-spec is_event_name_char(term()) -> boolean().
 is_event_name_char(C) when C >= $a, C =< $z -> true;
 is_event_name_char(C) when C >= $A, C =< $Z -> true;
 is_event_name_char(C) when C >= $0, C =< $9 -> true;

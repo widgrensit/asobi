@@ -355,6 +355,24 @@ raw, because it may be any scripting value (string, number, table).
 {"type": "module.message", "payload": {"module": "lua", "message": "you are player 3"}}
 ```
 
+### `module.event` (server push)
+
+A named, routable event an extension pushes to a player from its own Erlang
+code with `asobi_extensions:emit/4`. Unlike `module.message` (an unnamed dev
+message) this frame carries a routing key clients dispatch on. It is emitted as
+a single frame with no legacy alias.
+
+`module` is the emitter's registered short name. `event` is `<domain>.<name>`,
+where `domain` is an RPC prefix the extension owns. `data` is always an object.
+
+`module` may legitimately differ from the `event` domain, because an extension
+can own an RPC prefix that is not its own name - so a consumer should key off
+whichever of the two it actually means, deliberately.
+
+```json
+{"type": "module.event", "payload": {"module": "quests", "event": "quests.completed", "data": {"quest_id": "01j8x000000000000000000042", "reward": 250}}}
+```
+
 ### `game.error` / `game.message` (server push, deprecated)
 
 The pre-rename names for the two frames above. Deprecated. **New SDK code

@@ -45,6 +45,7 @@ surfaces with Nova's crash context rather than a legible asobi error.
 
 -export([resolve/0, check/0, validate/1, describe/1, sup_specs/1, error_codes/0]).
 -export([rpc_methods/0, lua_bindings/0, ops_action/2, is_webhook_path/1]).
+-export([emit/4]).
 -ifdef(TEST).
 -export([reset/0]).
 -endif.
@@ -55,6 +56,11 @@ surfaces with Nova's crash context rather than a legible asobi error.
 -define(LUA_KEY, {?MODULE, lua_bindings}).
 -define(OPS_KEY, {?MODULE, ops_actions}).
 -define(WEBHOOK_KEY, {?MODULE, webhook_paths}).
+-define(MAX_EVENT_NAME_BYTES, 64).
+%% A `module.event` payload cap sized to the WS frame limit
+%% (asobi_ws_handler's ?WS_MAX_PAYLOAD_BYTES) so emit/4 refuses at the trust
+%% boundary what the socket would otherwise reject after the encode.
+-define(MAX_EVENT_DATA_BYTES, 65536).
 
 -doc "One resolved extension. `sup/0` is deliberately absent; see `sup_specs/1`.".
 -type extension() :: #{
@@ -195,6 +201,112 @@ pattern_matches([Pattern | PatternRest], [Segment | SegmentRest]) ->
         pattern_matches(PatternRest, SegmentRest);
 pattern_matches(_Pattern, _Segments) ->
     false.
+
+-doc """
+Push a named event to a player from an extension's own Erlang code.
+
+`Event` is `<domain>.<name>`: each half is `[A-Za-z0-9_-]` (the exact charset
+`asobi_ws_handler:is_event_name_char/1` allows, so an event name and a
+game.broadcast name are validated one way), a single dot separates them, and
+the whole is at most 64 bytes. `domain` must be an RPC prefix `Extension` owns -
+derived exactly as an error code's domain is (see `m:asobi_extension`). `Data`
+is always a JSON object; a non-map is a caller bug and fails the guard.
+
+The ownership check is namespace hygiene, not an authorization boundary: it
+stops an extension minting events in a namespace it does not own, the same
+anti-collision rule its error codes obey. Any first-party extension could call
+`asobi_presence:send/2` directly, so nothing downstream should treat a
+successful `emit/4` as proof of a privilege.
+
+On success the event reaches the player's live sessions as a `module.event`
+wire frame (`m:asobi_ws_handler`). This is an Erlang-only seam: only an
+extension's own code calls it, and it has no Lua binding.
+
+Returns `{error, asobi_error:object()}`, never a crash, for: an event name
+outside the charset/shape or over 64 bytes (`event.invalid_name`); a domain
+`Extension` does not own (`event.unowned_domain`); `Data` that is not
+JSON-encodable (`event.invalid_data`); or encoded `Data` at or over 64 KiB
+(`event.payload_too_large`). Validating encodability here - one extra encode off
+the per-tick hot path - is what keeps a bad term from reaching the socket and
+dropping every one of the player's sessions.
+""".
+-spec emit(atom(), binary(), binary(), map()) -> ok | {error, asobi_error:object()}.
+emit(Extension, PlayerId, Event, Data) when is_atom(Extension), is_binary(Event), is_map(Data) ->
+    case emit_problem(Extension, Event, Data) of
+        ok ->
+            asobi_presence:send(PlayerId, {extension_event, Extension, Event, Data}),
+            ok;
+        {error, _Object} = Error ->
+            Error
+    end.
+
+%% Each error code is a literal at its `asobi_error:object/2` call site: the
+%% shared-object contract test (`asobi_error_contract_tests`) refuses a code
+%% built from a variable, which is what stops a script- or client-supplied
+%% string ever becoming a code. Only the details map is factored out.
+emit_problem(Extension, Event, Data) ->
+    case event_domain(Event) of
+        {ok, Domain} ->
+            case emitter_owns_rpc_prefix(Extension, Domain) of
+                true ->
+                    data_problem(Data, Extension, Event);
+                false ->
+                    {error, asobi_error:object(~"event.unowned_domain", details(Extension, Event))}
+            end;
+        error ->
+            {error, asobi_error:object(~"event.invalid_name", details(Extension, Event))}
+    end.
+
+%% Prove Data encodable and within the frame cap here, at the trust boundary, so
+%% the author gets a synchronous error rather than a silent degrade on someone
+%% else's socket. The ws clause re-encodes the wrapper, so this encode is spent
+%% on validation alone - acceptable off the per-tick path for a frozen wire.
+data_problem(Data, Extension, Event) ->
+    try json:encode(Data) of
+        Encoded ->
+            case iolist_size(Encoded) >= ?MAX_EVENT_DATA_BYTES of
+                true ->
+                    {error,
+                        asobi_error:object(~"event.payload_too_large", details(Extension, Event))};
+                false ->
+                    ok
+            end
+    catch
+        _:_ -> {error, asobi_error:object(~"event.invalid_data", details(Extension, Event))}
+    end.
+
+details(Extension, Event) ->
+    #{module => atom_to_binary(Extension, utf8), event => Event}.
+
+%% `<domain>.<name>`, each half in the same charset the ws handler holds a
+%% game.broadcast name to (`asobi_ws_handler:is_event_name_char/1`), one dot,
+%% at most 64 bytes. The charset excludes `.`, so an all-charset domain and name
+%% also guarantee exactly one separator and reject non-ASCII / invalid-UTF-8
+%% bytes that would otherwise crash json:encode/1 in every subscriber's socket.
+event_domain(Event) ->
+    case is_dotted(Event) andalso byte_size(Event) =< ?MAX_EVENT_NAME_BYTES of
+        true ->
+            case binary:split(Event, ~".") of
+                [Domain, Name] ->
+                    case charset(Domain) andalso charset(Name) of
+                        true -> {ok, Domain};
+                        false -> error
+                    end;
+                _ ->
+                    error
+            end;
+        false ->
+            error
+    end.
+
+charset(Bin) ->
+    lists:all(fun asobi_ws_handler:is_event_name_char/1, binary_to_list(Bin)).
+
+emitter_owns_rpc_prefix(Extension, Domain) ->
+    case lists:search(fun(#{name := Name}) -> Name =:= Extension end, resolve()) of
+        {value, Resolved} -> lists:member(Domain, claims(Resolved, rpc));
+        false -> false
+    end.
 
 %% The codes term is written before the resolved term, so a concurrent second
 %% caller that sees ?KEY populated also sees the codes it implies.

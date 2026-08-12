@@ -88,6 +88,23 @@ working and a new one reads one place: see `legacy/2`.
     {~"rpc.unsupported_protocol", 400, ~"This server does not speak that RPC protocol version."},
     {~"rpc.invalid_params", 400, ~"`params` must be a JSON object."},
 
+    %% Extension event push. `asobi_extensions:emit/4` fails closed: an event
+    %% whose name is malformed, whose domain the emitter does not own, whose data
+    %% is not JSON-encodable, or whose encoded data is too large never reaches a
+    %% player.
+    {
+        ~"event.invalid_name",
+        400,
+        ~"An event name must be `<domain>.<name>` in [A-Za-z0-9_-], up to 64 bytes."
+    },
+    {
+        ~"event.unowned_domain",
+        403,
+        ~"The event's domain is not an RPC prefix this extension owns."
+    },
+    {~"event.invalid_data", 400, ~"The event data is not JSON-encodable."},
+    {~"event.payload_too_large", 413, ~"The event data is larger than the server accepts."},
+
     %% Accounts, providers, guests.
     {~"auth.registration_closed", 403, ~"This deployment is not accepting new players."},
     {

@@ -218,6 +218,41 @@ script_error_unencodable_payload_degrades_test() ->
     ?assertEqual(~"internal", maps:get(~"code", maps:get(~"error", Payload))),
     ?assertEqual([~"error", ~"reason"], lists:sort(maps:keys(Payload))).
 
+%% module.event (asobi_extensions:emit/4): a named, routable server->client
+%% event, distinct from the unnamed module.message dev frame. Emitted as a
+%% single frame - it has no pre-S6 legacy alias, so unlike module.message it
+%% does not dual-emit through extension_frames/3. `data` is always an object.
+extension_event_encodes_the_named_push_envelope_test() ->
+    Data = #{~"quest_id" => ~"01j8", ~"reward" => 250},
+    Msg = {asobi_message, {extension_event, quests, ~"quests.completed", Data}},
+    {reply, {text, Frame}, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(
+        #{
+            ~"type" => ~"module.event",
+            ~"payload" => #{
+                ~"module" => ~"quests",
+                ~"event" => ~"quests.completed",
+                ~"data" => Data
+            }
+        },
+        decode(Frame)
+    ).
+
+extension_event_is_a_single_frame_test() ->
+    Msg = {asobi_message, {extension_event, quests, ~"quests.completed", #{}}},
+    ?assertMatch({reply, {text, _}, _}, asobi_ws_handler:websocket_info(Msg, #{})).
+
+%% The socket safety net: emit/4 normally rejects non-encodable data, but if a
+%% bad term reaches the ws clause the encode is wrapped so it degrades to an
+%% error frame rather than crashing this connection process - send/2 fans out
+%% to every one of the player's session pids, so a crash would drop them all.
+extension_event_unencodable_data_degrades_test() ->
+    Msg = {asobi_message, {extension_event, quests, ~"x.y", #{~"k" => self()}}},
+    {reply, {text, Frame}, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    Decoded = decode(Frame),
+    ?assertEqual(~"error", maps:get(~"type", Decoded)),
+    ?assertEqual(~"internal", maps:get(~"reason", maps:get(~"payload", Decoded))).
+
 type_of({text, Raw}) ->
     #{~"type" := Type} = decode(Raw),
     Type.

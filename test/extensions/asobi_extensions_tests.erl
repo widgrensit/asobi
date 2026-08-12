@@ -26,6 +26,7 @@ extensions_test_() ->
         fun reserved_core_table_refused/0,
         fun reserved_core_queue_refused/0,
         fun reserved_rpc_prefix_refused/0,
+        fun reserved_core_wire_prefix_refused/0,
         fun claiming_outside_the_owned_set_refused/0,
         fun a_queue_is_derived_from_the_worker_that_declares_it/0,
         fun a_table_is_derived_from_the_schema_that_declares_it/0,
@@ -65,6 +66,99 @@ extensions_test_() ->
         fun a_duplicated_requires_entry_reports_once/0,
         fun a_requires_must_be_a_list_of_atoms/0
     ]}.
+
+%% emit/4 needs the quests fixture resolved (for its owned `quests` RPC prefix).
+%% asobi_presence:send/2 is meck'd with a passthrough so the produced term is
+%% observable through meck's call history - a foreach test body runs in its own
+%% process, so message-passing to the setup process would never arrive.
+emit_test_() ->
+    {foreach, fun emit_setup/0, fun emit_cleanup/1, [
+        fun emit_reaches_the_player_under_an_owned_domain/0,
+        fun emit_under_an_unowned_domain_is_refused/0,
+        fun emit_with_a_malformed_event_is_refused/0,
+        fun emit_with_a_non_ascii_event_name_is_refused/0,
+        fun emit_with_non_encodable_data_is_refused/0,
+        fun emit_with_oversized_data_is_refused/0,
+        fun emit_rejects_non_map_data/0
+    ]}.
+
+emit_setup() ->
+    asobi_extensions:reset(),
+    meck:new(asobi_presence, [passthrough, no_link]),
+    meck:expect(asobi_presence, send, fun(_PlayerId, _Message) -> ok end),
+    install(?QUESTS).
+
+emit_cleanup(_) ->
+    asobi_fixture_app:uninstall(?QUESTS),
+    meck:unload(asobi_presence),
+    asobi_extensions:reset(),
+    ok.
+
+emit_reaches_the_player_under_an_owned_domain() ->
+    Data = #{~"quest_id" => ~"01j8", ~"reward" => 250},
+    ?assertEqual(ok, asobi_extensions:emit(quests, ~"p1", ~"quests.completed", Data)),
+    ?assert(
+        meck:called(
+            asobi_presence, send, [~"p1", {extension_event, quests, ~"quests.completed", Data}]
+        )
+    ).
+
+emit_under_an_unowned_domain_is_refused() ->
+    %% quests owns the `quests` RPC prefix, not `social`.
+    {error, Object} = asobi_extensions:emit(quests, ~"p1", ~"social.pinged", #{}),
+    ?assertEqual(~"event.unowned_domain", code_of(Object)),
+    ?assertEqual(0, meck:num_calls(asobi_presence, send, ['_', '_'])).
+
+emit_with_a_malformed_event_is_refused() ->
+    OwnedButTooLong = <<"quests.", (binary:copy(~"a", 58))/binary>>,
+    ?assertEqual(65, byte_size(OwnedButTooLong)),
+    Names = [~"nodot", ~"quests.", ~".completed", ~"", ~"quests.a.b", OwnedButTooLong],
+    [
+        begin
+            {error, Object} = asobi_extensions:emit(quests, ~"p1", Name, #{}),
+            ?assertEqual(~"event.invalid_name", code_of(Object))
+        end
+     || Name <- Names
+    ],
+    ?assertEqual(0, meck:num_calls(asobi_presence, send, ['_', '_'])).
+
+%% A non-ASCII / invalid-UTF-8 byte in the name is rejected before it can reach
+%% json:encode/1 and crash every subscriber's socket. The domain is owned, so
+%% only the charset check stands between it and the wire.
+emit_with_a_non_ascii_event_name_is_refused() ->
+    {error, Object} = asobi_extensions:emit(quests, ~"p1", <<"quests.", 16#FF>>, #{}),
+    ?assertEqual(~"event.invalid_name", code_of(Object)),
+    ?assertEqual(0, meck:num_calls(asobi_presence, send, ['_', '_'])).
+
+%% A pid (or any non-JSON term) in Data raises inside json:encode/1; emit/4
+%% catches it at the boundary and returns an error rather than crashing the
+%% socket clause. Owned domain + valid name, so only encodability stands here.
+emit_with_non_encodable_data_is_refused() ->
+    {error, Object} = asobi_extensions:emit(quests, ~"p1", ~"quests.completed", #{~"pid" => self()}),
+    ?assertEqual(~"event.invalid_data", code_of(Object)),
+    ?assertEqual(0, meck:num_calls(asobi_presence, send, ['_', '_'])).
+
+%% One byte of data blob per the 64 KiB cap, plus the JSON overhead, is over it.
+emit_with_oversized_data_is_refused() ->
+    Big = #{~"blob" => binary:copy(~"a", 65536)},
+    {error, Object} = asobi_extensions:emit(quests, ~"p1", ~"quests.completed", Big),
+    ?assertEqual(~"event.payload_too_large", code_of(Object)),
+    ?assertEqual(0, meck:num_calls(asobi_presence, send, ['_', '_'])).
+
+%% The `is_map(Data)` guard has no in-type value that fails it, so the non-map
+%% arguments travel through apply/3 - which eqwalizer does not arg-check - to
+%% reach the guard at runtime without a static type error.
+emit_rejects_non_map_data() ->
+    [
+        ?assertError(
+            function_clause,
+            erlang:apply(asobi_extensions, emit, [quests, ~"p1", ~"quests.completed", NotAMap])
+        )
+     || NotAMap <- [[], 7]
+    ].
+
+code_of(#{error := #{code := Code}}) ->
+    Code.
 
 setup() ->
     asobi_extensions:reset(),
@@ -198,6 +292,16 @@ reserved_core_queue_refused() ->
 reserved_rpc_prefix_refused() ->
     tunable(#{rpc => #{~"storage.get" => {tunable_rpc, get, 2}}}),
     ?assert(lists:member({reserved_namespace, rpc, ~"storage", ?TUNABLE}, check_problems())).
+
+%% `session` and `presence` are core wire frame families with no error domain
+%% and no Lua namespace, now reserved via core_wire_prefixes/0. An extension
+%% claiming either as an owns/0 RPC prefix is refused, so it cannot forge a
+%% frame in a core family or emit an event under it.
+reserved_core_wire_prefix_refused() ->
+    tunable(#{owns => #{rpc => [~"session"]}}),
+    ?assert(lists:member({reserved_namespace, rpc, ~"session", ?TUNABLE}, check_problems())),
+    retune(#{owns => #{rpc => [~"presence"]}}),
+    ?assert(lists:member({reserved_namespace, rpc, ~"presence", ?TUNABLE}, check_problems())).
 
 claiming_outside_the_owned_set_refused() ->
     tunable(#{

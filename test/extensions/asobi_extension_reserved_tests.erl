@@ -98,6 +98,21 @@ rpc_prefixes_cover_error_domains_and_lua_test() ->
     [?assert(lists:member(N, Reserved)) || N <- Lua],
     ?assertNot(lists:member(~"quests", Reserved)).
 
+%% session.*, presence.* and module.* are core wire frame families with no
+%% error domain and no Lua namespace, so error_domains/0 and lua/0 miss their
+%% prefixes. core_wire_prefixes/0 folds them into the rpc union. Anti-drift:
+%% every prefix the constant names must land in the reserved rpc set, so a
+%% frame family added to the constant later cannot be silently unreserved.
+core_wire_prefixes_are_reserved_rpc_prefixes_test() ->
+    #{rpc := Reserved} = asobi_extension_reserved:namespaces(),
+    [
+        ?assert(lists:member(Prefix, Reserved))
+     || Prefix <- asobi_extension_reserved:core_wire_prefixes()
+    ],
+    ?assert(lists:member(~"session", Reserved)),
+    ?assert(lists:member(~"presence", Reserved)),
+    ?assert(lists:member(~"module", Reserved)).
+
 %% Deleting this env key silently removes `rebar3 asobi check` from every host.
 the_build_time_gate_is_declared_to_rebar3_test() ->
     _ = application:load(asobi),

@@ -260,6 +260,43 @@ scan_documented_reserved_names(Bin) ->
         nomatch -> []
     end.
 
+%% Every server->client frame family (the token before the first dot) must be a
+%% reserved RPC prefix. Most families are covered by an error domain or a Lua
+%% namespace; the ones that are neither (`session`, `presence`, `module`) are
+%% reserved via asobi_extension_reserved:core_wire_prefixes/0. Deriving the
+%% assertion from the emitted set means a FUTURE core frame family lacking both
+%% an error domain and a Lua namespace fails this test until it is added to the
+%% constant - the reserved_tests keep the explicit session/presence/module
+%% asserts, which catch removal from the constant.
+every_emitted_frame_family_prefix_is_reserved_test() ->
+    Emitted = enumerate_emitted_events(),
+    Prefixes = lists:usort(lists:append([wire_prefix(Type) || Type <- Emitted])),
+    #{rpc := Reserved} = asobi_extension_reserved:namespaces(),
+    Missing = Prefixes -- Reserved,
+    ?assertEqual(
+        [],
+        Missing,
+        lists:flatten(
+            io_lib:format(
+                "server->client frame family prefixes not reserved in "
+                "asobi_extension_reserved:namespaces() rpc set (add to "
+                "core_wire_prefixes/0 if the family has no error domain or Lua "
+                "namespace): ~p",
+                [Missing]
+            )
+        )
+    ).
+
+%% The bare `error` envelope has no family prefix; everything else contributes
+%% the token before its first dot.
+wire_prefix(~"error") ->
+    [];
+wire_prefix(Type) ->
+    case binary:split(Type, ~".") of
+        [Prefix, _] -> [Prefix];
+        _ -> []
+    end.
+
 match_or_world_suffix(<<"match.", Suffix/binary>>) -> {true, Suffix};
 match_or_world_suffix(<<"world.", Suffix/binary>>) -> {true, Suffix};
 match_or_world_suffix(_) -> false.
