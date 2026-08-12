@@ -23,6 +23,12 @@ fully succeed" an index scan rather than a jsonb parse.
 `{error, Reason}` is the operation that never got as far as having subjects -
 a rejected parameter, a lost connection.
 
+An extension ops handler returns `t:asobi_rpc:reply/0` and is audited without
+translation: `{ok, Map}` is the single-subject success, and `{error, Code}`
+or `{error, Code, Details}` is an operation that failed as a whole. The
+stored reason is the code; `Details` is the caller's diagnostic and already
+went to the caller.
+
 ## When the audit write itself fails
 
 **The audit never fails the operation.** It runs after the mutation has
@@ -61,7 +67,7 @@ to hide one by exploding.
 
 -type subject() :: binary().
 -type failure() :: {subject(), term()}.
--type outcome() :: {ok, [subject()], [failure()]} | {error, term()}.
+-type outcome() :: {ok, [subject()], [failure()]} | {error, term()} | asobi_rpc:reply().
 -type target() :: {binary(), subject() | undefined} | undefined.
 
 -export_type([subject/0, failure/0, outcome/0, target/0]).
@@ -194,7 +200,9 @@ target({Type, Id}) -> #{target_type => Type, target_id => Id}.
 
 -spec counts(outcome()) -> {non_neg_integer(), non_neg_integer()}.
 counts({ok, Succeeded, Failed}) -> {length(Succeeded), length(Failed)};
-counts({error, _Reason}) -> {0, 0}.
+counts({ok, Result}) when is_map(Result) -> {1, 0};
+counts({error, _Reason}) -> {0, 0};
+counts({error, _Code, _Details}) -> {0, 0}.
 
 %% A bulk call where every subject failed is not a partial success. It is
 %% recorded as `error` so the "did not fully succeed" query and the "nothing
@@ -203,7 +211,9 @@ counts({error, _Reason}) -> {0, 0}.
 classify({ok, _Succeeded, []}) -> ~"ok";
 classify({ok, [], [_ | _]}) -> ~"error";
 classify({ok, [_ | _], [_ | _]}) -> ~"partial";
-classify({error, _Reason}) -> ~"error".
+classify({ok, Result}) when is_map(Result) -> ~"ok";
+classify({error, _Reason}) -> ~"error";
+classify({error, _Code, _Details}) -> ~"error".
 
 -spec details(outcome()) -> map().
 details({ok, _Succeeded, []}) ->
@@ -217,8 +227,12 @@ details({ok, _Succeeded, Failed}) ->
         ],
         failures_omitted => length(Failed) - length(Shown)
     };
+details({ok, Result}) when is_map(Result) ->
+    #{};
 details({error, Reason}) ->
-    #{reason => reason(Reason)}.
+    #{reason => reason(Reason)};
+details({error, Code, _Details}) ->
+    #{reason => reason(Code)}.
 
 -spec reason(term()) -> binary().
 reason(Reason) when is_binary(Reason) ->

@@ -790,12 +790,10 @@ cannot write on this plane without core recording who asked. Declaring a
 method other than `get` is what opts an action in; there is nothing to
 configure.
 
-That recording is currently incomplete. Only a failure returned without
-details reaches `ops_audit_entries`; a successful call, and a failure carrying
-details, raise inside the audit path and are logged at error level as
-`ops audit row not written`, carrying the action but not the row's own
-fields. The call itself still runs and still answers normally. Ship your logs
-and treat them as part of the audit trail until that is fixed.
+A successful call is stored as outcome `ok` with a succeeded count of one. A
+failure is stored as outcome `error` whether or not it carried details, and
+the row's `details` holds the returned code; the details map itself is the
+caller's diagnostic and is not stored.
 
 While the node is still running migrations the route answers **503**
 `not_ready`, before the extension's handler runs.

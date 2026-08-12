@@ -9,6 +9,8 @@ audit_test_() ->
         fun partial_outcome_is_not_a_success/0,
         fun total_failure_is_not_partial/0,
         fun error_outcome_records_its_reason/0,
+        fun extension_reply_success_is_a_single_subject_ok/0,
+        fun extension_reply_failure_records_its_code/0,
         fun unattested_actor_is_recorded_as_unattested/0,
         fun attested_actor_is_recorded_as_attested/0,
         fun target_is_recorded_when_there_is_one/0,
@@ -81,6 +83,23 @@ error_outcome_records_its_reason() ->
     Row = record({error, invalid_subject}),
     ?assertEqual(~"error", maps:get(outcome, Row)),
     ?assertEqual(#{reason => ~"invalid_subject"}, maps:get(details, Row)).
+
+%% The rpc reply shapes an extension ops handler returns (asobi#397). Before
+%% they were accepted, a successful extension mutation raised function_clause
+%% inside the audit path and wrote no row at all.
+extension_reply_success_is_a_single_subject_ok() ->
+    Row = record({ok, #{~"defined" => ~"daily"}}),
+    ?assertEqual(~"ok", maps:get(outcome, Row)),
+    ?assertEqual(1, maps:get(succeeded_count, Row)),
+    ?assertEqual(0, maps:get(failed_count, Row)),
+    ?assertEqual(#{}, maps:get(details, Row)).
+
+extension_reply_failure_records_its_code() ->
+    Row = record({error, ~"quests.not_found", #{~"hint" => ~"use another key"}}),
+    ?assertEqual(~"error", maps:get(outcome, Row)),
+    ?assertEqual(0, maps:get(succeeded_count, Row)),
+    ?assertEqual(0, maps:get(failed_count, Row)),
+    ?assertEqual(#{reason => ~"quests.not_found"}, maps:get(details, Row)).
 
 %% An actor named only by the `x-asobi-operator` label is self-declared. The
 %% row has to say so, or every stored name implies a verification that never
