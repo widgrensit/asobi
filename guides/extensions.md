@@ -71,7 +71,7 @@ player-scoped, and no player ever holds an operator capability.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1, export_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
 
@@ -704,18 +704,42 @@ than merely discouraged: a database cascade fires below the transaction's
 control flow, so `erase_player/1` would never be called at all and the receipts
 would be destroyed silently.
 
-### There is no `export_player/1`
+### `export_player/1`
 
 Core exports a player - `GET /api/v1/ops/players/:id/export` - and the payload
-covers core's tables only. Extensions do not contribute to it, and that is a
-decision rather than a gap.
+names **every** installed extension under an `extensions` key: the data your
+`export_player/1` returned, or a `skipped` marker when you do not export one.
 
 `erase_player/1` earns its keep because the foreign key forces you to answer:
 skip it and the player row physically cannot be deleted. An export callback has
-no such forcing function, so an extension that skipped it would produce a
-silently incomplete export and nothing would fail - a worse contract than no
-contract. If one ever ships, core will have to name in the payload which
-installed extensions contributed and which did not.
+no such forcing function - an extension that skipped an unmarked one would
+produce a silently incomplete export and nothing would fail - so the artefact
+itself is the forcing function. A skipped extension is a visible marker in the
+export a data subject or auditor reads, not an absence nobody can detect.
+
+```erlang
+-spec export_player(binary()) -> {ok, #{binary() => term()}} | {error, term()}.
+export_player(PlayerId) ->
+    {ok, Rows} = asobi_repo:all(by_player(asobi_quest_progress, PlayerId)),
+    {ok, #{~"quest_progress" => [maps:with([quest_id, counter], Row) || Row <- Rows]}}.
+```
+
+The map keys are your own section names, mirroring core's per-table sections.
+Apply the same rule core does: positive allowlists via `maps:with/2`, never
+subtractive filters - an extension carrying a token or secret column is one
+schema field away from exporting it otherwise. And every row you return must
+be one this player owns - core cannot check that for you. Where one column
+holds several players' data, lift out this player's part rather than exporting
+the column whole, the way core exports only the requester's own choice from
+`votes.votes_cast`.
+
+A missing callback is a marker; a failing one fails the export. Returning
+`{error, _}`, raising, or returning a section `json:encode/1` cannot encode
+means data was promised and not delivered - exactly the silent incompleteness
+the marker exists to prevent - so the whole request answers
+`500 ops.export_incomplete` and no artefact is produced. There is no
+transaction: core's export is a sequence of plain reads, and yours run in the
+same untransacted pass, after core's own sections.
 
 ## Counters
 

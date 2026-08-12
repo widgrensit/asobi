@@ -57,20 +57,26 @@ a_refusing_extension_stops_the_whole_deletion() ->
     ),
     ?assertEqual([{quests, ?PLAYER}], asobi_fixture_erase:calls()).
 
+%% The reason is sanitised - class, truncated text, top frame without
+%% arguments - because whatever the extension raised with can hold the
+%% subject's data, and the reason reaches the log and the caller's badmatch.
 a_raising_extension_is_attributed_not_propagated() ->
     install_both(),
     ok = asobi_fixture_erase:outcome(quests, {raise, boom}),
     ?assertMatch(
-        {error, {quests, {raised, error, boom, _}}}, asobi_extension_erase:run(?PLAYER)
+        {error, {quests, {raised, error, ~"boom", _}}}, asobi_extension_erase:run(?PLAYER)
     ),
     ?assertEqual([{quests, ?PLAYER}], asobi_fixture_erase:calls()).
 
+%% Only the shape of what came back survives - an atom carries no size, so it
+%% reports as `other` - for the same reason the raise path truncates.
 a_return_outside_the_contract_is_a_failure() ->
     install_both(),
     ok = asobi_fixture_erase:outcome(quests, deleted_i_think),
     ?assertEqual(
-        {error, {quests, {bad_return, deleted_i_think}}}, asobi_extension_erase:run(?PLAYER)
-    ).
+        {error, {quests, {bad_return, other}}}, asobi_extension_erase:run(?PLAYER)
+    ),
+    ?assertEqual([{quests, ?PLAYER}], asobi_fixture_erase:calls()).
 
 install_both() ->
     ok = asobi_fixture_app:install(?QUESTS, asobi_fixture_quests_extension, []),

@@ -26,9 +26,18 @@ An extension that raises is caught rather than allowed to propagate, so the
 failure is attributed to a name before it becomes the caller's problem. Nothing
 runs after a catch: the Postgres transaction is already aborted at that point,
 and the only correct next statement is the caller's rollback.
+
+Failure reasons carry the shape of what came back - a tag and a size, a
+truncated formatted reason, the top stack frame without arguments - never the
+term itself. What an extension returns on this path can be the data subject's
+personal data, and the reason flows into the log line below and into the
+caller's badmatch; neither may hold it. `m:asobi_extension_export` applies the
+same rule.
 """.
 
 -include_lib("kernel/include/logger.hrl").
+
+-define(MAX_REASON_BYTES, 200).
 
 -export([run/1]).
 
@@ -65,8 +74,28 @@ erase_one(Module, PlayerId) ->
             try Module:erase_player(PlayerId) of
                 ok -> ok;
                 {error, Reason} -> {error, Reason};
-                Other -> {error, {bad_return, Other}}
+                Other -> {error, {bad_return, kind(Other)}}
             catch
-                Class:Reason:Stacktrace -> {error, {raised, Class, Reason, Stacktrace}}
+                Class:Reason:Stacktrace ->
+                    {error, {raised, Class, reason(Reason), top_frame(Stacktrace)}}
             end
     end.
+
+kind(Term) when is_tuple(Term), tuple_size(Term) > 0 -> {element(1, Term), tuple_size(Term)};
+kind(Term) when length(Term) >= 0 -> {list, length(Term)};
+kind(Term) when is_map(Term) -> {map, map_size(Term)};
+kind(_Term) -> other.
+
+reason(Reason) when is_binary(Reason) -> truncate(Reason);
+reason(Reason) when is_atom(Reason) -> atom_to_binary(Reason);
+reason(Reason) -> truncate(iolist_to_binary(io_lib:format("~0p", [Reason]))).
+
+truncate(Bin) when byte_size(Bin) =< ?MAX_REASON_BYTES -> Bin;
+truncate(Bin) -> <<(binary:part(Bin, 0, ?MAX_REASON_BYTES))/binary, "...">>.
+
+top_frame([{Module, Function, Arity, _Location} | _]) when is_integer(Arity) ->
+    {Module, Function, Arity};
+top_frame([{Module, Function, Args, _Location} | _]) when is_list(Args) ->
+    {Module, Function, length(Args)};
+top_frame(_Stacktrace) ->
+    undefined.

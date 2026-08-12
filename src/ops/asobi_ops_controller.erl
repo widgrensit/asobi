@@ -81,9 +81,12 @@ export_player(#{bindings := #{~"id" := Id}}) ->
         false -> {asobi_error, ~"ops.invalid_id"}
     end.
 
--spec exported({ok, map()} | {error, not_found}) -> response().
+-spec exported(
+    {ok, map()} | {error, not_found | {extension_export, asobi_extension:name(), term()}}
+) -> response().
 exported({ok, Payload}) -> {json, #{data => Payload}};
-exported({error, not_found}) -> {asobi_error, ~"ops.not_found"}.
+exported({error, not_found}) -> {asobi_error, ~"ops.not_found"};
+exported({error, {extension_export, _Name, _Reason}}) -> {asobi_error, ~"ops.export_incomplete"}.
 
 -spec confirmed_erase(binary(), binary() | undefined, asobi_ops_auth:actor()) -> response().
 confirmed_erase(_Id, undefined, _Actor) ->

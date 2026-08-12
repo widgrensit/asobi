@@ -857,6 +857,13 @@ row through a positive allowlist. Credentials are never in it: no
 bearer token. Class `player_data`, not `read` - a leaderboard view is one
 thing, and the whole of one identified person's record is another.
 
+The payload also names every installed extension under an `extensions` key:
+the data its `export_player/1` returned, or a `skipped` marker when the
+extension does not export one - a skipped extension is visible in the
+artefact, never silently absent. An extension that fails to export fails the
+whole request with `500 ops.export_incomplete`, and no partial artefact is
+returned. See [Extensions](extensions.md).
+
 `erase` deletes the player and every row core holds for them, in one
 transaction, and it cannot be undone. The body must echo the player's username
 and the server checks it against the row:

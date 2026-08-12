@@ -650,7 +650,8 @@ erase_handler_test_() ->
         {"a refused capability answers forbidden", fun erase_forbidden/0},
         {"a rolled-back erasure is a 500 code", fun erase_failed/0},
         {"export projects and never 404s a live player", fun export_ok/0},
-        {"export of an unknown player is not_found", fun export_unknown/0}
+        {"export of an unknown player is not_found", fun export_unknown/0},
+        {"a failed extension export is export_incomplete", fun export_incomplete/0}
     ]}.
 
 -define(ERASE_ID, ~"01960000-0000-7000-8000-000000000009").
@@ -750,5 +751,16 @@ export_unknown() ->
     meck:expect(asobi_player_export, run, fun(?ERASE_ID) -> {error, not_found} end),
     ?assertEqual(
         {asobi_error, ~"ops.not_found"},
+        asobi_ops_controller:export_player(#{bindings => #{~"id" => ?ERASE_ID}})
+    ).
+
+%% Fail loudly and retry beats a partial export presented as complete: an
+%% extension failure is a 500 code, never a payload missing a section.
+export_incomplete() ->
+    meck:expect(asobi_player_export, run, fun(?ERASE_ID) ->
+        {error, {extension_export, quests, db_down}}
+    end),
+    ?assertEqual(
+        {asobi_error, ~"ops.export_incomplete"},
         asobi_ops_controller:export_player(#{bindings => #{~"id" => ?ERASE_ID}})
     ).

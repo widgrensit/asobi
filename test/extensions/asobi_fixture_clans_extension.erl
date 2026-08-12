@@ -2,7 +2,7 @@
 -moduledoc "A second extension, whose application depends on the first, so ordering is observable.".
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0, erase_player/1]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, erase_player/1, export_player/1]).
 
 -spec info() -> asobi_extension:info().
 info() ->
@@ -46,3 +46,7 @@ owns() ->
 -spec erase_player(binary()) -> ok | {error, term()}.
 erase_player(PlayerId) ->
     asobi_fixture_erase:run(clans, PlayerId).
+
+-spec export_player(binary()) -> {ok, #{binary() => term()}} | {error, term()}.
+export_player(PlayerId) ->
+    asobi_fixture_export:run(clans, PlayerId).
