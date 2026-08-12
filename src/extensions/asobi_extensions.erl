@@ -246,7 +246,13 @@ resolve_now() ->
 Discover, read and validate without memoising.
 
 The build-time gate (`rebar3 asobi check`) and the boot backstop run exactly
-this, so the two can never disagree.
+this, so the two can never disagree on anything derived from the loaded
+application set. The one env-dependent input is the co-mounted `http` reserved
+set, which reads `nova_apps`: the `m:rebar3_asobi_check` plugin sets it from
+the host's release sys_config before calling this, so the gate matches boot,
+and falls back to reserving nothing extra only when that config cannot be
+read - in which case boot, which does load sys.config, remains the backstop
+that refuses.
 """.
 -spec check() -> {ok, [extension()]} | {error, [problem(), ...]}.
 check() ->

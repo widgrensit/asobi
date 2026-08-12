@@ -29,6 +29,9 @@ version in `project_plugins`. Pin it to the same tag as the dependency.
 -behaviour(provider).
 
 -export([init/1, do/1, format_error/1]).
+-ifdef(TEST).
+-export([co_mounted_from_config/1]).
+-endif.
 
 -define(PROVIDER, check).
 -define(NAMESPACE, asobi).
@@ -60,6 +63,7 @@ init(State) ->
 -spec do(term()) -> {ok, term()} | {error, string()}.
 do(State) ->
     ok = load_apps(rebar_state:project_apps(State) ++ rebar_state:all_deps(State)),
+    ok = reserve_co_mounted_apps(State),
     case asobi_extensions:check() of
         {ok, []} ->
             rebar_api:info("asobi: no extensions installed", []),
@@ -94,6 +98,83 @@ load_app(AppInfo) ->
     _ = code:add_pathz(rebar_app_info:ebin_dir(AppInfo)),
     _ = application:load(binary_to_atom(rebar_app_info:name(AppInfo), utf8)),
     ok.
+
+%% The boot path reserves every co-mounted application's routes - nova plus
+%% the bootstrap app's `nova_apps` - so `/health` and its siblings cannot be
+%% claimed. This VM never loads sys.config, so without this the gate would
+%% see no `nova_apps`, pass a `/health` claim the node refuses at boot, and
+%% make `check/0`'s "build gate and boot backstop can never disagree" a lie.
+%% Read the same two keys the boot path reads out of the release sys_config
+%% and set them for the check. Defensive by design: an unreadable or
+%% templated (`.src`) config falls back to reserving nothing extra - which is
+%% also the correct answer for a project that declares no `nova_apps` - and
+%% never crashes the build.
+reserve_co_mounted_apps(State) ->
+    try
+        case sys_config(State) of
+            {ok, Config} ->
+                apply_co_mounted(co_mounted_from_config(Config));
+            none ->
+                ok
+        end
+    catch
+        Class:Reason ->
+            rebar_api:debug("asobi: could not read nova_apps from config (~p:~p)", [Class, Reason]),
+            ok
+    end.
+
+apply_co_mounted({ok, Bootstrap, NovaApps}) ->
+    %% Set nova's env last so `application:load(nova)` cannot reset it from
+    %% the .app, and set it at all because `nova:get_env/2` - the boot path's
+    %% own read - keys `nova_apps` off nova's `bootstrap_application`.
+    _ = application:load(nova),
+    ok = application:set_env(Bootstrap, nova_apps, NovaApps),
+    ok = application:set_env(nova, bootstrap_application, Bootstrap);
+apply_co_mounted(none) ->
+    ok.
+
+%% The release sys_config, from relx config in the host's rebar.config. A
+%% plain `.config` consults; a `.src` with templating does not, and falls
+%% through to the next candidate or to `none`.
+sys_config(State) ->
+    Relx = rebar_state:get(State, relx, []),
+    Paths = [P || {sys_config, P} <- Relx] ++ [P || {sys_config_src, P} <- Relx],
+    first_consultable(Paths).
+
+first_consultable([]) ->
+    none;
+first_consultable([Path | Rest]) ->
+    case filelib:is_regular(Path) andalso file:consult(Path) of
+        {ok, [Config]} when is_list(Config) -> {ok, Config};
+        _ -> first_consultable(Rest)
+    end.
+
+-doc """
+`nova`'s `bootstrap_application` and that app's `nova_apps`, the two keys
+`nova_sup` uses to build the compiled dispatch, or `none` when the config
+names no bootstrap app or an empty `nova_apps`. Pure, so the parse is tested
+without a rebar state.
+""".
+-spec co_mounted_from_config([{atom(), [{atom(), term()}]}]) ->
+    {ok, atom(), [atom()]} | none.
+co_mounted_from_config(Config) ->
+    case proplists:get_value(bootstrap_application, env(nova, Config)) of
+        Bootstrap when is_atom(Bootstrap), Bootstrap =/= undefined ->
+            case proplists:get_value(nova_apps, env(Bootstrap, Config)) of
+                [_ | _] = NovaApps -> {ok, Bootstrap, [App || App <- NovaApps, is_atom(App)]};
+                _ -> none
+            end;
+        _ ->
+            none
+    end.
+
+%% One app's env from a sys_config, or `[]` - narrowed to a list so the
+%% proplist reads above stay well-typed against an untyped config term.
+env(App, Config) ->
+    case proplists:get_value(App, Config, []) of
+        KVs when is_list(KVs) -> KVs;
+        _ -> []
+    end.
 
 report(Extensions) ->
     rebar_api:info("asobi: ~b extension(s), in migration order", [length(Extensions)]),
