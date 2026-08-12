@@ -640,6 +640,23 @@ everyone out - see [Clustering](clustering.md) and
 [Operator console](console.md), which owns turning it on, signing in, what the
 screens show and the troubleshooting.
 
+## Storage
+
+Cloud saves and the generic key-value store, served at `/api/v1/saves*` and
+`/api/v1/storage*` and exposed to Lua as `game.storage.*`. On by default; set
+`storage` to `false` to switch the whole subsystem off - the opposite default
+to the console, which is off until asked for.
+
+```erlang
+{storage, false}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `storage` | `true` | Serve the storage subsystem. When `false` the seven `/saves` and `/storage` routes answer 404 and the `game.storage.*` Lua namespace is withheld at VM install |
+
+It has no environment variable; set it in `sys.config`.
+
 ## Vote templates
 
 Reusable vote configurations, merged with the per-vote config from your game

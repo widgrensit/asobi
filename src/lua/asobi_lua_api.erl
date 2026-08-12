@@ -39,7 +39,7 @@ game.leaderboard.around(board_id, player_id, count)
 game.notify(player_id, type, subject, data)
 game.notify_many(player_ids, type, subject, data)
 
--- Key-Value Storage
+-- Key-Value Storage (withheld when storage is off; asobi_storage:enabled/0)
 game.storage.get(collection, key)
 game.storage.set(collection, key, value)
 game.storage.player_get(player_id, collection, key)
@@ -127,9 +127,21 @@ install_pure(Ctx, St0) ->
 %% installing `game.quests.progress` into a nil `game.quests` raises.
 create_tables(Ctx, St) ->
     create_namespaces(
-        asobi_lua_surface:reserved_namespaces() ++ extension_namespaces(Ctx),
+        [Ns || Ns <- asobi_lua_surface:reserved_namespaces(), storage_available(Ns)] ++
+            extension_namespaces(Ctx),
         St
     ).
+
+%% Storage is the one core namespace with a release-level off switch
+%% (asobi_storage:enabled/0). When it is off, neither the `game.storage` table
+%% nor its four bindings are installed - a script indexing `game.storage` then
+%% hits a nil-index Lua error, the twin of the HTTP 404 asobi_storage_controller
+%% answers. Gated here so install/2 and install_pure/2 (both build via
+%% create_tables and api_surface) withhold it together; the name stays reserved
+%% (asobi_lua_surface) whether or not it is installed.
+-spec storage_available([binary(), ...]) -> boolean().
+storage_available([~"game", ~"storage" | _]) -> asobi_storage:enabled();
+storage_available(_Path) -> true.
 
 create_namespaces([], St) ->
     St;
@@ -145,6 +157,13 @@ api_fns(Ctx, Mode) ->
 %% a resource; `none` only reads or computes.
 -spec api_surface(map()) -> [{[binary(), ...], asobi_lua_surface:effect(), function()}].
 api_surface(Ctx) ->
+    [
+        Entry
+     || {Path, _, _} = Entry <- core_surface(Ctx) ++ extension_surface(Ctx), storage_available(Path)
+    ].
+
+-spec core_surface(map()) -> [{[binary(), ...], asobi_lua_surface:effect(), function()}].
+core_surface(Ctx) ->
     [
         %% Core
         {[~"game", ~"id"], none, fun_id()},
@@ -188,7 +207,7 @@ api_surface(Ctx) ->
         %% Terrain
         {[~"game", ~"terrain", ~"get_chunk"], none, fun_terrain_get_chunk(Ctx)},
         {[~"game", ~"terrain", ~"preload"], terrain_effect(Ctx), fun_terrain_preload(Ctx)}
-    ] ++ extension_surface(Ctx).
+    ].
 
 %%--------------------------------------------------------------------
 %% Extension namespaces (asobi_extension:lua/0)

@@ -109,7 +109,12 @@ api_test_() ->
         {"probe ctx: game.storage.get still runs for real", fun probe_storage_get_live/0},
         {"probe ctx: game.chat.send is inert", fun probe_chat_send_inert/0},
         {"install creates exactly the reserved namespaces", fun install_creates_reserved/0},
-        {"probe install creates the same namespaces", fun probe_install_creates_reserved/0}
+        {"probe install creates the same namespaces", fun probe_install_creates_reserved/0},
+        {"storage on by default installs game.storage", fun storage_enabled_installs_namespace/0},
+        {"storage off withholds game.storage at install",
+            fun storage_disabled_withholds_namespace/0},
+        {"storage off withholds game.storage in a probe VM too",
+            fun storage_disabled_withholds_namespace_probe/0}
     ]}.
 
 setup() ->
@@ -962,6 +967,51 @@ probe_install_creates_reserved() ->
     Reserved = lists:sort(asobi_lua_surface:reserved_namespaces()),
     ?assertEqual(Reserved, lists:sort(namespace_tables(St))),
     ?assertEqual(Reserved, lists:sort(populated_namespaces(St))).
+
+%% --- Storage off switch (asobi_storage:enabled/0) ---
+%%
+%% When storage is disabled at the release level the `game.storage` table is
+%% not pre-created and its four bindings are not installed, so a script that
+%% indexes `game.storage` gets a nil-index error. Both install/2 and
+%% install_pure/2 honour the switch. The name stays reserved either way.
+
+storage_enabled_installs_namespace() ->
+    with_storage(true, fun() ->
+        St = install_api(),
+        ?assert(lists:member([~"game", ~"storage"], namespace_tables(St))),
+        ?assert(lists:member([~"game", ~"storage"], populated_namespaces(St))),
+        Code = "local r = game.storage.get('c', 'k')\nreturn r.error ~= nil",
+        {ok, [true | _], _} = eval(Code, St)
+    end).
+
+storage_disabled_withholds_namespace() ->
+    with_storage(false, fun() ->
+        St = install_api(),
+        ?assertNot(lists:member([~"game", ~"storage"], namespace_tables(St))),
+        ?assertNot(lists:member([~"game", ~"storage"], populated_namespaces(St))),
+        %% The rest of the surface is untouched.
+        ?assert(lists:member([~"game", ~"economy"], namespace_tables(St)))
+    end).
+
+storage_disabled_withholds_namespace_probe() ->
+    with_storage(false, fun() ->
+        St = install_api_probe(),
+        ?assertNot(lists:member([~"game", ~"storage"], namespace_tables(St))),
+        ?assertNot(lists:member([~"game", ~"storage"], populated_namespaces(St)))
+    end).
+
+-spec with_storage(boolean(), fun(() -> term())) -> term().
+with_storage(Value, Fun) ->
+    Was = application:get_env(asobi, storage),
+    try
+        application:set_env(asobi, storage, Value),
+        Fun()
+    after
+        case Was of
+            {ok, Prev} -> application:set_env(asobi, storage, Prev);
+            undefined -> application:unset_env(asobi, storage)
+        end
+    end.
 
 %% `game` itself plus every table-valued field on it.
 namespace_tables(St) ->

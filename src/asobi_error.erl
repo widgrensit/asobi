@@ -229,13 +229,20 @@ working and a new one reads one place: see `legacy/2`.
     {~"console.not_found", 404, ~"No console resource exists at this path."},
     {~"console.not_built", 503, ~"The console bundle is not built into this release."},
 
-    %% Cloud saves.
+    %% Cloud saves. save.not_found is also what the slot-keyed /saves routes
+    %% return when storage is switched off at the release level
+    %% (asobi_storage:enabled/0), so a disabled deployment reads the same as an
+    %% empty one - see asobi_storage_controller.
     {~"save.not_found", 404, ~"No cloud save exists in this slot."},
     {~"save.too_large", 413, ~"The save data is larger than the per-slot limit."},
     {~"save.version_conflict", 409, ~"The slot was written by another client."},
     {~"save.slot_limit_reached", 409, ~"The player has no free cloud-save slots."},
 
-    %% Generic storage.
+    %% Generic storage. storage.not_found is also what the /storage routes
+    %% return when storage is switched off (asobi_storage:enabled/0), the
+    %% collection/key counterpart to save.not_found for the /saves routes: each
+    %% family answers with its own genuine-miss code so the off-state cannot be
+    %% fingerprinted against an enabled but empty deployment.
     {~"storage.not_found", 404, ~"No object exists at this collection and key."},
     {~"storage.forbidden", 403, ~"The object's permissions do not allow this."},
     {~"storage.value_too_large", 413, ~"The value is larger than the per-object limit."},

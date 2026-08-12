@@ -381,6 +381,9 @@ that evaluates on a *running* node, and `asobi_lua_validate:cli/1` ends in
 
 - **The console is off** unless you turned it on. Leave it off if nobody needs
   it; if you turn it on, put it behind the proxy restriction above.
+- **Storage is on** unless you set `{storage, false}`. Off, the `/saves` and
+  `/storage` routes answer 404 and Lua's `game.storage.*` is withheld - see
+  [Configuration](configuration.md#storage).
 - **Guest auth is off** until the game declares `guest_auth = true` in its Lua
   *and* the operator configures a pepper of at least 32 bytes. Both halves are
   required (ADR 0004), and the operator half currently needs a `sys.config`:

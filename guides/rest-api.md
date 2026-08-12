@@ -368,6 +368,10 @@ PUT    /api/v1/storage/:collection/:key        Write object
 DELETE /api/v1/storage/:collection/:key        Delete object
 ```
 
+The whole subsystem is on by default and switches off with `{storage, false}`;
+off, all seven routes answer 404 - see
+[Configuration](configuration.md#storage).
+
 ## Ops
 
 ```

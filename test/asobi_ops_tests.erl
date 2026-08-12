@@ -629,6 +629,23 @@ features_capability_reflects_configuration_test() ->
         end
     end.
 
+%% Storage is on by default (asobi_storage:enabled/0), unlike the configured
+%% capabilities above which are off until set. `false` is the only value that
+%% reports it disabled.
+features_reports_the_storage_switch_test() ->
+    Original = application:get_env(asobi, storage),
+    try
+        application:unset_env(asobi, storage),
+        ?assertEqual(true, capability_enabled(~"storage")),
+        application:set_env(asobi, storage, false),
+        ?assertEqual(false, capability_enabled(~"storage"))
+    after
+        case Original of
+            {ok, Value} -> application:set_env(asobi, storage, Value);
+            undefined -> application:unset_env(asobi, storage)
+        end
+    end.
+
 capability_enabled(Name) ->
     [Enabled] = [
         E

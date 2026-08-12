@@ -3,7 +3,15 @@
 
 -include_lib("kura/include/kura.hrl").
 
--export([table/0, fields/0, associations/0, indexes/0, generate_id/0]).
+-export([enabled/0, table/0, fields/0, associations/0, indexes/0, generate_id/0]).
+
+%% Storage is on unless a release explicitly sets `storage` to `false` - the
+%% opposite default to the console (m:asobi_console), which is off until asked
+%% for. When off the seven HTTP routes answer 404 and the game.storage.* Lua
+%% namespace is withheld at VM install.
+-spec enabled() -> boolean().
+enabled() ->
+    application:get_env(asobi, storage, true) =:= true.
 
 -spec table() -> binary().
 table() -> ~"storage".
