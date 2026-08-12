@@ -81,9 +81,6 @@ export_player(#{bindings := #{~"id" := Id}}) ->
         false -> {asobi_error, ~"ops.invalid_id"}
     end.
 
-%% The walker has already logged the failing extension and the reason, so this
-%% clause only states the outcome: fail loudly and retry beats a partial
-%% export presented as complete.
 -spec exported(
     {ok, map()} | {error, not_found | {extension_export, asobi_extension:name(), term()}}
 ) -> response().

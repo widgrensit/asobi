@@ -12,7 +12,9 @@ Every row goes through a `maps:with/2` projection, modelled on
 `asobi_ops_players:project/1`. `players` carries `hashed_password`, so a
 subtractive filter is one schema field away from exporting a credential;
 `player_tokens` carries live bearer tokens, so the export reports that a
-session existed and when, never the token itself.
+session existed and when, never the token itself. A guest identity's
+`provider_metadata` is the device-secret verifier, so only its `revoked` flag
+is exported.
 
 ## The two tables with no foreign key
 
@@ -128,21 +130,33 @@ player(Row) ->
         Row
     ).
 
+%% A guest identity's `provider_metadata` is the credential verifier itself -
+%% salt, key id, HMAC verifier, written by the guest controller - so only its
+%% `revoked` flag survives. Other providers' metadata is descriptive profile
+%% data and passes through.
 -spec identity(map()) -> map().
 identity(Row) ->
-    maps:with(
+    Projected = maps:with(
         [
             id,
             provider,
             provider_uid,
             provider_email,
             provider_display_name,
-            provider_metadata,
             inserted_at,
             updated_at
         ],
         Row
-    ).
+    ),
+    Metadata = identity_metadata(
+        maps:get(provider, Row, undefined), maps:get(provider_metadata, Row, #{})
+    ),
+    Projected#{provider_metadata => Metadata}.
+
+-spec identity_metadata(term(), term()) -> map().
+identity_metadata(~"guest", Metadata) when is_map(Metadata) -> maps:with([~"revoked"], Metadata);
+identity_metadata(_Provider, Metadata) when is_map(Metadata) -> Metadata;
+identity_metadata(_Provider, _Metadata) -> #{}.
 
 -spec stats(map()) -> map().
 stats(Row) ->

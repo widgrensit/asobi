@@ -71,7 +71,7 @@ player-scoped, and no player ever holds an operator capability.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1]).
+-export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1, export_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
 
@@ -727,12 +727,17 @@ export_player(PlayerId) ->
 The map keys are your own section names, mirroring core's per-table sections.
 Apply the same rule core does: positive allowlists via `maps:with/2`, never
 subtractive filters - an extension carrying a token or secret column is one
-schema field away from exporting it otherwise.
+schema field away from exporting it otherwise. And every row you return must
+be one this player owns - core cannot check that for you. Where one column
+holds several players' data, lift out this player's part rather than exporting
+the column whole, the way core exports only the requester's own choice from
+`votes.votes_cast`.
 
 A missing callback is a marker; a failing one fails the export. Returning
-`{error, _}` or raising means data was promised and not delivered - exactly the
-silent incompleteness the marker exists to prevent - so the whole request
-answers `500 ops.export_incomplete` and no artefact is produced. There is no
+`{error, _}`, raising, or returning a section `json:encode/1` cannot encode
+means data was promised and not delivered - exactly the silent incompleteness
+the marker exists to prevent - so the whole request answers
+`500 ops.export_incomplete` and no artefact is produced. There is no
 transaction: core's export is a sequence of plain reads, and yours run in the
 same untransacted pass, after core's own sections.
 

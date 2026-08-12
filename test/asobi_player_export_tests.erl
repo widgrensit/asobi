@@ -15,6 +15,8 @@ export_test_() ->
         {"votes are matched by jsonb key existence", fun votes_by_key_existence/0},
         {"a vote exports this player's choice and nobody else's",
             fun votes_do_not_leak_other_voters/0},
+        {"a guest identity exports its revoked flag and never the verifier",
+            fun guest_identity_metadata_is_projected/0},
         {"every installed extension is named, contributor or not",
             fun extensions_are_named_contributor_or_not/0},
         {"a failing extension export fails the whole export",
@@ -172,6 +174,38 @@ asobi_player_export_probe(PlayerId) ->
     meck:expect(asobi_repo, get, fun(asobi_player, _) -> {ok, player_row()} end),
     {ok, #{votes := [Vote]}} = asobi_player_export:run(PlayerId),
     Vote.
+
+%% A guest identity's `provider_metadata` is the credential verifier itself -
+%% salt, key id, HMAC verifier - so exporting it whole would hand out the
+%% means to resume the session. Only `revoked` survives.
+guest_identity_metadata_is_projected() ->
+    meck:expect(asobi_repo, all, fun(#kura_query{from = Schema}) ->
+        case Schema of
+            asobi_player_identity -> {ok, [guest_identity_row()]};
+            _ -> {ok, []}
+        end
+    end),
+    {ok, #{identities := [Identity]}} = asobi_player_export:run(?PLAYER),
+    ?assertEqual(#{~"revoked" => false}, maps:get(provider_metadata, Identity)),
+    Flat = iolist_to_binary(io_lib:format("~p", [Identity])),
+    ?assertEqual(nomatch, binary:match(Flat, ~"a-base64-salt")),
+    ?assertEqual(nomatch, binary:match(Flat, ~"a-base64-verifier")).
+
+guest_identity_row() ->
+    #{
+        id => ~"i-1",
+        player_id => ?PLAYER,
+        provider => ~"guest",
+        provider_uid => ~"device-1",
+        provider_metadata => #{
+            ~"salt" => ~"a-base64-salt",
+            ~"key_id" => ~"k1",
+            ~"verifier" => ~"a-base64-verifier",
+            ~"revoked" => false
+        },
+        inserted_at => {{2026, 1, 1}, {0, 0, 0}},
+        updated_at => {{2026, 1, 1}, {0, 0, 0}}
+    }.
 
 %% The payload names every installed extension, whether or not it contributed:
 %% a skipped callback is a visible marker in the artefact, never a silent

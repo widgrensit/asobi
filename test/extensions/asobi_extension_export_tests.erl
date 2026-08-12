@@ -14,7 +14,8 @@ export_test_() ->
         fun every_extension_exports_in_dependency_order/0,
         fun a_refusing_extension_fails_the_whole_export/0,
         fun a_raising_extension_is_attributed_not_propagated/0,
-        fun a_return_outside_the_contract_is_a_failure/0
+        fun a_return_outside_the_contract_is_a_failure/0,
+        fun a_section_that_cannot_be_encoded_fails_the_export/0
     ]}.
 
 setup() ->
@@ -66,20 +67,35 @@ a_refusing_extension_fails_the_whole_export() ->
     ?assertEqual({error, {quests, db_down}}, asobi_extension_export:run(?PLAYER)),
     ?assertEqual([{quests, ?PLAYER}], asobi_fixture_export:calls()).
 
+%% The reason is sanitised - class, truncated text, top frame without
+%% arguments - because whatever the extension raised with can hold the
+%% subject's data, and the reason reaches the log and the caller's error.
 a_raising_extension_is_attributed_not_propagated() ->
     install_both(),
     ok = asobi_fixture_export:outcome(quests, {raise, boom}),
     ?assertMatch(
-        {error, {quests, {raised, error, boom, _}}}, asobi_extension_export:run(?PLAYER)
+        {error, {quests, {raised, error, ~"boom", _}}}, asobi_extension_export:run(?PLAYER)
     ),
     ?assertEqual([{quests, ?PLAYER}], asobi_fixture_export:calls()).
 
+%% Only the shape of what came back - a tag and a size - survives, for the
+%% same reason the raise path truncates.
 a_return_outside_the_contract_is_a_failure() ->
     install_both(),
     ok = asobi_fixture_export:outcome(quests, {ok, not_a_map}),
     ?assertEqual(
-        {error, {quests, {bad_return, {ok, not_a_map}}}}, asobi_extension_export:run(?PLAYER)
-    ).
+        {error, {quests, {bad_return, {ok, 2}}}}, asobi_extension_export:run(?PLAYER)
+    ),
+    ?assertEqual([{quests, ?PLAYER}], asobi_fixture_export:calls()).
+
+%% The export is served as one JSON object, so a section json:encode/1
+%% refuses must fail here, attributed to its extension - not as an
+%% unattributed 500 after the payload has already left the controller.
+a_section_that_cannot_be_encoded_fails_the_export() ->
+    install_both(),
+    ok = asobi_fixture_export:outcome(quests, {ok, #{~"where" => {59.3, 18.1}}}),
+    ?assertMatch({error, {quests, _}}, asobi_extension_export:run(?PLAYER)),
+    ?assertEqual([{quests, ?PLAYER}], asobi_fixture_export:calls()).
 
 install_both() ->
     ok = asobi_fixture_app:install(?QUESTS, asobi_fixture_quests_extension, []),

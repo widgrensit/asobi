@@ -15,16 +15,27 @@ A missing callback is a marker; a failing callback fails the export. An
 extension that exports the callback and then returns `{error, _}` or raises
 promised data and could not deliver it - exactly the silent incompleteness the
 marker exists to prevent - so the caller must produce no artefact. Fail loudly
-and retry beats a partial export presented as complete.
+and retry beats a partial export presented as complete. A section
+`json:encode/1` refuses is the same failure: the export is served as one JSON
+object, so an unencodable term would otherwise become an unattributed 500
+after the payload had already left the controller.
 
 No transaction: core's own export is a sequence of plain reads with no
 transaction around them, and wrapping only this walk in one would buy
 consistency with nothing. An extension that raises is caught rather than
 allowed to propagate, so the failure is attributed to a name before it becomes
 the caller's problem.
+
+Failure reasons carry the shape of what came back - a tag and a size, a
+truncated formatted reason, the top stack frame without arguments - never the
+term itself. What an extension returns on this path is the data subject's
+personal data, and a reason term flows into the log line below and into the
+caller's error; neither may hold what the export refused to produce.
 """.
 
 -include_lib("kernel/include/logger.hrl").
+
+-define(MAX_REASON_BYTES, 200).
 
 -export([run/1]).
 
@@ -62,10 +73,38 @@ export_one(Module, PlayerId) ->
             {ok, #{skipped => ~"export_player/1 not exported"}};
         true ->
             try Module:export_player(PlayerId) of
-                {ok, Data} when is_map(Data) -> {ok, #{data => Data}};
+                {ok, Data} when is_map(Data) -> encodable(Data);
                 {error, Reason} -> {error, Reason};
-                Other -> {error, {bad_return, Other}}
+                Other -> {error, {bad_return, kind(Other)}}
             catch
-                Class:Reason:Stacktrace -> {error, {raised, Class, Reason, Stacktrace}}
+                Class:Reason:Stacktrace ->
+                    {error, {raised, Class, reason(Reason), top_frame(Stacktrace)}}
             end
     end.
+
+encodable(Data) ->
+    try
+        _ = json:encode(Data),
+        {ok, #{data => Data}}
+    catch
+        error:Reason -> {error, {not_encodable, reason(Reason)}}
+    end.
+
+kind(Term) when is_tuple(Term), tuple_size(Term) > 0 -> {element(1, Term), tuple_size(Term)};
+kind(Term) when length(Term) >= 0 -> {list, length(Term)};
+kind(Term) when is_map(Term) -> {map, map_size(Term)};
+kind(_Term) -> other.
+
+reason(Reason) when is_binary(Reason) -> truncate(Reason);
+reason(Reason) when is_atom(Reason) -> atom_to_binary(Reason);
+reason(Reason) -> truncate(iolist_to_binary(io_lib:format("~0p", [Reason]))).
+
+truncate(Bin) when byte_size(Bin) =< ?MAX_REASON_BYTES -> Bin;
+truncate(Bin) -> <<(binary:part(Bin, 0, ?MAX_REASON_BYTES))/binary, "...">>.
+
+top_frame([{Module, Function, Arity, _Location} | _]) when is_integer(Arity) ->
+    {Module, Function, Arity};
+top_frame([{Module, Function, Args, _Location} | _]) when is_list(Args) ->
+    {Module, Function, length(Args)};
+top_frame(_Stacktrace) ->
+    undefined.
