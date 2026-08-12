@@ -5,7 +5,7 @@ and colliding shape instead of a file per case.
 """.
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, routes/0]).
+-export([info/0, requires/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, routes/0]).
 -export([set/1, clear/0]).
 
 -define(KEY, {?MODULE, manifest}).
@@ -22,6 +22,10 @@ clear() ->
 -spec info() -> asobi_extension:info().
 info() ->
     value(info, #{name => tunable, extension_version => 1}).
+
+-spec requires() -> [asobi_extension:name()].
+requires() ->
+    value(requires, []).
 
 -spec rpc() -> asobi_extension:rpc().
 rpc() ->

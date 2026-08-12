@@ -1,12 +1,23 @@
 -module(asobi_fixture_clans_extension).
--moduledoc "A second extension, whose application depends on the first, so ordering is observable.".
+-moduledoc """
+A second extension, whose application depends on the first, so ordering is
+observable, and whose `requires/0` names the first, so the requires
+provider-before-requirer rule is observable on the same install.
+""".
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0, erase_player/1, export_player/1]).
+-export([info/0, requires/0, rpc/0, lua/0, sup/0, owns/0, erase_player/1, export_player/1]).
 
 -spec info() -> asobi_extension:info().
 info() ->
     #{name => clans, extension_version => 2}.
+
+%% Depends on the quests extension by name. Satisfied when clans's application
+%% also depends on quests's (quests then resolves first); an out-of-order
+%% problem when it does not.
+-spec requires() -> [asobi_extension:name()].
+requires() ->
+    [quests].
 
 -spec rpc() -> asobi_extension:rpc().
 rpc() ->

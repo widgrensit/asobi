@@ -62,6 +62,7 @@ surfaces with Nova's crash context rather than a legible asobi error.
     module := module(),
     name := asobi_extension:name(),
     extension_version := pos_integer(),
+    requires := [asobi_extension:name()],
     rpc := asobi_extension:rpc(),
     ops := asobi_extension:ops(),
     lua := asobi_extension:lua(),
@@ -78,7 +79,10 @@ surfaces with Nova's crash context rather than a legible asobi error.
     | {undeclared_claim, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}
     | {route_conflict, {asobi_extension:token(), atom()}, {asobi_extension:token(), atom()}}
     | {reserved_route, asobi_extension:token(), asobi_extension:token(), atom()}
-    | {reserved_prefix, asobi_extension:token(), asobi_extension:token(), atom()}.
+    | {reserved_prefix, asobi_extension:token(), asobi_extension:token(), atom()}
+    | {unsatisfied_requirement, atom(), asobi_extension:name()}
+    | {requirement_out_of_order, atom(), asobi_extension:name()}
+    | {self_requirement, atom(), asobi_extension:name()}.
 
 -doc "One `lua/0` binding with the namespace and function name it was declared under.".
 -type binding() :: #{
@@ -379,6 +383,7 @@ read_one(App, Module) ->
 read_manifest(App, Module) ->
     Reads = [
         {info, call(Module, info, undefined)},
+        {requires, call(Module, requires, [])},
         {rpc, call(Module, rpc, #{})},
         {lua, call(Module, lua, #{})},
         {owns, call(Module, owns, #{})},
@@ -410,6 +415,7 @@ call(Module, Function, Default) ->
 build(App, Module, Values) ->
     #{
         info := Info,
+        requires := Requires,
         rpc := Rpc,
         lua := Lua,
         owns := Owns,
@@ -418,7 +424,7 @@ build(App, Module, Values) ->
         routes := Routes,
         sup := Sup
     } = Values,
-    case shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) of
+    case shape_problems(Info, Requires, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) of
         [] ->
             #{name := Name, extension_version := Version} = Info,
             {ok, #{
@@ -426,6 +432,7 @@ build(App, Module, Values) ->
                 module => Module,
                 name => Name,
                 extension_version => Version,
+                requires => Requires,
                 rpc => Rpc,
                 lua => Lua,
                 owns => Owns,
@@ -437,8 +444,9 @@ build(App, Module, Values) ->
             {error, [{bad_manifest, App, Module, Detail} || Detail <- Details]}
     end.
 
-shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) ->
+shape_problems(Info, Requires, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) ->
     info_problems(Info) ++
+        requires_problems(Requires) ++
         rpc_problems(Rpc) ++
         lua_problems(Lua) ++
         owns_problems(Owns) ++
@@ -464,6 +472,14 @@ name_problems(Name) ->
         match -> [];
         nomatch -> [{info, ~"name must match ^[a-z][a-z0-9_]*$", Name}]
     end.
+
+%% Shape only. Whether each name resolves to something installed, and orders
+%% before the requirer, is a cross-set question `validate/1` answers - the
+%% same split rpc/lua/http claims make between their own shape and collision.
+requires_problems(Requires) when is_list(Requires) ->
+    [{requires, ~"must be a list of atoms", Name} || Name <- Requires, not is_atom(Name)];
+requires_problems(Requires) ->
+    [{requires, ~"must be a list of atoms", Requires}].
 
 rpc_problems(Rpc) when is_map(Rpc) ->
     [
@@ -809,6 +825,12 @@ derived. Naming a kind at all says "this is the complete set", and anything
 derived outside it is `undeclared_claim` - which is what turns a typo in
 `owns.queues` from an invisible no-op into a build failure. Nothing in
 `owns/0` is load-bearing for collision detection any more.
+
+`requires/0` is checked here too, against the union of core's subsystem names
+(`asobi_extension_reserved:core_capabilities/0`) and the installed extensions'
+own names. It reads `Extensions` in the order given, which is the resolver's
+dependency order, so the extension-ordering rule is a position check rather
+than a second sort.
 """.
 -spec validate([extension()]) -> ok | {error, [problem(), ...]}.
 validate([]) ->
@@ -820,7 +842,8 @@ validate(Extensions) ->
             lists:append([
                 kind_problems(Kind, Extensions, maps:get(Kind, Reserved, []))
              || Kind <- asobi_extension_reserved:kinds()
-            ]),
+            ]) ++
+            requirement_problems(Extensions),
     case Problems of
         [] -> ok;
         [_ | _] -> {error, Problems}
@@ -831,6 +854,52 @@ duplicate_names(Extensions) ->
         {duplicate_name, Name, A, B}
      || {Name, A, B} <- pairs([{Name, App} || #{name := Name, app := App} <- Extensions])
     ].
+
+%% `requires/0` resolves against the union of core's subsystem names and the
+%% installed extensions' own names. Each name is checked in a fixed order.
+%% Naming your own info-name is a `self_requirement` manifest bug, caught first
+%% so it is never mistaken for an ordering problem an application dependency
+%% could fix. Otherwise a name that hits an installed extension carries an
+%% order: the walk is front to back over the resolver's dependency order,
+%% carrying the names already resolved, so a required extension not yet resolved
+%% is one that resolves at or after the requirer - its `requires` is not backed
+%% by an OTP application dependency, and boot would start the two out of order
+%% against `c:asobi_extension:sup/0`'s guarantee. A core subsystem is always
+%% present and boots first, so it imposes no order. The installed case is tried
+%% before the capability case, so a name that is both - a core subsystem an
+%% installed extension has taken over - resolves to the extension and keeps its
+%% ordering, which is the transparency an extraction needs. The result is
+%% `usort`ed, so a name repeated in one `requires/0` reports once.
+requirement_problems(Extensions) ->
+    Installed = [Name || #{name := Name} <- Extensions],
+    Capabilities = asobi_extension_reserved:core_capabilities(),
+    lists:usort(requirement_problems(Extensions, Installed, Capabilities, [])).
+
+requirement_problems([], _Installed, _Capabilities, _Resolved) ->
+    [];
+requirement_problems([Extension | Rest], Installed, Capabilities, Resolved) ->
+    #{app := App, name := Name, requires := Requires} = Extension,
+    lists:append([requirement(App, Name, R, Installed, Resolved, Capabilities) || R <- Requires]) ++
+        requirement_problems(Rest, Installed, Capabilities, [Name | Resolved]).
+
+requirement(App, Owner, Owner, _Installed, _Resolved, _Capabilities) ->
+    [{self_requirement, App, Owner}];
+requirement(App, _Owner, Required, Installed, Resolved, Capabilities) ->
+    case lists:member(Required, Resolved) of
+        true ->
+            [];
+        false ->
+            case lists:member(Required, Installed) of
+                true -> [{requirement_out_of_order, App, Required}];
+                false -> capability_requirement(App, Required, Capabilities)
+            end
+    end.
+
+capability_requirement(App, Required, Capabilities) ->
+    case lists:member(Required, Capabilities) of
+        true -> [];
+        false -> [{unsatisfied_requirement, App, Required}]
+    end.
 
 kind_problems(http, Extensions, ReservedPaths) ->
     Claims = lists:usort([{Path, App} || #{app := App} = E <- Extensions, Path <- claims(E, http)]),
@@ -989,6 +1058,23 @@ describe_one({reserved_prefix, Path, Prefix, App}) ->
     line(
         "~s declares the route \"~s\" under \"~s\", which asobi reserves for its own plane.",
         [App, Path, Prefix]
+    );
+describe_one({unsatisfied_requirement, App, Name}) ->
+    line(
+        "~s requires \"~s\", which resolves to nothing: it is neither a core "
+        "subsystem nor an installed extension.",
+        [App, Name]
+    );
+describe_one({requirement_out_of_order, App, Name}) ->
+    line(
+        "~s requires the extension \"~s\", but \"~s\" resolves after it. Make ~s's "
+        "application depend on it so boot starts the provider first.",
+        [App, Name, Name, App]
+    );
+describe_one({self_requirement, App, Name}) ->
+    line(
+        "~s lists itself (\"~s\") in requires/0; an extension cannot depend on itself.",
+        [App, Name]
     ).
 
 line(Format, Args) ->

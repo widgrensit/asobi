@@ -39,6 +39,12 @@ extension route may sit anywhere under them, whatever it would resolve to.
 This is a policy list, not a derivation - which sub-paths of a plane are
 sensitive is a judgment the route table cannot express.
 
+`core_capabilities/0` answers the mirror-image question `owns/0` does not:
+not "what may an extension never claim" but "what may an extension depend on".
+A subsystem name here can be named in `requires/0` yet never in `owns/0` - you
+may call into `economy`, never claim its namespace - so the two roles sit in
+one module because both are the authority on core's own subsystem names.
+
 Deriving from modules costs one `code:ensure_loaded/1` sweep over core's
 module list. `asobi_extensions` only asks for it when at least one extension
 is installed, so a node with none pays nothing.
@@ -50,7 +56,9 @@ claims, so core's names and an extension's names are found by the same rule
 rather than by two that can disagree.
 """.
 
--export([namespaces/0, kinds/0, route_prefixes/0, schema_tables/1, worker_queues/1]).
+-export([
+    namespaces/0, kinds/0, route_prefixes/0, core_capabilities/0, schema_tables/1, worker_queues/1
+]).
 
 -type kind() :: tables | rpc | lua | queues | http.
 -export_type([kind/0]).
@@ -81,6 +89,52 @@ console or socket plane is refused whatever the path would resolve to.
 -spec route_prefixes() -> [asobi_extension:token(), ...].
 route_prefixes() ->
     [~"/api/v1/ops", ~"/api/v1/auth", ~"/api/v1/iap", ~"/console", ~"/ws"].
+
+-doc """
+The core subsystem names an extension may name in `requires/0`.
+
+A documented constant, not a derivation, and deliberately so. The names an
+extension depends on are the extraction-unit names - the one each subsystem
+carries out of core as its own package, so `asobi_leaderboards`'s
+`info().name` is `leaderboards` - and no single core artefact spells that set:
+the `game.*` Lua namespaces are singular and partial (`leaderboard`, no
+`world` or `tournaments` at all) and the error-code domains mix machinery in.
+So the set is written here, one atom per subsystem, tied to its `src/`
+directory and its extraction wave. It has two groups: the extraction-unit
+names, each of which becomes an extension of exactly that name; and the
+kernel-permanent runtime subsystems an extension may call into but that never
+leave core (`matches`, `world`, `votes`, `presence`, `timers`). Only the first
+group moves.
+
+The resolution set `asobi_extensions` validates a `requires/0` against is the
+union of this set and the installed extensions' own names, and that union is
+why the set stays correct across an extraction: when a subsystem leaves core
+its atom is deleted here and reappears as the extracted package's
+`info().name`, so a `requires` on it moves from the core side of the union to
+the extension side with the same answer - satisfied, because the bundle
+installs the package. Sub-parts are named by the unit that extracts, never
+separately: use `economy` for inventory, `chat` for dm, `matches` for the
+matchmaker or match-scoped zones, `world` for world zones and terrain.
+""".
+-spec core_capabilities() -> [asobi_extension:name(), ...].
+core_capabilities() ->
+    [
+        %% Extraction targets - each becomes an extension named exactly this.
+        storage,
+        iap,
+        notifications,
+        leaderboards,
+        economy,
+        tournaments,
+        social,
+        chat,
+        %% Kernel-permanent subsystems - callable, never extracted.
+        matches,
+        world,
+        votes,
+        presence,
+        timers
+    ].
 
 %% Every path any co-mounted application serves, prefixed as it is mounted.
 %% The compiled dispatch is `[nova, BootstrapApp | nova_apps]` (nova_sup),

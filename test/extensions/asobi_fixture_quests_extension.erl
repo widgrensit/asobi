@@ -3,12 +3,29 @@
 -behaviour(asobi_extension).
 
 -export([
-    info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, routes/0, erase_player/1, export_player/1
+    info/0,
+    requires/0,
+    rpc/0,
+    lua/0,
+    sup/0,
+    owns/0,
+    codes/0,
+    ops/0,
+    routes/0,
+    erase_player/1,
+    export_player/1
 ]).
 
 -spec info() -> asobi_extension:info().
 info() ->
     #{name => quests, extension_version => 1}.
+
+%% Models quests' real asobi_economy:grant/4 call: it depends on economy, which
+%% is a core subsystem today and an extracted extension from Wave 2 on. Either
+%% way this stays satisfied, because the resolution set is their union.
+-spec requires() -> [asobi_extension:name()].
+requires() ->
+    [economy].
 
 -spec rpc() -> asobi_extension:rpc().
 rpc() ->

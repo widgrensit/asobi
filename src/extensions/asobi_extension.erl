@@ -17,9 +17,11 @@ just modules. This behaviour covers only what core cannot infer.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1, export_player/1]).
+-export([info/0, requires/0, rpc/0, lua/0, sup/0, owns/0, codes/0, erase_player/1, export_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
+
+requires() -> [economy].
 
 rpc()  -> #{~"quests.claim" => {asobi_quests_rpc, claim, 2}}.
 
@@ -47,10 +49,10 @@ export_player(PlayerId) ->
     {ok, #{~"quest_progress" => [maps:with([quest_id, counter], Row) || Row <- Rows]}}.
 ```
 
-Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0`, `owns/0`, `codes/0`,
-`ops/0`, `routes/0`, `erase_player/1` and `export_player/1` default to
-nothing, because several are frequently empty: an extension with no processes
-has no `sup/0`, and one whose rows cascade needs no `erase_player/1`.
+Only `info/0` is required. `requires/0`, `rpc/0`, `lua/0`, `sup/0`, `owns/0`,
+`codes/0`, `ops/0`, `routes/0`, `erase_player/1` and `export_player/1` default
+to nothing, because several are frequently empty: an extension with no
+processes has no `sup/0`, and one whose rows cascade needs no `erase_player/1`.
 
 An extension declaring neither `rpc/0` nor `lua/0` is reachable by nobody:
 game logic calls `game.<ns>.*` from Lua, and clients call
@@ -148,6 +150,38 @@ The contract version, distinct from the package version: a minor release may
 change an experimental contract.
 """.
 -type info() :: #{name := name(), extension_version := pos_integer()}.
+
+-doc """
+The subsystems and extensions this extension calls, by name.
+
+A bare list of names - core subsystems (`economy`, `leaderboards`, `world`,
+...) and other installed extensions - never version ranges. Which versions are
+compatible is the dependency pin's job (`{asobi, "~> 0.79.0"}`, and the
+bundle's lockstep for a first-party set); this list says only *that* you call
+into a thing, never *which* of it. `requires => [economy]` says "I call into
+economy" and nothing about which economy.
+
+Two things read it, and both run the same `asobi_extensions:check/0`:
+
+- **Refusal.** `rebar3 asobi check` and the boot backstop reject a set where a
+  required name resolves to nothing - neither a core subsystem nor an
+  installed extension. A missing dependency is a build failure naming the
+  extension and the name, not an `undef` the first time a client reaches the
+  moved code.
+- **Boot order.** A requirement on another extension must be backed by an OTP
+  application dependency, so the resolver already lists the provider first
+  (`c:sup/0`'s start-order guarantee); a requirement whose provider is not
+  ordered before it is refused, because boot would otherwise start them out of
+  order. A requirement on an always-present core subsystem imposes no order.
+
+The resolution set is the union of core's subsystem names and the installed
+extensions' names, and that union is what keeps `requires/0` correct across an
+extraction: when a core subsystem later ships as its own package the name
+simply moves from the core side of the union to the extension side, and a
+`requires` on it stays satisfied - the bundle installs the package. This is
+the seam the Wave 3 tournaments->leaderboards dependency rides.
+""".
+-callback requires() -> [name()].
 
 -doc "An RPC method, `<prefix>.<method>`.".
 -type method() :: binary().
@@ -472,5 +506,14 @@ That trade is accepted - method behaviour follows HTTP rather than hiding.
 -callback ops() -> ops().
 
 -optional_callbacks([
-    rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, routes/0, erase_player/1, export_player/1
+    requires/0,
+    rpc/0,
+    lua/0,
+    sup/0,
+    owns/0,
+    codes/0,
+    ops/0,
+    routes/0,
+    erase_player/1,
+    export_player/1
 ]).

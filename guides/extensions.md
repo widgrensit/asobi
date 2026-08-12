@@ -75,9 +75,12 @@ right answer and when `rpc/0` is.
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1, export_player/1]).
+-export([info/0, requires/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0,
+         erase_player/1, export_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
+
+requires() -> [economy].
 
 rpc()  -> #{~"quests.list"  => {asobi_quests_rpc, list,  2},
             ~"quests.claim" => {asobi_quests_rpc, claim, 2}}.
@@ -112,6 +115,8 @@ extension.
 
 Only `info/0` is required. The rest default to nothing.
 
+- `requires/0` - the subsystems and extensions this one calls, by name. See
+  [Declaring dependencies](#declaring-dependencies).
 - `rpc/0` - core cannot guess that `quests.claim` is `{asobi_quests_rpc, claim, 2}`.
   The arity is always 2; see [Writing an RPC handler](#writing-an-rpc-handler).
 - `lua/0` - the `game.<ns>.*` surface a Lua game calls. See
@@ -605,6 +610,45 @@ Two failure modes are worth stating plainly:
   503. The alternative is every extension crash-looping into its own restart
   budget and going dark anyway. The marker is written once, before this
   supervisor exists, so it cannot flip later and there is nothing to retry.
+
+## Declaring dependencies
+
+`requires/0` names the subsystems and extensions this one calls:
+
+```erlang
+requires() -> [economy].
+```
+
+A bare list of names, never version ranges. The names are core subsystems
+(`economy`, `leaderboards`, `notifications`, `storage`, `tournaments`,
+`social`, `chat`, `iap`, `matches`, `world`, `votes`, `presence`, `timers`)
+and other installed extensions. Which versions work together is the
+dependency pin's job -
+`{asobi, "~> 0.79.0"}` in your `rebar.config`, and the bundle's lockstep for a
+first-party set - so `requires/0` says only *that* you call into a thing, never
+*which* of it.
+
+Two things read it, both through the one `rebar3 asobi check`:
+
+- **A name that resolves to nothing is refused.** If a required name is neither
+  a core subsystem nor an installed extension, the build fails and the boot
+  backstop refuses, naming your extension and the missing dependency - not an
+  `undef` the first time a client reaches the code that was never installed.
+- **It orders boot.** A requirement on another extension must be backed by an
+  ordinary OTP application dependency, so the resolver already starts the
+  provider first (the same dependency order your `sup/0` children rely on).
+  Declare `requires => [leaderboards]` and make your application depend on
+  `asobi_leaderboards`; the requirement without the application dependency is
+  refused, because nothing would guarantee the boot order. A requirement on an
+  always-present core subsystem imposes no ordering.
+
+The set a name resolves against is the union of core's subsystem names and the
+installed extensions' names, and that union is what keeps a `requires` correct
+when a core subsystem later ships as its own package: the name moves from the
+core side of the union to the extension side, and the requirement stays
+satisfied because the bundle installs the package. `economy` is a core
+subsystem you may depend on today and an extracted extension tomorrow, and
+`requires => [economy]` reads the same either way.
 
 ## Namespaces
 

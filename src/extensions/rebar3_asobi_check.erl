@@ -191,14 +191,23 @@ summarise(#{
     name := Name,
     app := App,
     extension_version := Version,
+    requires := Requires,
     rpc := Rpc,
     lua := Lua,
     routes := Routes
 }) ->
     io_lib:format(
-        "~s (~s, contract v~b): ~b rpc method(s), ~b lua namespace(s), ~b route(s)",
-        [Name, App, Version, map_size(Rpc), map_size(Lua), length(Routes)]
+        "~s (~s, contract v~b): ~b rpc method(s), ~b lua namespace(s), ~b route(s)~ts",
+        [Name, App, Version, map_size(Rpc), map_size(Lua), length(Routes), requires_note(Requires)]
     ).
+
+%% The migration order the report already prints is the boot order a
+%% requirement rides, so naming what each extension needs makes an out-of-order
+%% or missing dependency legible against the list right above it.
+requires_note([]) ->
+    ~"";
+requires_note(Requires) ->
+    io_lib:format(", requires ~ts", [lists:join(~", ", [atom_to_binary(R, utf8) || R <- Requires])]).
 
 route_line(#{path := Path, method := Method, security := Security}) ->
     io_lib:format(
