@@ -397,17 +397,22 @@ a webhook" is an accepted answer.
 
 ```erlang
 routes() ->
-    [#{path => ~"/api/v1/saves", method => get,
-       mfa => {asobi_storage_controller, list_saves, 1}, security => player},
-     #{path => ~"/api/v1/iap/notifications/apple", method => post,
-       mfa => {asobi_iap_controller, notification, 1}, security => webhook}].
+    [#{path => ~"/api/v1/quests/board", method => get,
+       mfa => {asobi_quests_controller, board, 1}, security => player},
+     #{path => ~"/api/v1/quests/webhook/steam", method => post,
+       mfa => {asobi_quests_controller, steam_notification, 1}, security => webhook}].
 ```
 
+Routes live under your extension's own name, exactly like every other
+namespace you claim: `/api/v1/quests/...` for an extension named `quests`. A
+subsystem extracted out of core is the one exception - it keeps its historic
+core paths, and core's own table stops serving them in the same release.
+
 Declared, not mounted: core's router mounts every entry at boot, inside its
-global plugin chain - body cap, rate limiter, client gate, security headers -
-which an extension can neither replace nor reorder. The handler is a Nova
-controller, applied as `Module:Function(Req)`, so the arity is 1 - unlike the
-`rpc/0` and `ops/0` seams, whose handlers never see a request.
+global plugin chain - body cap, rate limiter, security headers - which an
+extension can neither replace nor reorder. The handler is a Nova controller,
+applied as `Module:Function(Req)`, so the arity is 1 - unlike the `rpc/0`
+and `ops/0` seams, whose handlers never see a request.
 
 `security` picks what stands in front of it:
 
@@ -416,30 +421,44 @@ controller, applied as `Module:Function(Req)`, so the arity is 1 - unlike the
   request is refused exactly as it is on a core route. The default choice.
 - `webhook` - no player check, for the server-to-server case. The handler
   must authenticate its caller itself - a signature, a shared secret -
-  because nothing else will.
+  because nothing else will. Webhook paths run in the dedicated `webhook`
+  rate-limit bucket (10/s per caller, the same shape as iap) rather than
+  the general 300/s api bucket: a webhook handler does signature crypto on
+  every request, so the api budget would make it a CPU amplifier.
+
+One path carries exactly one security class - declaring the same path under
+both is a build failure, not a coin-flip on which chain OPTIONS lands in.
 
 Every declared path is a derived `http` claim (see
 [Namespaces](#namespaces)), and the comparison is structural: two paths
-collide when some request could match both, so `/saves/:slot` and
-`/saves/:id` are one claim, and a literal under another table's binding is
-caught too. A collision with another extension, or with any path core's own
-table serves, is a build failure at `rebar3 asobi check` and a refusal at
-boot - a route can never be silently shadowed first-compiled-wins, and
-declaration order never matters. The other side of that coin is the 404
-discipline: a path whose extension is not installed is simply absent from the
-table, indistinguishable from a path that never meant anything.
+collide when the routing tree cannot serve both - some request matches both
+patterns (`/saves/:slot` and `/saves/:id` are one claim), or one pattern
+diverges from the other at a binding at any depth, the shape that lets one
+route swallow lookups meant for the other. A collision with another
+extension, with any path a co-mounted application serves (core's own table,
+and `nova_apps` like nova_resilience's `/health`), or with a privileged
+plane prefix (`/api/v1/ops`, `/api/v1/auth`, `/api/v1/iap`, `/console`,
+`/ws`) is a build failure at `rebar3 asobi check` and a refusal at boot - a
+route can never be silently shadowed first-compiled-wins, and declaration
+order never matters. The other side of that coin is the 404 discipline: a
+path whose extension is not installed is simply absent from the table,
+answering 404 like any path that never meant anything. That discipline is
+path-level only - a mounted path answers a wrong-method request with 405
+plus an allow header, exactly as core routes do, so the methods on declared
+paths are enumerable; that trade is accepted.
 
 Each of these is a build failure, like the `ops/0` list above:
 
-- `path` is `/`-rooted, with non-empty segments that are literals (no
-  `: . ? # %`) or `:name` bindings
+- `path` is `/`-rooted, with non-empty segments that are literals
+  (`[A-Za-z0-9_~-]`) or `:name` bindings
 - `method` is `get`, `post`, `put` or `delete`
-- `mfa` is `{Module, Function, 1}`
-- `security` is `player` or `webhook`
+- `mfa` is `{Module, Function, 1}`, and it names an exported function - a
+  missing handler is refused here, not discovered as a 500
+- `security` is `player` or `webhook`, and one path carries one class
 - no two entries in one manifest serve the same path and method, and no two
-  declare patterns that match the same requests - the same path under several
-  methods is fine
-- with `owns().http` named, every declared path is listed in it, verbatim
+  declare patterns that collide - the same path under several methods is fine
+- with `owns().http` named, every declared path is listed in it, verbatim,
+  and every listed token is itself a `/`-rooted path
 
 ## Writing a Lua binding
 
@@ -612,13 +631,18 @@ build failure - which is what catches a worker on `quests` under an `owns/0`
 saying `quest`.
 
 `http` alone compares structurally rather than by name: two paths are one
-claim when some request could match both. An `owns().http` entry with no
-route behind it is a plain reservation, and reserves with the same
-exclusivity.
+claim when the routing tree cannot serve both - a request matches both, or
+they diverge at a binding at any depth. An `owns().http` entry with no route
+behind it is a plain reservation, and reserves with the same exclusivity.
 
 Core's reserved names derive from core itself by the same rules: Lua namespaces
 from `asobi_lua_surface:reserved_namespaces/0`, tables from core's schemas,
-queues from core's shigoto workers, route paths from core's own route table.
+queues from core's shigoto workers, route paths from every co-mounted
+application's route table - core's own plus `nova_apps`, so
+nova_resilience's `/health`, `/ready` and `/live` are as unclaimable as
+`/api/v1/matches`. Five plane prefixes (`/api/v1/ops`, `/api/v1/auth`,
+`/api/v1/iap`, `/console`, `/ws`) are reserved whole: nothing mounts under
+them, whatever it would resolve to.
 
 Reserved RPC prefixes are the domains of `asobi_error:core_codes/0` plus every
 core Lua namespace, because an RPC prefix and an error-code domain are the same

@@ -43,6 +43,7 @@ extensions_test_() ->
         fun an_rpc_handler_must_have_arity_two/0,
         fun a_bot_binding_is_refused_not_ignored/0,
         fun an_ops_handler_must_have_arity_two/0,
+        fun an_ops_handler_must_exist/0,
         fun an_ops_action_must_carry_a_real_class/0,
         fun an_ops_action_must_be_one_path_segment/0,
         fun a_declared_ops_action_is_reachable_by_its_class/0,
@@ -420,11 +421,29 @@ a_declared_ops_action_is_reachable_by_its_class() ->
         asobi_ops_caps:class(~"POST", ~"/api/v1/ops/ext/tunable/other")
     ).
 
+%% A real exported handler: ops entries are handler-existence-checked, so a
+%% fake module would fail validation before the property under test runs.
 ops_entry(Overrides) ->
     maps:merge(
-        #{method => post, mfa => {tunable_ops, thing, 2}, class => config},
+        #{method => post, mfa => {asobi_fixture_quests_ops, summary, 2}, class => config},
         Overrides
     ).
+
+%% The missing-handler refusal itself: shape-perfect entries whose module or
+%% function does not exist must fail the build, not 500 on first call.
+an_ops_handler_must_exist() ->
+    tunable(#{ops => #{~"thing" => ops_entry(#{mfa => {asobi_no_such_module, thing, 2}})}}),
+    ?assertMatch(
+        [{bad_manifest, ?TUNABLE, _, {ops, ~"mfa does not name an exported function", ~"thing"}}],
+        check_problems()
+    ),
+    retune(#{ops => #{~"thing" => ops_entry(#{mfa => {asobi_fixture_quests_ops, nope, 2}})}}),
+    ?assertMatch(
+        [{bad_manifest, ?TUNABLE, _, {ops, ~"mfa does not name an exported function", ~"thing"}}],
+        check_problems()
+    ),
+    retune(#{ops => #{~"thing" => ops_entry(#{})}}),
+    ?assertMatch({ok, [_]}, asobi_extensions:check()).
 
 %% --- Error codes ---
 

@@ -22,11 +22,22 @@ cannot drift:
   `core_codes/0` rather than `codes/0` on purpose: `codes/0` includes the codes
   the installed extensions declare, and reserving those would tell an extension
   it may not claim the namespace it just claimed.
-- **http** from core's own route table, via `asobi_router:core_routes/0` -
-  the core groups without the extension mounts, because this runs inside
-  `asobi_extensions:resolve/0` and reading the full table there would re-enter
-  the resolver before its term exists. A path core serves can never be
-  re-served, or shadowed under a binding, by an extension.
+- **http** from the route tables of every co-mounted application - the same
+  list Nova compiles, `[nova, asobi | nova_apps]` - so `/health`, `/ready`
+  and `/live` (served by `nova_resilience` in both shipped configs) are as
+  unclaimable as core's own paths. asobi's table comes from
+  `asobi_router:core_routes/0`, the groups without the extension mounts,
+  because this runs inside `asobi_extensions:resolve/0` and reading the full
+  table there would re-enter the resolver before its term exists; every
+  other app's comes from its `<app>_router:routes/1`. A path any co-mounted
+  app serves can never be re-served, or shadowed under a binding, by an
+  extension.
+
+On top of the derived set, `route_prefixes/0` names the privileged plane
+roots (`/api/v1/ops`, `/api/v1/auth`, `/api/v1/iap`, `/console`, `/ws`): no
+extension route may sit anywhere under them, whatever it would resolve to.
+This is a policy list, not a derivation - which sub-paths of a plane are
+sensitive is a judgment the route table cannot express.
 
 Deriving from modules costs one `code:ensure_loaded/1` sweep over core's
 module list. `asobi_extensions` only asks for it when at least one extension
@@ -39,7 +50,7 @@ claims, so core's names and an extension's names are found by the same rule
 rather than by two that can disagree.
 """.
 
--export([namespaces/0, kinds/0, schema_tables/1, worker_queues/1]).
+-export([namespaces/0, kinds/0, route_prefixes/0, schema_tables/1, worker_queues/1]).
 
 -type kind() :: tables | rpc | lua | queues | http.
 -export_type([kind/0]).
@@ -62,14 +73,81 @@ namespaces() ->
         http => core_route_paths()
     }.
 
-%% Every path core's own table serves, prefixed as it is mounted. The one
-%% protocol route (`/ws`) carries no methods key and is still a path claim.
+-doc """
+The privileged plane roots. No extension route may sit anywhere under one -
+mounting an open webhook handler inside the operator, auth, purchase,
+console or socket plane is refused whatever the path would resolve to.
+""".
+-spec route_prefixes() -> [asobi_extension:token(), ...].
+route_prefixes() ->
+    [~"/api/v1/ops", ~"/api/v1/auth", ~"/api/v1/iap", ~"/console", ~"/ws"].
+
+%% Every path any co-mounted application serves, prefixed as it is mounted.
+%% The compiled dispatch is `[nova, BootstrapApp | nova_apps]` (nova_sup),
+%% and in routing_tree the FIRST insert of a path wins, so an extension claim
+%% on a later app's path (nova_resilience's /health) would silently hijack
+%% it. `nova:get_env/2` reads the bootstrap application's env, which is
+%% exactly where nova_sup reads `nova_apps` from.
 core_route_paths() ->
     lists:usort([
-        <<Prefix/binary, Path/binary>>
-     || #{prefix := Prefix, routes := Routes} <- asobi_router:core_routes(),
-        {Path, _Handler, _Options} <- Routes
+        Path
+     || App <- co_mounted_apps(),
+        Group <- app_route_groups(App),
+        Path <- group_paths(Group)
     ]).
+
+co_mounted_apps() ->
+    NovaApps =
+        case nova:get_env(nova_apps, []) of
+            Apps when is_list(Apps) -> [App || App <- Apps, is_atom(App)];
+            _ -> []
+        end,
+    [nova, asobi | NovaApps].
+
+%% asobi through `core_routes/0` - its full `routes/1` resolves extensions,
+%% and this runs inside the resolver. Everything else through its Nova router
+%% module, found by name in the app's own module list (the manifest-module
+%% rule, so no atom is ever created from config data) and called exactly as
+%% `nova_router:compile/3` calls it.
+app_route_groups(asobi) ->
+    asobi_router:core_routes();
+app_route_groups(App) ->
+    _ = application:load(App),
+    Name = atom_to_list(App) ++ "_router",
+    lists:append([
+        Module:routes(nova:get_environment())
+     || Module <- app_modules(App),
+        atom_to_list(Module) =:= Name,
+        code:ensure_loaded(Module) =:= {module, Module},
+        erlang:function_exported(Module, routes, 1)
+    ]).
+
+app_modules(App) ->
+    case application:get_key(App, modules) of
+        {ok, Modules} -> Modules;
+        undefined -> []
+    end.
+
+%% Total over every route shape Nova compiles: a path entry is a claim, a
+%% status-code entry claims nothing, and anything else - a static-file
+%% 2-tuple, a non-binary prefix - raises rather than silently reserving
+%% nothing. A hole here is a hijackable path, so unrecognised means loud.
+group_paths(#{routes := Routes} = Group) ->
+    case maps:get(prefix, Group, ~"") of
+        Prefix when is_binary(Prefix) ->
+            lists:append([entry_paths(Prefix, Entry) || Entry <- Routes]);
+        _ ->
+            error({asobi_unrecognised_core_route_group, Group})
+    end;
+group_paths(Group) ->
+    error({asobi_unrecognised_core_route_group, Group}).
+
+entry_paths(Prefix, {Path, _Handler, _Options}) when is_binary(Path) ->
+    [<<Prefix/binary, Path/binary>>];
+entry_paths(_Prefix, {Status, _Handler, _Options}) when is_integer(Status) ->
+    [];
+entry_paths(Prefix, Entry) ->
+    error({asobi_unrecognised_core_route, Prefix, Entry}).
 
 -doc "Every table declared by a `kura_schema` module in this list.".
 -spec schema_tables([module()]) -> [asobi_extension:token()].

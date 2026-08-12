@@ -59,6 +59,36 @@ http_paths_come_from_the_core_route_table_test() ->
     ],
     ?assertNot(lists:member(~"/api/v1/quests/board", Reserved)).
 
+%% The compiled dispatch is [nova, asobi | nova_apps] and the first insert of
+%% a path wins, so a co-mounted app's paths - nova_resilience answers the
+%% k8s probes in both shipped configs - must be as unclaimable as core's own.
+http_paths_cover_every_co_mounted_app_test() ->
+    application:set_env(nova, bootstrap_application, asobi),
+    application:set_env(asobi, nova_apps, [nova_resilience]),
+    try
+        #{http := Reserved} = asobi_extension_reserved:namespaces(),
+        [?assert(lists:member(P, Reserved)) || P <- [~"/health", ~"/ready", ~"/live"]],
+        %% nova_resilience mounts under its configured prefix, and the
+        %% reserved set derives through the same routes/1 call, so the two
+        %% cannot disagree about where the probes live.
+        application:set_env(nova_resilience, health_prefix, ~"/probes"),
+        #{http := Prefixed} = asobi_extension_reserved:namespaces(),
+        ?assert(lists:member(~"/probes/health", Prefixed)),
+        ?assertNot(lists:member(~"/health", Prefixed))
+    after
+        application:unset_env(nova_resilience, health_prefix),
+        application:unset_env(asobi, nova_apps),
+        application:unset_env(nova, bootstrap_application)
+    end.
+
+%% A policy list, not a derivation: which plane roots are closed to
+%% extensions outright is a judgment the route table cannot express.
+the_privileged_plane_prefixes_test() ->
+    ?assertEqual(
+        [~"/api/v1/ops", ~"/api/v1/auth", ~"/api/v1/iap", ~"/console", ~"/ws"],
+        asobi_extension_reserved:route_prefixes()
+    ).
+
 %% An RPC prefix and an error-code domain are the same token by construction,
 %% so core's closed code set reserves the prefixes too.
 rpc_prefixes_cover_error_domains_and_lua_test() ->

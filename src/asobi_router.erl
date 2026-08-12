@@ -359,16 +359,22 @@ ws_routes() ->
 extension_routes(Extensions) ->
     lists:append([extension_groups(Routes) || #{routes := Routes} <- Extensions]).
 
+%% The classifier is total over the validated shape, so a route that somehow
+%% lost its security key crashes the compile loudly instead of vanishing
+%% from the table - or worse, mounting under the wrong chain.
 extension_groups(Routes) ->
     [
         Group
      || Security <- [player, webhook],
-        Group <- security_group(Security, [E || #{security := S} = E <- Routes, S =:= Security])
+        Group <- security_group(Security, [E || E <- Routes, security(E) =:= Security])
     ].
+
+security(#{security := Security}) -> Security.
 
 %% `player` is the same chain `api_routes/0` carries; `webhook` mounts open,
 %% like `auth_routes/0`, for a server-to-server caller that cannot hold a
-%% player token - the handler authenticates its caller itself.
+%% player token - the handler authenticates its caller itself, and the rate
+%% limiter puts it in the dedicated webhook bucket rather than the api one.
 security_group(_Security, []) ->
     [];
 security_group(player, Entries) ->
@@ -377,7 +383,9 @@ security_group(webhook, Entries) ->
     [#{prefix => ~"", security => false, routes => mounted(Entries)}].
 
 mounted(Entries) ->
-    [
-        {Path, erlang:make_fun(Module, Function, 1), #{methods => [Method, options]}}
-     || #{path := Path, method := Method, mfa := {Module, Function, 1}} <- Entries
-    ].
+    [mount(Entry) || Entry <- Entries].
+
+%% Total on purpose: a malformed entry cannot exist after validation, and if
+%% one ever does, a function_clause here beats a route silently not mounted.
+mount(#{path := Path, method := Method, mfa := {Module, Function, 1}}) ->
+    {Path, fun Module:Function/1, #{methods => [Method, options]}}.

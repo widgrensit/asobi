@@ -127,15 +127,17 @@ route_line(#{path := Path, method := Method, security := Security}) ->
 
 %% Not an error: it is a legal state halfway through writing an extension.
 %% But an extension with no seam at all is reachable by nobody - game logic
-%% calls game.<ns>.*, clients call rpc or a declared route - so saying
-%% nothing would be worse.
-is_unreachable(#{rpc := Rpc, lua := Lua, routes := Routes}) ->
-    map_size(Rpc) =:= 0 andalso map_size(Lua) =:= 0 andalso Routes =:= [].
+%% calls game.<ns>.*, clients call rpc or a declared route, operators call
+%% ops actions - so saying nothing would be worse.
+is_unreachable(#{rpc := Rpc, lua := Lua, ops := Ops, routes := Routes}) ->
+    map_size(Rpc) =:= 0 andalso map_size(Lua) =:= 0 andalso map_size(Ops) =:= 0 andalso
+        Routes =:= [].
 
 unreachable(#{app := App}) ->
     io_lib:format(
-        "~s declares neither rpc/0, lua/0 nor routes/0, so nothing can call it: "
-        "game logic reaches an extension through game.<ns>.*, clients through "
-        "rpc, HTTP callers through a declared route",
+        "~s declares none of rpc/0, lua/0, ops/0 or routes/0, so nothing can "
+        "call it: game logic reaches an extension through game.<ns>.*, clients "
+        "through rpc, operators through ops actions, HTTP callers through a "
+        "declared route",
         [App]
     ).

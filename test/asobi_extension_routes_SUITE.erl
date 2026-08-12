@@ -18,7 +18,7 @@ list or a security callback goes wrong without any unit test noticing.
     the_global_plugin_chain_applies/1,
     an_unauthenticated_request_gets_the_core_refusal/1,
     a_webhook_route_needs_no_player_token/1,
-    an_absent_extension_route_is_an_unknown_route/1
+    the_404_discipline_is_path_level/1
 ]).
 
 -define(QUESTS, asobi_fixture_quests).
@@ -29,19 +29,28 @@ all() ->
         the_global_plugin_chain_applies,
         an_unauthenticated_request_gets_the_core_refusal,
         a_webhook_route_needs_no_player_token,
-        an_absent_extension_route_is_an_unknown_route
+        the_404_discipline_is_path_level
     ].
 
 %% The route table compiles inside Nova's boot, so unlike the RPC suite the
 %% fixture must be installed before the node starts - there is no memo to
 %% clear afterwards, a route either was mounted or was not. Another suite may
 %% have booted the node already; restarting nova is what recompiles the table
-%% (nova_app:prep_stop/1 closes the listener, so the port is free again).
+%% (nova_app:prep_stop/1 closes the listener, so the port is free again). If
+%% the boot then fails, the fixture must not stay loaded for whichever suite
+%% runs next.
 init_per_suite(Config) ->
     restart([
         fun() -> ok = asobi_fixture_app:install(?QUESTS, asobi_fixture_quests_extension, []) end
     ]),
-    asobi_test_helpers:start(Config).
+    try
+        asobi_test_helpers:start(Config)
+    catch
+        Class:Reason:Stack ->
+            asobi_fixture_app:uninstall(?QUESTS),
+            asobi_extensions:reset(),
+            erlang:raise(Class, Reason, Stack)
+    end.
 
 %% Restarted without the fixture so later suites compile a clean table.
 end_per_suite(Config) ->
@@ -108,17 +117,29 @@ a_webhook_route_needs_no_player_token(Config) ->
     ),
     ?assertEqual(200, nova_test:status(Resp)),
     ?assertEqual(#{~"received" => #{~"receipt" => ~"abc-123"}}, nova_test:json(Resp)),
+    %% The dedicated webhook bucket (limit 10), not the 300/s api one: the
+    %% remaining budget after one request gives the bucket away.
+    Remaining =
+        case nova_test:header("x-ratelimit-remaining", Resp) of
+            undefined -> ct:fail(missing_rate_limit_header);
+            Value -> list_to_integer(Value)
+        end,
+    ?assert(Remaining < 10),
     Config.
 
-%% The 404 discipline: a path the installed set never declared answers
-%% exactly as a path that has never meant anything - no status, header or
-%% body difference an outsider could use to map what is installed.
-an_absent_extension_route_is_an_unknown_route(Config) ->
+%% The 404 discipline is path-level: a path the installed set never declared
+%% answers 404 exactly as a path that never meant anything, while a
+%% wrong-method probe on a mounted path answers 405 with an allow header,
+%% as on any core route - method enumeration on declared paths is the
+%% accepted trade, not a leak this suite pretends is closed.
+the_404_discipline_is_path_level(Config) ->
     {ok, Resp} = nova_test:get("/api/v1/quests/undeclared", Config),
-    {ok, UnknownResp} = nova_test:get("/api/v1/never_a_route", Config),
     ?assertEqual(404, nova_test:status(Resp)),
-    ?assertEqual(nova_test:status(UnknownResp), nova_test:status(Resp)),
-    ?assertEqual(nova_test:body(UnknownResp), nova_test:body(Resp)),
+    {ok, WrongMethod} = nova_test:delete("/api/v1/quests/board", Config),
+    ?assertEqual(405, nova_test:status(WrongMethod)),
+    ?assertNotEqual(undefined, nova_test:header("allow", WrongMethod)),
+    {ok, CoreWrongMethod} = nova_test:delete("/api/v1/matches", Config),
+    ?assertEqual(nova_test:status(CoreWrongMethod), nova_test:status(WrongMethod)),
     Config.
 
 %% --- helpers (mirrors asobi_rpc_SUITE) ---

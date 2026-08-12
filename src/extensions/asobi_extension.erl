@@ -399,9 +399,12 @@ callback for it here. See `guides/console-extensions.md`.
 One HTTP route this extension serves, mounted by core's router.
 
 `path` is absolute and `/`-rooted, made of non-empty segments that are either
-literals or `:name` bindings. `mfa` is a Nova controller - applied as
-`Module:Function(Req)`, so the arity is always 1, unlike the `rpc/0` and
-`ops/0` seams whose handlers never see a request.
+literals (`[A-Za-z0-9_~-]` - RFC 3986 unreserved minus the dot, which
+routing_tree does not normalise) or `:name` bindings. `mfa` is a Nova
+controller - applied as `Module:Function(Req)`, so the arity is always 1,
+unlike the `rpc/0` and `ops/0` seams whose handlers never see a request -
+and it must name an exported function, checked at build time rather than
+discovered as a 500.
 
 `security` picks the chain in front of the handler:
 
@@ -411,11 +414,16 @@ literals or `:name` bindings. `mfa` is a Nova controller - applied as
   choice, and the only right one for anything a client calls.
 - `webhook` - no player check, for a server-to-server caller that cannot hold
   a token (a store's receipt notification). The handler must authenticate its
-  caller itself - a signature, a shared secret - because nothing else will.
+  caller itself - a signature, a shared secret - because nothing else will,
+  and the rate limiter puts the path in the dedicated `webhook` bucket
+  (10/s per caller, iap's shape) rather than the general api one, because
+  per-request signature crypto on the api bucket's budget is a CPU
+  amplifier.
 
 Either way the route mounts inside core's global plugin chain - body cap,
-rate limiter, client gate, security headers - which an extension can neither
-replace nor reorder.
+rate limiter, security headers - which an extension can neither replace nor
+reorder. One path carries exactly one security class: declaring it under
+both is refused at build time.
 """.
 -type route() :: #{
     path := binary(),
@@ -436,13 +444,22 @@ guideline, not a mechanical ban - "it is a webhook" is an accepted answer.
 
 Every declared path is a derived `http` claim, validated like tables, rpc,
 lua and queues - but the comparison is structural rather than token equality:
-two paths collide when some request could match both, so `/saves/:slot` and
-`/saves/:id` are one claim, and a literal sitting under another table's
-binding is caught too. A collision with another extension or with a path
-core's own table serves refuses boot; a declared route can never be silently
-shadowed first-compiled-wins. An unmounted route - the extension absent, the
-path never declared - is indistinguishable from any other unknown route: 404,
-never a hint that the path means something when installed.
+two paths collide when the routing tree cannot serve both, so `/saves/:slot`
+and `/saves/:id` are one claim, a literal sitting under another table's
+binding is caught, and so is a pattern that diverges from an existing route
+at a binding at any depth - the shape that lets one route swallow another's
+lookups. A collision with another extension, with a path any co-mounted
+application serves (core's own table, Nova's, `nova_apps` such as
+nova_resilience's `/health`), or with a privileged plane prefix
+(`/api/v1/ops`, `/api/v1/auth`, `/api/v1/iap`, `/console`, `/ws`) refuses
+boot; a declared route can never be silently shadowed first-compiled-wins.
+
+An unmounted route - the extension absent, the path never declared - is
+absent from the table: 404, indistinguishable at the path level from a path
+that never meant anything. This discipline is path-level only: a mounted
+path answers a wrong-method request with 405 and an allow header, as every
+core route does, so which methods a declared path serves is enumerable.
+That trade is accepted - method behaviour follows HTTP rather than hiding.
 """.
 -callback routes() -> [route()].
 

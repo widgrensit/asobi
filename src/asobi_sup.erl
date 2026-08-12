@@ -250,6 +250,13 @@ register_limiters() ->
         %% number because the honest frequency is lower.
         erase => #{algorithm => sliding_window, limit => 3, window => 60000},
         iap => #{algorithm => sliding_window, limit => 10, window => 1000},
+        %% Extension routes mounted with `security => webhook` (see
+        %% asobi_extension:routes/0). A webhook handler authenticates its
+        %% caller itself - signature crypto on every request - so letting
+        %% tokenless traffic ride the 300/s api bucket makes each request a
+        %% CPU amplifier. Same shape and size as iap, which is the known
+        %% webhook case the seam exists for.
+        webhook => #{algorithm => sliding_window, limit => 10, window => 1000},
         api => #{algorithm => sliding_window, limit => 300, window => 1000},
         ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000},
         %% Per-player bound on world/match joins (asobi#193). Joining is how a
@@ -315,6 +322,7 @@ register_limiters() ->
 limiter_name(auth) -> asobi_auth_limiter;
 limiter_name(register) -> asobi_register_limiter;
 limiter_name(iap) -> asobi_iap_limiter;
+limiter_name(webhook) -> asobi_webhook_limiter;
 limiter_name(api) -> asobi_api_limiter;
 limiter_name(ws_connect) -> asobi_ws_connect_limiter;
 limiter_name(join) -> asobi_join_limiter;
