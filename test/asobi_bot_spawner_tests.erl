@@ -33,7 +33,10 @@ fill_mode_test_() ->
         {"fill walks past bot ids that are still queued from the last cycle",
             fun fill_skips_already_queued_bots/0},
         {"fill gives up rather than spinning when every id comes back already queued",
-            fun fill_gives_up_when_all_ids_taken/0}
+            fun fill_gives_up_when_all_ids_taken/0},
+        {"fill names walk past the end of the names list", fun fill_names_walk_past_the_list/0},
+        {"a non-binary names entry falls back to the fill position",
+            fun fill_names_tolerate_a_non_binary_entry/0}
     ]}.
 
 %% Script-driven bots: a match script placing one itself rather than the
@@ -75,7 +78,10 @@ bot_id_test_() ->
         {"the same name mints a different id every time", fun bot_ids_are_distinct/0},
         {"a name round-trips through the id", fun name_round_trips/0},
         {"a name containing _ round-trips", fun underscore_name_round_trips/0},
-        {"an id minted before discriminators still yields its name", fun legacy_id_yields_name/0}
+        {"an id minted before discriminators still yields its name", fun legacy_id_yields_name/0},
+        {"a legacy name ending in a non-hex run of the same width is left whole",
+            fun legacy_name_shaped_like_a_discriminator/0},
+        {"the ceiling refuses the 65th bot and not the 64th", fun ceiling_boundary/0}
     ].
 
 bot_ids_are_distinct() ->
@@ -93,6 +99,23 @@ underscore_name_round_trips() ->
 
 legacy_id_yields_name() ->
     ?assertEqual(~"Spark", asobi_bot_spawner:name_part(~"bot_Spark")).
+
+%% `_zzzzzz` is the width of a discriminator and none of it is hex, so it is
+%% part of the name. Taking it off by width alone would eat it.
+legacy_name_shaped_like_a_discriminator() ->
+    ?assertEqual(~"red_zzzzzz", asobi_bot_spawner:name_part(~"bot_red_zzzzzz")),
+    ?assertEqual(~"red", asobi_bot_spawner:name_part(~"bot_red_abcdef")).
+
+ceiling_boundary() ->
+    Bots = [asobi_bot_spawner:bot_id(integer_to_binary(N)) || N <- lists:seq(1, ?MAX_BOT_FILL)],
+    ?assertEqual(
+        {refused, bot_ceiling_reached},
+        asobi_bot_spawner:add_bot_refusal(~"OneTooMany", Bots, 1000)
+    ),
+    ?assertEqual(
+        ok,
+        asobi_bot_spawner:add_bot_refusal(~"TheLastOne", tl(Bots), 1000)
+    ).
 
 second_match_bot_gets_an_ai() ->
     A = asobi_bot_spawner:bot_id(~"Spark"),
@@ -289,6 +312,45 @@ fill_reaches_min_players_under_cap() ->
     }),
     asobi_bot_spawner:fill_mode(~"arena", 1),
     ?assertEqual(3, meck:num_calls(asobi_matchmaker, add, '_')).
+
+%% Names come from the list in order, and past its end fall back to the
+%% position in the fill. Every one of them is minted through bot_id/1, so a
+%% fill never offers the matchmaker the same id twice.
+fill_names_walk_past_the_list() ->
+    application:set_env(asobi, game_modes, #{
+        ~"arena" => #{
+            match_size => 4,
+            max_players => 10,
+            bots => #{enabled => true, min_players => 4, names => [~"Solo"]}
+        }
+    }),
+    asobi_bot_spawner:fill_mode(~"arena", 1),
+    Ids = offered_bot_ids(),
+    ?assertEqual(
+        [~"Solo", ~"2", ~"3"], [asobi_bot_spawner:name_part(Id) || Id <- Ids]
+    ),
+    ?assertEqual(3, length(lists:usort(Ids))).
+
+%% A sys.config-declared mode hands its `names` straight through, unlike the
+%% script path which filters to binaries, so an entry that is not one falls
+%% back to the position in the fill exactly as a missing entry does.
+fill_names_tolerate_a_non_binary_entry() ->
+    application:set_env(asobi, game_modes, #{
+        ~"arena" => #{
+            match_size => 4,
+            max_players => 10,
+            bots => #{enabled => true, min_players => 4, names => [~"Solo", 42, ~"Trio"]}
+        }
+    }),
+    asobi_bot_spawner:fill_mode(~"arena", 1),
+    ?assertEqual(
+        [~"Solo", ~"2", ~"Trio"],
+        [asobi_bot_spawner:name_part(Id) || Id <- offered_bot_ids()]
+    ).
+
+%% Every id the fill handed the matchmaker, in order.
+offered_bot_ids() ->
+    [BotId || {_, {_, add, [BotId, _]}, _} <- meck:history(asobi_matchmaker)].
 
 no_bots_when_already_at_cap() ->
     application:set_env(asobi, game_modes, #{
