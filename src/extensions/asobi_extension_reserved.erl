@@ -22,6 +22,11 @@ cannot drift:
   `core_codes/0` rather than `codes/0` on purpose: `codes/0` includes the codes
   the installed extensions declare, and reserving those would tell an extension
   it may not claim the namespace it just claimed.
+- **http** from core's own route table, via `asobi_router:core_routes/0` -
+  the core groups without the extension mounts, because this runs inside
+  `asobi_extensions:resolve/0` and reading the full table there would re-enter
+  the resolver before its term exists. A path core serves can never be
+  re-served, or shadowed under a binding, by an extension.
 
 Deriving from modules costs one `code:ensure_loaded/1` sweep over core's
 module list. `asobi_extensions` only asks for it when at least one extension
@@ -36,13 +41,13 @@ rather than by two that can disagree.
 
 -export([namespaces/0, kinds/0, schema_tables/1, worker_queues/1]).
 
--type kind() :: tables | rpc | lua | queues.
+-type kind() :: tables | rpc | lua | queues | http.
 -export_type([kind/0]).
 
 -doc "The namespace kinds an extension may claim in `owns/0`.".
 -spec kinds() -> [kind(), ...].
 kinds() ->
-    [tables, rpc, lua, queues].
+    [tables, rpc, lua, queues, http].
 
 -doc "Core's reserved token set, per namespace kind.".
 -spec namespaces() -> #{kind() := [asobi_extension:token()]}.
@@ -53,8 +58,18 @@ namespaces() ->
         tables => schema_tables(Modules),
         queues => worker_queues(Modules),
         lua => Lua,
-        rpc => lists:usort(error_domains() ++ Lua)
+        rpc => lists:usort(error_domains() ++ Lua),
+        http => core_route_paths()
     }.
+
+%% Every path core's own table serves, prefixed as it is mounted. The one
+%% protocol route (`/ws`) carries no methods key and is still a path claim.
+core_route_paths() ->
+    lists:usort([
+        <<Prefix/binary, Path/binary>>
+     || #{prefix := Prefix, routes := Routes} <- asobi_router:core_routes(),
+        {Path, _Handler, _Options} <- Routes
+    ]).
 
 -doc "Every table declared by a `kura_schema` module in this list.".
 -spec schema_tables([module()]) -> [asobi_extension:token()].

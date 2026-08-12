@@ -1,7 +1,7 @@
 -module(asobi_router).
 -behaviour(nova_router).
 
--export([routes/1]).
+-export([routes/1, core_routes/0]).
 
 %% Every route accepts its real method plus OPTIONS. Nova's middleware chain
 %% runs `nova_router` before `nova_cors_plugin`, so a route that doesn't
@@ -13,11 +13,20 @@
 %% memoised function rather than a process: nova is in asobi's `applications`
 %% list, so nova_sup:init/1 compiles this route table before asobi_app:start/2
 %% has run and before any asobi process exists. Resolving here validates the
-%% installed set at the earliest possible moment. Extensions contribute no
-%% routes at all; core owns the whole table.
+%% installed set at the earliest possible moment. Core owns the whole table:
+%% an extension declares entries in its manifest's `routes/0`, and this is the
+%% one place they are mounted.
 -spec routes(atom()) -> [map()].
 routes(_Environment) ->
-    _ = asobi_extensions:resolve(),
+    Extensions = asobi_extensions:resolve(),
+    core_routes() ++ extension_routes(Extensions).
+
+%% Core's own groups, without resolving extensions. `asobi_extension_reserved`
+%% derives the reserved http claims from this - it is called from inside
+%% `asobi_extensions:resolve/0`, where reading `routes/1` would re-enter the
+%% resolver before its term exists.
+-spec core_routes() -> [map()].
+core_routes() ->
     [
         auth_routes(),
         iap_routes(),
@@ -284,12 +293,13 @@ ops_routes() ->
             {~"/notifications", fun asobi_ops_controller:notifications/1, #{
                 methods => [get, options]
             }},
-            %% The one route core owns on behalf of extensions. Extensions
-            %% contribute no routes at all; this dispatches every action an
-            %% installed manifest declares, exactly as one WebSocket frame type
-            %% dispatches `rpc/0`. Its class is per action and comes from that
-            %% manifest, so it is deliberately absent from
-            %% `asobi_ops_caps:classes/0` - see `m:asobi_ops_extension`.
+            %% The one ops-plane route core owns on behalf of extensions -
+            %% `routes/0` mounts player and webhook surfaces, never operator
+            %% ones. This dispatches every action an installed manifest
+            %% declares, exactly as one WebSocket frame type dispatches
+            %% `rpc/0`. Its class is per action and comes from that manifest,
+            %% so it is deliberately absent from `asobi_ops_caps:classes/0` -
+            %% see `m:asobi_ops_extension`.
             {~"/ext/:extension/:action", fun asobi_ops_extension:handle/1, #{
                 methods => [get, post, put, delete, options]
             }}
@@ -336,3 +346,38 @@ ws_routes() ->
             {~"/ws", asobi_ws_handler, #{protocol => ws}}
         ]
     }.
+
+%% The declared route seam. Each manifest's `routes/0` entries mount here,
+%% under core's global plugin chain: the groups declare no `plugins` key, so
+%% Nova applies the chain from its own env - a group naming `plugins` would
+%% replace it, which is the Nova-apps hazard this seam exists to close.
+%% Ordering against core's groups is irrelevant by construction:
+%% `asobi_extensions:validate/1` refused any two patterns that could match
+%% one request, so the asobi#326 declaration-order trap cannot arise, and an
+%% uninstalled extension's paths are simply absent - an unknown route, not a
+%% reserved-looking one.
+extension_routes(Extensions) ->
+    lists:append([extension_groups(Routes) || #{routes := Routes} <- Extensions]).
+
+extension_groups(Routes) ->
+    [
+        Group
+     || Security <- [player, webhook],
+        Group <- security_group(Security, [E || #{security := S} = E <- Routes, S =:= Security])
+    ].
+
+%% `player` is the same chain `api_routes/0` carries; `webhook` mounts open,
+%% like `auth_routes/0`, for a server-to-server caller that cannot hold a
+%% player token - the handler authenticates its caller itself.
+security_group(_Security, []) ->
+    [];
+security_group(player, Entries) ->
+    [#{prefix => ~"", security => fun asobi_auth_plugin:verify/1, routes => mounted(Entries)}];
+security_group(webhook, Entries) ->
+    [#{prefix => ~"", security => false, routes => mounted(Entries)}].
+
+mounted(Entries) ->
+    [
+        {Path, erlang:make_fun(Module, Function, 1), #{methods => [Method, options]}}
+     || #{path := Path, method := Method, mfa := {Module, Function, 1}} <- Entries
+    ].

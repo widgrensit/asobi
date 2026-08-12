@@ -65,7 +65,8 @@ surfaces with Nova's crash context rather than a legible asobi error.
     ops := asobi_extension:ops(),
     lua := asobi_extension:lua(),
     owns := asobi_extension:owns(),
-    codes := asobi_extension:codes()
+    codes := asobi_extension:codes(),
+    routes := [asobi_extension:route()]
 }.
 
 -type problem() ::
@@ -73,7 +74,9 @@ surfaces with Nova's crash context rather than a legible asobi error.
     | {duplicate_name, asobi_extension:name(), atom(), atom()}
     | {namespace_conflict, asobi_extension_reserved:kind(), asobi_extension:token(), atom(), atom()}
     | {reserved_namespace, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}
-    | {undeclared_claim, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}.
+    | {undeclared_claim, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}
+    | {route_conflict, {asobi_extension:token(), atom()}, {asobi_extension:token(), atom()}}
+    | {reserved_route, asobi_extension:token(), asobi_extension:token(), atom()}.
 
 -doc "One `lua/0` binding with the namespace and function name it was declared under.".
 -type binding() :: #{
@@ -337,6 +340,7 @@ read_manifest(App, Module) ->
         {owns, call(Module, owns, #{})},
         {codes, call(Module, codes, #{})},
         {ops, call(Module, ops, #{})},
+        {routes, call(Module, routes, [])},
         {sup, call(Module, sup, [])}
     ],
     case [{Key, Detail} || {Key, {error, Detail}} <- Reads] of
@@ -367,9 +371,10 @@ build(App, Module, Values) ->
         owns := Owns,
         codes := Codes,
         ops := Ops,
+        routes := Routes,
         sup := Sup
     } = Values,
-    case shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Sup) of
+    case shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) of
         [] ->
             #{name := Name, extension_version := Version} = Info,
             {ok, #{
@@ -381,19 +386,21 @@ build(App, Module, Values) ->
                 lua => Lua,
                 owns => Owns,
                 codes => Codes,
-                ops => Ops
+                ops => Ops,
+                routes => Routes
             }};
         Details ->
             {error, [{bad_manifest, App, Module, Detail} || Detail <- Details]}
     end.
 
-shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Sup) ->
+shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) ->
     info_problems(Info) ++
         rpc_problems(Rpc) ++
         lua_problems(Lua) ++
         owns_problems(Owns) ++
         codes_problems(Codes) ++
         ops_problems(Ops) ++
+        routes_problems(Routes) ++
         sup_problems(Sup).
 
 info_problems(#{name := Name, extension_version := Version}) when
@@ -456,6 +463,93 @@ is_segment(Action) when is_binary(Action), Action =/= ~"" ->
     binary:match(Action, [~"/", ~".", ~"?", ~"#", ~"%"]) =:= nomatch;
 is_segment(_Action) ->
     false.
+
+%% Cross-entry checks only run over a well-formed list: an entry that failed
+%% its own shape has nothing meaningful to compare against.
+routes_problems(Routes) when is_list(Routes) ->
+    case [Entry || Entry <- Routes, not is_route_entry(Entry)] of
+        [] -> route_set_problems(Routes);
+        Malformed -> [{routes, route_problem(Entry), route_offender(Entry)} || Entry <- Malformed]
+    end;
+routes_problems(Routes) ->
+    [{routes, ~"must be a list of route entries", Routes}].
+
+%% Arity 1, not the seams' usual 2: a route handler is a Nova controller and
+%% is applied as `Module:Function(Req)` by nova_handler, never by core.
+is_route_entry(#{path := Path, method := Method, mfa := {M, F, 1}, security := Security}) when
+    is_atom(M), is_atom(F)
+->
+    is_route_path(Path) andalso
+        lists:member(Method, [get, post, put, delete]) andalso
+        lists:member(Security, [player, webhook]);
+is_route_entry(_Entry) ->
+    false.
+
+is_route_path(<<"/", Rest/binary>>) when Rest =/= <<>> ->
+    lists:all(fun is_route_segment/1, binary:split(Rest, ~"/", [global]));
+is_route_path(_Path) ->
+    false.
+
+is_route_segment(<<":", Name/binary>>) ->
+    re:run(Name, ~"^[a-z][a-z0-9_]*$", [{capture, none}]) =:= match;
+is_route_segment(Segment) ->
+    is_segment(Segment) andalso binary:match(Segment, ~":") =:= nomatch.
+
+route_problem(#{path := Path} = Entry) when is_binary(Path) ->
+    case is_route_path(Path) of
+        false ->
+            ~"path must be /-rooted with non-empty literal or :binding segments";
+        true ->
+            route_entry_problem(Entry)
+    end;
+route_problem(_Entry) ->
+    ~"entry must be #{path, method, mfa => {Module, Function, 1}, security => player | webhook}".
+
+route_entry_problem(#{mfa := {M, F, A}}) when is_atom(M), is_atom(F), A =/= 1 ->
+    ~"a route handler is a Nova controller: mfa must be {Module, Function, 1}";
+route_entry_problem(_Entry) ->
+    ~"entry must be #{path, method, mfa => {Module, Function, 1}, security => player | webhook}".
+
+route_offender(#{path := Path}) when is_binary(Path) -> Path;
+route_offender(Entry) -> Entry.
+
+%% Within one manifest the same path may carry several methods - core's own
+%% table does - but the same path and method twice would be resolved by
+%% insertion order, and two overlapping patterns would shadow one another the
+%% same way. Refusing both is what makes declaration order irrelevant.
+route_set_problems(Routes) ->
+    Indexed = lists:enumerate([{Path, Method} || #{path := Path, method := Method} <- Routes]),
+    [
+        {routes, ~"two entries serve the same path and method", PathA}
+     || {I, {PathA, Method}} <- Indexed,
+        {J, {PathB, MethodB}} <- Indexed,
+        I < J,
+        PathA =:= PathB,
+        Method =:= MethodB
+    ] ++
+        [
+            {routes, ~"two entries declare paths that match the same requests", {PathA, PathB}}
+         || {I, {PathA, _}} <- Indexed,
+            {J, {PathB, _}} <- Indexed,
+            I < J,
+            PathA =/= PathB,
+            paths_overlap(PathA, PathB)
+        ].
+
+%% Two patterns collide when some concrete request path matches both: same
+%% segment count, and at every position the literals agree or either side is
+%% a binding. This is what makes `/saves/:slot` and `/saves/:id` one claim,
+%% and catches a literal hiding under somebody else's binding.
+paths_overlap(PathA, PathB) ->
+    SegmentsA = binary:split(PathA, ~"/", [global]),
+    SegmentsB = binary:split(PathB, ~"/", [global]),
+    length(SegmentsA) =:= length(SegmentsB) andalso
+        lists:all(fun segments_compatible/1, lists:zip(SegmentsA, SegmentsB)).
+
+segments_compatible({<<":", _/binary>>, _Segment}) -> true;
+segments_compatible({_Segment, <<":", _/binary>>}) -> true;
+segments_compatible({Segment, Segment}) -> true;
+segments_compatible({_SegmentA, _SegmentB}) -> false.
 
 is_dotted(Method) when is_binary(Method) ->
     case binary:split(Method, ~".") of
@@ -576,12 +670,20 @@ already implies, and every kind derives:
 | `lua` | the namespaces in `lua/0` |
 | `tables` | `table/0` on the extension's `kura_schema` modules |
 | `queues` | `queue/0` on the extension's `shigoto_worker` modules |
+| `http` | the paths in `routes/0` |
 
 So two extensions installing the same `game.quests`, or the same job queue,
 collide before either has bothered with `owns/0`.
 
-The last two derive through `asobi_extension_reserved`, the same rule that
-finds core's own tables and queues, so a name core reserves and a name an
+The `http` kind alone compares structurally rather than by token equality:
+two paths conflict when some request could match both, so `/saves/:slot` and
+`/saves/:id` are one claim and a literal under another table's binding is a
+collision too. Its reserved set is core's own route table, via
+`asobi_router:core_routes/0` - the same derive-don't-restate rule the other
+kinds follow.
+
+Tables and queues derive through `asobi_extension_reserved`, the same rule
+that finds core's own tables and queues, so a name core reserves and a name an
 extension claims can never be found two different ways.
 
 That leaves `owns/0` doing one job, and it is worth stating because it is no
@@ -613,6 +715,16 @@ duplicate_names(Extensions) ->
      || {Name, A, B} <- pairs([{Name, App} || #{name := Name, app := App} <- Extensions])
     ].
 
+kind_problems(http, Extensions, ReservedPaths) ->
+    Claims = lists:usort([{Path, App} || #{app := App} = E <- Extensions, Path <- claims(E, http)]),
+    route_conflicts(Claims) ++
+        [
+            {reserved_route, Path, CorePath, App}
+         || {Path, App} <- Claims,
+            CorePath <- ReservedPaths,
+            paths_overlap(Path, CorePath)
+        ] ++
+        undeclared(http, Extensions);
 kind_problems(Kind, Extensions, ReservedTokens) ->
     Claims = [{Token, App} || #{app := App} = E <- Extensions, Token <- claims(E, Kind)],
     [{namespace_conflict, Kind, Token, A, B} || {Token, A, B} <- pairs(Claims)] ++
@@ -621,6 +733,21 @@ kind_problems(Kind, Extensions, ReservedTokens) ->
          || {Token, App} <- lists:usort(Claims), lists:member(Token, ReservedTokens)
         ] ++
         undeclared(Kind, Extensions).
+
+%% Structural, so `pairs/1` cannot serve: two different tokens can still be
+%% one claim. Same-app pairs are skipped - a manifest's own set was already
+%% checked for internal overlap, and a reservation in `owns/0` next to the
+%% route it reserves is the well-formed case, not a conflict.
+route_conflicts(Claims) ->
+    Indexed = lists:enumerate(Claims),
+    [
+        {route_conflict, {PathA, AppA}, {PathB, AppB}}
+     || {I, {PathA, AppA}} <- Indexed,
+        {J, {PathB, AppB}} <- Indexed,
+        I < J,
+        AppA =/= AppB,
+        paths_overlap(PathA, PathB)
+    ].
 
 %% `owns/0` is the closed statement of what an extension claims. Once it names
 %% a kind at all, anything the manifest derives for that kind and the owned set
@@ -650,6 +777,8 @@ derived(#{rpc := Rpc, codes := Codes}, rpc) ->
     );
 derived(#{lua := Lua}, lua) ->
     lists:usort(maps:keys(Lua));
+derived(#{routes := Routes}, http) ->
+    lists:usort([Path || #{path := Path} <- Routes]);
 %% A shigoto queue is only ever what the worker's own `queue/0` returns -
 %% nothing reads `owns.queues` at runtime - so deriving it here is what makes
 %% the claim enforceable at all. Same for a table and its schema.
@@ -705,6 +834,20 @@ describe_one({undeclared_claim, Kind, Token, App}) ->
     line(
         "~s uses the ~s \"~s\" but does not list it in owns().~s.",
         [App, singular(Kind), Token, Kind]
+    );
+describe_one({route_conflict, {Path, A}, {Path, B}}) ->
+    line("~s and ~s both declare the route \"~s\". Routes are exclusive; move one.", [A, B, Path]);
+describe_one({route_conflict, {PathA, A}, {PathB, B}}) ->
+    line(
+        "~s declares the route \"~s\" and ~s declares \"~s\"; the two match the same requests.",
+        [A, PathA, B, PathB]
+    );
+describe_one({reserved_route, Path, Path, App}) ->
+    line("~s declares the route \"~s\", which asobi's own table serves.", [App, Path]);
+describe_one({reserved_route, Path, CorePath, App}) ->
+    line(
+        "~s declares the route \"~s\", which matches requests asobi's own \"~s\" serves.",
+        [App, Path, CorePath]
     ).
 
 line(Format, Args) ->
@@ -713,4 +856,5 @@ line(Format, Args) ->
 singular(tables) -> ~"table";
 singular(rpc) -> ~"RPC prefix";
 singular(lua) -> ~"Lua namespace";
-singular(queues) -> ~"queue".
+singular(queues) -> ~"queue";
+singular(http) -> ~"route".

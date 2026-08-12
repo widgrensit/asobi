@@ -48,9 +48,9 @@ export_player(PlayerId) ->
 ```
 
 Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0`, `owns/0`, `codes/0`,
-`erase_player/1` and `export_player/1` default to nothing, because several are
-frequently empty: an extension with no processes has no `sup/0`, and one whose
-rows cascade needs no `erase_player/1`.
+`ops/0`, `routes/0`, `erase_player/1` and `export_player/1` default to
+nothing, because several are frequently empty: an extension with no processes
+has no `sup/0`, and one whose rows cascade needs no `erase_player/1`.
 
 An extension declaring neither `rpc/0` nor `lua/0` is reachable by nobody:
 game logic calls `game.<ns>.*` from Lua, and clients call
@@ -136,7 +136,8 @@ second consumer has said what it is missing.
     codes/0,
     ops/0,
     ops_action/0,
-    ops_entry/0
+    ops_entry/0,
+    route/0
 ]).
 
 -doc "The extension's short name, and the root of everything it owns.".
@@ -196,7 +197,8 @@ table at all, so the binding would install nothing.
     tables => [token()],
     rpc => [token()],
     lua => [token()],
-    queues => [token()]
+    queues => [token()],
+    http => [token()]
 }.
 
 -doc "The HTTP status and human-readable message one code carries.".
@@ -373,7 +375,8 @@ vocabulary no player ever holds. So an extension with an admin surface - the
 first one hit it immediately with `quests.define` - had nowhere to put it.
 This is that home.
 
-Extensions still contribute **no routes** of their own. Core owns one route,
+Extensions contribute **no operator routes** - `routes/0` mounts player and
+webhook surfaces, never this plane. Core owns one route,
 `/api/v1/ops/ext/:extension/:action`, and dispatches it here exactly as it owns
 one WebSocket frame type and dispatches `rpc/0` behind it. An action is
 therefore reachable at:
@@ -392,6 +395,57 @@ callback for it here. See `guides/console-extensions.md`.
 """.
 -type ops() :: #{ops_action() => ops_entry()}.
 
+-doc """
+One HTTP route this extension serves, mounted by core's router.
+
+`path` is absolute and `/`-rooted, made of non-empty segments that are either
+literals or `:name` bindings. `mfa` is a Nova controller - applied as
+`Module:Function(Req)`, so the arity is always 1, unlike the `rpc/0` and
+`ops/0` seams whose handlers never see a request.
+
+`security` picks the chain in front of the handler:
+
+- `player` - the same authenticated player-token check every core `/api/v1`
+  route carries. The handler's `Req` arrives with `auth_data` holding
+  `player_id`, exactly as a core controller's does. This is the default
+  choice, and the only right one for anything a client calls.
+- `webhook` - no player check, for a server-to-server caller that cannot hold
+  a token (a store's receipt notification). The handler must authenticate its
+  caller itself - a signature, a shared secret - because nothing else will.
+
+Either way the route mounts inside core's global plugin chain - body cap,
+rate limiter, client gate, security headers - which an extension can neither
+replace nor reorder.
+""".
+-type route() :: #{
+    path := binary(),
+    method := get | post | put | delete,
+    mfa := mfa(),
+    security := player | webhook
+}.
+
+-doc """
+The HTTP routes this extension serves. Core's router mounts them at boot;
+extensions never mount anything themselves.
+
+This exists to preserve extracted REST surfaces and to receive server-to-server
+webhooks. A new client-facing feature should use `rpc/0` instead: one
+`rpc(method, params)` symbol reaches every SDK with zero per-extension SDK
+work, while a new REST route has no SDK surface at all. That is a listing
+guideline, not a mechanical ban - "it is a webhook" is an accepted answer.
+
+Every declared path is a derived `http` claim, validated like tables, rpc,
+lua and queues - but the comparison is structural rather than token equality:
+two paths collide when some request could match both, so `/saves/:slot` and
+`/saves/:id` are one claim, and a literal sitting under another table's
+binding is caught too. A collision with another extension or with a path
+core's own table serves refuses boot; a declared route can never be silently
+shadowed first-compiled-wins. An unmounted route - the extension absent, the
+path never declared - is indistinguishable from any other unknown route: 404,
+never a hint that the path means something when installed.
+""".
+-callback routes() -> [route()].
+
 -callback info() -> info().
 -callback rpc() -> rpc().
 -callback lua() -> lua().
@@ -400,4 +454,6 @@ callback for it here. See `guides/console-extensions.md`.
 -callback codes() -> codes().
 -callback ops() -> ops().
 
--optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1, export_player/1]).
+-optional_callbacks([
+    rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, routes/0, erase_player/1, export_player/1
+]).

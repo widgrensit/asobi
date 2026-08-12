@@ -50,8 +50,10 @@ init(State) ->
         {desc,
             "Discovers every application exporting an <app>_extension module, reads "
             "each manifest and checks that no two extensions claim the same table, "
-            "RPC prefix, Lua namespace or job queue, and that none claims a name "
-            "asobi reserves. Exits non-zero with both claimants named."}
+            "RPC prefix, Lua namespace, job queue or HTTP route, and that none "
+            "claims a name asobi reserves - for routes that includes any pattern a "
+            "request core's own table serves could match. Exits non-zero with both "
+            "claimants named."}
     ]),
     {ok, rebar_state:add_provider(State, Provider)}.
 
@@ -95,25 +97,45 @@ load_app(AppInfo) ->
 
 report(Extensions) ->
     rebar_api:info("asobi: ~b extension(s), in migration order", [length(Extensions)]),
-    _ = [rebar_api:info("  ~ts", [summarise(E)]) || E <- Extensions],
+    _ = [rebar_api:info("  ~ts", [Line]) || E <- Extensions, Line <- lines(E)],
     _ = [rebar_api:warn("asobi: ~ts", [unreachable(E)]) || E <- Extensions, is_unreachable(E)],
     ok.
 
-summarise(#{name := Name, app := App, extension_version := Version, rpc := Rpc, lua := Lua}) ->
+%% The route lines are the mount preview: exactly what `asobi_router` will
+%% put in the table, path by path, with the chain each one sits behind.
+lines(#{routes := Routes} = Extension) ->
+    [summarise(Extension) | [["  ", route_line(Route)] || Route <- Routes]].
+
+summarise(#{
+    name := Name,
+    app := App,
+    extension_version := Version,
+    rpc := Rpc,
+    lua := Lua,
+    routes := Routes
+}) ->
     io_lib:format(
-        "~s (~s, contract v~b): ~b rpc method(s), ~b lua namespace(s)",
-        [Name, App, Version, map_size(Rpc), map_size(Lua)]
+        "~s (~s, contract v~b): ~b rpc method(s), ~b lua namespace(s), ~b route(s)",
+        [Name, App, Version, map_size(Rpc), map_size(Lua), length(Routes)]
+    ).
+
+route_line(#{path := Path, method := Method, security := Security}) ->
+    io_lib:format(
+        "~ts ~ts (~s)",
+        [string:uppercase(atom_to_binary(Method, utf8)), Path, Security]
     ).
 
 %% Not an error: it is a legal state halfway through writing an extension.
-%% But an extension with neither seam is reachable by nobody - game logic
-%% calls game.<ns>.*, clients call rpc - so saying nothing would be worse.
-is_unreachable(#{rpc := Rpc, lua := Lua}) ->
-    map_size(Rpc) =:= 0 andalso map_size(Lua) =:= 0.
+%% But an extension with no seam at all is reachable by nobody - game logic
+%% calls game.<ns>.*, clients call rpc or a declared route - so saying
+%% nothing would be worse.
+is_unreachable(#{rpc := Rpc, lua := Lua, routes := Routes}) ->
+    map_size(Rpc) =:= 0 andalso map_size(Lua) =:= 0 andalso Routes =:= [].
 
 unreachable(#{app := App}) ->
     io_lib:format(
-        "~s declares neither rpc/0 nor lua/0, so nothing can call it: "
-        "game logic reaches an extension through game.<ns>.*, clients through rpc",
+        "~s declares neither rpc/0, lua/0 nor routes/0, so nothing can call it: "
+        "game logic reaches an extension through game.<ns>.*, clients through "
+        "rpc, HTTP callers through a declared route",
         [App]
     ).

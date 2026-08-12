@@ -2,8 +2,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-kinds_are_the_four_namespaces_owns_declares_test() ->
-    ?assertEqual([lua, queues, rpc, tables], lists:sort(asobi_extension_reserved:kinds())).
+kinds_are_the_five_namespaces_owns_declares_test() ->
+    ?assertEqual([http, lua, queues, rpc, tables], lists:sort(asobi_extension_reserved:kinds())).
 
 %% Derived from asobi_lua_surface, the one place the `game.*` vocabulary is
 %% written down, so adding a core namespace there reserves it here with no
@@ -40,6 +40,24 @@ seasons_is_no_longer_reserved_test() ->
 queues_come_from_core_shigoto_workers_test() ->
     #{queues := Reserved} = asobi_extension_reserved:namespaces(),
     ?assertEqual([asobi_broadcast_worker:queue()], Reserved).
+
+%% Derived from core's own route table - `asobi_router:core_routes/0`, the
+%% groups without the extension mounts - so a route core gains is reserved
+%% here with no second edit, and resolving inside Nova's boot cannot re-enter
+%% the resolver to read it.
+http_paths_come_from_the_core_route_table_test() ->
+    #{http := Reserved} = asobi_extension_reserved:namespaces(),
+    [
+        ?assert(lists:member(Path, Reserved))
+     || Path <- [
+            ~"/api/v1/matches/:id",
+            ~"/api/v1/auth/register",
+            ~"/api/v1/ops/ext/:extension/:action",
+            ~"/console",
+            ~"/ws"
+        ]
+    ],
+    ?assertNot(lists:member(~"/api/v1/quests/board", Reserved)).
 
 %% An RPC prefix and an error-code domain are the same token by construction,
 %% so core's closed code set reserves the prefixes too.
