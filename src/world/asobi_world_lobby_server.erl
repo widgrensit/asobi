@@ -58,8 +58,9 @@ Async: the caller keeps the value it already computed; this only seeds the
 shared cache for the next reader.
 
 The key is `{ServerMod, HasCapacity}` for worlds and
-`{ServerMod, HasCapacity, Joinable}` for matches - ten keys total across the
-two. Every element after the module has to be a bounded, non-client-controlled
+`{ServerMod, HasCapacity, Joinable}` for matches - eight keys total across
+the two, two for worlds and six for matches, `Joinable` being `undefined`
+when the caller did not ask. Every element after the module has to be a bounded, non-client-controlled
 value: keying on `mode` would let a client cycle distinct modes to miss on
 every request and grow the table without bound. The guard enforces that shape
 rather than trusting the caller, which is why it is not simply `is_tuple/1`.

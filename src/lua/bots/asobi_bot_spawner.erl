@@ -4,7 +4,9 @@ Watches the matchmaker queue and fills with bots when players are waiting.
 Also starts bot AI processes when bots join matches.
 
 Bot names are read from the bot script's `names` global. If not defined,
-falls back to default generated names.
+falls back to default generated names. A name is not an id: `bot_id/1` mints
+the roster id from it and every id it mints is unique, because everything a
+bot is reachable through is keyed on that id alone.
 
 `add_bot/2` and `remove_bot/2` are the other route in: a match script placing
 a bot itself, rather than a mode opting in to queue fill. Queue fill answers
@@ -28,11 +30,17 @@ it to answer the join.
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3]).
 -ifdef(TEST).
 -export([fill_mode/2, do_add_bot/2, do_remove_bot/2]).
+-export([bot_id/1, name_part/1, add_bot_refusal/3, match_bot_ids/2, bots_needing_ai/1]).
 -endif.
 
 %% Same shape as a broadcast event name, and deliberately excludes `.`: the id
 %% reaches a client in the match roster and is used as a pg group key.
 -define(MAX_BOT_NAME, 32).
+
+%% Bytes of entropy in the discriminator every bot id carries, as hex, so the
+%% suffix is twice this many characters. Fixed width on purpose: name_part/1
+%% takes it off the end by length, and a name may itself contain `_`.
+-define(BOT_SUFFIX_BYTES, 3).
 
 -define(CHECK_INTERVAL, 8000).
 -define(SCAN_INTERVAL, 2000).
@@ -43,21 +51,26 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 -doc """
-Place a bot in a live match. `Name` is bare - the `bot_` prefix every bot id
-carries is added here, so a script never has to know about it.
+Place a bot in a live match. `Name` is bare - `bot_id/1` mints the roster id
+from it, so a script never has to know about the prefix or the
+discriminator.
 
 Silently does nothing if the match is gone, full, already holds a bot by that
 name, or is already at the bot ceiling; a script calling this on every tick
-must not turn into an error stream.
+must not turn into an error stream, so the refusal log is rate limited too.
 """.
 -spec add_bot(pid(), binary()) -> ok.
 add_bot(MatchPid, Name) when is_pid(MatchPid), is_binary(Name) ->
     gen_server:cast(?MODULE, {add_bot, MatchPid, Name}).
 
 -doc """
-Remove a bot from a live match, by bare name or by full `bot_`-prefixed id -
-the roster a script reads holds the prefixed form, and a script that passes
-back what it read should not have to strip it.
+Remove a bot from a live match, by bare name or by full id - the roster a
+script reads holds the full form, and a script that passes back what it read
+should not have to strip it.
+
+Resolved against `MatchPid`'s own roster, so it can only ever remove a bot
+from the match that asked. The bot id namespace is global (see `bot_id/1`),
+which makes "stop whatever process holds this id" the wrong question.
 
 Stopping the bot process is what removes it: `asobi_bot:terminate/2` leaves
 the match on the way out.
@@ -116,17 +129,13 @@ handle_cast(_, State) ->
 
 -spec do_add_bot(pid(), binary()) -> ok.
 do_add_bot(MatchPid, Name) ->
-    BotId = <<"bot_", Name/binary>>,
     try asobi_match_server:get_info(MatchPid) of
         #{players := Players, mode := Mode, max_players := Max} when is_list(Players) ->
-            case add_bot_refusal(BotId, Players, Max) of
+            case add_bot_refusal(Name, Players, Max) of
                 ok ->
-                    start_bot(MatchPid, BotId, bot_script(Mode));
+                    start_bot(MatchPid, bot_id(Name), bot_script(Mode));
                 {refused, Reason} ->
-                    ?LOG_INFO(#{
-                        msg => ~"bot not added", bot_id => BotId, reason => Reason
-                    }),
-                    ok
+                    log_bot_not_added(MatchPid, Name, Reason)
             end;
         _ ->
             ok
@@ -137,15 +146,40 @@ do_add_bot(MatchPid, Name) ->
             ok
     end.
 
+%% Keyed on the match, not the bot: a script looping over names would
+%% otherwise get a fresh bucket per name and defeat the limit. Same shape as
+%% asobi_match_server:log_dropped_input/3 - a script calling game.bots.add on
+%% every tick is a log channel the script controls, and every one of those
+%% calls past the first is a refusal.
+-spec log_bot_not_added(pid(), binary(), atom()) -> ok.
+log_bot_not_added(MatchPid, Name, Reason) ->
+    case asobi_script_log_limiter:allow({?MODULE, bot_not_added, MatchPid}) of
+        {true, Dropped} ->
+            ?LOG_INFO(#{
+                event => bot_not_added,
+                name => Name,
+                reason => Reason,
+                suppressed_since_last => Dropped
+            }),
+            ok;
+        false ->
+            ok
+    end.
+
+%% Matched on the name rather than the whole id, because the id carries a
+%% random discriminator and so never repeats: `already_in_match` is the answer
+%% to "is this match already holding a bot the script called Spark", which is
+%% the question a script asking for Spark twice is really asking. Without it a
+%% per-tick game.bots.add would seat a new bot every tick up to ?MAX_BOT_FILL.
 -spec add_bot_refusal(binary(), [binary()], pos_integer()) -> ok | {refused, atom()}.
-add_bot_refusal(BotId, Players, Max) ->
-    Bots = length([Id || Id <- Players, is_bot(Id)]),
-    case lists:member(BotId, Players) of
+add_bot_refusal(Name, Players, Max) ->
+    Bots = [Id || Id <- Players, is_binary(Id), is_bot(Id)],
+    case lists:member(Name, [name_part(Id) || Id <- Bots]) of
         true ->
             {refused, already_in_match};
         false when length(Players) >= Max ->
             {refused, match_full};
-        false when Bots >= ?MAX_BOT_FILL ->
+        false when length(Bots) >= ?MAX_BOT_FILL ->
             {refused, bot_ceiling_reached};
         false ->
             ok
@@ -174,13 +208,40 @@ start_bot(MatchPid, BotId, Script) ->
 %% Killing it instead would leave the roster to the match server's monitor,
 %% which under a reconnect policy holds the slot open for the grace window -
 %% a bot the script removed would linger.
+%% Resolved against this match's roster rather than against the bot id
+%% namespace. A script passes back either the id it read from the roster or
+%% the bare name it chose, and both have to mean "the bot in *this* match",
+%% which a global pg lookup on the id cannot express.
 -spec do_remove_bot(pid(), binary()) -> ok.
 do_remove_bot(MatchPid, BotId0) ->
-    BotId =
-        case is_bot(BotId0) of
-            true -> BotId0;
-            false -> <<"bot_", BotId0/binary>>
-        end,
+    try asobi_match_server:get_info(MatchPid) of
+        #{players := Players} when is_list(Players) ->
+            lists:foreach(
+                fun(BotId) when is_binary(BotId) -> remove_roster_bot(MatchPid, BotId) end,
+                match_bot_ids(BotId0, Players)
+            );
+        _ ->
+            ok
+    catch
+        _:_ ->
+            ok
+    end.
+
+%% Both spellings resolve here: the full id as it appears in the roster, and
+%% the bare name the script passed to bots.add. A name is matched against
+%% name_part/1 so the discriminator never has to be known by the script.
+-spec match_bot_ids(binary(), [term()]) -> [binary()].
+match_bot_ids(Wanted, Players) ->
+    [
+        Id
+     || Id <- Players,
+        is_binary(Id),
+        is_bot(Id),
+        Id =:= Wanted orelse name_part(Id) =:= Wanted
+    ].
+
+-spec remove_roster_bot(pid(), binary()) -> ok.
+remove_roster_bot(MatchPid, BotId) ->
     case asobi_presence:bot_pids(BotId) of
         [] ->
             %% A bot id in the roster with no live process (its AI crashed,
@@ -195,6 +256,11 @@ do_remove_bot(MatchPid, BotId0) ->
 %% matters because a script can place a bot (add_bot/2) before this match is
 %% scanned for the first time, and starting a second process for the same id
 %% would put two AIs on one roster slot.
+%%
+%% Sound only because bot_id/1 makes ids unique across concurrent matches
+%% (#442): the pg group behind bot_pids/1 is keyed on the id alone, so a bot
+%% id shared by two matches would answer this question for the wrong one and
+%% leave the second match's bot with no AI at all (#443).
 -spec bots_needing_ai([term()]) -> [binary()].
 bots_needing_ai(Players) ->
     [
@@ -404,13 +470,70 @@ bot_script(Mode) ->
 is_bot(<<"bot_", _/binary>>) -> true;
 is_bot(_) -> false.
 
+-doc """
+Mint a bot id: the `bot_` prefix, the chosen name, and a random
+discriminator.
+
+The discriminator is what makes the id identify one bot in one match. Every
+group a bot is reachable through is keyed on the id and nothing else -
+`{bot, Id}` for state, `{player, Id}` for everything `asobi_presence:send/2`
+delivers - so two matches holding the same id share those groups and each
+other's traffic. Queue fill names a bot before a match exists, so the match
+cannot be the discriminator; entropy can (#442).
+
+Deliberately not `asobi_id:generate/0`: a UUIDv7's leading characters are a
+millisecond timestamp, so two bots minted in the same tick would collide on
+exactly the prefix a reader eyeballs.
+""".
+-spec bot_id(binary()) -> binary().
+bot_id(Name) ->
+    <<"bot_", Name/binary, "_", (asobi_id:rand_suffix(?BOT_SUFFIX_BYTES))/binary>>.
+
+-doc """
+The name behind a bot id, with the prefix and discriminator taken off.
+
+Taken off by width rather than by splitting on `_`, because a name may
+contain `_` itself. An id that predates the discriminator (a match recovered
+from a backup written by an older node) has nothing to take off, so it comes
+back whole.
+""".
+-spec name_part(binary()) -> binary().
+name_part(<<"bot_", Rest/binary>>) ->
+    Width = 2 * ?BOT_SUFFIX_BYTES + 1,
+    case byte_size(Rest) > Width of
+        true ->
+            Name = binary:part(Rest, 0, byte_size(Rest) - Width),
+            case binary:part(Rest, byte_size(Rest) - Width, Width) of
+                <<"_", Hex/binary>> ->
+                    case is_hex(Hex) of
+                        true -> Name;
+                        false -> Rest
+                    end;
+                _ ->
+                    Rest
+            end;
+        false ->
+            Rest
+    end;
+name_part(Id) ->
+    Id.
+
+-spec is_hex(binary()) -> boolean().
+is_hex(Hex) ->
+    lists:all(
+        fun(C) ->
+            (C >= $0 andalso C =< $9) orelse (C >= $a andalso C =< $f)
+        end,
+        binary_to_list(Hex)
+    ).
+
 bot_name(N, Names) when is_list(Names), N =< length(Names) ->
     case lists:nth(N, Names) of
-        Name when is_binary(Name) -> <<"bot_", Name/binary>>;
-        _ -> <<"bot_", (integer_to_binary(N))/binary>>
+        Name when is_binary(Name) -> bot_id(Name);
+        _ -> bot_id(integer_to_binary(N))
     end;
 bot_name(N, _) ->
-    <<"bot_", (integer_to_binary(N))/binary>>.
+    bot_id(integer_to_binary(N)).
 
 default_names() ->
     [~"Spark", ~"Blitz", ~"Volt", ~"Neon", ~"Pulse"].

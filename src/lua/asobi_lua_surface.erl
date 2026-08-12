@@ -80,7 +80,7 @@ Making it work instead was the alternative, and it was rejected. A bot decides
 from the state the match broadcasts and nothing more, so `game.<ns>` in a bot
 VM would be one extension namespace floating in a `game` table with no
 `game.log`, no `game.economy` and no `game.storage` under it. A bot also has no
-`players.id` - `bot_Spark` is not a player row - so the one argument every
+`players.id` - a `bot_` id is not a player row - so the one argument every
 extension binding takes cannot be supplied. The documented route stands: put
 the value in the state the match broadcasts.
 """.
