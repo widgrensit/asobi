@@ -14,16 +14,24 @@ export_test_() ->
         {"match records are matched by containment", fun match_records_by_containment/0},
         {"votes are matched by jsonb key existence", fun votes_by_key_existence/0},
         {"a vote exports this player's choice and nobody else's",
-            fun votes_do_not_leak_other_voters/0}
+            fun votes_do_not_leak_other_voters/0},
+        {"every installed extension is named, contributor or not",
+            fun extensions_are_named_contributor_or_not/0},
+        {"a failing extension export fails the whole export",
+            fun a_failing_extension_fails_the_export/0}
     ]}.
 
 setup() ->
     meck:new(asobi_repo, [no_link]),
     meck:expect(asobi_repo, get, fun(asobi_player, ?PLAYER) -> {ok, player_row()} end),
     meck:expect(asobi_repo, all, fun(#kura_query{from = Schema}) -> {ok, [row(Schema)]} end),
+    meck:new(asobi_extensions, [no_link, passthrough]),
+    meck:expect(asobi_extensions, resolve, fun() -> [] end),
     ok.
 
 cleanup(_) ->
+    _ = [catch meck:unload(M) || M <- [asobi_fake_quests, asobi_fake_seasons]],
+    meck:unload(asobi_extensions),
     meck:unload(asobi_repo),
     ok.
 
@@ -113,7 +121,8 @@ covers_the_same_tables() ->
         ]),
         Queried
     ),
-    ?assertEqual(18, map_size(Payload)).
+    ?assertEqual(19, map_size(Payload)),
+    ?assertEqual(#{}, maps:get(extensions, Payload)).
 
 %% `match_records.players` is a jsonb id list with no foreign key, so a match a
 %% player took part in is only reachable by containment.
@@ -163,3 +172,38 @@ asobi_player_export_probe(PlayerId) ->
     meck:expect(asobi_repo, get, fun(asobi_player, _) -> {ok, player_row()} end),
     {ok, #{votes := [Vote]}} = asobi_player_export:run(PlayerId),
     Vote.
+
+%% The payload names every installed extension, whether or not it contributed:
+%% a skipped callback is a visible marker in the artefact, never a silent
+%% absence.
+extensions_are_named_contributor_or_not() ->
+    meck:new(asobi_fake_quests, [non_strict, no_link]),
+    meck:expect(asobi_fake_quests, export_player, fun(?PLAYER) ->
+        {ok, #{~"quest_progress" => [#{~"quest_id" => ~"q-1"}]}}
+    end),
+    meck:new(asobi_fake_seasons, [non_strict, no_link]),
+    meck:expect(asobi_extensions, resolve, fun() ->
+        [
+            #{name => quests, module => asobi_fake_quests},
+            #{name => seasons, module => asobi_fake_seasons}
+        ]
+    end),
+    {ok, #{extensions := Extensions}} = asobi_player_export:run(?PLAYER),
+    ?assertEqual(
+        #{
+            quests => #{data => #{~"quest_progress" => [#{~"quest_id" => ~"q-1"}]}},
+            seasons => #{skipped => ~"export_player/1 not exported"}
+        },
+        Extensions
+    ).
+
+%% Fail-closed: an extension that promised data and could not deliver it is
+%% exactly the silent incompleteness the marker exists to prevent, so no
+%% artefact is produced at all.
+a_failing_extension_fails_the_export() ->
+    meck:new(asobi_fake_quests, [non_strict, no_link]),
+    meck:expect(asobi_fake_quests, export_player, fun(?PLAYER) -> {error, db_down} end),
+    meck:expect(asobi_extensions, resolve, fun() ->
+        [#{name => quests, module => asobi_fake_quests}]
+    end),
+    ?assertEqual({error, {extension_export, quests, db_down}}, asobi_player_export:run(?PLAYER)).

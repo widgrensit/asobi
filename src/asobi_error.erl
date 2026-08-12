@@ -195,6 +195,11 @@ working and a new one reads one place: see `legacy/2`.
         ~"The username in the request body is not this player's username."
     },
     {~"ops.erase_failed", 500, ~"The erasure was rolled back and nothing was deleted."},
+    {
+        ~"ops.export_incomplete",
+        500,
+        ~"An installed extension failed to export. No export was produced."
+    },
 
     %% Operator console. One 404 covers both "this node does not serve the
     %% console" and "no such asset", so a caller cannot tell a deployment that

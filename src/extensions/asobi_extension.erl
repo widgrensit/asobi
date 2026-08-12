@@ -43,10 +43,10 @@ erase_player(PlayerId) ->
     ok.
 ```
 
-Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0`, `owns/0`, `codes/0` and
-`erase_player/1` default to nothing, because several are frequently empty: an
-extension with no processes has no `sup/0`, and one whose rows cascade needs no
-`erase_player/1`.
+Only `info/0` is required. `rpc/0`, `lua/0`, `sup/0`, `owns/0`, `codes/0`,
+`erase_player/1` and `export_player/1` default to nothing, because several are
+frequently empty: an extension with no processes has no `sup/0`, and one whose
+rows cascade needs no `erase_player/1`.
 
 An extension declaring neither `rpc/0` nor `lua/0` is reachable by nobody:
 game logic calls `game.<ns>.*` from Lua, and clients call
@@ -290,6 +290,35 @@ the same reason the guide gives an extension author for not reaching for one.
 """.
 -callback erase_player(PlayerId :: binary()) -> ok | {error, term()}.
 
+-doc """
+Export everything this extension holds about one player, keyed by the
+extension's own section names - mirroring core's per-table sections.
+
+The read half of `c:erase_player/1`, and optional for a different reason.
+Erasure has a physical forcing function: skip it and the foreign key blocks
+the delete. An export callback has none, so for a long time there was
+deliberately no contract here - an extension that skipped it would have
+produced a silently incomplete export and nothing would have failed. What
+made one shippable is that the artefact itself now forces the answer: core's
+export names **every** installed extension, and one without this callback
+appears under a `skipped` marker rather than being silently absent, so a data
+subject or auditor can see exactly which extensions contributed and which did
+not.
+
+Apply the same projection rule core does: positive allowlists via
+`maps:with/2`, never subtractive filters - an extension carrying a token or
+secret column is one schema field away from exporting it otherwise.
+
+A missing callback is a marker; a failing one fails the export. Returning
+`{error, Reason}` or raising means data was promised and not delivered, which
+is exactly the silent incompleteness the marker exists to prevent, so the
+whole export fails and no artefact is produced. There is no transaction: the
+export is a sequence of plain reads, and this runs in the same untransacted
+pass, after core's own sections. `m:asobi_extension_export` is the seam.
+""".
+-callback export_player(PlayerId :: binary()) ->
+    {ok, #{binary() => term()}} | {error, term()}.
+
 -doc "One operator action, the last segment of `/api/v1/ops/ext/<name>/<action>`.".
 -type ops_action() :: binary().
 
@@ -359,4 +388,4 @@ callback for it here. See `guides/console-extensions.md`.
 -callback codes() -> codes().
 -callback ops() -> ops().
 
--optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1]).
+-optional_callbacks([rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1, export_player/1]).
