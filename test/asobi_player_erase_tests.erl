@@ -29,7 +29,11 @@ erase_test_() ->
             fun failed_lookup_is_not_not_found/0},
         {"a failed lookup at the last step rolls back", fun failed_final_lookup_rolls_back/0},
         {"the auth cache is revoked after the commit", fun revokes_after_commit/0},
-        {"live leaderboards drop the player after the commit", fun evicts_leaderboards/0}
+        {"live leaderboards drop the player after the commit", fun evicts_leaderboards/0},
+        {"a raising subsystem hook is logged, swallowed, and does not fail the erase",
+            fun a_raising_hook_is_swallowed/0},
+        {"a raising step does not stop the steps after it", fun a_raising_step_isolates/0},
+        {"the post-commit steps run in a deterministic order", fun post_commit_order_is_fixed/0}
     ]}.
 
 setup() ->
@@ -373,4 +377,90 @@ evicts_leaderboards() ->
         )
     after
         meck:unload(asobi_leaderboard_server)
+    end.
+
+%% --- The post-erase hook seam ---
+%%
+%% The leaderboard eviction is no longer a hardcoded call in `after_commit/1`;
+%% it is the one entry in `post_erase_hooks/0`, invoked best-effort in isolation
+%% next to the kernel teardown. These pin the three properties the seam keeps: a
+%% raising hook is swallowed and does not fail the erase, a raising step does
+%% not stop the ones after it, and the order is deterministic.
+
+%% The rows are already committed away, so a wedged board must be logged and
+%% dropped, never turned into a failure. The kernel teardown that shares
+%% `after_commit/1` is untouched by it.
+a_raising_hook_is_swallowed() ->
+    meck:new(asobi_presence, [no_link]),
+    meck:expect(asobi_presence, disconnect, fun(_PlayerId, _Reason) -> ok end),
+    meck:new(asobi_leaderboard_server, [no_link, passthrough]),
+    meck:expect(asobi_leaderboard_server, evict_player, fun(_PlayerId) -> error(board_is_wedged) end),
+    try
+        ?assertMatch({ok, _}, asobi_player_erase:run(?PLAYER)),
+        ?assertEqual(1, meck:num_calls(asobi_leaderboard_server, evict_player, [?PLAYER])),
+        ?assertEqual(1, meck:num_calls(asobi_auth_cache, revoke_player, [?PLAYER]))
+    after
+        meck:unload(asobi_leaderboard_server),
+        meck:unload(asobi_presence)
+    end.
+
+%% Isolation, proved from the front: the first step `after_commit/1` runs -
+%% revoking the auth cache - is made to raise, and the session teardown and the
+%% leaderboard hook after it must still run, with the erase still {ok, _}. One
+%% subsystem's failure blocking another's cleanup is exactly what the per-step
+%% guard exists to forbid.
+a_raising_step_isolates() ->
+    meck:expect(asobi_auth_cache, revoke_player, fun(_PlayerId) -> error(cache_is_down) end),
+    meck:new(asobi_presence, [no_link]),
+    meck:expect(asobi_presence, disconnect, fun(_PlayerId, _Reason) -> ok end),
+    meck:new(asobi_leaderboard_server, [no_link, passthrough]),
+    meck:expect(asobi_leaderboard_server, evict_player, fun(_PlayerId) -> ok end),
+    try
+        ?assertMatch({ok, _}, asobi_player_erase:run(?PLAYER)),
+        ?assertEqual(1, meck:num_calls(asobi_presence, disconnect, [?PLAYER, ~"erased"])),
+        ?assertEqual(1, meck:num_calls(asobi_leaderboard_server, evict_player, [?PLAYER]))
+    after
+        meck:unload(asobi_leaderboard_server),
+        meck:unload(asobi_presence)
+    end.
+
+%% Kernel teardown (auth cache, then session), then the subsystem hooks in
+%% `post_erase_hooks/0` order. A collector records each call as it happens, so
+%% the sequence itself is asserted, not just the registry's contents.
+post_commit_order_is_fixed() ->
+    Tester = self(),
+    meck:expect(asobi_auth_cache, revoke_player, fun(_PlayerId) ->
+        Tester ! {step, {asobi_auth_cache, revoke_player}},
+        ok
+    end),
+    meck:new(asobi_presence, [no_link]),
+    meck:expect(asobi_presence, disconnect, fun(_PlayerId, _Reason) ->
+        Tester ! {step, {asobi_presence, disconnect}},
+        ok
+    end),
+    meck:new(asobi_leaderboard_server, [no_link, passthrough]),
+    meck:expect(asobi_leaderboard_server, evict_player, fun(_PlayerId) ->
+        Tester ! {step, {asobi_leaderboard_server, evict_player}},
+        ok
+    end),
+    try
+        ?assertMatch({ok, _}, asobi_player_erase:run(?PLAYER)),
+        ?assertEqual(
+            [
+                {asobi_auth_cache, revoke_player},
+                {asobi_presence, disconnect},
+                {asobi_leaderboard_server, evict_player}
+            ],
+            drain_steps()
+        )
+    after
+        meck:unload(asobi_leaderboard_server),
+        meck:unload(asobi_presence)
+    end.
+
+drain_steps() ->
+    receive
+        {step, Step} -> [Step | drain_steps()]
+    after 0 ->
+        []
     end.
