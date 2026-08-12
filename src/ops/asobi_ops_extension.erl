@@ -101,6 +101,8 @@ dispatch(Extension, Action, Actor, Req) ->
 ctx(Extension, Action, Actor) ->
     #{actor => Actor, extension => Extension, action => Action}.
 
+-spec call({module(), atom(), 2}, map(), ctx()) ->
+    asobi_rpc:reply() | {raised, atom(), term(), erlang:stacktrace()}.
 call({M, F, 2}, Params, Ctx) ->
     try
         M:F(Params, Ctx)

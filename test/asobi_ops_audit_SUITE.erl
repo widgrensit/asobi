@@ -9,7 +9,8 @@
     half_failed_broadcast_is_stored_as_partial/1,
     row_carries_the_unattested_actor/1,
     successful_extension_mutation_is_stored_as_ok/1,
-    failed_extension_mutation_is_stored_as_error/1
+    failed_extension_mutation_is_stored_as_error/1,
+    raising_extension_mutation_is_stored_as_error/1
 ]).
 
 all() -> [{group, ops_audit}, {group, extension_ops}].
@@ -23,7 +24,8 @@ groups() ->
         ]},
         {extension_ops, [], [
             successful_extension_mutation_is_stored_as_ok,
-            failed_extension_mutation_is_stored_as_error
+            failed_extension_mutation_is_stored_as_error,
+            raising_extension_mutation_is_stored_as_error
         ]}
     ].
 
@@ -150,6 +152,27 @@ failed_extension_mutation_is_stored_as_error(Config) ->
     ?assertEqual(0, maps:get(succeeded_count, Row)),
     ?assertEqual(0, maps:get(failed_count, Row)),
     ?assertEqual(#{~"reason" => ~"quests.already_claimed"}, maps:get(details, Row)),
+    Config.
+
+%% The declared action is re-pointed at the raising fixture, mirroring the
+%% dispatch_mfa helper the unit tests use, so the raise travels the same seam a
+%% real call takes.
+raising_extension_mutation_is_stored_as_error(Config) ->
+    Display = label(?FUNCTION_NAME),
+    meck:new(asobi_extensions, [passthrough, no_link]),
+    meck:expect(asobi_extensions, ops_action, fun(_Extension, _Action) ->
+        #{method => post, mfa => {asobi_fixture_quests_ops, raises, 2}, class => config}
+    end),
+    try
+        {asobi_error, ~"internal"} = asobi_ops_extension:handle(ext_req(Display, #{}))
+    after
+        meck:unload(asobi_extensions)
+    end,
+    Row = row(Display),
+    ?assertEqual(~"error", maps:get(outcome, Row)),
+    ?assertEqual(0, maps:get(succeeded_count, Row)),
+    ?assertEqual(0, maps:get(failed_count, Row)),
+    ?assertEqual(#{~"reason" => ~"{error,deliberate}"}, maps:get(details, Row)),
     Config.
 
 ext_req(Display, Params) ->

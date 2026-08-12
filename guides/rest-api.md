@@ -793,7 +793,9 @@ configure.
 A successful call is stored as outcome `ok` with a succeeded count of one. A
 failure is stored as outcome `error` whether or not it carried details, and
 the row's `details` holds the returned code; the details map itself is the
-caller's diagnostic and is not stored.
+caller's diagnostic and is not stored. A handler that raises, or answers
+something outside the reply contract, is answered `internal` and still
+audited as an `error` outcome.
 
 While the node is still running migrations the route answers **503**
 `not_ready`, before the extension's handler runs.

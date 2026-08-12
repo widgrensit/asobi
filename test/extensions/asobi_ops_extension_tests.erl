@@ -40,7 +40,9 @@ extension_ops_test_() ->
 extension_audit_row_test_() ->
     {foreach, fun setup_rows/0, fun cleanup_rows/1, [
         fun a_successful_write_writes_an_ok_row/0,
-        fun a_failure_with_details_writes_an_error_row/0
+        fun a_failure_with_details_writes_an_error_row/0,
+        fun a_raising_handler_writes_an_error_row/0,
+        fun an_off_contract_return_writes_an_error_row/0
     ]}.
 
 setup() ->
@@ -160,6 +162,25 @@ a_failure_with_details_writes_an_error_row() ->
     ?assertEqual(0, maps:get(succeeded_count, Row)),
     ?assertEqual(0, maps:get(failed_count, Row)),
     ?assertEqual(#{reason => ~"quests.already_claimed"}, maps:get(details, Row)).
+
+%% A raise is caught by the seam and comes back as a `{raised, ...}` value, so
+%% the wrapper audits it like any other outcome - answered `internal`, recorded
+%% as an error.
+a_raising_handler_writes_an_error_row() ->
+    ?assertEqual({asobi_error, ~"internal"}, dispatch_mfa(raises)),
+    Row = row(),
+    ?assertEqual(~"error", maps:get(outcome, Row)),
+    ?assertEqual(0, maps:get(succeeded_count, Row)),
+    ?assertEqual(0, maps:get(failed_count, Row)),
+    ?assertEqual(#{reason => ~"{error,deliberate}"}, maps:get(details, Row)).
+
+an_off_contract_return_writes_an_error_row() ->
+    ?assertEqual({asobi_error, ~"internal"}, dispatch_mfa(off_contract)),
+    Row = row(),
+    ?assertEqual(~"error", maps:get(outcome, Row)),
+    ?assertEqual(0, maps:get(succeeded_count, Row)),
+    ?assertEqual(0, maps:get(failed_count, Row)),
+    ?assertEqual(#{reason => ~"surprise"}, maps:get(details, Row)).
 
 %% --- Readiness ---
 
