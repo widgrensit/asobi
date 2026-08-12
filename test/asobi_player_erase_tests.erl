@@ -249,6 +249,102 @@ failed_final_lookup_rolls_back() ->
     %% is the outcome this test exists to forbid.
     ?assertEqual(0, meck:num_calls(asobi_repo, delete, [asobi_player, '_'])).
 
+%% --- orphan_blocker/1: pure classification, no database ---
+%%
+%% The 409 "reinstall the package" answer is only ever right for a foreign key
+%% core does not own. These pin that only a 23503 naming a table outside the
+%% swept set classifies; a core-table, no-table, or non-FK failure stays
+%% `not_orphaned` and escalates as a 500.
+
+orphan_blocker_test_() ->
+    [
+        {"an extension table on a badmatch-wrapped 23503 is named",
+            fun orphan_names_extension_table/0},
+        {"a 23503 with only a constraint, no table, does not classify",
+            fun orphan_no_table_is_not_orphaned/0},
+        {"a 23503 naming a core-swept table does not classify",
+            fun orphan_core_table_is_not_orphaned/0},
+        {"a non-23503 pgsql error does not classify", fun orphan_non_fk_is_not_orphaned/0},
+        {"a plain {error,{pgsql_error,_}} without the badmatch layer still classifies",
+            fun orphan_plain_error_unwraps/0},
+        {"an unrelated reason does not classify", fun orphan_unrelated_is_not_orphaned/0},
+        {"steps/1 touches no relation missing from core_relations/0",
+            fun steps_touch_only_core_relations/0}
+    ].
+
+orphan_names_extension_table() ->
+    Reason =
+        {badmatch,
+            {error,
+                {pgsql_error, #{
+                    code => ~"23503",
+                    table => ~"orphan_ext_saves",
+                    constraint => ~"orphan_ext_saves_player_id_fkey"
+                }}}},
+    ?assertEqual(
+        {orphaned_extension_rows, ~"orphan_ext_saves"}, asobi_player_erase:orphan_blocker(Reason)
+    ).
+
+orphan_no_table_is_not_orphaned() ->
+    Reason = {badmatch, {error, {pgsql_error, #{code => ~"23503", constraint => ~"some_fkey"}}}},
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(Reason)).
+
+orphan_core_table_is_not_orphaned() ->
+    CoreTable = asobi_wallet:table(),
+    Reason = {badmatch, {error, {pgsql_error, #{code => ~"23503", table => CoreTable}}}},
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(Reason)).
+
+orphan_non_fk_is_not_orphaned() ->
+    Reason = {badmatch, {error, {pgsql_error, #{code => ~"23505", table => ~"orphan_ext_saves"}}}},
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(Reason)).
+
+orphan_plain_error_unwraps() ->
+    Reason = {error, {pgsql_error, #{code => ~"23503", table => ~"orphan_ext_saves"}}},
+    ?assertEqual(
+        {orphaned_extension_rows, ~"orphan_ext_saves"}, asobi_player_erase:orphan_blocker(Reason)
+    ).
+
+orphan_unrelated_is_not_orphaned() ->
+    ?assertEqual(
+        not_orphaned, asobi_player_erase:orphan_blocker({lookup_failed, statement_timeout})
+    ),
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(not_found)).
+
+%% The anti-drift guard for FIX 1: every kura schema the erase logic references
+%% must have its real table name in core_relations/0. Add a table to steps/1
+%% without adding its schema to swept_schemas/0 and this fails - so a new core
+%% child can never silently start reading as extension residue.
+steps_touch_only_core_relations() ->
+    Core = asobi_player_erase:core_relations(),
+    Missing = [S || S <- erase_logic_schemas(), not lists:member(S:table(), Core)],
+    ?assertEqual([], Missing).
+
+%% The kura schema modules referenced anywhere in the erase logic, read from the
+%% compiled abstract code. swept_schemas/0 and core_relations/0 are excluded:
+%% they are the declaration under test, not part of the sweep.
+erase_logic_schemas() ->
+    Logic = [
+        F
+     || {function, _, Name, _Arity, _Clauses} = F <- forms(asobi_player_erase),
+        not lists:member(Name, [swept_schemas, core_relations])
+    ],
+    lists:usort([A || A <- atoms(Logic), is_kura_schema(A)]).
+
+atoms(Term) when is_tuple(Term) -> lists:append([atoms(E) || E <- tuple_to_list(Term)]);
+atoms(List) when is_list(List) -> lists:append([atoms(E) || E <- List]);
+atoms(A) when is_atom(A) -> [A];
+atoms(_Other) -> [].
+
+is_kura_schema(A) ->
+    _ = code:ensure_loaded(A),
+    erlang:function_exported(A, table, 0).
+
+forms(Module) ->
+    {Module, Beam, _Path} = code:get_object_code(Module),
+    {ok, {Module, [{abstract_code, {raw_abstract_v1, Forms}}]}} =
+        beam_lib:chunks(Beam, [abstract_code]),
+    Forms.
+
 %% asobi#215's revocation SLA: without this a deleted player's access token
 %% keeps resolving from the cache for up to auth_cache_ttl_ms against a row
 %% that no longer exists.

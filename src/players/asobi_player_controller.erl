@@ -149,13 +149,24 @@ erase(PlayerId, ConfirmedHash) ->
             {asobi_error, ~"player.erase_failed"}
     catch
         Class:Reason:Stacktrace ->
-            ?LOG_ERROR(#{
-                event => player_self_erase_rolled_back,
-                player_id => PlayerId,
-                class => Class,
-                reason => Reason,
-                stacktrace => Stacktrace
-            }),
+            %% Log the named blocker for operators, but never put a table name
+            %% on a player-facing response - the wire answer stays generic.
+            case asobi_player_erase:orphan_blocker(Reason) of
+                {orphaned_extension_rows, Table} ->
+                    ?LOG_ERROR(#{
+                        event => player_self_erase_orphaned_extension_rows,
+                        player_id => PlayerId,
+                        table => Table
+                    });
+                not_orphaned ->
+                    ?LOG_ERROR(#{
+                        event => player_self_erase_rolled_back,
+                        player_id => PlayerId,
+                        class => Class,
+                        reason => Reason,
+                        stacktrace => Stacktrace
+                    })
+            end,
             {asobi_error, ~"player.erase_failed"}
     end.
 

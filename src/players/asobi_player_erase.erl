@@ -2,9 +2,17 @@
 -moduledoc """
 Delete one player and everything core holds about them, in one transaction.
 
-This is the single place core deletes a player. `m:asobi_guest_reaper` is one
-caller of it, not the site itself, and the operator-facing route
-(`POST /api/v1/ops/players/:id/erase`) is another.
+This is the single place core deletes a player. `steps/1` is the delete
+sequence; three callers reach it, each wrapping its own transaction:
+
+* `run/1,2` here - the shell and the operator route
+  (`POST /api/v1/ops/players/:id/erase`);
+* `m:asobi_guest_reaper` - the retention sweep;
+* `asobi_player_controller:erase_self/1` - the data subject's own
+  `POST /api/v1/players/me/erase`.
+
+All three route a rolled-back erasure through `orphan_blocker/1` so a removed
+extension's rows are named rather than surfaced as a bare constraint error.
 
 ## Why the child list is written out here
 
@@ -62,6 +70,14 @@ erased, the transaction rolls back cleanly, and the operator learns which
 package to reinstall or purge instead of reading a constraint name off a
 stacktrace. `guides/extensions.md` documents the rule where it bites.
 
+The translation is **narrow**: only a 23503 naming a table *outside*
+`core_relations/0` - the set `steps/1` itself sweeps, plus `players` and the
+ops audit table - reads as extension residue. A 23503 naming a core-swept
+table, or one carrying no table name, is a core bug or a write-race, not a
+removed package; those keep the raw reason and surface as
+`ops.erase_failed` (500), which is the escalate signal, never the benign
+"reinstall the package" 409.
+
 ## Atomic, never best-effort
 
 One transaction, every result asserted, so a bare `{error, _}` becomes a
@@ -93,7 +109,7 @@ idempotent, so a retry is safe. See `after_commit/1`.
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kura/include/kura.hrl").
 
--export([steps/1, after_commit/1, run/1, run/2, orphan_blocker/1]).
+-export([steps/1, after_commit/1, run/1, run/2, orphan_blocker/1, core_relations/0]).
 
 -define(ACTION, ~"players.erase").
 -define(CLASS, erasure).
@@ -341,16 +357,18 @@ shell_actor() ->
 -doc """
 Classify an exception raised inside the erase transaction.
 
-`{orphaned_extension_rows, Table}` when the failure was a Postgres
-`foreign_key_violation` (SQLSTATE 23503): core clears every child it owns
-before deleting `players`, so a foreign key that still refuses the parent
-delete belongs to a table core does not know about - a removed extension's.
-`Table` is the referencing table read from the error, its constraint name when
-the table is absent, and `unknown` when neither is carried. Every other failure
-is `not_orphaned` and keeps its own path. Exported for the other callers of the
-delete sequence - `m:asobi_guest_reaper` - which wrap their own transaction.
+`{orphaned_extension_rows, Table}` only when the failure was a Postgres
+`foreign_key_violation` (SQLSTATE 23503) naming a table **outside**
+`core_relations/0`. Core clears every child it owns before deleting `players`,
+so a foreign key that still refuses the parent delete and names a table core
+does not sweep belongs to a removed extension. A 23503 naming a core-swept
+table (a bug or a write-race), or one carrying no table name, is `not_orphaned`
+and keeps its raw reason so it escalates rather than reads as a benign removed
+package. Every non-23503 failure is `not_orphaned` too. Exported for the other
+callers of the delete sequence - `m:asobi_guest_reaper` and
+`asobi_player_controller:erase_self/1` - which wrap their own transaction.
 """.
--spec orphan_blocker(term()) -> {orphaned_extension_rows, binary() | unknown} | not_orphaned.
+-spec orphan_blocker(term()) -> {orphaned_extension_rows, binary()} | not_orphaned.
 orphan_blocker({badmatch, Inner}) ->
     orphan_blocker(Inner);
 orphan_blocker({error, Inner}) ->
@@ -360,16 +378,53 @@ orphan_blocker({pgsql_error, Fields}) when is_map(Fields) ->
 orphan_blocker(_Other) ->
     not_orphaned.
 
--spec orphan_from_fields(map()) -> {orphaned_extension_rows, binary() | unknown} | not_orphaned.
-orphan_from_fields(#{code := ~"23503"} = Fields) ->
-    {orphaned_extension_rows, blocker_name(Fields)};
+-spec orphan_from_fields(map()) -> {orphaned_extension_rows, binary()} | not_orphaned.
+orphan_from_fields(#{code := ~"23503", table := Table}) when is_binary(Table), Table =/= ~"" ->
+    case is_core_relation(Table) of
+        true -> not_orphaned;
+        false -> {orphaned_extension_rows, Table}
+    end;
 orphan_from_fields(_Fields) ->
     not_orphaned.
 
--spec blocker_name(map()) -> binary() | unknown.
-blocker_name(#{table := Table}) when is_binary(Table), Table =/= ~"" ->
-    Table;
-blocker_name(#{constraint := Constraint}) when is_binary(Constraint), Constraint =/= ~"" ->
-    Constraint;
-blocker_name(_Fields) ->
-    unknown.
+-spec is_core_relation(binary()) -> boolean().
+is_core_relation(Table) ->
+    lists:member(Table, core_relations()).
+
+-doc """
+The Postgres relations `steps/1` clears, by their real table names.
+
+The escalation boundary for `orphan_blocker/1`: a 23503 naming one of these is
+a core defect or a write-race, not a removed extension. Derived from the schema
+modules `steps/1` sweeps (`asobi_player:table/0` and friends give the real
+relation name, which differs from the module name), plus the ops audit table
+`asobi_ops_audit:record_strict/4` writes inside the same transaction. `players`
+is already in the swept set. `asobi_player_erase_tests` fails if `steps/1` gains
+a schema whose table is not covered here.
+""".
+-spec core_relations() -> [binary()].
+core_relations() ->
+    [Schema:table() || Schema <- swept_schemas()] ++ [asobi_ops_audit_entry:table()].
+
+%% The schemas `steps/1` sweeps a player out of. Single source of truth for
+%% `core_relations/0`; keep in step with `steps/1`.
+-spec swept_schemas() -> [module()].
+swept_schemas() ->
+    [
+        asobi_iap_transaction,
+        asobi_group,
+        asobi_transaction,
+        asobi_wallet,
+        asobi_player_item,
+        asobi_storage,
+        asobi_cloud_save,
+        asobi_notification,
+        asobi_leaderboard_entry,
+        asobi_chat_message,
+        asobi_group_member,
+        asobi_friendship,
+        asobi_player_stats,
+        asobi_player_token,
+        asobi_player_identity,
+        asobi_player
+    ].
