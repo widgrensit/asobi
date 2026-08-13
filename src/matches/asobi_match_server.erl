@@ -620,18 +620,16 @@ finished({call, From}, {get_info, listing}, State) ->
 finished(cast, {broadcast_event, Event, Payload}, State) ->
     broadcast_match_event(Event, Payload, State),
     keep_state_and_data;
-%% asobi#462: a late vote.cast/vote.veto lands here while the finished match
-%% waits out its 5s cleanup timer, still holding the player's match_pid.
-%% Without an explicit reply the catch-all below swallows the {call, From} and
-%% the caller (asobi_ws_handler, an infinity gen_statem:call) blocks until this
-%% server stops at its cleanup timeout - a frozen socket that reads as a
-%% disconnect on mobile - then gets a misleading internal_error. Replying
+%% asobi#469: any other call landing here while the finished match waits out
+%% its 5s cleanup timer (a late vote.cast/vote.veto while the session still
+%% holds match_pid, or any call added later) must reply - an unanswered
+%% {call, From} hangs the caller (asobi_ws_handler, an infinity
+%% gen_statem:call) until this server stops at its cleanup timeout. Replying
 %% not_in_match returns immediately with the same registered 409 the
 %% dead/finished-fabric path in vote_call/1 uses, so "the match is over" is one
-%% code a client can branch on, not two that depend on a 5s race.
-finished({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
-    {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
-finished({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
+%% code a client can branch on. Only non-call events reach the swallow
+%% catch-all below now.
+finished({call, From}, _Request, _State) ->
     {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
 finished(_EventType, _Event, _State) ->
     keep_state_and_data.

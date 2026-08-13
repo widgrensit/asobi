@@ -1015,6 +1015,32 @@ vote_calls_into_finished_match_error_test() ->
     gen_statem:stop(Pid),
     cleanup(ok).
 
+%% asobi#469: the finished state enumerated a couple of call clauses and then
+%% swallowed every other {call, From} on the catch-all, so a call the finished
+%% state did not name (here a reconnect) hung the caller until the ~5s cleanup
+%% timeout. A single general call catch-all now replies not_in_match to any
+%% unexpected call, and votes into a finished match still return not_in_match.
+unexpected_call_to_finished_match_replies_not_in_match_test() ->
+    setup(),
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"pf1"),
+    ok = asobi_match_server:join(Pid, ~"pf2"),
+    timer:sleep(50),
+    ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    asobi_match_server:cancel(Pid),
+    wait_for_status(Pid, finished, 60),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {reconnect, ~"pf1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {cast_vote, ~"pf1", ~"v1", ~"o1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    gen_statem:stop(Pid),
+    cleanup(ok).
+
 %% asobi#462: a vote.cast with a non-binary option_id (a JSON number/null)
 %% missed running/3's is_binary guard and, with no catch-all there, crashed
 %% the whole match on function_clause - every player in it - on one malformed

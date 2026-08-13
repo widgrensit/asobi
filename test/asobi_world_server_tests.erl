@@ -111,7 +111,10 @@ world_server_test_() ->
             {"#462: cast_vote with a list option (approval/ranked) reaches the vote server",
                 fun cast_vote_list_option_reaches_vote_server/0}},
         {"#466: an unexpected call to a loading world replies world_not_ready, not crash",
-            fun loading_call_replies_world_not_ready/0}
+            fun loading_call_replies_world_not_ready/0},
+        {timeout, 15,
+            {"#469: an unexpected call to a finished world replies not_in_match, not hang",
+                fun unexpected_call_to_finished_world_replies_not_in_match/0}}
     ]}.
 
 starts_running() ->
@@ -666,6 +669,26 @@ vote_calls_into_finished_world_error() ->
     ?assertEqual(
         {error, not_in_match},
         gen_statem:call(Pid, {use_veto, ~"pf1", ~"v1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    stop_world(Ctx).
+
+%% asobi#469: the finished state enumerated a couple of call clauses and then
+%% swallowed every other {call, From} on the catch-all, so a call the finished
+%% state did not name (here a reconnect) hung the caller until the ~5s cleanup
+%% timeout. A single general call catch-all now replies not_in_match to any
+%% unexpected call, and votes into a finished world still return not_in_match.
+unexpected_call_to_finished_world_replies_not_in_match() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    asobi_world_server:cancel(Pid),
+    wait_for_world_status(Pid, finished, 60),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {reconnect, ~"pf1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {cast_vote, ~"pf1", ~"v1", ~"o1"}, 2000)
     ),
     ?assert(is_process_alive(Pid)),
     stop_world(Ctx).
