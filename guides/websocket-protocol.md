@@ -689,7 +689,7 @@ rather than every third.
 One cost to know: `last_seq` sits on the shared entity delta, so it reaches
 every subscriber in the zone, not just its owner - the ack's bandwidth scales
 with zone population. A per-connection ack frame that avoids that is tracked in
-asobi#463; the entity-field pattern is the answer today.
+asobi#474; the entity-field pattern is the answer today.
 
 ### `world.terrain` (server push)
 

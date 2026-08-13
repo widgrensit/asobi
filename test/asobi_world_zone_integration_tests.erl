@@ -62,6 +62,10 @@ world_zone_integration_test_() ->
         {"multiple players share same zone process", fun shared_zone_process/0},
         {"get_active_zones correct after lazy joins", fun active_zones_after_joins/0},
         {"small grid backward compat", fun small_grid_backward_compat/0},
+        {"broadcast_interval override reaches the zone process (#463)",
+            fun broadcast_interval_reaches_the_zone/0},
+        {"broadcast_interval defaults to 3 when unset (#463)",
+            fun broadcast_interval_defaults_to_three/0},
         {"world.input crossing a zone boundary rehomes the player",
             fun world_input_rehomes_across_boundary/0},
         {"a binary-keyed (Lua-shaped) player entity rehomes across a boundary",
@@ -103,6 +107,22 @@ default_prespawns_all() ->
         end,
         [{X, Y} || X <- lists:seq(0, 2), Y <- lists:seq(0, 2)]
     ),
+    stop_world(Ctx).
+
+%% asobi#463: a mode-set broadcast_interval must reach the zone PROCESS, not just
+%% world_config/1. This is the hop that was missing - the value was read by
+%% asobi_zone but never placed into BaseZoneConfig.
+broadcast_interval_reaches_the_zone() ->
+    Ctx = #{zone_mgr := Mgr} = start_world(#{broadcast_interval => 1}),
+    {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
+    ?assertEqual(1, maps:get(broadcast_interval, sys:get_state(ZonePid))),
+    stop_world(Ctx).
+
+%% The default is unchanged: a world that sets nothing runs on 3.
+broadcast_interval_defaults_to_three() ->
+    Ctx = #{zone_mgr := Mgr} = start_world(),
+    {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
+    ?assertEqual(3, maps:get(broadcast_interval, sys:get_state(ZonePid))),
     stop_world(Ctx).
 
 %% lazy_zones=true means no zones spawned at startup
