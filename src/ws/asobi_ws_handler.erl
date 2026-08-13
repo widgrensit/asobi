@@ -831,11 +831,13 @@ handle_message(
     #{session := SessionPid} = State
 ) when SessionPid =/= undefined ->
     %% asobi#474: an optional client input sequence number, a sibling of payload
-    %% (so "the payload IS the input map" stays true). Non-integers are ignored,
-    %% so a malformed seq degrades to no-ack instead of crashing the handler.
+    %% (so "the payload IS the input map" stays true). Bounded to a non-negative
+    %% JS-safe integer: the value is echoed back on every broadcast tick, so an
+    %% unbounded bignum here would be a per-tick json:encode amplifier. Anything
+    %% out of range degrades to no-ack rather than crashing the handler.
     Seq =
         case maps:get(~"seq", Msg, undefined) of
-            N when is_integer(N) -> N;
+            N when is_integer(N), N >= 0, N =< 16#1FFFFFFFFFFFFF -> N;
             _ -> undefined
         end,
     try asobi_player_session:get_state(SessionPid) of

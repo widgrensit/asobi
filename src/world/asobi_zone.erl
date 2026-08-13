@@ -695,7 +695,7 @@ apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, Acks) ->
         {ok, Entities1} ->
             apply_inputs(GameMod, Rest, Entities1, Acks1);
         {error, Reason} ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"zone input rejected",
                 player_id => PlayerId,
                 reason => Reason
@@ -708,11 +708,15 @@ apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, Acks) ->
 %% seq (the client did not opt in) contribute nothing.
 record_ack(_PlayerId, undefined, Acks) ->
     Acks;
-record_ack(PlayerId, Seq, Acks) when is_integer(Seq) ->
+record_ack(PlayerId, Seq, Acks) when is_integer(Seq), Seq >= 0 ->
     case Acks of
         #{PlayerId := Prev} when Prev >= Seq -> Acks;
         _ -> Acks#{PlayerId => Seq}
-    end.
+    end;
+%% Total over Seq: player_input/4 is exported, so a caller passing a
+%% spec-violating Seq must not function_clause-crash the shared zone process.
+record_ack(_PlayerId, _Seq, Acks) ->
+    Acks.
 
 -spec compute_deltas(map(), map()) -> [term()].
 compute_deltas(OldEntities, NewEntities) ->

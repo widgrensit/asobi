@@ -621,8 +621,8 @@ server only forwards the map verbatim to your `handle_input/3` callback.
 For client-side prediction, add an optional `seq` *alongside* `payload` (a
 sibling, so "the payload IS the input map" stays true). The server echoes the
 highest consumed `seq` back as a [`world.ack`](#worldack-server-push); see
-[Client-side prediction](#client-side-prediction). A non-integer `seq` is
-ignored.
+[Client-side prediction](#client-side-prediction). A `seq` that is not a
+non-negative integer below 2^53 is ignored.
 
 ```json
 {"type": "world.input", "seq": 412, "payload": {"kind": "move", "x": 600, "y": 480}}
