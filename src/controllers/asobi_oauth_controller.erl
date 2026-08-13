@@ -226,7 +226,7 @@ create_player_with_identity(Provider, Claims, Attempt) ->
                         PlayerId = maps:get(id, Player),
                         case insert_identity(PlayerId, Provider, Claims) of
                             {ok, _Identity} ->
-                                _ = init_player_stats(PlayerId),
+                                _ = asobi_player_stats:init(PlayerId),
                                 {ok, Player};
                             {error, _} = IErr ->
                                 throw({rollback, identity, IErr})
@@ -330,22 +330,6 @@ generate_username(Provider, ProviderUid) ->
 -spec maybe_value(term(), term()) -> term().
 maybe_value(undefined, Default) -> Default;
 maybe_value(Value, _Default) -> Value.
-
--spec init_player_stats(binary()) -> ok.
-init_player_stats(PlayerId) ->
-    CS = kura_changeset:cast(asobi_player_stats, #{}, #{player_id => PlayerId}, [player_id]),
-    %% F-25: log insert errors instead of silently dropping them.
-    case asobi_repo:insert(CS) of
-        {ok, _} ->
-            ok;
-        {error, Reason} ->
-            logger:warning(#{
-                msg => ~"player_stats_init_failed",
-                player_id => PlayerId,
-                reason => Reason
-            }),
-            ok
-    end.
 
 -spec provider_to_atom(binary()) -> atom().
 provider_to_atom(~"google") -> google;

@@ -95,3 +95,41 @@ sql_increments() ->
     ?assertNotEqual(nomatch, binary:match(SQL, ~"wins = wins + $2")),
     ?assertNotEqual(nomatch, binary:match(SQL, ~"losses = losses + $3")),
     ?assertNotEqual(nomatch, binary:match(SQL, ~"WHERE player_id = $1")).
+
+%% init/1 is the one stats-creation entry the register, OAuth, and guest
+%% controllers all share (asobi#448). The SQL is exercised end to end by the
+%% controller SUITEs; here we pin the shared body: it casts a stats changeset
+%% for the player and never lets an insert failure escape.
+
+init_setup() ->
+    meck:new(asobi_repo, [no_link]),
+    meck:new(kura_changeset, [passthrough, no_link]),
+    ok.
+
+init_cleanup(_) ->
+    meck:unload(kura_changeset),
+    meck:unload(asobi_repo),
+    ok.
+
+init_test_() ->
+    {foreach, fun init_setup/0, fun init_cleanup/1, [
+        {"init casts a stats changeset for the player and returns ok",
+            fun init_casts_and_returns_ok/0},
+        {"init swallows an insert error and still returns ok", fun init_swallows_insert_error/0}
+    ]}.
+
+init_casts_and_returns_ok() ->
+    meck:expect(asobi_repo, insert, fun(_CS) -> {ok, inserted} end),
+    PlayerId = asobi_id:generate(),
+    ?assertEqual(ok, asobi_player_stats:init(PlayerId)),
+    ?assert(
+        meck:called(
+            kura_changeset, cast, [asobi_player_stats, #{}, #{player_id => PlayerId}, [player_id]]
+        )
+    ),
+    ?assertEqual(1, meck:num_calls(asobi_repo, insert, '_')).
+
+init_swallows_insert_error() ->
+    meck:expect(asobi_repo, insert, fun(_CS) -> {error, boom} end),
+    ?assertEqual(ok, asobi_player_stats:init(asobi_id:generate())),
+    ?assertEqual(1, meck:num_calls(asobi_repo, insert, '_')).
