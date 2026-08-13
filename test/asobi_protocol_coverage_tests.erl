@@ -15,6 +15,96 @@
     ?WORLD_SERVER
 ]).
 
+%% The frozen 1.0 wire (ADR 0010): the 40 frame types the corpus shipped when
+%% the wire froze. Every one must stay present as a fixture, because the SDKs
+%% vendor the corpus by copying it and cannot be upgraded in place - removing or
+%% renaming a frozen type breaks every client already shipped against it. So a
+%% removal has to fail CI and go through a protocol-version bump (1 -> 2) rather
+%% than pass as a green diff. Additions are NOT listed here: a new event is not
+%% frozen yet, and every_emitted_event_has_a_fixture_test already covers it.
+%%
+%% This list is hand-maintained, NOT derived from the corpus, and that is the
+%% whole point: deriving it would let a deletion shrink the list along with the
+%% fixtures and pass, which is exactly the regression this guard exists to catch.
+-define(FROZEN_WIRE_1_0, [
+    ~"chat.joined",
+    ~"chat.left",
+    ~"chat.message",
+    ~"dm.message",
+    ~"dm.sent",
+    ~"error",
+    ~"game.error",
+    ~"game.message",
+    ~"match.finished",
+    ~"match.joined",
+    ~"match.left",
+    ~"match.list",
+    ~"match.matched",
+    ~"match.matchmaker_expired",
+    ~"match.matchmaker_failed",
+    ~"match.state",
+    ~"match.vote_result",
+    ~"match.vote_start",
+    ~"match.vote_tally",
+    ~"match.vote_vetoed",
+    ~"matchmaker.queued",
+    ~"matchmaker.removed",
+    ~"module.error",
+    ~"module.event",
+    ~"module.message",
+    ~"notification.new",
+    ~"presence.updated",
+    ~"rpc.error",
+    ~"rpc.ok",
+    ~"session.connected",
+    ~"session.heartbeat",
+    ~"vote.cast_ok",
+    ~"vote.veto_ok",
+    ~"world.finished",
+    ~"world.joined",
+    ~"world.left",
+    ~"world.list",
+    ~"world.phase_changed",
+    ~"world.terrain",
+    ~"world.tick"
+]).
+
+%% The frozen 1.0 INBOUND wire (ADR 0010): the 22 client->server command frame
+%% types the socket handles. The client SENDS these; they are hard-coded in
+%% every SDK's call sites, NOT in the vendored fixture corpus, so they cannot be
+%% re-pulled either - renaming or removing a handled frame makes the server
+%% answer `unknown_type` to every shipped client, the same blast radius as an
+%% outbound rename. Each must stay handled by asobi_ws_handler.
+%%
+%% Hand-maintained, NOT derived from the handler scan, for the same reason the
+%% outbound list is not derived from the corpus: deriving it would let a
+%% deleted clause shrink the list along with the scanned set and pass, which is
+%% exactly the regression this guard exists to catch.
+-define(FROZEN_INBOUND_1_0, [
+    ~"chat.join",
+    ~"chat.leave",
+    ~"chat.send",
+    ~"dm.send",
+    ~"match.input",
+    ~"match.join",
+    ~"match.leave",
+    ~"match.list",
+    ~"matchmaker.add",
+    ~"matchmaker.remove",
+    ~"presence.update",
+    ~"rpc.call",
+    ~"session.connect",
+    ~"session.heartbeat",
+    ~"vote.cast",
+    ~"vote.veto",
+    ~"world.create",
+    ~"world.find_or_create",
+    ~"world.input",
+    ~"world.join",
+    ~"world.leave",
+    ~"world.list"
+]).
+
 %% Every event the asobi server emits must have a fixture file. SDKs use
 %% the fixtures as ground truth for dispatch tests; a missing fixture
 %% means a wire event that no SDK can dispatch-test against. This is the
@@ -48,6 +138,60 @@ no_stale_fixtures_test() ->
             io_lib:format(
                 "Fixtures exist for events with no emit site in src/ — stale or renamed: ~p",
                 [Stale]
+            )
+        )
+    ).
+
+%% ADR 0010: the 1.0 wire is frozen. Every frozen frame type must still ship a
+%% fixture; a missing one is a removal or rename that silently breaks every SDK
+%% that vendored the corpus, and must instead go through a protocol-version bump
+%% (?PROTOCOL 1 -> 2) with an N/N-1 window. Additions stay allowed - a type not
+%% in the frozen list is covered by every_emitted_event_has_a_fixture_test.
+frozen_1_0_wire_types_are_still_present_test() ->
+    Fixtures = list_fixture_event_names(),
+    Removed = lists:sort(?FROZEN_WIRE_1_0 -- Fixtures),
+    ?assertEqual(
+        [],
+        Removed,
+        lists:flatten(
+            io_lib:format(
+                "Frozen 1.0 wire frame types removed or renamed (ADR 0010) - breaking "
+                "the wire needs a protocol-version bump, not a fixture deletion: ~p",
+                [Removed]
+            )
+        )
+    ).
+
+%% ADR 0010: the 1.0 wire is frozen in BOTH directions. The client SENDS the 22
+%% command frames in ?FROZEN_INBOUND_1_0; each must still be handled by
+%% asobi_ws_handler, or a shipped client's call answers `unknown_type`. A
+%% removal/rename drops the frame from the scanned set and must instead go
+%% through a protocol-version bump (?PROTOCOL 1 -> 2) with an N/N-1 window.
+%%
+%% The handled set is scanned straight from source (mirroring
+%% scan_encode_reply_types/1 for the outbound direction), so the guard trips
+%% even when a refactor updates the behavioural suite in lockstep with the
+%% rename. Additions stay allowed: a new inbound frame is simply not frozen yet,
+%% so it enlarges the scanned set without tripping the ?FROZEN_INBOUND_1_0 diff.
+frozen_1_0_inbound_types_are_still_handled_test() ->
+    Handled = scan_handled_inbound_types(read_file(?WS_HANDLER)),
+    %% The scan is real, not vacuous, and not over-broad: it finds a genuine
+    %% inbound command, and does NOT pick up a pure server push (match.state)
+    %% nor an outbound reply literal (session.connected), so it is reading
+    %% handle_message clause heads rather than encode_reply calls or payloads.
+    ?assert(lists:member(~"session.connect", Handled)),
+    ?assertNot(lists:member(~"match.state", Handled)),
+    ?assertNot(lists:member(~"session.connected", Handled)),
+    Removed = lists:sort(?FROZEN_INBOUND_1_0 -- Handled),
+    ?assertEqual(
+        [],
+        Removed,
+        lists:flatten(
+            io_lib:format(
+                "Frozen 1.0 inbound command frames no longer handled by asobi_ws_handler "
+                "(ADR 0010) - breaking the wire needs a protocol-version bump, not a "
+                "handler-clause deletion: ~p",
+                [Removed]
             )
         )
     ).
@@ -140,6 +284,15 @@ scan_encode_reply_types(Bin) ->
         {match, Matches} -> [B || [B] <- Matches];
         nomatch -> []
     end.
+
+%% The INBOUND counterpart to scan_encode_reply_types/1: pulls every handled
+%% command `type` literal from the `handle_message(#{~"type" := ~"X"...` clause
+%% heads. The catch-all `#{~"type" := _Type}` clause matches a variable, not a
+%% `~"..."` literal, so it is not captured - only frames the socket actually
+%% handles are.
+scan_handled_inbound_types(Bin) ->
+    Re = "~\"type\"\\s*:=\\s*~\"([a-z][a-z._]*)\"",
+    extract_captures(Bin, Re).
 
 %% S6: extension-produced frames go out through extension_frames/3, which
 %% names two wire types - the current one and the deprecated pre-rename

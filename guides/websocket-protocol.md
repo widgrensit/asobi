@@ -1088,6 +1088,46 @@ reflected back. Codes core itself adds for this surface:
 | `unauthenticated` | The socket has not completed `session.connect` |
 | `not_ready` | The node is still running migrations. Retry |
 
+### HTTP transport
+
+The same RPC also answers over HTTP, for a client with no open socket:
+
+```
+POST /api/v1/rpc/quests.claim
+```
+
+- The method is the last path segment, so `quests.claim` here is the method the
+  socket names in its payload. The body carries only `params`:
+
+```json
+{"params": {"quest_id": "q-1"}}
+```
+
+- `protocol` is injected server-side, so an HTTP client never sends it, and
+  `rpc.unsupported_protocol` cannot fire here; the version lives in the
+  `/api/v1/` path instead.
+- There is no `cid`. An HTTP reply is self-correlating - it is the response to
+  this one request and nothing else.
+
+The reply is the **same envelope** the socket sends,
+`{"type": ..., "payload": ...}`, carrying the same `rpc.ok` or `rpc.error`
+below it, plus an HTTP status: `200` for `rpc.ok`, and the error object's own
+status otherwise (the status the [REST API](rest-api.md#errors) gives that
+code).
+
+```json
+200 OK
+{"type": "rpc.ok", "payload": {"result": {"reward": 100}}}
+```
+
+```json
+404 Not Found
+{"type": "rpc.error", "payload": {"error": {"code": "rpc.unknown_method", "message": "No installed extension serves this RPC method.", "details": {}}}}
+```
+
+Both transports share one envelope below the transport, so a single SDK decoder
+reads a reply whether it arrived on the socket or from this endpoint.
+
 ## Next steps
 
 - [REST API](rest-api.md) - the request/response surface alongside this socket protocol.
