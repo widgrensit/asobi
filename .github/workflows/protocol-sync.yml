@@ -98,11 +98,16 @@ jobs:
         run: |
           scripts/protocol-sync.sh apply "${{ matrix.sdk }}" sdk
           cd sdk
-          if git diff --quiet; then
+          # `git diff` ignores untracked files, so a purely additive corpus
+          # change - a brand new <event>.json, the most common case - reads as
+          # "no change" and the PR step is skipped, silently. That is exactly
+          # how module.event reached only four of the seven SDKs. `git status
+          # --porcelain` lists untracked files too, so a new fixture counts.
+          if [ -z "$(git status --porcelain)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            git diff --stat
+            git status --short
           fi
 
       - name: Open a PR
