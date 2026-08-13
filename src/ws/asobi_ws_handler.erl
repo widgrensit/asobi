@@ -898,6 +898,11 @@ safe_handle_message(Msg, State) ->
             reply_error(Msg, ~"invalid_payload", State);
         error:{case_clause, _}:_Stack ->
             reply_error(Msg, ~"invalid_payload", State);
+        %% asobi#465: a non-map payload reaches maps:get/2 and raises badmap.
+        %% Treat it as a client payload error, not an internal_error with a
+        %% warning-log line an authenticated player could spam.
+        error:{badmap, _}:_Stack ->
+            reply_error(Msg, ~"invalid_payload", State);
         Class:Reason:Stack ->
             logger:warning(#{
                 msg => ~"ws_handler_crash",

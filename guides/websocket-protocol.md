@@ -907,7 +907,8 @@ changing your vote more times than the vote's `max_revotes` allows (3 by
 default) is `rate_limited`. The refusals that come from the vote itself -
 `vote_not_found`, `vote_closed`, `not_eligible`, `invalid_option` - have no
 code of their own and arrive as `ws.request_failed` with the reason in
-`details`.
+`details`. A vote in a world that has not finished loading is
+`world_not_ready`, carried the same way.
 
 ### `vote.veto`
 
@@ -926,7 +927,8 @@ in match config and `veto_enabled` on the vote.
 
 An unknown vote is `vote_not_found`, a player out of tokens is
 `no_veto_tokens`, and a vote that did not enable vetoes is `veto_disabled`.
-None of the three has a code of its own either.
+None of the three has a code of its own either. A veto in a world that has not
+finished loading is `world_not_ready`, carried the same way.
 
 ### `match.vote_start` (server push)
 

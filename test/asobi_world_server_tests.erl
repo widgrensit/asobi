@@ -109,7 +109,9 @@ world_server_test_() ->
             fun cast_vote_non_binary_option_does_not_crash_world/0},
         {timeout, 15,
             {"#462: cast_vote with a list option (approval/ranked) reaches the vote server",
-                fun cast_vote_list_option_reaches_vote_server/0}}
+                fun cast_vote_list_option_reaches_vote_server/0}},
+        {"#466: an unexpected call to a loading world replies world_not_ready, not crash",
+            fun loading_call_replies_world_not_ready/0}
     ]}.
 
 starts_running() ->
@@ -720,6 +722,26 @@ cast_vote_list_option_reaches_vote_server() ->
     ),
     ?assert(is_process_alive(Pid)),
     gen_statem:stop(VotePid),
+    stop_world(Ctx).
+
+%% asobi#466: the loading state had no call catch-all, so a call other than
+%% get_info/listing/join function_clause-crashed the whole world and hung the
+%% caller. A naturally started world transitions to running immediately, so
+%% sys:replace_state forces the state name back to loading deterministically;
+%% the large tick_rate keeps the ticker from casting post_tick (unhandled in
+%% loading) during the test.
+loading_call_replies_world_not_ready() ->
+    Ctx = #{world_pid := Pid} = start_world(#{tick_rate => 3600000}),
+    sys:replace_state(Pid, fun({_State, Data}) -> {loading, Data} end),
+    ?assertEqual(
+        {error, world_not_ready},
+        gen_statem:call(Pid, {cast_vote, ~"p1", ~"v1", ~"a"}, 2000)
+    ),
+    ?assertEqual(
+        {error, world_not_ready},
+        gen_statem:call(Pid, {use_veto, ~"p1", ~"v1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
     stop_world(Ctx).
 
 ensure_vote_sup() ->

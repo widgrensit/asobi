@@ -25,7 +25,8 @@ vote_routing_test_() ->
         fun exiting_match_vote_veto_noproc_degrades_to_error/1,
         fun exiting_world_vote_veto_shutdown_degrades_to_error/1,
         fun exiting_match_vote_cast_killed_degrades_to_error/1,
-        fun genuine_vote_handler_crash_is_internal_error/1
+        fun genuine_vote_handler_crash_is_internal_error/1,
+        fun non_map_payload_is_invalid_payload_not_internal_error/1
     ]}.
 
 setup() ->
@@ -200,6 +201,17 @@ genuine_vote_handler_crash_is_internal_error(_) ->
     Decoded = handle(~"vote.cast", ~"ve5", #{~"vote_id" => ~"v1", ~"option_id" => ~"a"}),
     ?_assertMatch(
         #{~"type" := ~"error", ~"payload" := #{~"reason" := ~"internal_error"}}, Decoded
+    ).
+
+%% asobi#465: a non-map payload (here a number) reaches maps:get(~"vote_id", 42)
+%% and raises error:{badmap, 42}. The named catch clause degrades that to a clean
+%% invalid_payload error frame with no warning-log line, rather than the generic
+%% internal_error an authenticated player could otherwise spam.
+non_map_payload_is_invalid_payload_not_internal_error(_) ->
+    mock_session(#{player_id => ~"p1", world_pid => self(), zone_pid => self()}),
+    Decoded = handle(~"vote.cast", ~"nm1", 42),
+    ?_assertMatch(
+        #{~"type" := ~"error", ~"payload" := #{~"reason" := ~"invalid_payload"}}, Decoded
     ).
 
 mock_session(SState) ->

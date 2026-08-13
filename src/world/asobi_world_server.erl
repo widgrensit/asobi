@@ -285,6 +285,10 @@ loading({call, _From}, {join, _PlayerId}, _State) ->
     %% Postpone join until we transition to running. Otherwise the call
     %% would crash with function_clause and the caller would time out.
     {keep_state_and_data, [postpone]};
+%% asobi#466: any other call during loading must reply, not function_clause -
+%% an unanswered {call, From} crashes the world and hangs the caller's call.
+loading({call, From}, _Request, _State) ->
+    {keep_state_and_data, [{reply, From, {error, world_not_ready}}]};
 %% A zone's post-tick crossing check (asobi_zone:resolve_zone_crossings/1)
 %% can fire on a pre-warmed zone recovered from a snapshot before the world
 %% has finished loading. Without this, that cast is a function_clause and
