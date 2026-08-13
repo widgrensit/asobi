@@ -85,7 +85,7 @@ http_paths_cover_every_co_mounted_app_test() ->
 %% extensions outright is a judgment the route table cannot express.
 the_privileged_plane_prefixes_test() ->
     ?assertEqual(
-        [~"/api/v1/ops", ~"/api/v1/auth", ~"/api/v1/iap", ~"/console", ~"/ws"],
+        [~"/api/v1/ops", ~"/api/v1/auth", ~"/api/v1/iap", ~"/api/v1/rpc", ~"/console", ~"/ws"],
         asobi_extension_reserved:route_prefixes()
     ).
 

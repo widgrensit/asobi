@@ -23,7 +23,16 @@ rpc_test_() ->
         fun the_protocol_version_is_checked/0,
         fun params_must_be_an_object/0,
         fun the_cid_is_validated_and_echoed/0,
-        fun a_rejected_cid_is_not_echoed_back/0
+        fun a_rejected_cid_is_not_echoed_back/0,
+        fun dispatch_returns_an_ok_result/0,
+        fun dispatch_reports_an_unknown_method/0,
+        fun dispatch_refuses_an_unauthenticated_caller/0,
+        fun dispatch_rejects_non_map_params/0,
+        fun dispatch_rejects_an_unsupported_protocol/0,
+        fun an_error_with_unencodable_details_is_internal/0,
+        fun the_ctx_carries_the_transport/0,
+        fun envelope_wraps_an_ok_result/0,
+        fun envelope_passes_an_error_object_through/0
     ]}.
 
 setup() ->
@@ -167,10 +176,78 @@ a_rejected_cid_is_not_echoed_back() ->
     ],
     ?assertMatch({~"ok-cid", _}, call(~"ok-cid", ~"quests.claim", #{})).
 
+%% --- dispatch/2: the transport-free core ---
+%%
+%% handle/3 is dispatch/2 behind cid validation, and asobi_rpc_controller is
+%% dispatch/2 behind HTTP request parsing. These pin the outcomes both
+%% transports share, and that each equals what handle/3 returns as its second
+%% element for the same call.
+
+dispatch_returns_an_ok_result() ->
+    Outcome = dispatched(~"quests.claim", #{}),
+    ?assertEqual({ok, #{~"claimed_by" => ?PLAYER, ~"reward" => 100}}, Outcome),
+    {_Cid, HandleOutcome} = call(~"c-1", ~"quests.claim", #{}),
+    ?assertEqual(HandleOutcome, Outcome).
+
+dispatch_reports_an_unknown_method() ->
+    ?assertEqual(~"rpc.unknown_method", code(dispatched(~"quests.nope", #{}))).
+
+dispatch_refuses_an_unauthenticated_caller() ->
+    ?assertEqual(
+        {error, asobi_error:object(~"unauthenticated")},
+        asobi_rpc:dispatch(payload(~"quests.claim", #{}), unauthenticated)
+    ).
+
+dispatch_rejects_non_map_params() ->
+    Outcome = asobi_rpc:dispatch(
+        #{~"protocol" => 1, ~"method" => ~"quests.claim", ~"params" => [1, 2, 3]},
+        caller()
+    ),
+    ?assertEqual(~"rpc.invalid_params", code(Outcome)).
+
+dispatch_rejects_an_unsupported_protocol() ->
+    Outcome = asobi_rpc:dispatch(
+        #{~"protocol" => 99, ~"method" => ~"quests.claim", ~"params" => #{}},
+        caller()
+    ),
+    ?assertEqual(~"rpc.unsupported_protocol", code(Outcome)),
+    ?assertEqual(#{supported => [1]}, details(Outcome)).
+
+%% Symmetric with the ok path: an extension code whose Details holds a pid
+%% cannot be JSON-encoded, and the dispatcher degrades that to `internal`
+%% rather than letting the reply encoder raise on either transport.
+an_error_with_unencodable_details_is_internal() ->
+    ?assertEqual(
+        ~"internal",
+        code(call(~"c-ue", ~"quests.claim", #{~"behaviour" => ~"unencodable_error"}))
+    ).
+
+%% invoke/5 defaults a caller with no transport key to `ws`, so a handler
+%% dispatched through handle/3 sees `ws`. The controller path (`http`) is
+%% asserted in asobi_rpc_controller_tests.
+the_ctx_carries_the_transport() ->
+    {_Cid, {ok, Result}} = call(~"c-tr", ~"quests.claim", #{~"behaviour" => ~"ctx_transport"}),
+    ?assertEqual(~"ws", maps:get(~"transport", Result)).
+
+%% --- envelope/1: the one rpc.ok / rpc.error payload ---
+
+envelope_wraps_an_ok_result() ->
+    ?assertEqual(
+        {~"rpc.ok", #{~"result" => #{~"reward" => 100}}},
+        asobi_rpc:envelope({ok, #{~"reward" => 100}})
+    ).
+
+envelope_passes_an_error_object_through() ->
+    Object = asobi_error:object(~"rpc.unknown_method"),
+    ?assertEqual({~"rpc.error", Object}, asobi_rpc:envelope({error, Object})).
+
 %% --- helpers ---
 
 call(Cid, Method, Params) ->
     asobi_rpc:handle(Cid, payload(Method, Params), caller()).
+
+dispatched(Method, Params) ->
+    asobi_rpc:dispatch(payload(Method, Params), caller()).
 
 payload(Method, Params) ->
     #{~"protocol" => asobi_rpc:protocol(), ~"method" => Method, ~"params" => Params}.

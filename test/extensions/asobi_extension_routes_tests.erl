@@ -197,6 +197,14 @@ a_privileged_plane_prefix_is_refused() ->
         lists:member(
             {reserved_prefix, ~"/api/v1/auth/sso", ~"/api/v1/auth", ?TUNABLE}, check_problems()
         )
+    ),
+    %% The frozen core rpc route `POST /api/v1/rpc/:method` lives under this
+    %% plane; no extension may mount anywhere beneath it through routes/0.
+    retune(#{routes => [route(~"/api/v1/rpc/custom")]}),
+    ?assert(
+        lists:member(
+            {reserved_prefix, ~"/api/v1/rpc/custom", ~"/api/v1/rpc", ?TUNABLE}, check_problems()
+        )
     ).
 
 %% The compiled dispatch is [nova, asobi | nova_apps], both shipped configs

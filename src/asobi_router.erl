@@ -227,7 +227,16 @@ api_routes() ->
             }},
             {~"/storage/:collection/:key", fun asobi_storage_controller:delete_storage/1, #{
                 methods => [delete, options]
-            }}
+            }},
+
+            %% Extension RPC over HTTP. The same dispatcher the socket
+            %% `rpc.call` frame reaches (`asobi_rpc:dispatch/2`), in the
+            %% player-scoped chain so the body cap, CORS and rate limiter apply
+            %% and a tokenless caller is refused before the controller - which
+            %% matches dispatch's own `unauthenticated` branch. The `/api/v1/rpc`
+            %% prefix is reserved in `asobi_extension_reserved:route_prefixes/0`
+            %% so no extension can claim this frozen core route.
+            {~"/rpc/:method", fun asobi_rpc_controller:call/1, #{methods => [post, options]}}
         ]
     }.
 

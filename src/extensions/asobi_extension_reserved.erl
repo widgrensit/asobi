@@ -38,10 +38,10 @@ cannot drift:
   extension.
 
 On top of the derived set, `route_prefixes/0` names the privileged plane
-roots (`/api/v1/ops`, `/api/v1/auth`, `/api/v1/iap`, `/console`, `/ws`): no
-extension route may sit anywhere under them, whatever it would resolve to.
-This is a policy list, not a derivation - which sub-paths of a plane are
-sensitive is a judgment the route table cannot express.
+roots (`/api/v1/ops`, `/api/v1/auth`, `/api/v1/iap`, `/api/v1/rpc`, `/console`,
+`/ws`): no extension route may sit anywhere under them, whatever it would
+resolve to. This is a policy list, not a derivation - which sub-paths of a
+plane are sensitive is a judgment the route table cannot express.
 
 `core_capabilities/0` answers the mirror-image question `owns/0` does not:
 not "what may an extension never claim" but "what may an extension depend on".
@@ -94,11 +94,14 @@ namespaces() ->
 -doc """
 The privileged plane roots. No extension route may sit anywhere under one -
 mounting an open webhook handler inside the operator, auth, purchase,
-console or socket plane is refused whatever the path would resolve to.
+extension-rpc, console or socket plane is refused whatever the path would
+resolve to. `/api/v1/rpc` is the core rpc dispatcher's own HTTP route
+(`m:asobi_rpc_controller`), reserved so an extension cannot shadow the frozen
+`POST /api/v1/rpc/<method>` surface through its `routes/0`.
 """.
 -spec route_prefixes() -> [asobi_extension:token(), ...].
 route_prefixes() ->
-    [~"/api/v1/ops", ~"/api/v1/auth", ~"/api/v1/iap", ~"/console", ~"/ws"].
+    [~"/api/v1/ops", ~"/api/v1/auth", ~"/api/v1/iap", ~"/api/v1/rpc", ~"/console", ~"/ws"].
 
 -doc """
 The core subsystem names an extension may name in `requires/0`.

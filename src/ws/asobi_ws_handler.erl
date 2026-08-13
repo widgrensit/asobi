@@ -816,18 +816,19 @@ handle_message(_Msg, State) ->
 rpc_caller(#{session := SessionPid, player_id := PlayerId}) when
     is_pid(SessionPid), is_binary(PlayerId)
 ->
-    #{player_id => PlayerId, session => SessionPid};
+    #{player_id => PlayerId, session => SessionPid, transport => ws};
 rpc_caller(_State) ->
     unauthenticated.
 
 %% `rpc.error` carries the error object alone. The `reason` half of the older
 %% `error` frame is not repeated here: nothing has ever shipped against this
 %% frame, so there is no client to keep working, and one dialect on a new
-%% surface is the point of the object.
-encode_rpc(Cid, {ok, Result}) ->
-    encode_reply(Cid, ~"rpc.ok", #{~"result" => Result});
-encode_rpc(Cid, {error, Object}) ->
-    encode_reply(Cid, ~"rpc.error", Object).
+%% surface is the point of the object. The `{type, payload}` pair comes from
+%% `asobi_rpc:envelope/1`, the one place it is built, so the HTTP transport
+%% (`m:asobi_rpc_controller`) puts the same payload on the wire.
+encode_rpc(Cid, Outcome) ->
+    {Type, Payload} = asobi_rpc:envelope(Outcome),
+    encode_reply(Cid, Type, Payload).
 
 %% --- Safe Message Dispatch ---
 

@@ -4,6 +4,7 @@
 
 -define(FIXTURE_DIR, "priv/protocol/fixtures").
 -define(WS_HANDLER, "src/ws/asobi_ws_handler.erl").
+-define(RPC, "src/extensions/asobi_rpc.erl").
 -define(WS_GUIDE, "guides/websocket-protocol.md").
 -define(MATCH_SERVER, "src/matches/asobi_match_server.erl").
 -define(WORLD_SERVER, "src/world/asobi_world_server.erl").
@@ -86,7 +87,10 @@ list_fixture_event_names() ->
 
 enumerate_emitted_events() ->
     WsHandler = read_file(?WS_HANDLER),
-    Static = scan_encode_reply_types(WsHandler) ++ scan_extension_frame_types(WsHandler),
+    Static =
+        scan_encode_reply_types(WsHandler) ++
+            scan_extension_frame_types(WsHandler) ++
+            scan_envelope_types(read_file(?RPC)),
     MatchAtoms = collect_match_emit_atoms(),
     WorldAtoms = collect_world_emit_atoms(),
     lists:usort(
@@ -148,6 +152,17 @@ scan_extension_frame_types(Bin) ->
         {match, Matches} -> lists:append(Matches);
         nomatch -> []
     end.
+
+%% The rpc.ok / rpc.error wire types are built in asobi_rpc:envelope/1, the one
+%% place the pair lives now that both transports share it - so encode_rpc/2
+%% takes a variable type the encode_reply scan cannot see (mirrors
+%% scan_extension_frame_types). Anchored to the `envelope(...) -> {~"rpc.X", ...`
+%% clause head so only the code is scanned: the `-doc` prose shows the same
+%% literals, and matching it would let a deleted clause with a lingering doc
+%% example still "discover" the type and mask a now-stale fixture.
+scan_envelope_types(Bin) ->
+    Re = "envelope\\([^)]*\\)\\s*->\\s*\\{~\"(rpc\\.[a-z]+)\"",
+    extract_captures(Bin, Re).
 
 %% Pulls the atom out of `{match_event, foo, _}` / `{world_event, foo, _}`
 %% literals. Atoms in Erlang start with [a-z]; this keeps us from
