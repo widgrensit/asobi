@@ -626,10 +626,34 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
+            %% #447: a vote lives on the fabric the player is actually in. A
+            %% match player casts against their match_server; a world player
+            %% casts against their world_server, which owns the world's votes.
+            %% Resolving from the authenticated session's own state (never from
+            %% the payload) is what stops a player voting in a fabric they are
+            %% not in. Mirrors the match.input fallback shape.
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    Reply = encode_error(Cid, ~"not_in_match"),
-                    {reply, {text, Reply}, State};
+                    case maps:get(world_pid, SState, undefined) of
+                        undefined ->
+                            Reply = encode_error(Cid, ~"not_in_match"),
+                            {reply, {text, Reply}, State};
+                        WorldPid ->
+                            VoteId = maps:get(~"vote_id", Payload),
+                            OptionId = maps:get(~"option_id", Payload),
+                            case
+                                asobi_world_server:cast_vote(
+                                    WorldPid, PlayerId, VoteId, OptionId
+                                )
+                            of
+                                ok ->
+                                    Reply = encode_reply(Cid, ~"vote.cast_ok", #{success => true}),
+                                    {reply, {text, Reply}, State};
+                                {error, Reason} ->
+                                    Reply = encode_error(Cid, Reason),
+                                    {reply, {text, Reply}, State}
+                            end
+                    end;
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
                     OptionId = maps:get(~"option_id", Payload),
@@ -653,10 +677,26 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
+            %% #447: same fabric-aware routing as vote.cast - a world player's
+            %% veto reaches their world_server, a match player's their
+            %% match_server.
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    Reply = encode_error(Cid, ~"not_in_match"),
-                    {reply, {text, Reply}, State};
+                    case maps:get(world_pid, SState, undefined) of
+                        undefined ->
+                            Reply = encode_error(Cid, ~"not_in_match"),
+                            {reply, {text, Reply}, State};
+                        WorldPid ->
+                            VoteId = maps:get(~"vote_id", Payload),
+                            case asobi_world_server:use_veto(WorldPid, PlayerId, VoteId) of
+                                ok ->
+                                    Reply = encode_reply(Cid, ~"vote.veto_ok", #{success => true}),
+                                    {reply, {text, Reply}, State};
+                                {error, Reason} ->
+                                    Reply = encode_error(Cid, Reason),
+                                    {reply, {text, Reply}, State}
+                            end
+                    end;
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
                     case asobi_match_server:use_veto(MatchPid, PlayerId, VoteId) of
