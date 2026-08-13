@@ -8,7 +8,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -behaviour(gen_server).
 
 -export([start_link/1, reap/1]).
--export([tick/2, player_input/3, add_entity/3, remove_entity/2]).
+-export([tick/2, player_input/3, player_input/4, add_entity/3, remove_entity/2]).
 -export([spawn_entity/3, spawn_entity/4, spawn_entities/2, despawn_entity/2]).
 -export([subscribe/2, unsubscribe/2]).
 -export([get_entities/1, get_subscriber_count/1, sync/1]).
@@ -54,7 +54,11 @@ tick(Pid, TickN) ->
 
 -spec player_input(pid(), binary(), map()) -> ok.
 player_input(Pid, PlayerId, Input) ->
-    gen_server:cast(Pid, {input, PlayerId, Input}).
+    player_input(Pid, PlayerId, Input, undefined).
+
+-spec player_input(pid(), binary(), map(), non_neg_integer() | undefined) -> ok.
+player_input(Pid, PlayerId, Input, Seq) ->
+    gen_server:cast(Pid, {input, PlayerId, Input, Seq}).
 
 -spec add_entity(pid(), binary(), map()) -> ok.
 add_entity(Pid, EntityId, EntityState) ->
@@ -209,6 +213,11 @@ init(Config) ->
             subscribers => #{},
             zone_state => ZoneState,
             input_queue => [],
+            %% asobi#474: highest input seq the server has consumed per player,
+            %% for clients that stamp world.input with a seq. Sent back as
+            %% world.ack so a client can reconcile its prediction; pruned to the
+            %% current subscribers each tick.
+            player_ack => #{},
             entity_timers => asobi_entity_timer:new(),
             spawner => Spawner,
             persistence => Persistence,
@@ -397,8 +406,8 @@ handle_cast({tick, TickN}, State) ->
             end,
             {noreply, State2}
     end;
-handle_cast({input, PlayerId, Input}, #{input_queue := Queue} = State) ->
-    {noreply, State#{input_queue => [{PlayerId, Input} | Queue]}};
+handle_cast({input, PlayerId, Input, Seq}, #{input_queue := Queue} = State) ->
+    {noreply, State#{input_queue => [{PlayerId, Seq, Input} | Queue]}};
 handle_cast(
     {add_entity, EntityId, EntityState}, #{entities := Entities, spatial_grid := Grid} = State
 ) ->
@@ -586,7 +595,8 @@ do_tick(
     %% this, a burst of moves arriving in one tick window collapses to the
     %% OLDEST input's state — every later move gets overwritten by the
     %% next-handle_input call walking the list head-first.
-    Entities2 = apply_inputs(GameMod, lists:reverse(Queue), Entities0),
+    {Entities2, TickAcks} = apply_inputs(GameMod, lists:reverse(Queue), Entities0),
+    PlayerAck1 = maps:fold(fun record_ack/3, maps:get(player_ack, State, #{}), TickAcks),
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
     Entities3 = apply_timer_events(TimerEvents, Entities2),
@@ -614,6 +624,7 @@ do_tick(
             0 ->
                 Deltas = compute_deltas(BroadcastEntities, Entities4),
                 broadcast_deltas(TickN, Deltas, Subs),
+                broadcast_acks(TickN, PlayerAck1, Subs),
                 State#{broadcast_entities => Entities4};
             _ ->
                 State
@@ -648,6 +659,9 @@ do_tick(
         prev_entities => Entities4,
         zone_state => ZoneState1,
         input_queue => [],
+        %% Bound player_ack to currently-subscribed players so it does not grow
+        %% with everyone who ever sent an input (asobi#474).
+        player_ack => maps:with(maps:keys(Subs), PlayerAck1),
         entity_timers => ET1,
         spawner => Spawner1,
         spatial_grid => Grid1,
@@ -667,19 +681,37 @@ apply_timer_events([{entity_timer_expired, EntityId, _TimerId, OnComplete} | Res
         end,
     apply_timer_events(Rest, Entities1).
 
-apply_inputs(_GameMod, [], Entities) ->
-    Entities;
-apply_inputs(GameMod, [{PlayerId, Input} | Rest], Entities) ->
+apply_inputs(GameMod, Queue, Entities) ->
+    apply_inputs(GameMod, Queue, Entities, #{}).
+
+apply_inputs(_GameMod, [], Entities, Acks) ->
+    {Entities, Acks};
+apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, Acks) ->
+    %% A rejected input still advances the ack (asobi#474): the client asked the
+    %% server to consume this seq and it did, it just declined the effect.
+    %% Otherwise a client waits forever on an input the server chose to drop.
+    Acks1 = record_ack(PlayerId, Seq, Acks),
     case GameMod:handle_input(PlayerId, Input, Entities) of
         {ok, Entities1} ->
-            apply_inputs(GameMod, Rest, Entities1);
+            apply_inputs(GameMod, Rest, Entities1, Acks1);
         {error, Reason} ->
             logger:warning(#{
                 msg => ~"zone input rejected",
                 player_id => PlayerId,
                 reason => Reason
             }),
-            apply_inputs(GameMod, Rest, Entities)
+            apply_inputs(GameMod, Rest, Entities, Acks1)
+    end.
+
+%% Keep the highest seq per player. world.input carries a monotonic client seq;
+%% out-of-order or duplicate delivery must never regress the ack. Inputs with no
+%% seq (the client did not opt in) contribute nothing.
+record_ack(_PlayerId, undefined, Acks) ->
+    Acks;
+record_ack(PlayerId, Seq, Acks) when is_integer(Seq) ->
+    case Acks of
+        #{PlayerId := Prev} when Prev >= Seq -> Acks;
+        _ -> Acks#{PlayerId => Seq}
     end.
 
 -spec compute_deltas(map(), map()) -> [term()].
@@ -723,6 +755,24 @@ broadcast_deltas(TickN, Deltas, Subs) ->
     maps:foreach(
         fun(_PlayerId, {Pid, _MonRef}) -> Pid ! RawMsg end,
         Subs
+    ).
+
+%% asobi#474: per-connection input ack. Iterate the opted-in players (those with
+%% a recorded seq) and send world.ack only to the ones still subscribed. Kept
+%% off the shared world.tick binary so the ack never leaks one player's input
+%% stream to the rest of the zone.
+-spec broadcast_acks(non_neg_integer(), #{binary() => non_neg_integer()}, map()) -> ok.
+broadcast_acks(TickN, PlayerAck, Subs) ->
+    maps:foreach(
+        fun(PlayerId, Seq) ->
+            case Subs of
+                #{PlayerId := {Pid, _MonRef}} ->
+                    Pid ! {asobi_message, {world_ack, TickN, Seq}};
+                _ ->
+                    ok
+            end
+        end,
+        PlayerAck
     ).
 
 encode_deltas(Deltas) ->

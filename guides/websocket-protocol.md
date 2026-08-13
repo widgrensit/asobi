@@ -69,10 +69,10 @@ The runtime validates the leaf name before it goes on the wire:
 
 <!-- BEGIN reserved-event-names (verified against asobi_ws_handler:reserved_event_names/0 by asobi_protocol_coverage_tests) -->
 ```
-finished            joined              left                list
-matched             matchmaker_expired  matchmaker_failed   phase_changed
-state               terrain             tick                vote_result
-vote_start          vote_tally          vote_vetoed
+ack                 finished            joined              left
+list                matched             matchmaker_expired  matchmaker_failed
+phase_changed       state               terrain             tick
+vote_result         vote_start          vote_tally          vote_vetoed
 ```
 <!-- END reserved-event-names -->
 
@@ -617,12 +617,15 @@ Join a specific world by id (e.g. one returned from `world.list`).
 Send game input to your zone. The `payload` IS the input map - there is
 no inner `data` wrapper. Field names are entirely up to your game; the
 server only forwards the map verbatim to your `handle_input/3` callback.
-Because it is verbatim, a client that wants prediction can add its own
-per-input field (a `seq`) and read the last-applied one back off `world.tick`;
-see [Client-side prediction](#client-side-prediction).
+
+For client-side prediction, add an optional `seq` *alongside* `payload` (a
+sibling, so "the payload IS the input map" stays true). The server echoes the
+highest consumed `seq` back as a [`world.ack`](#worldack-server-push); see
+[Client-side prediction](#client-side-prediction). A non-integer `seq` is
+ignored.
 
 ```json
-{"type": "world.input", "payload": {"kind": "move", "x": 600, "y": 480}}
+{"type": "world.input", "seq": 412, "payload": {"kind": "move", "x": 600, "y": 480}}
 ```
 
 The server routes the message to whichever zone owns your player
@@ -670,26 +673,40 @@ handler before sending the join message or you miss it.
 asobi is server-authoritative, and server-side rollback, replay and lag
 compensation are out of scope (TCP transport - see
 [migrate-from-hathora](migrate-from-hathora.md)). The server half that
-*client-side* prediction needs - an ack telling a client which of its inputs
-the authoritative state already includes - works today with no special
-protocol support, because `world.input` is verbatim and a `world.tick` delta
-carries whatever fields your entity has:
+*client-side* prediction needs - an ack telling a client which of its inputs the
+authoritative state already includes - is a first-class primitive:
 
-1. The client stamps each `world.input` with its own increasing `seq` and
-   applies the input locally right away (the prediction).
-2. Your `handle_input/3` writes that `seq` onto the acting player's entity,
-   e.g. `entity.last_seq = input.seq`.
-3. It rides back in the next `world.tick` delta for that entity. The client
-   drops every predicted input up to `last_seq` and replays the rest on top of
-   the authoritative state (the reconciliation).
+1. The client stamps each `world.input` with its own increasing `seq` (a sibling
+   of `payload`) and applies the input locally right away (the prediction).
+2. The server records the highest `seq` it consumed for that player - a rejected
+   input still counts, so a dropped input never strands the client - and sends it
+   back on the next broadcast as a per-connection
+   [`world.ack`](#worldack-server-push).
+3. The client discards every predicted input up to that `seq` and replays the
+   rest on top of the authoritative `world.tick` state (the reconciliation).
 
-Set [`broadcast_interval`](world-server.md) to 1 so the ack returns every tick
-rather than every third.
+Set [`broadcast_interval`](world-server.md) to 1 so the ack returns every tick.
 
-One cost to know: `last_seq` sits on the shared entity delta, so it reaches
-every subscriber in the zone, not just its owner - the ack's bandwidth scales
-with zone population. A per-connection ack frame that avoids that is tracked in
-asobi#474; the entity-field pattern is the answer today.
+The ack is per-connection: it is sent only to clients that opted in by stamping a
+`seq`, and never rides the shared `world.tick`, so one player's input stream is
+never broadcast to the rest of the zone.
+
+**If your SDK does not yet surface `world.ack`**, the same reconciliation works
+in userland: write the `seq` onto the player's entity in `handle_input/3`
+(`entity.last_seq = input.seq`) and read it back off the `world.tick` delta. The
+tradeoff is that `last_seq` then sits on the shared entity delta, so it reaches
+every subscriber in the zone - its bandwidth scales with zone population, which
+is exactly what the `world.ack` frame avoids.
+
+### `world.ack` (server push)
+
+Per-connection acknowledgement of the highest `world.input` `seq` the server has
+consumed for you as of `tick`. Sent only to clients that stamped a `seq` on their
+input; use it to reconcile prediction (above).
+
+```json
+{"type": "world.ack", "payload": {"tick": 42, "seq": 412}}
+```
 
 ### `world.terrain` (server push)
 

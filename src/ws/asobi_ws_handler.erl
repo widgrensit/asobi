@@ -60,6 +60,7 @@
 -define(RESERVED_EVENT_NAMES, [
     ~"state",
     ~"tick",
+    ~"ack",
     ~"terrain",
     ~"list",
     ~"left",
@@ -232,6 +233,10 @@ websocket_info({asobi_message, {zone_delta_raw, PreEncoded}}, State) when is_bin
     {reply, {text, PreEncoded}, State};
 websocket_info({asobi_message, {zone_delta, TickN, Deltas}}, State) ->
     Reply = encode_reply(undefined, ~"world.tick", #{tick => TickN, updates => Deltas}),
+    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {world_ack, TickN, Seq}}, State) ->
+    %% asobi#474: per-connection input ack, sent beside the shared world.tick.
+    Reply = encode_reply(undefined, ~"world.ack", #{tick => TickN, seq => Seq}),
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {terrain_chunk, {CX, CY}, Data}}, State) when is_binary(Data) ->
     Reply = encode_reply(undefined, ~"world.terrain", #{
@@ -822,9 +827,17 @@ handle_message(
             {reply, {text, Reply}, State}
     end;
 handle_message(
-    #{~"type" := ~"world.input", ~"payload" := Payload},
+    #{~"type" := ~"world.input", ~"payload" := Payload} = Msg,
     #{session := SessionPid} = State
 ) when SessionPid =/= undefined ->
+    %% asobi#474: an optional client input sequence number, a sibling of payload
+    %% (so "the payload IS the input map" stays true). Non-integers are ignored,
+    %% so a malformed seq degrades to no-ack instead of crashing the handler.
+    Seq =
+        case maps:get(~"seq", Msg, undefined) of
+            N when is_integer(N) -> N;
+            _ -> undefined
+        end,
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
             case maps:get(zone_pid, SState, undefined) of
@@ -837,7 +850,7 @@ handle_message(
                             Other when is_map(Other) -> Other;
                             _ -> #{}
                         end,
-                    asobi_zone:player_input(ZonePid, PlayerId, InputData),
+                    asobi_zone:player_input(ZonePid, PlayerId, InputData, Seq),
                     {ok, State}
             end
     catch
