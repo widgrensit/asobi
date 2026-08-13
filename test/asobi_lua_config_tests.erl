@@ -693,6 +693,10 @@ world_dimension_globals_forwarded() ->
     ?assertEqual(1500, maps:get(zone_size, Mode)),
     ?assertEqual(0, maps:get(view_radius, Mode)),
     ?assertEqual(true, maps:get(persistent, Mode)),
+    %% broadcast_interval reaches the mode config too, so a world can decimate
+    %% the wire delta rate (asobi#463: it was read by asobi_zone but never
+    %% plumbed, so every zone was stuck on the default 3).
+    ?assertEqual(2, maps:get(broadcast_interval, Mode)),
     %% And world_config/1 must echo them through.
     {ok, WorldConfig} = asobi_game_modes:world_config(~"default"),
     ?assertEqual(100, maps:get(tick_rate, WorldConfig)),
@@ -700,6 +704,7 @@ world_dimension_globals_forwarded() ->
     ?assertEqual(1500, maps:get(zone_size, WorldConfig)),
     ?assertEqual(0, maps:get(view_radius, WorldConfig)),
     ?assertEqual(true, maps:get(persistent, WorldConfig)),
+    ?assertEqual(2, maps:get(broadcast_interval, WorldConfig)),
     cleanup_temp_dir(TmpDir).
 
 discovery_flags_forwarded() ->

@@ -1,14 +1,15 @@
 -- Exercises the world dimension globals: tick_rate, grid_size,
--- zone_size, view_radius, persistent. These flow through to the world
--- server via asobi_game_modes:world_config/1.
-match_size  = 1
-max_players = 4
-game_type   = "world"
-tick_rate   = 100
-grid_size   = 1
-zone_size   = 1500
-view_radius = 0
-persistent  = true
+-- zone_size, view_radius, persistent, broadcast_interval. These flow
+-- through to the world server via asobi_game_modes:world_config/1.
+match_size         = 1
+max_players        = 4
+game_type          = "world"
+tick_rate          = 100
+grid_size          = 1
+zone_size          = 1500
+view_radius        = 0
+persistent         = true
+broadcast_interval = 2
 
 function init(config) return {} end
 function spawn_position(player_id, state) return { x = 0, y = 0 } end

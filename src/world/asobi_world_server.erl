@@ -611,6 +611,11 @@ configure_zone_manager(
         spawn_templates => Templates,
         persistence => Persistence,
         snapshot_interval => maps:get(snapshot_interval, Config, 600),
+        %% How many simulation ticks per wire delta. Default 3 (so at the 50ms
+        %% tick_rate deltas go out every 150ms); a mode sets `broadcast_interval`
+        %% to decimate less - 1 means every tick, which is what client-side
+        %% prediction wants for the tightest correction latency.
+        broadcast_interval => maps:get(broadcast_interval, Config, 3),
         zone_manager_pid => ZoneManagerPid,
         terrain_store_pid => TerrainStorePid,
         %% So a zone can decide crossings with the same clamped math - see

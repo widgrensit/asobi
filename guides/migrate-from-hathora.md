@@ -316,7 +316,12 @@ applies when you decide to move.
   `guest_auth` and the operator supplies a pepper of at least 32 bytes.
 - **No server-to-server token introspection route.** See Option A above.
 - **No automatic multi-region.** One container per region, deployed by you.
-- **No client-side prediction or rollback netcode primitives.**
+- **No rollback netcode or lag compensation.** No server-side replay, no hitbox
+  rewind; over TCP (above) asobi is not for twitch shooters. But the server half
+  of *client-side prediction* is available: a game stamps each input with a
+  sequence number, echoes the last-applied one back on the player's own entity,
+  and the client reconciles against it. See
+  [Client-side prediction](websocket-protocol.md#client-side-prediction).
 - **Pre-1.0 API.** Minor breaking changes are possible until 1.0.
 
 ## Do this today

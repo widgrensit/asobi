@@ -617,6 +617,9 @@ Join a specific world by id (e.g. one returned from `world.list`).
 Send game input to your zone. The `payload` IS the input map - there is
 no inner `data` wrapper. Field names are entirely up to your game; the
 server only forwards the map verbatim to your `handle_input/3` callback.
+Because it is verbatim, a client that wants prediction can add its own
+per-input field (a `seq`) and read the last-applied one back off `world.tick`;
+see [Client-side prediction](#client-side-prediction).
 
 ```json
 {"type": "world.input", "payload": {"kind": "move", "x": 600, "y": 480}}
@@ -661,6 +664,32 @@ handler before sending the join message or you miss it.
 | `"a"` | Added, full state | id + every field on the entity |
 | `"u"` | Updated, diff | id + only changed fields |
 | `"r"` | Removed | id only |
+
+### Client-side prediction
+
+asobi is server-authoritative, and server-side rollback, replay and lag
+compensation are out of scope (TCP transport - see
+[migrate-from-hathora](migrate-from-hathora.md)). The server half that
+*client-side* prediction needs - an ack telling a client which of its inputs
+the authoritative state already includes - works today with no special
+protocol support, because `world.input` is verbatim and a `world.tick` delta
+carries whatever fields your entity has:
+
+1. The client stamps each `world.input` with its own increasing `seq` and
+   applies the input locally right away (the prediction).
+2. Your `handle_input/3` writes that `seq` onto the acting player's entity,
+   e.g. `entity.last_seq = input.seq`.
+3. It rides back in the next `world.tick` delta for that entity. The client
+   drops every predicted input up to `last_seq` and replays the rest on top of
+   the authoritative state (the reconciliation).
+
+Set [`broadcast_interval`](world-server.md) to 1 so the ack returns every tick
+rather than every third.
+
+One cost to know: `last_seq` sits on the shared entity delta, so it reaches
+every subscriber in the zone, not just its owner - the ack's bandwidth scales
+with zone population. A per-connection ack frame that avoids that is tracked in
+asobi#463; the entity-field pattern is the answer today.
 
 ### `world.terrain` (server push)
 

@@ -118,7 +118,10 @@ world_config(Mode) ->
                 listed => maps:get(listed, ModeConfig, true),
                 quick_play => maps:get(quick_play, ModeConfig, true)
             },
-            {ok, forward_optional(ModeConfig, [empty_grace_ms, player_ttl_ms, chat], Base)};
+            {ok,
+                forward_optional(
+                    ModeConfig, [empty_grace_ms, player_ttl_ms, chat, broadcast_interval], Base
+                )};
         {error, _} = Err ->
             Err
     end.

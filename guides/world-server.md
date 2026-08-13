@@ -365,6 +365,7 @@ Register your world mode in `sys.config`:
 | `grid_size` | 10 | Zones per axis; total zones = `grid_size^2` |
 | `zone_size` | 200 | Units per zone side; world size = `grid_size * zone_size` |
 | `tick_rate` | 50 | Milliseconds between ticks (50 = 20 Hz) |
+| `broadcast_interval` | 3 | Simulation ticks per wire delta. Deltas go out every `tick_rate * broadcast_interval` ms (default 150 ms, ~6.7 Hz, even though the sim runs at `tick_rate`). Set to 1 for a delta every tick, which is what client-side prediction wants |
 | `view_radius` | 1 | Zones visible in each direction from the player's zone |
 | `max_players` | 500 | Concurrent players per world |
 | `persistent` | `false` | Keep the world alive with no players in it |

@@ -317,6 +317,7 @@ read_match_globals(ScriptPath, St) ->
     GameType = read_global_string(~"game_type", St),
     StateStrategy = read_global_string(~"state_strategy", St),
     TickRate = read_global_int(~"tick_rate", St),
+    BroadcastInterval = read_global_int(~"broadcast_interval", St),
     GridSize = read_global_int(~"grid_size", St),
     ZoneSize = read_global_int(~"zone_size", St),
     ViewRadius = read_global_int(~"view_radius", St),
@@ -361,7 +362,8 @@ read_match_globals(ScriptPath, St) ->
             %% (asobi_matchmaker), worlds listed (asobi_game_modes:world_config/1).
             Config14 = maybe_add_bool(Config13, listed, Listed),
             Config15 = maybe_add_bool(Config14, quick_play, QuickPlay),
-            {ok, Config15};
+            Config16 = maybe_add_int(Config15, broadcast_interval, BroadcastInterval),
+            {ok, Config16};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.
