@@ -318,9 +318,10 @@ applies when you decide to move.
 - **No automatic multi-region.** One container per region, deployed by you.
 - **No rollback netcode or lag compensation.** No server-side replay, no hitbox
   rewind; over TCP (above) asobi is not for twitch shooters. But the server half
-  of *client-side prediction* is available: a game stamps each input with a
-  sequence number, echoes the last-applied one back on the player's own entity,
-  and the client reconciles against it. See
+  of *client-side prediction* is a first-class primitive: the client stamps each
+  `world.input` with an increasing `seq`, and the server returns the highest one
+  it has consumed as a per-connection `world.ack` for the client to reconcile
+  against. See
   [Client-side prediction](websocket-protocol.md#client-side-prediction).
 - **Pre-1.0 API.** Minor breaking changes are possible until 1.0.
 
