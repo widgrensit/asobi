@@ -197,4 +197,4 @@ checklist, and test matrix. Security issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+asobi is [PolyForm Perimeter 1.0.1](https://polyformproject.org/licenses/perimeter/1.0.1) - source-available, non-compete. Use it, modify it, self-host it, and build games on it freely; the one thing you may not do is provide a product that competes with asobi. See [LICENSE](LICENSE).

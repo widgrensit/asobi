@@ -54,6 +54,6 @@
         "console/vite.config.js",
         "console/README.md"
     ]},
-    {licenses, ["Apache-2.0"]},
+    {licenses, ["PolyForm-Perimeter-1.0.1"]},
     {links, [{"GitHub", "https://github.com/widgrensit/asobi"}]}
 ]}.
