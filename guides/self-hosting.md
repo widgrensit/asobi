@@ -174,6 +174,13 @@ The image was renamed from `ghcr.io/widgrensit/asobi_lua`. That name is no
 longer rebuilt - tags already published keep working and are not going away,
 but they will not get fixes - so change your compose file.
 
+`ghcr.io/widgrensit/asobi` is now built from the
+[`asobi_bundle`](https://github.com/widgrensit/asobi_bundle) meta-package, so it
+contains asobi plus every first-party extension (quests, seasons, ...). The name
+and everything you do with it are unchanged; the asobi repo itself no longer
+publishes an image. If you build your own release instead of using this image,
+depend on `asobi_bundle` (not bare `asobi`) to get the same set.
+
 ```yaml
 services:
   postgres:
