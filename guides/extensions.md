@@ -34,7 +34,7 @@ failure and Hex rejects outright.
 Validate the set before you boot it:
 
 ```erlang
-{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.68.2"}}}]}.
+{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.83.5"}}}]}.
 ```
 
 ```sh
@@ -624,7 +624,7 @@ A bare list of names, never version ranges. The names are core subsystems
 `social`, `chat`, `iap`, `matches`, `world`, `votes`, `presence`, `timers`)
 and other installed extensions. Which versions work together is the
 dependency pin's job -
-`{asobi, "~> 0.79.0"}` in your `rebar.config`, and the bundle's lockstep for a
+`{asobi, "~> 0.83.0"}` in your `rebar.config`, and the bundle's lockstep for a
 first-party set - so `requires/0` says only *that* you call into a thing, never
 *which* of it.
 

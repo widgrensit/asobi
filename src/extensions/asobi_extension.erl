@@ -156,7 +156,7 @@ The subsystems and extensions this extension calls, by name.
 
 A bare list of names - core subsystems (`economy`, `leaderboards`, `world`,
 ...) and other installed extensions - never version ranges. Which versions are
-compatible is the dependency pin's job (`{asobi, "~> 0.79.0"}`, and the
+compatible is the dependency pin's job (`{asobi, "~> 0.83.0"}`, and the
 bundle's lockstep for a first-party set); this list says only *that* you call
 into a thing, never *which* of it. `requires => [economy]` says "I call into
 economy" and nothing about which economy.

@@ -9,7 +9,7 @@ rebar3 asobi check     # 0 and a summary, or 1 and a report naming both claimant
 Add it to a host release's `rebar.config`:
 
 ```erlang
-{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.50.0"}}}]}.
+{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.83.5"}}}]}.
 ```
 
 This is the gate, not the backstop. asobi validates the same set again at
