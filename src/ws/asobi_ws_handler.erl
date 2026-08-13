@@ -642,9 +642,11 @@ handle_message(
                             VoteId = maps:get(~"vote_id", Payload),
                             OptionId = maps:get(~"option_id", Payload),
                             case
-                                asobi_world_server:cast_vote(
-                                    WorldPid, PlayerId, VoteId, OptionId
-                                )
+                                vote_call(fun() ->
+                                    asobi_world_server:cast_vote(
+                                        WorldPid, PlayerId, VoteId, OptionId
+                                    )
+                                end)
                             of
                                 ok ->
                                     Reply = encode_reply(Cid, ~"vote.cast_ok", #{success => true}),
@@ -657,7 +659,11 @@ handle_message(
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
                     OptionId = maps:get(~"option_id", Payload),
-                    case asobi_match_server:cast_vote(MatchPid, PlayerId, VoteId, OptionId) of
+                    case
+                        vote_call(fun() ->
+                            asobi_match_server:cast_vote(MatchPid, PlayerId, VoteId, OptionId)
+                        end)
+                    of
                         ok ->
                             Reply = encode_reply(Cid, ~"vote.cast_ok", #{success => true}),
                             {reply, {text, Reply}, State};
@@ -688,7 +694,11 @@ handle_message(
                             {reply, {text, Reply}, State};
                         WorldPid ->
                             VoteId = maps:get(~"vote_id", Payload),
-                            case asobi_world_server:use_veto(WorldPid, PlayerId, VoteId) of
+                            case
+                                vote_call(fun() ->
+                                    asobi_world_server:use_veto(WorldPid, PlayerId, VoteId)
+                                end)
+                            of
                                 ok ->
                                     Reply = encode_reply(Cid, ~"vote.veto_ok", #{success => true}),
                                     {reply, {text, Reply}, State};
@@ -699,7 +709,11 @@ handle_message(
                     end;
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
-                    case asobi_match_server:use_veto(MatchPid, PlayerId, VoteId) of
+                    case
+                        vote_call(fun() ->
+                            asobi_match_server:use_veto(MatchPid, PlayerId, VoteId)
+                        end)
+                    of
                         ok ->
                             Reply = encode_reply(Cid, ~"vote.veto_ok", #{success => true}),
                             {reply, {text, Reply}, State};
@@ -977,6 +991,29 @@ current_player_world(PlayerId) ->
     end.
 
 %% --- Internal ---
+
+%% asobi#462: a vote whose fabric is gone reaches asobi_vote_server via a
+%% gen_statem:call that exits. safe_handle_message/2 already catches any handler
+%% exit and returns an error frame, so this is never a crash-preventer - but
+%% that generic path logs a warning and answers internal_error, blaming asobi
+%% for a race the client cannot avoid. Catch only the process-gone exit shapes
+%% here and upgrade them to the clean, registered not_in_match: a finished
+%% fabric stops with normal (and a call that lost the race to its cleanup sees
+%% that stop), a dead one is noproc, and supervised teardown can surface
+%% shutdown or killed. Any other exit reason is a genuine vote-handler crash and
+%% falls through to safe_handle_message -> logged internal_error, which is
+%% intended - masking a real crash as not_in_match would hide it. The normal
+%% ok/{error, Reason} replies are untouched.
+-spec vote_call(fun(() -> ok | {error, term()})) -> ok | {error, term()}.
+vote_call(Call) ->
+    try
+        Call()
+    catch
+        exit:{noproc, _} -> {error, not_in_match};
+        exit:{normal, _} -> {error, not_in_match};
+        exit:{shutdown, _} -> {error, not_in_match};
+        exit:killed -> {error, not_in_match}
+    end.
 
 cancel_idle_auth_timer(#{idle_auth_timer := Ref} = State) when is_reference(Ref) ->
     _ = erlang:cancel_timer(Ref, [{async, true}, {info, false}]),

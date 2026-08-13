@@ -440,16 +440,20 @@ running(
         {reply, From, {ok, VotePid}}
     ]};
 running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) when
-    is_binary(PlayerId), is_binary(OptionId)
+    is_binary(PlayerId), (is_binary(OptionId) orelse is_list(OptionId))
 ->
-    Active = maps:get(active_votes, State, #{}),
-    case maps:get(VoteId, Active, undefined) of
-        undefined ->
-            {keep_state_and_data, [{reply, From, {error, vote_not_found}}]};
-        VotePid ->
-            Result = asobi_vote_server:cast_vote(VotePid, PlayerId, OptionId),
-            {keep_state_and_data, [{reply, From, Result}]}
-    end;
+    handle_cast_vote(From, PlayerId, VoteId, OptionId, State);
+%% asobi#462: a valid option_id is a binary (plurality/weighted) or a list of
+%% binaries (approval/ranked - see asobi_vote_server:validate_option/2). A
+%% vote.cast whose option_id is a JSON number, bool, null or object misses the
+%% guard above; running/3 has no catch-all, so without this fallback the
+%% function_clause crashes the whole match - every player in it - on one
+%% malformed frame. Degrade to the invalid_option asobi_vote_server already
+%% reports for a bad option, and never forward the junk value on. A list that
+%% carries a non-binary passes the guard and is rejected downstream by
+%% validate_option, also as invalid_option, with no crash.
+running({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, invalid_option}}]};
 running({call, From}, {use_veto, PlayerId, VoteId}, #{veto_tokens := Tokens} = State) when
     is_binary(PlayerId)
 ->
@@ -469,6 +473,12 @@ running({call, From}, {use_veto, PlayerId, VoteId}, #{veto_tokens := Tokens} = S
                     {keep_state_and_data, [{reply, From, Err}]}
             end
     end;
+%% asobi#462: mirrors the cast_vote fallback above - a use_veto that misses the
+%% is_binary(PlayerId) guard would otherwise crash the whole match on
+%% function_clause. PlayerId is always resolved server-side, so this is
+%% defence-in-depth, replying the same invalid_option rather than a crash.
+running({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, invalid_option}}]};
 running(cast, {broadcast_event, Event, Payload}, State) ->
     broadcast_match_event(Event, Payload, State),
     keep_state_and_data;
@@ -610,6 +620,19 @@ finished({call, From}, {get_info, listing}, State) ->
 finished(cast, {broadcast_event, Event, Payload}, State) ->
     broadcast_match_event(Event, Payload, State),
     keep_state_and_data;
+%% asobi#462: a late vote.cast/vote.veto lands here while the finished match
+%% waits out its 5s cleanup timer, still holding the player's match_pid.
+%% Without an explicit reply the catch-all below swallows the {call, From} and
+%% the caller (asobi_ws_handler, an infinity gen_statem:call) blocks until this
+%% server stops at its cleanup timeout - a frozen socket that reads as a
+%% disconnect on mobile - then gets a misleading internal_error. Replying
+%% not_in_match returns immediately with the same registered 409 the
+%% dead/finished-fabric path in vote_call/1 uses, so "the match is over" is one
+%% code a client can branch on, not two that depend on a 5s race.
+finished({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
+finished({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
 finished(_EventType, _Event, _State) ->
     keep_state_and_data.
 
@@ -924,6 +947,21 @@ listing_info(Info) ->
             Base#{phase => maps:with([status, phase, remaining_ms, start_condition], Phase)};
         _ ->
             Base
+    end.
+
+%% asobi#462: extracted from the running/3 cast_vote clause so OptionId is a
+%% plain term() here (a binary option or an approval/ranked list) rather than
+%% the guard-narrowed union, mirroring asobi_world_server:handle_cast_vote/5.
+%% asobi_vote_server:validate_option/2 is the one gate for whether the option
+%% is valid, list or scalar.
+handle_cast_vote(From, PlayerId, VoteId, OptionId, State) ->
+    Active = maps:get(active_votes, State, #{}),
+    case maps:get(VoteId, Active, undefined) of
+        undefined ->
+            {keep_state_and_data, [{reply, From, {error, vote_not_found}}]};
+        VotePid ->
+            Result = asobi_vote_server:cast_vote(VotePid, PlayerId, OptionId),
+            {keep_state_and_data, [{reply, From, Result}]}
     end.
 
 maybe_start_vote(Mod, #{game_state := GS} = State) ->

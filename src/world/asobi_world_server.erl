@@ -372,10 +372,24 @@ running({call, From}, {get_info, listing}, State) ->
     {keep_state_and_data, [{reply, From, world_info(running, State, false)}]};
 running({call, From}, {start_vote, VoteConfig}, State) ->
     handle_start_vote(From, VoteConfig, State);
-running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
+running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) when
+    is_binary(PlayerId), (is_binary(OptionId) orelse is_list(OptionId))
+->
     handle_cast_vote(From, PlayerId, VoteId, OptionId, State);
-running({call, From}, {use_veto, PlayerId, VoteId}, State) ->
+%% asobi#462: this path was guard-free and forwarded an unvalidated option
+%% straight to asobi_vote_server. A valid option_id is a binary
+%% (plurality/weighted) or a list of binaries (approval/ranked - see
+%% asobi_vote_server:validate_option/2); anything else (a JSON number, bool,
+%% null or object) hits this fallback and degrades to the invalid_option
+%% asobi_vote_server already reports for a bad option, never forwarding the
+%% junk. A list that carries a non-binary passes the guard and is rejected
+%% downstream by validate_option, also as invalid_option, with no crash.
+running({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, invalid_option}}]};
+running({call, From}, {use_veto, PlayerId, VoteId}, State) when is_binary(PlayerId) ->
     handle_use_veto(From, PlayerId, VoteId, State);
+running({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, invalid_option}}]};
 running(
     cast,
     {spawn_at, TemplateId, {X, Y} = Pos, Overrides},
@@ -545,6 +559,19 @@ finished({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(finished, State)}]};
 finished({call, From}, {get_info, listing}, State) ->
     {keep_state_and_data, [{reply, From, world_info(finished, State, false)}]};
+%% asobi#462: as in asobi_match_server - a late vote.cast/vote.veto reaches a
+%% finished world during its 5s cleanup window while the session still holds
+%% world_pid. Without an explicit reply the catch-all below swallows the
+%% {call, From} and the caller (asobi_ws_handler, an infinity gen_statem:call)
+%% blocks until this server stops at its cleanup timeout - a frozen socket that
+%% reads as a disconnect on mobile - then gets a misleading internal_error.
+%% Replying not_in_match returns immediately with the same registered 409 the
+%% dead/finished-fabric path in vote_call/1 uses, so "the world is over" is one
+%% code a client can branch on, not two that depend on a 5s race.
+finished({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
+finished({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
 finished(_EventType, _Event, _State) ->
     keep_state_and_data.
 
