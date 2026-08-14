@@ -320,8 +320,8 @@ applies when you decide to move.
   rewind; over TCP (above) asobi is not for twitch shooters. But the server half
   of *client-side prediction* is a first-class primitive: the client stamps each
   `world.input` with an increasing `seq`, and the server returns the highest one
-  it has consumed as a per-connection `world.ack` for the client to reconcile
-  against. See
+  it has consumed as a `world.ack` on that connection for the client to
+  reconcile against. See
   [Client-side prediction](websocket-protocol.md#client-side-prediction).
 - **Pre-1.0 API.** Minor breaking changes are possible until 1.0.
 

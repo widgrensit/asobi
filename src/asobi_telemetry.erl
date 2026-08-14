@@ -23,7 +23,8 @@
     join_rate_limited/1,
     rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
-    ws_origin_rejected/0
+    ws_origin_rejected/0,
+    ws_legacy_input_unwrap/0
 ]).
 -export([anticheat_violation/3]).
 -export([game_error/1, game_error/2]).
@@ -80,6 +81,7 @@ events() ->
         [asobi, ws, connect_rate_limited],
         [asobi, ws, idle_auth_timeout],
         [asobi, ws, origin_rejected],
+        [asobi, ws, legacy_input_unwrap],
         [asobi, join, rate_limited],
         [asobi, rehome, rate_limited],
         [asobi, anticheat, violation],
@@ -329,6 +331,13 @@ ws_idle_auth_timeout() ->
 -spec ws_origin_rejected() -> ok.
 ws_origin_rejected() ->
     telemetry:execute([asobi, ws, origin_rejected], #{count => 1}, #{}).
+
+%% asobi#478: a client sent input wrapped as a sole `data` key, the deprecated
+%% compat shape. Counted so the carve-out's removal can be scheduled against real
+%% traffic instead of guesswork.
+-spec ws_legacy_input_unwrap() -> ok.
+ws_legacy_input_unwrap() ->
+    telemetry:execute([asobi, ws, legacy_input_unwrap], #{count => 1}, #{}).
 
 -spec anticheat_violation(binary(), atom(), map()) -> ok.
 anticheat_violation(PlayerId, Type, Details) ->

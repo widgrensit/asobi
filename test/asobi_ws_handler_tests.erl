@@ -375,28 +375,56 @@ await_no_unhandled() ->
     end.
 
 %% asobi#478: `data` is not a general escape hatch on a world.input payload.
-%% The guide promises the payload IS the input map; these pin the three shapes
-%% that promise turns on.
+%% The guide promises the payload IS the input map; these pin the shapes that
+%% promise turns on, and the deprecated compat carve-out that survives it.
 
 world_input_data_forwards_the_payload_verbatim_test() ->
     Payload = #{~"kind" => ~"move", ~"x" => 600, ~"y" => 480},
-    ?assertEqual(Payload, asobi_ws_handler:world_input_data(Payload)).
+    ?assertEqual({ok, Payload}, asobi_ws_handler:world_input_data(Payload)).
 
 world_input_data_unwraps_a_sole_data_map_test() ->
-    %% asobi-unreal's shape: {"data": {...}} and nothing else.
+    %% asobi-unreal's shape: {"data": {...}} and nothing else. Deprecated.
     Inner = #{~"kind" => ~"move", ~"x" => 1},
-    ?assertEqual(Inner, asobi_ws_handler:world_input_data(#{~"data" => Inner})).
+    ?assertEqual({legacy_unwrap, Inner}, asobi_ws_handler:world_input_data(#{~"data" => Inner})).
 
 world_input_data_keeps_siblings_of_a_data_key_test() ->
     %% Was: unwrapped to the inner map, silently dropping `kind`.
     Payload = #{~"kind" => ~"fire", ~"data" => #{~"x" => 1}},
-    ?assertEqual(Payload, asobi_ws_handler:world_input_data(Payload)).
+    ?assertEqual({ok, Payload}, asobi_ws_handler:world_input_data(Payload)).
 
 world_input_data_keeps_a_non_map_data_value_test() ->
-    %% Was: #{} - the whole input discarded. This is the asobi-unity case.
+    %% Was: #{} - the whole input discarded.
     Payload = #{~"data" => ~"{\"kind\":\"move\"}"},
-    ?assertEqual(Payload, asobi_ws_handler:world_input_data(Payload)).
+    ?assertEqual({ok, Payload}, asobi_ws_handler:world_input_data(Payload)).
 
-world_input_data_on_a_non_map_payload_is_empty_test() ->
-    ?assertEqual(#{}, asobi_ws_handler:world_input_data(~"not a map")),
-    ?assertEqual(#{}, asobi_ws_handler:world_input_data([1, 2, 3])).
+world_input_data_on_a_non_map_payload_is_invalid_test() ->
+    %% Not #{}: an empty map is indistinguishable from a legitimate empty input,
+    %% so the client would be told nothing about a frame it got wrong.
+    ?assertEqual(invalid, asobi_ws_handler:world_input_data(~"not a map")),
+    ?assertEqual(invalid, asobi_ws_handler:world_input_data([1, 2, 3])).
+
+%% match.input carries world.input's shapes plus a sole `data` holding a JSON
+%% string. The decode must be total: json:decode/1 raises, and an authenticated
+%% client can send 60 frames a second.
+
+match_input_data_decodes_a_sole_data_string_test() ->
+    ?assertEqual(
+        {legacy_unwrap, #{~"kind" => ~"move"}},
+        asobi_ws_handler:match_input_data(#{~"data" => ~"{\"kind\":\"move\"}"})
+    ).
+
+match_input_data_on_malformed_json_is_invalid_not_a_crash_test() ->
+    %% asobi#465 class: reaching safe_handle_message/2's catch-all would log a
+    %% stacktrace per frame, and the logger burst budget is node-wide.
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"{not json"})),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~""})),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"\xff\xfe"})).
+
+match_input_data_on_a_non_object_json_string_is_invalid_test() ->
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"[1,2,3]"})),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"null"})).
+
+match_input_data_falls_back_to_the_world_shapes_test() ->
+    Payload = #{~"kind" => ~"fire"},
+    ?assertEqual({ok, Payload}, asobi_ws_handler:match_input_data(Payload)),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(~"nope")).

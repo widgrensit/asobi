@@ -6,7 +6,7 @@
 -export([origin_allowed/1]).
 
 -ifdef(TEST).
--export([world_input_data/1]).
+-export([world_input_data/1, match_input_data/1]).
 -endif.
 %% Exported so asobi_protocol_coverage_tests can assert every emitted
 %% match./world. event stays inside the reserved namespace (#303), and so
@@ -122,24 +122,6 @@ websocket_init(State) ->
 %% may open the socket. A missing Origin header is a non-browser client
 %% (Defold/Unity native etc.) - it cannot be a CSWSH vector, so it always
 %% passes regardless of the allowlist.
-%% asobi#478: the payload IS the input map, which is what
-%% guides/websocket-protocol.md promises. `data` is unwrapped only when it is a
-%% map AND the sole key - the shape asobi-unreal sends - and everything else
-%% goes through verbatim.
-%%
-%% Before this, any `data` key was unwrapped, silently dropping its siblings, and
-%% a `data` that was not a map discarded the whole input as `#{}`. That second
-%% branch is how asobi-unity sent world input into a void for every release it
-%% ever shipped: it wrapped the payload as a JSON *string* under `data`, so
-%% handle_input/3 always received an empty map, with nothing logged either side.
--spec world_input_data(term()) -> map().
-world_input_data(#{~"data" := Inner} = Payload) when is_map(Inner), map_size(Payload) =:= 1 ->
-    Inner;
-world_input_data(Payload) when is_map(Payload) ->
-    Payload;
-world_input_data(_) ->
-    #{}.
-
 -spec origin_allowed(binary() | undefined) -> boolean().
 origin_allowed(undefined) ->
     true;
@@ -160,6 +142,69 @@ origin_allowed(Origin) when is_binary(Origin) ->
             end;
         {ok, Other} ->
             misconfigured_origins(Other)
+    end.
+
+%% asobi#478: the payload IS the input map, which is what
+%% guides/websocket-protocol.md promises.
+%%
+%% `legacy_unwrap` is a DEPRECATED compatibility shape: a payload whose sole key
+%% is `data`, mapped to an object. asobi-unreal still sends input that way. It is
+%% reported to telemetry so the removal can be scheduled once no SDK relies on
+%% it; remove this clause at the next protocol break.
+%%
+%% Everything else that is a map goes through verbatim. A payload that is not a
+%% map at all is `invalid` rather than an empty map: handing the game `#{}` is
+%% indistinguishable from a legitimate empty input, and the client - which sent a
+%% frame the protocol does not allow - would be told nothing.
+-spec world_input_data(term()) -> {ok, map()} | {legacy_unwrap, map()} | invalid.
+world_input_data(#{~"data" := Inner} = Payload) when is_map(Inner), map_size(Payload) =:= 1 ->
+    {legacy_unwrap, Inner};
+world_input_data(Payload) when is_map(Payload) ->
+    {ok, Payload};
+world_input_data(_) ->
+    invalid.
+
+%% match.input carries the same shapes plus one of its own: a sole `data` holding
+%% a JSON *string*, which predates world.input and is what asobi-unity's
+%% SendMatchInput sends. The decode is total - `json:decode/1` RAISES on malformed
+%% input, and an authenticated client can send 60 frames a second, so letting it
+%% reach safe_handle_message/2's catch-all hands one connection a warning-log
+%% amplifier that can exhaust the node's logger burst budget and blind every other
+%% log line. See asobi#465 for the same class closed on badmap.
+-spec match_input_data(term()) -> {ok, map()} | {legacy_unwrap, map()} | invalid.
+match_input_data(#{~"data" := Bin} = Payload) when is_binary(Bin), map_size(Payload) =:= 1 ->
+    try json:decode(Bin) of
+        Decoded when is_map(Decoded) -> {legacy_unwrap, Decoded};
+        _ -> invalid
+    catch
+        _:_ -> invalid
+    end;
+match_input_data(Payload) ->
+    world_input_data(Payload).
+
+%% Unwrap the extraction result, reporting the deprecated compat shape so its
+%% removal can be scheduled against real traffic rather than guesswork.
+-spec input_data({ok, map()} | {legacy_unwrap, map()}) -> map().
+input_data({ok, Input}) ->
+    Input;
+input_data({legacy_unwrap, Input}) ->
+    asobi_telemetry:ws_legacy_input_unwrap(),
+    Input.
+
+-spec match_input_route(map(), binary(), map(), map()) -> {ok, map()} | {reply, term(), map()}.
+match_input_route(SState, PlayerId, InputData, State) ->
+    case maps:get(match_pid, SState, undefined) of
+        undefined ->
+            case maps:get(zone_pid, SState, undefined) of
+                undefined ->
+                    not_in_match_hint(State);
+                ZonePid ->
+                    asobi_zone:player_input(ZonePid, PlayerId, InputData),
+                    {ok, State}
+            end;
+        MatchPid ->
+            asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
+            {ok, State}
     end.
 
 -spec misconfigured_origins(term()) -> false.
@@ -441,36 +486,20 @@ handle_message(#{~"type" := ~"session.heartbeat"} = Msg, State) ->
     Reply = encode_reply(Cid, ~"session.heartbeat", #{ts => erlang:system_time(millisecond)}),
     {reply, {text, Reply}, State};
 handle_message(
-    #{~"type" := ~"match.input", ~"payload" := Payload}, #{session := SessionPid} = State
+    #{~"type" := ~"match.input", ~"payload" := Payload} = Msg,
+    #{session := SessionPid} = State
 ) when
     SessionPid =/= undefined
 ->
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
-            InputData =
-                case maps:get(~"data", Payload, undefined) of
-                    undefined when is_map(Payload) -> Payload;
-                    Bin when is_binary(Bin) ->
-                        case json:decode(Bin) of
-                            M when is_map(M) -> M;
-                            _ -> #{}
-                        end;
-                    Other when is_map(Other) -> Other;
-                    _ ->
-                        #{}
-                end,
-            case maps:get(match_pid, SState, undefined) of
-                undefined ->
-                    case maps:get(zone_pid, SState, undefined) of
-                        undefined ->
-                            not_in_match_hint(State);
-                        ZonePid ->
-                            asobi_zone:player_input(ZonePid, PlayerId, InputData),
-                            {ok, State}
-                    end;
-                MatchPid ->
-                    asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
-                    {ok, State}
+            case match_input_data(Payload) of
+                invalid ->
+                    Cid = maps:get(~"cid", Msg, undefined),
+                    {reply, {text, encode_error(Cid, ~"invalid_payload")}, State};
+                Extracted ->
+                    InputData = input_data(Extracted),
+                    match_input_route(SState, PlayerId, InputData, State)
             end
     catch
         exit:{noproc, _} ->
@@ -868,9 +897,15 @@ handle_message(
                 undefined ->
                     {ok, State};
                 ZonePid ->
-                    InputData = world_input_data(Payload),
-                    asobi_zone:player_input(ZonePid, PlayerId, InputData, Seq),
-                    {ok, State}
+                    case world_input_data(Payload) of
+                        invalid ->
+                            Cid = maps:get(~"cid", Msg, undefined),
+                            {reply, {text, encode_error(Cid, ~"invalid_payload")}, State};
+                        Extracted ->
+                            InputData = input_data(Extracted),
+                            asobi_zone:player_input(ZonePid, PlayerId, InputData, Seq),
+                            {ok, State}
+                    end
             end
     catch
         exit:{noproc, _} ->
