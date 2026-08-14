@@ -820,24 +820,42 @@ handle_message(
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    case asobi_world_lobby:create_world(Mode, PlayerId) of
-        {ok, WorldPid, _Info} ->
-            join_and_reply(Cid, WorldPid, PlayerId, State);
-        {error, Reason} ->
-            Reply = encode_error(Cid, Reason),
-            {reply, {text, Reply}, State}
+    %% asobi#480: both create frames spawn or resolve an instance and were the
+    %% only entry points not behind the join limiter, even though world.join
+    %% and match.join are. The pg caps bound how many worlds one player can
+    %% OWN, not how often they may ask.
+    case check_join_rate(PlayerId) of
+        denied ->
+            {reply, {text, encode_error(Cid, ~"join_rate_limited")}, State};
+        allowed ->
+            case asobi_world_lobby:create_world(Mode, PlayerId) of
+                {ok, WorldPid, _Info} ->
+                    join_and_reply(Cid, WorldPid, PlayerId, State);
+                {error, Reason} ->
+                    Reply = encode_error(Cid, Reason),
+                    {reply, {text, Reply}, State}
+            end
     end;
 handle_message(
     #{~"type" := ~"world.find_or_create", ~"payload" := #{~"mode" := Mode}} = Msg,
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    case asobi_world_lobby:find_or_create(Mode, PlayerId) of
-        {ok, WorldPid, _Info} ->
-            join_and_reply(Cid, WorldPid, PlayerId, State);
-        {error, Reason} ->
-            Reply = encode_error(Cid, Reason),
-            {reply, {text, Reply}, State}
+    %% asobi#480: the find branch consumes no pg cap at all - it returns an
+    %% existing world - so before this nothing bounded how often one connection
+    %% could drive a gen_server:call into the single lobby server, each one
+    %% fanning an uncached get_info out to every live world.
+    case check_join_rate(PlayerId) of
+        denied ->
+            {reply, {text, encode_error(Cid, ~"join_rate_limited")}, State};
+        allowed ->
+            case asobi_world_lobby:find_or_create(Mode, PlayerId) of
+                {ok, WorldPid, _Info} ->
+                    join_and_reply(Cid, WorldPid, PlayerId, State);
+                {error, Reason} ->
+                    Reply = encode_error(Cid, Reason),
+                    {reply, {text, Reply}, State}
+            end
     end;
 handle_message(
     #{~"type" := ~"world.join", ~"payload" := #{~"world_id" := WorldId}} = Msg,

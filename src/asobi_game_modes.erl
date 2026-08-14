@@ -99,10 +99,30 @@ lua_provider(Kind, Script) ->
             {error, lua_runtime_unavailable}
     end.
 
--doc "Build a world server config map from a mode's game_modes config.".
--spec world_config(binary()) -> {ok, map()} | {error, not_found | lua_runtime_unavailable}.
+-doc """
+Build a world server config map from a mode's game_modes config.
+
+`{error, wrong_mode_type}` means the mode exists but is a match mode. Only
+`resolve_game_module/1`'s first clause dispatches on `type`, so without this
+guard a match mode resolves to `asobi_lua_match` and a world is built around
+it - six processes come up and then the first join or tick raises `undef`,
+because `asobi_lua_match` exports neither `spawn_position/2` nor `post_tick/2`.
+A mode with no `type` is a match, which is the default, so the common way to
+hit this is forgetting `game_type = "world"` in a Lua config.
+""".
+-spec world_config(binary()) ->
+    {ok, map()} | {error, not_found | wrong_mode_type | lua_runtime_unavailable}.
 world_config(Mode) ->
     ModeConfig = mode_config(Mode),
+    case maps:get(type, ModeConfig, match) of
+        world -> world_config_1(Mode, ModeConfig);
+        _ when map_size(ModeConfig) =:= 0 -> {error, not_found};
+        _ -> {error, wrong_mode_type}
+    end.
+
+-spec world_config_1(binary(), map()) ->
+    {ok, map()} | {error, not_found | lua_runtime_unavailable}.
+world_config_1(Mode, ModeConfig) ->
     case resolve_game_module(Mode) of
         {ok, GameMod, ExtraConfig} ->
             Base = #{

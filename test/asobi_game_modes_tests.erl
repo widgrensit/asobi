@@ -9,7 +9,11 @@ world_config_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {"chat config reaches the world server config", fun chat_forwarded/0},
         {"a mode without chat config forwards no chat key", fun chat_absent/0},
-        {"declared global channel names are the union across modes", fun global_union/0}
+        {"declared global channel names are the union across modes", fun global_union/0},
+        {"a match mode is refused, not built into a world (#480)", fun match_mode_refused/0},
+        {"a mode with no type is a match, so it is refused too (#480)", fun untyped_mode_refused/0},
+        {"an unknown mode is still not_found, not wrong_mode_type (#480)",
+            fun unknown_mode_still_not_found/0}
     ]}.
 
 setup() ->
@@ -21,7 +25,9 @@ setup() ->
             chat => #{global => [~"general"], world => true}
         },
         ~"arena" => #{type => world, module => some_game, chat => #{global => [~"trade"]}},
-        ~"quiet" => #{type => world, module => some_game}
+        ~"quiet" => #{type => world, module => some_game},
+        ~"duel" => #{type => match, module => some_game},
+        ~"untyped" => #{module => some_game}
     }),
     Prev.
 
@@ -117,3 +123,21 @@ erlang_module_unaffected() ->
 
 world_config_without_provider() ->
     ?assertEqual({error, lua_runtime_unavailable}, asobi_game_modes:world_config(~"galaxy")).
+
+%% asobi#480: resolve_game_module/1 dispatches on `type` in its FIRST clause
+%% only, so a match mode fell through to asobi_lua_match and world_config/1
+%% built a world config around it. asobi_world_instance_sup then brought up six
+%% processes and the first join raised undef on spawn_position/2. Refuse it up
+%% front instead.
+match_mode_refused() ->
+    ?assertEqual({error, wrong_mode_type}, asobi_game_modes:world_config(~"duel")).
+
+%% `match` is the default, so the common way in is forgetting game_type.
+untyped_mode_refused() ->
+    ?assertEqual({error, wrong_mode_type}, asobi_game_modes:world_config(~"untyped")).
+
+%% The new clause must not swallow the pre-existing not_found case: a mode that
+%% is not configured at all is still not_found, so a client asking for a typo'd
+%% mode gets the same answer it always did.
+unknown_mode_still_not_found() ->
+    ?assertEqual({error, not_found}, asobi_game_modes:world_config(~"no_such_mode")).

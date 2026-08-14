@@ -21,7 +21,8 @@ identity returned to the client.
     join_rejects_when_player_already_in_other_world/1,
     observer_sees_movers_input_via_world_tick/1,
     world_tick_diff_is_partial/1,
-    move_burst_collapses_to_latest_in_each_broadcast/1
+    move_burst_collapses_to_latest_in_each_broadcast/1,
+    find_or_create_is_join_rate_limited/1
 ]).
 
 -define(MODE_HUB, ~"test_ws_hub").
@@ -38,7 +39,8 @@ all() ->
         join_rejects_when_player_already_in_other_world,
         observer_sees_movers_input_via_world_tick,
         world_tick_diff_is_partial,
-        move_burst_collapses_to_latest_in_each_broadcast
+        move_burst_collapses_to_latest_in_each_broadcast,
+        find_or_create_is_join_rate_limited
     ].
 
 init_per_suite(Config) ->
@@ -470,3 +472,41 @@ cleanup_worlds() ->
             timer:sleep(20),
             ok
     end.
+
+%% asobi#480: world.create and world.find_or_create were the only instance-entry
+%% frames not behind the join limiter, even though world.join and match.join
+%% both are. The pg caps do not cover it: the FIND branch returns an existing
+%% world and consumes no cap at all, so nothing bounded how often one connection
+%% could drive a gen_server:call into the single lobby server, each fanning an
+%% uncached get_info out to every live world.
+%%
+%% The default bucket is 10 per 60s (asobi_sup). The 11th call must be refused.
+find_or_create_is_join_rate_limited(Config) ->
+    {_P, Tok} = register_player(~"rl1", Config),
+    Conn = ws_connect_authed(Tok, Config),
+    %% Ten reuse the same world and consume the bucket.
+    _ = [
+        ws_find_or_create(?MODE_HUB, integer_to_binary(N), Conn)
+     || N <- lists:seq(1, 10)
+    ],
+    ok = nova_test_ws:send_json(
+        #{
+            ~"type" => ~"world.find_or_create",
+            ~"cid" => ~"rl-over",
+            ~"payload" => #{~"mode" => ?MODE_HUB}
+        },
+        Conn
+    ),
+    {ok, Err} = recv_until(
+        fun(M) -> maps:get(~"cid", M, undefined) =:= ~"rl-over" end,
+        Conn
+    ),
+    nova_test_ws:close(Conn),
+    ?assertEqual(
+        ~"error",
+        maps:get(~"type", Err, undefined),
+        "an unrated find_or_create lets one connection saturate the lobby server"
+    ),
+    ?assertEqual(
+        ~"join_rate_limited", maps:get(~"reason", maps:get(~"payload", Err, #{}), undefined)
+    ).
