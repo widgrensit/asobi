@@ -42,6 +42,10 @@ function on_phase_ended(phase_name, state)   -- return updated state
 
 -export([init/1, join/2, join/3, leave/2, handle_input/3, tick/1, get_state/2]).
 -export([vote_requested/1, vote_resolved/3]).
+
+-ifdef(TEST).
+-export([normalise_vote_config/1]).
+-endif.
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
 
 %% A sandboxed Lua callback runs in a child process so the parent
@@ -258,13 +262,77 @@ vote_requested(#{lua_state := LuaSt, game_state := GS}) ->
         {ok, [false | _], _} ->
             none;
         {ok, [Config | _], LuaSt1} ->
-            Decoded = decode_to_map(Config, LuaSt1),
+            Decoded = normalise_vote_config(decode_to_map(Config, LuaSt1)),
             case map_size(Decoded) of
                 0 -> none;
                 _ -> {ok, Decoded}
             end;
         _ ->
             none
+    end.
+
+%% asobi#489: a Lua table decodes with binary keys, and asobi_vote_server reads
+%% atom ones - `maps:get(options, Merged)` has no default, so a binary-keyed
+%% config raised badkey, the vote server failed to start, and do_start_vote/3
+%% matched `{error, _} -> State`. The vote silently never happened: no
+%% vote_start frame, no log line naming the script. guides/voting.md called it
+%% "the one feature you cannot reach" from Lua.
+%%
+%% Translated against a fixed whitelist rather than binary_to_atom/2 on whatever
+%% the script wrote: script-supplied keys are untrusted input and converting
+%% them wholesale is an atom-table exhaustion vector. A key not on the list is
+%% left as the script wrote it, so it reaches the vote server as a binary key it
+%% ignores, which is the same outcome as not setting it.
+-define(VOTE_CONFIG_KEYS, [
+    template,
+    vote_id,
+    options,
+    window_ms,
+    method,
+    visibility,
+    tie_breaker,
+    veto_enabled,
+    max_revotes,
+    window_type,
+    min_window_ms,
+    supermajority,
+    require_supermajority,
+    quorum,
+    default_votes,
+    delegation,
+    spectator_weight
+]).
+
+-define(VOTE_OPTION_KEYS, [id, label]).
+
+-spec normalise_vote_config(map()) -> map().
+normalise_vote_config(Config) when is_map(Config) ->
+    Atomised = atomise_keys(?VOTE_CONFIG_KEYS, Config),
+    case maps:get(options, Atomised, undefined) of
+        Options when is_list(Options) ->
+            Atomised#{options => [atomise_option(O) || O <- Options]};
+        _ ->
+            Atomised
+    end;
+normalise_vote_config(Other) ->
+    Other.
+
+-spec atomise_option(term()) -> term().
+atomise_option(Option) when is_map(Option) ->
+    atomise_keys(?VOTE_OPTION_KEYS, Option);
+atomise_option(Other) ->
+    Other.
+
+-spec atomise_keys([atom()], map()) -> map().
+atomise_keys([], Map) ->
+    Map;
+atomise_keys([Key | Rest], Map) ->
+    Bin = atom_to_binary(Key, utf8),
+    case Map of
+        #{Bin := Value} ->
+            atomise_keys(Rest, maps:put(Key, Value, maps:remove(Bin, Map)));
+        _ ->
+            atomise_keys(Rest, Map)
     end.
 
 -spec vote_resolved(binary(), map(), map()) -> {ok, map()}.
