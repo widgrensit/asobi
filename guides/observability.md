@@ -120,12 +120,18 @@ asobi.session.connected          asobi.session.disconnected
 asobi.ws.connected               asobi.ws.disconnected
 asobi.ws.message_in              asobi.ws.message_out
 asobi.ws.connect_rate_limited    asobi.ws.idle_auth_timeout
-asobi.ws.origin_rejected
+asobi.ws.origin_rejected         asobi.ws.legacy_input_unwrap
 ```
 
 `asobi.ws.origin_rejected` and `asobi.ws.connect_rate_limited` are the two
 worth alerting on: a spike in either is either an attack or a client
 misconfiguration, and both are invisible in game metrics.
+
+`asobi.ws.legacy_input_unwrap` counts input frames sent in the deprecated
+sole-`data` shape (see [WebSocket protocol](websocket-protocol.md#worldinput)).
+It is not an error, and not worth an alert: it exists so the carve-out can be
+retired once the counter reaches zero for a release, instead of guessing which
+clients still depend on it.
 
 ### Matches and matchmaking
 
