@@ -60,7 +60,8 @@ the match sits in `waiting` until backfill brings it up to the threshold:
 match_size  = 2   -- the matchmaker forms and spawns on two
 min_players = 4   -- the loop does not start until four are in
 max_players = 8
-listed      = true
+quick_play  = true   -- so match.find_or_create can bring the other two in
+listed      = true   -- so match.list can find it too
 ```
 
 It gives up at `?WAITING_TIMEOUT` (60s) if the fourth never arrives.

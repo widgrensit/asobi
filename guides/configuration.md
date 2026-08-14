@@ -20,6 +20,8 @@ Declare settings as globals at the top of your match script:
 -- match.lua
 match_size = 4
 max_players = 10
+min_players = 4     -- defaults to match_size; higher makes the match wait for backfill
+quick_play = true   -- defaults to FALSE for matches: without it match.find_or_create refuses
 strategy = "fill"
 bots = { script = "bots/arena_bot.lua" }
 ```
@@ -28,11 +30,12 @@ bots = { script = "bots/arena_bot.lua" }
 |--------|----------|---------|-------------|
 | `match_size` | yes | none | Minimum players to start a match |
 | `max_players` | no | `match_size` | Maximum players per match |
+| `min_players` | no | `match_size` | Players needed before the loop starts. Higher than `match_size` spawns a match that waits for backfill, and gives up after 60s |
 | `strategy` | no | `"fill"` | `"fill"`, `"skill_based"`, or a custom module |
 | `bots` | no | none | `{ script = "path/to/bot.lua" }` - see [Bots](lua-bots.md) |
 | `game_type` | no | `"match"` | `"match"` or `"world"` |
 | `listed` | no | `false` for matches, `true` for worlds | Whether instances appear in discovery (`match.list` / `world.list`). Never gates joining |
-| `quick_play` | no | `true` | Whether `world.find_or_create` may place a player into an existing instance of this mode |
+| `quick_play` | no | `false` for matches, `true` for worlds | Whether `match.find_or_create` / `world.find_or_create` may place a player into an existing instance of this mode. A match mode that does not set it is refused with `quick_play_disabled`. Independent of `listed` |
 | `state_strategy` | no | none | `"shared"` selects the encode-once broadcast path |
 | `guest_auth` | no | `false` | Declares that this game offers anonymous play. The operator still has to supply a pepper |
 | `registration` | no | none | `"open"`, `"oauth_only"` or `"closed"`. The operator's `sys.config` wins when it sets one |
