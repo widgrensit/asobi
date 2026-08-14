@@ -4,6 +4,10 @@
 -export([init/1, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 %% Exported for tests (pure allowlist predicate), mirroring deployable/1.
 -export([origin_allowed/1]).
+
+-ifdef(TEST).
+-export([world_input_data/1]).
+-endif.
 %% Exported so asobi_protocol_coverage_tests can assert every emitted
 %% match./world. event stays inside the reserved namespace (#303), and so
 %% asobi_lua_api can reject a bad game.broadcast name against these same
@@ -118,6 +122,24 @@ websocket_init(State) ->
 %% may open the socket. A missing Origin header is a non-browser client
 %% (Defold/Unity native etc.) - it cannot be a CSWSH vector, so it always
 %% passes regardless of the allowlist.
+%% asobi#478: the payload IS the input map, which is what
+%% guides/websocket-protocol.md promises. `data` is unwrapped only when it is a
+%% map AND the sole key - the shape asobi-unreal sends - and everything else
+%% goes through verbatim.
+%%
+%% Before this, any `data` key was unwrapped, silently dropping its siblings, and
+%% a `data` that was not a map discarded the whole input as `#{}`. That second
+%% branch is how asobi-unity sent world input into a void for every release it
+%% ever shipped: it wrapped the payload as a JSON *string* under `data`, so
+%% handle_input/3 always received an empty map, with nothing logged either side.
+-spec world_input_data(term()) -> map().
+world_input_data(#{~"data" := Inner} = Payload) when is_map(Inner), map_size(Payload) =:= 1 ->
+    Inner;
+world_input_data(Payload) when is_map(Payload) ->
+    Payload;
+world_input_data(_) ->
+    #{}.
+
 -spec origin_allowed(binary() | undefined) -> boolean().
 origin_allowed(undefined) ->
     true;
@@ -846,12 +868,7 @@ handle_message(
                 undefined ->
                     {ok, State};
                 ZonePid ->
-                    InputData =
-                        case maps:get(~"data", Payload, undefined) of
-                            undefined when is_map(Payload) -> Payload;
-                            Other when is_map(Other) -> Other;
-                            _ -> #{}
-                        end,
+                    InputData = world_input_data(Payload),
                     asobi_zone:player_input(ZonePid, PlayerId, InputData, Seq),
                     {ok, State}
             end

@@ -415,7 +415,18 @@ handle_cast(
     {noreply, State#{entities => Entities#{EntityId => EntityState}, spatial_grid => Grid1}};
 handle_cast({remove_entity, EntityId}, #{entities := Entities, spatial_grid := Grid} = State) ->
     Grid1 = spatial_grid_remove(EntityId, Grid),
-    {noreply, State#{entities => maps:remove(EntityId, Entities), spatial_grid => Grid1}};
+    %% asobi#477: drop any input ack held for this entity. A crossing player
+    %% stays subscribed to the zone they left whenever it remains inside their
+    %% interest ring, so without this the old zone keeps acking them with a
+    %% frozen seq while the new zone advances - and the client sees world.ack
+    %% go backwards. Entity ids and player ids coincide for players; for an NPC
+    %% removal this is a no-op.
+    PlayerAck = maps:remove(EntityId, maps:get(player_ack, State, #{})),
+    {noreply, State#{
+        entities => maps:remove(EntityId, Entities),
+        spatial_grid => Grid1,
+        player_ack => PlayerAck
+    }};
 handle_cast(
     {subscribe, PlayerId, PlayerPid},
     #{subscribers := Subs} = State
@@ -761,8 +772,11 @@ broadcast_deltas(TickN, Deltas, Subs) ->
         Subs
     ).
 
-%% asobi#474: per-connection input ack. Iterate the opted-in players (those with
-%% a recorded seq) and send world.ack only to the ones still subscribed. Kept
+%% asobi#474: input ack, addressed to one connection. Iterate the opted-in
+%% players (those with a recorded seq) and send world.ack only to the ones still
+%% subscribed. asobi#477: an entry is dropped when the player's entity leaves
+%% this zone, so a subscriber whose entity has crossed into a neighbour is no
+%% longer acked here and never sees a stale seq from the zone behind them. Kept
 %% off the shared world.tick binary so the ack never leaks one player's input
 %% stream to the rest of the zone.
 -spec broadcast_acks(non_neg_integer(), #{binary() => non_neg_integer()}, map()) -> ok.

@@ -616,7 +616,13 @@ Join a specific world by id (e.g. one returned from `world.list`).
 
 Send game input to your zone. The `payload` IS the input map - there is
 no inner `data` wrapper. Field names are entirely up to your game; the
-server only forwards the map verbatim to your `handle_input/3` callback.
+server forwards the map verbatim to your `handle_input/3` callback.
+
+One compatibility shape survives: a payload whose *only* key is `data`, mapped
+to an object, is unwrapped to that object, because an SDK sends input that way.
+A `data` key alongside any other key is not special, and neither is a `data`
+whose value is not an object - both reach `handle_input/3` untouched, with the
+rest of the payload intact.
 
 For client-side prediction, add an optional `seq` *alongside* `payload` (a
 sibling, so "the payload IS the input map" stays true). The server echoes the
@@ -680,16 +686,21 @@ authoritative state already includes - is a first-class primitive:
    of `payload`) and applies the input locally right away (the prediction).
 2. The server records the highest `seq` it consumed for that player - a rejected
    input still counts, so a dropped input never strands the client - and sends it
-   back on the next broadcast as a per-connection
-   [`world.ack`](#worldack-server-push).
+   back on the next broadcast as a [`world.ack`](#worldack-server-push)
+   addressed to that connection alone.
 3. The client discards every predicted input up to that `seq` and replays the
    rest on top of the authoritative `world.tick` state (the reconciliation).
 
 Set [`broadcast_interval`](world-server.md) to 1 so the ack returns every tick.
 
-The ack is per-connection: it is sent only to clients that opted in by stamping a
-`seq`, and never rides the shared `world.tick`, so one player's input stream is
-never broadcast to the rest of the zone.
+The ack is addressed to one connection: it is sent only to clients that opted in
+by stamping a `seq`, and never rides the shared `world.tick`, so one player's
+input stream is never broadcast to the rest of the zone.
+
+It is emitted by the zone that consumed the input, and a player is subscribed to
+their whole interest ring, so a zone stops acking you as soon as your entity
+leaves it. Crossing a boundary therefore hands the ack over from one zone to the
+next rather than leaving the old one to repeat a stale `seq`.
 
 **If your SDK does not yet surface `world.ack`**, the same reconciliation works
 in userland: write the `seq` onto the player's entity in `handle_input/3`
@@ -700,9 +711,10 @@ is exactly what the `world.ack` frame avoids.
 
 ### `world.ack` (server push)
 
-Per-connection acknowledgement of the highest `world.input` `seq` the server has
-consumed for you as of `tick`. Sent only to clients that stamped a `seq` on their
-input; use it to reconcile prediction (above).
+Acknowledgement of the highest `world.input` `seq` the zone holding your entity
+has consumed for you as of `tick`. Addressed to your connection alone, and sent
+only to clients that stamped a `seq` on their input; use it to reconcile
+prediction (above).
 
 ```json
 {"type": "world.ack", "payload": {"tick": 42, "seq": 412}}

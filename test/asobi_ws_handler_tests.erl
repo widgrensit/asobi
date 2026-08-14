@@ -373,3 +373,30 @@ await_no_unhandled() ->
     after 200 ->
         no_log
     end.
+
+%% asobi#478: `data` is not a general escape hatch on a world.input payload.
+%% The guide promises the payload IS the input map; these pin the three shapes
+%% that promise turns on.
+
+world_input_data_forwards_the_payload_verbatim_test() ->
+    Payload = #{~"kind" => ~"move", ~"x" => 600, ~"y" => 480},
+    ?assertEqual(Payload, asobi_ws_handler:world_input_data(Payload)).
+
+world_input_data_unwraps_a_sole_data_map_test() ->
+    %% asobi-unreal's shape: {"data": {...}} and nothing else.
+    Inner = #{~"kind" => ~"move", ~"x" => 1},
+    ?assertEqual(Inner, asobi_ws_handler:world_input_data(#{~"data" => Inner})).
+
+world_input_data_keeps_siblings_of_a_data_key_test() ->
+    %% Was: unwrapped to the inner map, silently dropping `kind`.
+    Payload = #{~"kind" => ~"fire", ~"data" => #{~"x" => 1}},
+    ?assertEqual(Payload, asobi_ws_handler:world_input_data(Payload)).
+
+world_input_data_keeps_a_non_map_data_value_test() ->
+    %% Was: #{} - the whole input discarded. This is the asobi-unity case.
+    Payload = #{~"data" => ~"{\"kind\":\"move\"}"},
+    ?assertEqual(Payload, asobi_ws_handler:world_input_data(Payload)).
+
+world_input_data_on_a_non_map_payload_is_empty_test() ->
+    ?assertEqual(#{}, asobi_ws_handler:world_input_data(~"not a map")),
+    ?assertEqual(#{}, asobi_ws_handler:world_input_data([1, 2, 3])).
