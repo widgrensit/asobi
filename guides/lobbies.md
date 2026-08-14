@@ -67,25 +67,16 @@ listed      = true   -- so match.list can find it too
 It gives up at `?WAITING_TIMEOUT` (60s) if the fourth never arrives.
 
 Before asobi v0.85.0 the matchmaker overwrote `min_players` with `match_size`,
-so declaring it was silently ignored and this was an Erlang-only route through
-`asobi_match_sup:start_match/1`. That call is still available to an operator
-shipping their own module, and is still the only way to create a match outside
-the matchmaker.
+so declaring it was silently ignored and a waiting lobby needed an Erlang module
+in your release calling `asobi_match_sup:start_match/1`. That function still
+exists for an operator shipping their own module, but nothing about a lobby
+needs it any more.
 
-```erlang
-{ok, Pid} = asobi_match_sup:start_match(#{
-    mode         => ~"arena",
-    game_module  => my_arena,
-    game_config  => #{},
-    min_players  => 4,
-    max_players  => 4,
-    listed       => true
-}).
-```
-
-**If you are writing Lua, use a world instead.** A world is the only session a
-client can create, so it is the only lobby a Lua-only game can build. Skip to
-[Persistent world as a hub](#persistent-world-as-a-hub).
+**A match is a client-creatable session too.** That was not true before
+`match.find_or_create`, and this page used to send Lua readers to a world for
+that reason. A world is still the better hub when you want somewhere persistent
+that survives empty - see [Persistent world as a hub](#persistent-world-as-a-hub)
+- but it is a choice now, not the only option.
 
 ### Letting players find it
 
