@@ -121,9 +121,11 @@ Serialized through `asobi_world_lobby_server`, which already owns the shared
 listing cache for both worlds and matches. Calling `find_or_create_unsafe/2`
 directly is racy.
 
-Only `listed` modes participate, which is the opt-in and needs no new flag:
-matches are unlisted by default, so a ranked mode the matchmaker owns is
-unreachable here by construction.
+Eligibility is `quick_play`, which defaults to FALSE for match modes, so a
+ranked mode the matchmaker owns is refused with `quick_play_disabled` until it
+opts in. That is a separate axis from `listed`, which decides only whether a
+match appears in `match.list` - hidden but auto-filled is a legitimate
+combination.
 """.
 -spec find_or_create(binary(), binary() | undefined) -> {ok, pid(), map()} | {error, term()}.
 find_or_create(Mode, PlayerId) ->
