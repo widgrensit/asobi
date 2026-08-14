@@ -183,6 +183,13 @@ callback_mode() -> [state_functions, state_enter].
 init(Config) ->
     MatchId = maps:get(match_id, Config, generate_id()),
     pg:join(?PG_SCOPE, {asobi_match_server, MatchId}, self()),
+    %% asobi#482: a flat group as well as the per-id one, so the node-wide match
+    %% count is a pg lookup rather than a gen_statem:call per match. Mirrors
+    %% asobi_owned_worlds_global on the world side. Unconditional, so a
+    %% matchmaker-spawned match counts toward the same node resource as one
+    %% created through match.find_or_create. Membership is tied to the process,
+    %% so it clears on death with no bookkeeping.
+    pg:join(?PG_SCOPE, asobi_live_matches_global, self()),
     case recover_state(MatchId) of
         {ok, SavedStatus, SavedState} ->
             logger:notice(#{msg => ~"match recovered", match_id => MatchId, status => SavedStatus}),

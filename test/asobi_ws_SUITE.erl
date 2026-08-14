@@ -360,6 +360,15 @@ ws_match_find_or_create_joins(Config) ->
             match_size => 2,
             min_players => 2,
             max_players => 8,
+            listed => true,
+            quick_play => true
+        },
+        %% Listed, but never opted in - the shape every match mode written
+        %% before this frame existed has.
+        ~"foc_ws_closed" => #{
+            module => asobi_test_game,
+            match_size => 2,
+            max_players => 8,
             listed => true
         }
     }),
@@ -399,6 +408,26 @@ ws_match_find_or_create_joins(Config) ->
             MatchId,
             maps:get(~"match_id", maps:get(~"payload", R2, #{}), undefined),
             "the second caller must find the first caller's match"
+        ),
+
+        %% And the refusal reaches the client as a reason it can branch on.
+        {_, Tok3} = register_player(~"focws3", Config),
+        Conn3 = ws_connect_authed(Tok3, Config),
+        ok = nova_test_ws:send_json(
+            #{
+                ~"type" => ~"match.find_or_create",
+                ~"cid" => ~"f3",
+                ~"payload" => #{~"mode" => ~"foc_ws_closed"}
+            },
+            Conn3
+        ),
+        {ok, R3} = recv_until(fun(M) -> maps:get(~"cid", M, undefined) =:= ~"f3" end, Conn3),
+        nova_test_ws:close(Conn3),
+        ?assertEqual(~"error", maps:get(~"type", R3, undefined)),
+        ?assertEqual(
+            ~"quick_play_disabled",
+            maps:get(~"reason", maps:get(~"payload", R3, #{}), undefined),
+            "a mode that never opted in must be refused, not silently spawned"
         )
     after
         case Prev of

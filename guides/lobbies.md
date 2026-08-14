@@ -34,9 +34,14 @@ still accepting players, and spawns one if there is none. The reply is
 {"type": "match.find_or_create", "cid": "1", "payload": {"mode": "arena"}}
 ```
 
-Only `listed` modes participate. Matches are unlisted by default, so a ranked
-mode the matchmaker owns is never absorbed into this - the opt-in is the flag
-you already set to appear in `match.list`.
+Opt in with `quick_play = true`. It defaults to `false` for match modes, so a
+ranked mode the matchmaker owns is refused with `quick_play_disabled` until you
+say otherwise - and a mode written before this frame existed is safe on upgrade
+without touching it.
+
+`quick_play` and `listed` are independent: `listed` decides whether a match
+appears in `match.list`, `quick_play` decides whether a player may be dropped
+into an existing one. Hidden but auto-filled is a legitimate combination.
 
 Prefer it over `match.list` then `match.join`. Browsing and then joining is two
 round trips with a race in the middle: two clients that both read an empty list
@@ -169,8 +174,8 @@ Worlds are subject to `world_max_per_player` (5) and `world_max` (1000) - see
 
 ### Private lobbies
 
-Because only a world can be created by a client, a code-gated private lobby is a
-world too. Share a code out of band and check it on the way in. The join context
+A code-gated private lobby can be a match as well as a world: `match.find_or_create`
+forwards the join context, so a `join` callback can refuse on a bad code. Share a code out of band and check it on the way in. The join context
 is whatever the client put in the join payload; asobi never reads it.
 
 ```lua

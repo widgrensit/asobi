@@ -159,7 +159,7 @@ Shorthand (Erlang module only):
 | `skill_expand_rate` | `50` | Window expansion per 5 seconds (`skill_based` only) |
 | `bots` | `#{}` | Bot configuration - see [Bots](lua-bots.md) |
 | `listed` | `false` for matches, `true` for worlds | Whether instances appear in discovery (`match.list` / `world.list`). Matches are unlisted by default: a matchmaker-spawned match is already assigned to its players, so opt in explicitly |
-| `quick_play` | `true` | Whether `world.find_or_create` may place a player into an existing world of this mode. Read on the world entry path for whatever mode name it is handed, so setting it `false` on a match mode is protective rather than inert. Independent of `listed` - see [World server](world-server.md#visibility) |
+| `quick_play` | `true` for worlds, **`false` for matches** | Whether `world.find_or_create` / `match.find_or_create` may place a player into an existing instance of this mode. Match modes default closed so a mode written before `match.find_or_create` existed is not exposed on upgrade. Independent of `listed` - see [World server](world-server.md#visibility) |
 
 ### Operator modes and game-declared modes
 
@@ -672,7 +672,7 @@ module:
 }}
 ```
 
-## World capacity
+## Instance capacity
 
 Bounds on persistent world creation, enforced as a DoS backstop:
 
@@ -684,6 +684,18 @@ Bounds on persistent world creation, enforced as a DoS backstop:
 A player at the per-player cap gets `429 world.player_limit_reached`; once the
 global cap is reached further creates get `503 world.capacity_reached`. The
 global cap is checked first.
+
+Matches have a node-wide cap of their own:
+
+```erlang
+{match_max, 1000}            %% default 1000
+```
+
+It bounds `match.find_or_create`, and answers `match_capacity_reached`. The
+matchmaker used to bound match creation implicitly - forming one took
+`match_size` queued tickets - and that bound disappears once a single player can
+create a match. There is no per-player match cap: matches carry no owner, unlike
+worlds.
 
 ## Join rate
 

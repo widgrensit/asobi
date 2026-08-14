@@ -86,8 +86,14 @@ match_lobby_test_() ->
             fun foc_spawns_when_none/0},
         {"find_or_create reuses a listed, joinable match with room (#482)",
             fun foc_reuses_existing/0},
-        {"find_or_create ignores an unlisted match, so ranked stays matchmaker-only (#482)",
-            fun foc_ignores_unlisted/0},
+        {"find_or_create REFUSES a non-quick_play mode, so ranked stays matchmaker-only (#482)",
+            fun foc_refuses_non_quick_play/0},
+        {"quick_play and listed stay independent axes (#482)",
+            fun foc_quick_play_is_independent_of_listed/0},
+        {"a mode that declares no quick_play is refused, so upgrades are safe (#482)",
+            fun foc_defaults_closed/0},
+        {"find_or_create picks the FULLEST eligible match, consolidating (#482)",
+            fun foc_picks_fullest/0},
         {"find_or_create ignores a match closed with set_joinable(false) (#482)",
             fun foc_ignores_closed/0},
         {"find_or_create refuses a world mode (#482)", fun foc_refuses_world_mode/0},
@@ -214,7 +220,44 @@ foc_mode(Mode, Extra) ->
     Prev = application:get_env(asobi, game_modes),
     application:set_env(asobi, game_modes, #{
         Mode => maps:merge(
-            #{module => ?GAME, match_size => 2, max_players => 4, listed => true}, Extra
+            #{
+                module => ?GAME,
+                match_size => 2,
+                max_players => 4,
+                listed => true,
+                quick_play => true
+            },
+            Extra
+        )
+    }),
+    Prev.
+
+%% A mode exactly as an operator would have written it before this verb existed:
+%% no quick_play key at all.
+foc_mode_bare(Mode) ->
+    Prev = application:get_env(asobi, game_modes),
+    application:set_env(asobi, game_modes, #{
+        Mode => #{module => ?GAME, match_size => 2, max_players => 4, listed => true}
+    }),
+    Prev.
+
+foc_mode2(Mode, Extra) ->
+    Prev = application:get_env(asobi, game_modes),
+    Existing =
+        case Prev of
+            {ok, M} when is_map(M) -> M;
+            _ -> #{}
+        end,
+    application:set_env(asobi, game_modes, Existing#{
+        Mode => maps:merge(
+            #{
+                module => ?GAME,
+                match_size => 2,
+                max_players => 4,
+                listed => true,
+                quick_play => true
+            },
+            Extra
         )
     }),
     Prev.
@@ -248,16 +291,77 @@ foc_reuses_existing() ->
         restore_modes(Prev)
     end.
 
-foc_ignores_unlisted() ->
-    %% The opt-in, and why no new mode flag was needed: matches are unlisted by
-    %% default, so a matchmaker-owned ranked mode is unreachable here.
-    Prev = foc_mode(~"foc_c", #{listed => false}),
+foc_refuses_non_quick_play() ->
+    %% The policy gate. quick_play defaults FALSE for match modes, so a
+    %% matchmaker-only mode is not merely un-found - it must be REFUSED. Before
+    %% this the filter simply missed the unlisted match and spawned another, so
+    %% every call minted a fresh ranked match and joined the caller to it,
+    %% routing around matchmaking entirely and bounded only by the join limiter.
+    Prev = foc_mode(~"foc_c", #{quick_play => false}),
     try
-        {ok, Pid1, _} = asobi_match_lobby:find_or_create_unsafe(~"foc_c", ~"p1"),
-        {ok, Pid2, _} = asobi_match_lobby:find_or_create_unsafe(~"foc_c", ~"p2"),
-        ?assertNotEqual(Pid1, Pid2, "an unlisted match must not absorb a second caller"),
-        stop_match(Pid1),
-        stop_match(Pid2)
+        ?assertEqual(
+            {error, quick_play_disabled},
+            asobi_match_lobby:find_or_create_unsafe(~"foc_c", ~"p1")
+        ),
+        ?assertEqual(
+            [],
+            asobi_match_lobby:list_matches(#{mode => ~"foc_c"}),
+            "a refused call must not have spawned anything"
+        )
+    after
+        restore_modes(Prev)
+    end.
+
+foc_picks_fullest() ->
+    %% Ordering is not incidental. list_matches/1 order comes from
+    %% pg:which_groups/1, i.e. ETS iteration order, which reshuffles as groups
+    %% churn - so without an explicit rule, concurrent callers can flip between
+    %% matches mid-fill and leave two half-filled waiting matches that each die
+    %% at ?WAITING_TIMEOUT without reaching min_players. Fullest-first
+    %% consolidates: the match at 2/4 is the one worth completing.
+    Prev = foc_mode(~"foc_j", #{}),
+    try
+        Empty = start_match(#{mode => ~"foc_j", listed => true, max_players => 4}),
+        Fuller = start_match(#{mode => ~"foc_j", listed => true, max_players => 4}),
+        ok = asobi_match_server:join(Fuller, ~"a"),
+        ok = asobi_match_server:join(Fuller, ~"b"),
+        {ok, Picked, _} = asobi_match_lobby:find_or_create_unsafe(~"foc_j", ~"p1"),
+        ?assertEqual(Fuller, Picked, "the fuller match must win, not whichever pg listed first"),
+        ?assertNotEqual(Empty, Picked),
+        stop_match(Empty),
+        stop_match(Fuller)
+    after
+        restore_modes(Prev)
+    end.
+
+foc_defaults_closed() ->
+    %% The upgrade-safety case, and the one that matters most: every match mode
+    %% that exists today predates this verb and declares no quick_play. If the
+    %% default were open, merging this would silently expose every operator's
+    %% ranked mode to a client that can spawn and join one without ever being
+    %% rated or queued. Declaring quick_play => false is NOT what protects them
+    %% - declaring nothing is the common case.
+    Prev = foc_mode_bare(~"foc_i"),
+    try
+        ?assertEqual(
+            {error, quick_play_disabled},
+            asobi_match_lobby:find_or_create_unsafe(~"foc_i", ~"p1")
+        ),
+        ?assertEqual([], asobi_match_lobby:list_matches(#{mode => ~"foc_i"}))
+    after
+        restore_modes(Prev)
+    end.
+
+foc_quick_play_is_independent_of_listed() ->
+    %% The two axes stay separate: hidden from the browser but still auto-filled
+    %% is a legitimate cell, and collapsing them onto `listed` would remove it.
+    Prev = foc_mode(~"foc_h", #{listed => false, quick_play => true}),
+    try
+        {ok, Pid1, _} = asobi_match_lobby:find_or_create_unsafe(~"foc_h", ~"p1"),
+        {ok, Pid2, _} = asobi_match_lobby:find_or_create_unsafe(~"foc_h", ~"p2"),
+        ?assertEqual(Pid1, Pid2),
+        ?assertEqual([], asobi_match_lobby:list_matches(#{mode => ~"foc_h", listed => true})),
+        stop_match(Pid1)
     after
         restore_modes(Prev)
     end.
@@ -301,19 +405,32 @@ foc_respects_cap() ->
     %% The matchmaker bounded match creation implicitly - it took match_size
     %% queued tickets to make one. A client-facing create removes that bound, so
     %% the cap is required machinery, not hardening.
+    %%
+    %% Discriminating on purpose: the earlier version set match_max to
+    %% live_match_count() and asserted 0 >= 0, which passed even with the count
+    %% hardcoded to zero - which is what a bare-atom pg lookup effectively was.
     Prev = foc_mode(~"foc_f", #{}),
+    Prev2 = foc_mode2(~"foc_g", #{}),
     PrevMax = application:get_env(asobi, match_max),
-    application:set_env(asobi, match_max, asobi_match_lobby:live_match_count()),
     try
+        {ok, P1, _} = asobi_match_lobby:find_or_create_unsafe(~"foc_f", ~"p1"),
+        Base = asobi_match_lobby:live_match_count(),
+        ?assert(Base >= 1, "a live match must be counted, or the cap can never fire"),
+        application:set_env(asobi, match_max, Base),
         ?assertEqual(
             {error, match_capacity_reached},
-            asobi_match_lobby:find_or_create_unsafe(~"foc_f", ~"p1")
-        )
+            asobi_match_lobby:find_or_create_unsafe(~"foc_g", ~"p2")
+        ),
+        application:set_env(asobi, match_max, Base + 1),
+        {ok, P2, _} = asobi_match_lobby:find_or_create_unsafe(~"foc_g", ~"p3"),
+        stop_match(P1),
+        stop_match(P2)
     after
         case PrevMax of
             {ok, M} -> application:set_env(asobi, match_max, M);
             undefined -> application:unset_env(asobi, match_max)
         end,
+        restore_modes(Prev2),
         restore_modes(Prev)
     end.
 
@@ -327,13 +444,19 @@ foc_is_serialized() ->
     Prev = foc_mode(~"foc_race", #{max_players => 64}),
     Parent = self(),
     try
+        %% Barrier: without it the eight spawns run sequentially and caller 1
+        %% can finish before caller 8 starts, so they would all find match 1
+        %% even unserialized and the test would prove nothing.
         Pids = [
             spawn(fun() ->
+                receive
+                    go -> ok
+                end,
                 Parent ! {foc, N, asobi_match_lobby:find_or_create(~"foc_race", ~"racer")}
             end)
          || N <- lists:seq(1, 8)
         ],
-        _ = Pids,
+        [P ! go || P <- Pids],
         Got = [
             receive
                 {foc, _, {ok, P, _}} -> P;
