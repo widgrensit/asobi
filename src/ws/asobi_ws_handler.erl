@@ -638,6 +638,38 @@ handle_message(
     Reply = encode_reply(Cid, ~"presence.updated", #{status => Status}),
     {reply, {text, Reply}, State};
 handle_message(
+    #{~"type" := ~"match.find_or_create", ~"payload" := #{~"mode" := Mode}} = Msg,
+    #{player_id := PlayerId} = State
+) ->
+    %% asobi#482: the match twin of world.find_or_create. The matchmaker groups
+    %% co-queued tickets and never joins a player into a running match, so
+    %% before this the only route into a live match was match.list then
+    %% match.join - a browse-then-join carrying the TOCTOU that
+    %% asobi_world_lobby_server exists to close.
+    %%
+    %% The reply is match.joined, not a new match.created leaf: under the 1.0
+    %% freeze (ADR 0010) a new OUTBOUND match./world. leaf has to enter
+    %% ?RESERVED_EVENT_NAMES, which would retroactively ban it for any shipped
+    %% game already broadcasting that name through game.broadcast. Additive
+    %% inbound frames carry no such hazard.
+    Cid = maps:get(~"cid", Msg, undefined),
+    case check_join_rate(PlayerId) of
+        denied ->
+            {reply, {text, encode_error(Cid, ~"join_rate_limited")}, State};
+        allowed ->
+            case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
+                {error, CtxErr} ->
+                    {reply, {text, encode_error(Cid, CtxErr)}, State};
+                {ok, Ctx} ->
+                    case asobi_match_lobby:find_or_create(Mode, PlayerId) of
+                        {ok, MatchPid, _Info} ->
+                            join_match_and_reply(Cid, MatchPid, PlayerId, Ctx, State);
+                        {error, Reason} ->
+                            {reply, {text, encode_error(Cid, Reason)}, State}
+                    end
+            end
+    end;
+handle_message(
     #{~"type" := ~"match.join", ~"payload" := #{~"match_id" := MatchId}} = Msg,
     #{player_id := PlayerId} = State
 ) ->

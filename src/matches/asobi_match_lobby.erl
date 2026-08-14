@@ -15,8 +15,11 @@ default to listed because their browser already shipped.
 """.
 
 -export([list_matches/0, list_matches/1, list_matches_cached/1]).
+-export([find_or_create/2, find_or_create_unsafe/2, live_match_count/0]).
 
 -define(LIST_CACHE_TTL_MS, 500).
+-define(PG_SCOPE, nova_scope).
+-define(DEFAULT_MAX_MATCHES, 1000).
 
 -doc "List live matches. Unfiltered - callers that serve clients want `list_matches/1`.".
 -spec list_matches() -> [map()].
@@ -101,3 +104,107 @@ matches_filters(Info, Filters) ->
     Status = maps:get(status, Info, undefined),
     StatusOk = Status =:= waiting orelse Status =:= running,
     ModeOk andalso CapOk andalso ListedOk andalso JoinableOk andalso StatusOk.
+
+-doc """
+Get this player into a live match of `Mode`, spawning one if there is none.
+
+The match twin of `asobi_world_lobby:find_or_create/2`, and the reason it
+exists: the matchmaker groups co-queued tickets and spawns - it never joins a
+player into a running match (see `asobi_matchmaker_fill`, whose `match/2` only
+ever sees the ticket queue). So before this the only route into a live match was
+`match.list` then `match.join`, a browse-then-join with the same TOCTOU
+`asobi_world_lobby_server` was built to close, and worse here because a split
+leaves two half-empty matches that may both fail to reach `min_players`.
+
+Serialized through `asobi_world_lobby_server`, which already owns the shared
+listing cache for both worlds and matches. Calling `find_or_create_unsafe/2`
+directly is racy.
+
+Only `listed` modes participate, which is the opt-in and needs no new flag:
+matches are unlisted by default, so a ranked mode the matchmaker owns is
+unreachable here by construction.
+""".
+-spec find_or_create(binary(), binary() | undefined) -> {ok, pid(), map()} | {error, term()}.
+find_or_create(Mode, PlayerId) ->
+    asobi_world_lobby_server:find_or_create_match(Mode, PlayerId).
+
+-doc """
+The inner sequence. Public only so the serializing server can call it - every
+other caller wants `find_or_create/2`.
+""".
+-spec find_or_create_unsafe(binary(), binary() | undefined) ->
+    {ok, pid(), map()} | {error, term()}.
+find_or_create_unsafe(Mode, _PlayerId) ->
+    Filters = #{mode => Mode, listed => true, has_capacity => true, joinable => true},
+    case list_matches(Filters) of
+        [Info | _] ->
+            %% A listing entry can name a match that died between the
+            %% enumeration and here, so resolve it again and fall through to a
+            %% spawn rather than handing back a dead pid.
+            case asobi_match_server:whereis(maps:get(match_id, Info, ~"")) of
+                {ok, Pid} -> {ok, Pid, Info};
+                error -> spawn_for_mode(Mode)
+            end;
+        [] ->
+            spawn_for_mode(Mode)
+    end.
+
+-doc """
+Live matches, counted from the pg group rather than by asking each one.
+
+`asobi_discovery` uses the server module as the pg group tag, so membership is
+already tracked and tied to the process lifetime - the count clears on death
+with no bookkeeping. Counting via `list_matches/0` would issue a
+`gen_statem:call` per match on every create, which is the amplification the
+listing cache exists to avoid.
+""".
+-spec live_match_count() -> non_neg_integer().
+live_match_count() ->
+    length(pg:get_members(?PG_SCOPE, asobi_match_server)).
+
+-spec spawn_for_mode(binary()) -> {ok, pid(), map()} | {error, term()}.
+spawn_for_mode(Mode) ->
+    ModeConfig = asobi_game_modes:mode_config(Mode),
+    case maps:get(type, ModeConfig, match) of
+        world ->
+            {error, wrong_mode_type};
+        _ when map_size(ModeConfig) =:= 0 ->
+            {error, not_found};
+        _ ->
+            check_cap_and_spawn(Mode, ModeConfig)
+    end.
+
+-spec check_cap_and_spawn(binary(), map()) -> {ok, pid(), map()} | {error, term()}.
+check_cap_and_spawn(Mode, ModeConfig) ->
+    Max = application:get_env(asobi, match_max, ?DEFAULT_MAX_MATCHES),
+    case live_match_count() >= Max of
+        true ->
+            {error, match_capacity_reached};
+        false ->
+            do_spawn(Mode, ModeConfig)
+    end.
+
+-spec do_spawn(binary(), map()) -> {ok, pid(), map()} | {error, term()}.
+do_spawn(Mode, ModeConfig) ->
+    case asobi_game_modes:resolve_game_module(Mode) of
+        {ok, GameMod, ExtraConfig} ->
+            MatchSize = maps:get(match_size, ModeConfig, 2),
+            Config = #{
+                mode => Mode,
+                game_module => GameMod,
+                game_config => ExtraConfig,
+                min_players => maps:get(min_players, ModeConfig, MatchSize),
+                max_players => maps:get(max_players, ModeConfig, MatchSize),
+                listed => maps:get(listed, ModeConfig, false)
+            },
+            case asobi_match_sup:start_match(Config) of
+                {ok, Pid} when is_pid(Pid) ->
+                    {ok, Pid, asobi_match_server:get_info(Pid)};
+                {error, _} = Err ->
+                    Err;
+                Other ->
+                    {error, {start_match_failed, Other}}
+            end;
+        {error, _} = Err ->
+            Err
+    end.

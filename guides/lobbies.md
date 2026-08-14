@@ -25,9 +25,27 @@ A waiting match is the cheaper shape, but the row above that decides it is
 A match starts in the `waiting` state and transitions to `running` when
 `min_players` is reached. That waiting period is the lobby.
 
-**No client-facing call brings a match into existence.** The matchmaker is the
-only creator: it groups co-queued tickets and spawns. There is no `match.create`
-frame and no `POST /api/v1/matches`.
+**`match.find_or_create` is the client-facing route into a live match.** Send a
+mode; the server returns the first listed match of that mode with room that is
+still accepting players, and spawns one if there is none. The reply is
+`match.joined`, the same frame `match.join` answers with.
+
+```json
+{"type": "match.find_or_create", "cid": "1", "payload": {"mode": "arena"}}
+```
+
+Only `listed` modes participate. Matches are unlisted by default, so a ranked
+mode the matchmaker owns is never absorbed into this - the opt-in is the flag
+you already set to appear in `match.list`.
+
+Prefer it over `match.list` then `match.join`. Browsing and then joining is two
+round trips with a race in the middle: two clients that both read an empty list
+both create, and you get two half-empty matches that may each fail to reach
+`min_players`. `find_or_create` resolves server-side, serialized, so
+simultaneous callers land in the same match.
+
+There is still no bare `match.create`, and no `POST /api/v1/matches`. Creating a
+match without reusing one is what the matchmaker is for.
 
 But the waiting state is reachable from mode config. Declare a `min_players`
 higher than `match_size` and the matchmaker spawns on the group it formed while

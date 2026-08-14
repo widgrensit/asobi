@@ -9,6 +9,7 @@
     ws_unknown_type/1,
     ws_idle_auth_timeout_closes/1,
     ws_match_input_not_in_match_hint/1,
+    ws_match_find_or_create_joins/1,
     ws_match_input_hint_rate_limited/1,
     ws_script_error_rendered_as_extension_error/1,
     ws_matchmaker_add_omitted_mode_rejected/1,
@@ -23,6 +24,7 @@ all() ->
         ws_unknown_type,
         ws_idle_auth_timeout_closes,
         ws_match_input_not_in_match_hint,
+        ws_match_find_or_create_joins,
         ws_match_input_hint_rate_limited,
         ws_script_error_rendered_as_extension_error,
         ws_matchmaker_add_omitted_mode_rejected,
@@ -343,3 +345,65 @@ recv_until(Pred, Conn, N) ->
         {error, _} = Err ->
             Err
     end.
+
+%% asobi#482: match.find_or_create is the match twin of world.find_or_create.
+%% Two things this pins that a unit test cannot: the frame is dispatched at all
+%% (it is an additive inbound type under the 1.0 freeze), and the reply is
+%% match.joined rather than a new match.created leaf - minting an outbound
+%% match. leaf would have to enter ?RESERVED_EVENT_NAMES and would retroactively
+%% ban that name for any shipped game broadcasting it via game.broadcast.
+ws_match_find_or_create_joins(Config) ->
+    Prev = application:get_env(asobi, game_modes),
+    application:set_env(asobi, game_modes, #{
+        ~"foc_ws" => #{
+            module => asobi_test_game,
+            match_size => 2,
+            min_players => 2,
+            max_players => 8,
+            listed => true
+        }
+    }),
+    try
+        {_, Tok1} = register_player(~"focws1", Config),
+        Conn1 = ws_connect_authed(Tok1, Config),
+        ok = nova_test_ws:send_json(
+            #{
+                ~"type" => ~"match.find_or_create",
+                ~"cid" => ~"f1",
+                ~"payload" => #{~"mode" => ~"foc_ws"}
+            },
+            Conn1
+        ),
+        {ok, R1} = recv_until(fun(M) -> maps:get(~"cid", M, undefined) =:= ~"f1" end, Conn1),
+        ?assertEqual(~"match.joined", maps:get(~"type", R1, undefined)),
+        MatchId = maps:get(~"match_id", maps:get(~"payload", R1, #{}), undefined),
+        ?assert(is_binary(MatchId)),
+
+        %% A second player asking for the same mode must land in that match,
+        %% not a fresh one - the whole point of the verb.
+        {_, Tok2} = register_player(~"focws2", Config),
+        Conn2 = ws_connect_authed(Tok2, Config),
+        ok = nova_test_ws:send_json(
+            #{
+                ~"type" => ~"match.find_or_create",
+                ~"cid" => ~"f2",
+                ~"payload" => #{~"mode" => ~"foc_ws"}
+            },
+            Conn2
+        ),
+        {ok, R2} = recv_until(fun(M) -> maps:get(~"cid", M, undefined) =:= ~"f2" end, Conn2),
+        nova_test_ws:close(Conn1),
+        nova_test_ws:close(Conn2),
+        ?assertEqual(~"match.joined", maps:get(~"type", R2, undefined)),
+        ?assertEqual(
+            MatchId,
+            maps:get(~"match_id", maps:get(~"payload", R2, #{}), undefined),
+            "the second caller must find the first caller's match"
+        )
+    after
+        case Prev of
+            {ok, P} -> application:set_env(asobi, game_modes, P);
+            undefined -> application:unset_env(asobi, game_modes)
+        end
+    end,
+    Config.

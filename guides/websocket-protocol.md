@@ -188,6 +188,31 @@ Distinct from `GET /api/v1/matches`, which reads the match *record* table
 (finished matches, an audit trail). `GET /api/v1/matches/live` is the REST
 equivalent of this message.
 
+### `match.find_or_create`
+
+Get into a live match of a mode, spawning one if there is none.
+
+```json
+{"type": "match.find_or_create", "cid": "1", "payload": {"mode": "arena"}}
+```
+
+Replies with `match.joined`, exactly as `match.join` does. The payload takes
+`mode` only - every other match parameter comes from mode config, so a client
+cannot choose `max_players` or the tick rate.
+
+Only modes with `listed = true` are eligible, which is the same opt-in that
+makes a mode appear in `match.list`. A mode left unlisted is reachable through
+the matchmaker alone.
+
+Prefer this to `match.list` followed by `match.join`: the two-step version
+races, and two clients reading the same empty listing will each create a match.
+This resolves server-side and is serialized, so simultaneous callers converge on
+one match.
+
+Subject to the same join rate limit as `match.join` and `world.join`, and to a
+node-wide cap on live matches (`asobi.match_max`, default 1000), which answers
+`match_capacity_reached`. A world mode is refused with `wrong_mode_type`.
+
 ### `match.join`
 
 Join a match (after being matched via matchmaker, discovered via
