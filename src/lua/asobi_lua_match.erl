@@ -306,16 +306,14 @@ vote_requested(#{lua_state := LuaSt, game_state := GS}) ->
 -define(VOTE_OPTION_KEYS, [id, label]).
 
 -spec normalise_vote_config(map()) -> map().
-normalise_vote_config(Config) when is_map(Config) ->
+normalise_vote_config(Config) ->
     Atomised = atomise_keys(?VOTE_CONFIG_KEYS, Config),
     case maps:get(options, Atomised, undefined) of
         Options when is_list(Options) ->
             Atomised#{options => [atomise_option(O) || O <- Options]};
         _ ->
             Atomised
-    end;
-normalise_vote_config(Other) ->
-    Other.
+    end.
 
 -spec atomise_option(term()) -> term().
 atomise_option(Option) when is_map(Option) ->
