@@ -13,6 +13,7 @@
     add_idempotent_same_player_mode/1,
     add_distinct_modes_new_ticket/1,
     add_distinct_players_new_ticket/1,
+    min_players_above_match_size_spawns_a_waiting_match/1,
     add_default_mode_idempotent/1,
     remove_then_readd_new_ticket/1,
     selfmatch_group_rejected/1,
@@ -45,7 +46,8 @@ all() ->
         expiry_emits_removed_telemetry,
         spawn_retry_bounded_then_gives_up,
         queue_snapshot_reports_waiting_by_mode,
-        queue_snapshot_never_waits_on_the_matchmaker
+        queue_snapshot_never_waits_on_the_matchmaker,
+        min_players_above_match_size_spawns_a_waiting_match
     ].
 
 init_per_suite(Config) ->
@@ -329,4 +331,54 @@ await_mode(Mode, Attempts) ->
         [] ->
             timer:sleep(200),
             await_mode(Mode, Attempts - 1)
+    end.
+
+%% asobi#481: the matchmaker hardcoded min_players => MatchSize, so a mode
+%% declaring a higher one was silently ignored and the match started the moment
+%% the group landed. With it plumbed, a mode can spawn on a group of two and
+%% genuinely wait for backfill to reach four before the loop runs. This drives
+%% the real matchmaker tick rather than calling start_match directly, because
+%% the overwrite was in the matchmaker and start_match always honoured it.
+min_players_above_match_size_spawns_a_waiting_match(Config) ->
+    Prev = application:get_env(asobi, game_modes),
+    application:set_env(asobi, game_modes, #{
+        ~"waitmode" => #{
+            module => asobi_test_game,
+            match_size => 2,
+            min_players => 4,
+            max_players => 8,
+            listed => true
+        }
+    }),
+    try
+        {ok, _, _} = asobi_matchmaker:add(~"wp1", #{mode => ~"waitmode"}),
+        {ok, _, _} = asobi_matchmaker:add(~"wp2", #{mode => ~"waitmode"}),
+        Match = wait_for_listed_match(~"waitmode", 40),
+        %% Two players landed but min_players is 4, so the loop must NOT be
+        %% running. Before the fix the matchmaker overwrote min_players with
+        %% match_size and this read `running`.
+        ?assertMatch(#{status := waiting, player_count := 2}, Match),
+        {ok, Pid} = asobi_match_server:whereis(maps:get(match_id, Match)),
+        ok = asobi_match_server:join(Pid, ~"wp3"),
+        ?assertMatch(#{status := waiting, player_count := 3}, asobi_match_server:get_info(Pid)),
+        %% The fourth clears the threshold.
+        ok = asobi_match_server:join(Pid, ~"wp4"),
+        ?assertMatch(#{status := running, player_count := 4}, asobi_match_server:get_info(Pid))
+    after
+        case Prev of
+            {ok, P} -> application:set_env(asobi, game_modes, P);
+            undefined -> application:unset_env(asobi, game_modes)
+        end
+    end,
+    Config.
+
+wait_for_listed_match(_Mode, 0) ->
+    ct:fail("matchmaker never spawned a match for the mode");
+wait_for_listed_match(Mode, N) ->
+    case [M || M <- asobi_match_lobby:list_matches(#{mode => Mode}), is_map(M)] of
+        [M | _] ->
+            M;
+        [] ->
+            timer:sleep(100),
+            wait_for_listed_match(Mode, N - 1)
     end.

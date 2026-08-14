@@ -74,6 +74,9 @@ config_test_() ->
             fun discovery_flags_forwarded/0},
         {"listed = true opts a match mode into the live-match browser",
             fun listed_match_global_forwarded/0},
+        {"min_players reaches the mode config (#481)", fun min_players_global_forwarded/0},
+        {"min_players absent leaves the key out so match_size still defaults it (#481)",
+            fun min_players_absent_keeps_match_size/0},
         {"absent listed/quick_play leave the per-kind defaults alone",
             fun discovery_flags_absent_keep_defaults/0},
         {"a non-boolean listed is ignored and warns rather than failing open",
@@ -726,6 +729,34 @@ discovery_flags_forwarded() ->
     {ok, WorldConfig} = asobi_game_modes:world_config(~"default"),
     ?assertEqual(false, maps:get(listed, WorldConfig)),
     ?assertEqual(false, maps:get(quick_play, WorldConfig)),
+    cleanup_temp_dir(TmpDir).
+
+min_players_global_forwarded() ->
+    %% asobi#481: asobi_match_server reads min_players at :219 and honours it in
+    %% maybe_start/2, but the matchmaker hardcoded it to match_size and the Lua
+    %% globals reader did not read it at all, so declaring it was silence.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_min_players.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(4, maps:get(min_players, Mode)),
+    ?assertEqual(2, maps:get(match_size, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+min_players_absent_keeps_match_size() ->
+    %% The compatibility case, and the reason the default lives downstream
+    %% rather than here: a script that never mentions min_players must produce
+    %% a mode map with no such key, so asobi_matchmaker keeps defaulting it to
+    %% match_size and no existing mode moves.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_listed_match.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertNot(maps:is_key(min_players, Mode)),
     cleanup_temp_dir(TmpDir).
 
 listed_match_global_forwarded() ->

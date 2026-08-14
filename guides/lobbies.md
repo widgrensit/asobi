@@ -25,17 +25,28 @@ A waiting match is the cheaper shape, but the row above that decides it is
 A match starts in the `waiting` state and transitions to `running` when
 `min_players` is reached. That waiting period is the lobby.
 
-**No client-facing call brings a waiting match into existence.**
-`asobi_match_sup:start_match/1` is the only thing that creates a match, and its
-only caller in the release is the matchmaker - which spawns a match with
-`min_players` already equal to the group it just formed, so the waiting state
-lasts as long as the join fan-out and no longer. There is no `match.create`
+**No client-facing call brings a match into existence.** The matchmaker is the
+only creator: it groups co-queued tickets and spawns. There is no `match.create`
 frame and no `POST /api/v1/matches`.
 
-So the waiting-match lobby is an **Erlang-only** route: it needs a module in
-your release that calls `asobi_match_sup:start_match/1` with a `min_players`
-higher than the number of players it seeds, and `listed => true` so clients can
-find it.
+But the waiting state is reachable from mode config. Declare a `min_players`
+higher than `match_size` and the matchmaker spawns on the group it formed while
+the match sits in `waiting` until backfill brings it up to the threshold:
+
+```lua
+match_size  = 2   -- the matchmaker forms and spawns on two
+min_players = 4   -- the loop does not start until four are in
+max_players = 8
+listed      = true
+```
+
+It gives up at `?WAITING_TIMEOUT` (60s) if the fourth never arrives.
+
+Before asobi v0.85.0 the matchmaker overwrote `min_players` with `match_size`,
+so declaring it was silently ignored and this was an Erlang-only route through
+`asobi_match_sup:start_match/1`. That call is still available to an operator
+shipping their own module, and is still the only way to create a match outside
+the matchmaker.
 
 ```erlang
 {ok, Pid} = asobi_match_sup:start_match(#{
