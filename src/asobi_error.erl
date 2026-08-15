@@ -213,6 +213,17 @@ working and a new one reads one place: see `legacy/2`.
     },
     {~"ops.erase_failed", 500, ~"The erasure was rolled back and nothing was deleted."},
     {
+        ~"ops.invalid_cutoff",
+        400,
+        ~"A guest purge must name `inactive_for_seconds` as a whole number of seconds, 0 or more."
+    },
+    {
+        ~"ops.purge_count_mismatch",
+        409,
+        ~"The cohort is no longer the size the request confirmed. Nothing was deleted."
+    },
+    {~"ops.purge_failed", 500, ~"The cohort could not be selected. Nothing was deleted."},
+    {
         ~"ops.orphaned_extension_rows",
         409,
         ~"A removed extension's rows still reference this player and block the erase. Reinstall the package so its erase sweep runs, or purge its tables."

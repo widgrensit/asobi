@@ -351,12 +351,16 @@ or store receipt validation today, self-host.
 **Guest auth beyond the toggle.** The per-environment pepper is injected for
 you, so `guest_auth = true` in your Lua works. `guest_verifier_key_id`,
 `guest_unlinked_cap`, `guest_reap_after` and `guest_reap_interval_ms` are not
-settable, so unclaimed guests are never reaped and only the default soft cap
-applies. Pepper rotation is not yours either. Your client can still shed
-accounts one at a time with `POST /api/v1/players/me/erase`
-([REST API](rest-api.md#erasing-your-own-account)) - that is the whole of guest
-removal on cloud, so a client that mints a throwaway device pair per launch
-should erase the account it abandons.
+settable, so unclaimed guests are never reaped automatically and only the
+default soft cap applies. Pepper rotation is not yours either. Two things still
+clear them: a client can shed accounts one at a time with
+`POST /api/v1/players/me/erase`
+([REST API](rest-api.md#erasing-your-own-account)), and an operator can delete
+the abandoned cohort in bulk with
+[`POST /api/v1/ops/players/guests/purge`](rest-api.md#purging-abandoned-guests),
+which needs no server-side configuration. A client that mints a throwaway
+device pair per launch should still erase the account it abandons rather than
+leave the purge to clean up after it.
 
 **Ops-plane shape.** `ops_secret`, `console_erasure`, `console_session_ttl`,
 `console_secure_cookie`, `console_api_base`, `console_label`,

@@ -5,6 +5,11 @@ Player list for the ops read plane: filter, search, sort, paginate.
 Search is `ILIKE` across `username` and `display_name`. The endpoints this
 replaces searched by exact equality on a single column, which meant an
 operator had to already know the username to find it.
+
+`?guest=true` narrows to unclaimed guests, and `?guest=false` to everyone
+else. The predicate is `asobi_guest_purge:clause/1`'s, not a second reading
+of it: this list is what an operator looks at before purging that cohort, and a
+list that disagrees with the purge is a list that promises the wrong deletion.
 """.
 
 -include_lib("kura/include/kura.hrl").
@@ -37,11 +42,23 @@ query(Params) ->
     case asobi_ops_params:sort(Params, ?SORTABLE, [{inserted_at, desc}]) of
         {ok, Orders} ->
             case asobi_ops_filters:build(kura_query:from(asobi_player), Params, ?FILTERS) of
-                {ok, Query} -> {ok, kura_query:order_by(Query, Orders)};
+                {ok, Query} -> {ok, kura_query:order_by(guest(Query, Params), Orders)};
                 {error, _} = Error -> Error
             end;
         {error, _} = Error ->
             Error
+    end.
+
+%% Not an `asobi_ops_filters` spec: those build one clause over one column of
+%% the table being listed, and "is an unclaimed guest" is a statement about two
+%% correlated subqueries and a column this endpoint refuses to project. An
+%% unparseable value narrows nothing, the same as every other absent filter.
+-spec guest(#kura_query{}, asobi_ops_params:params()) -> #kura_query{}.
+guest(Query, Params) ->
+    case asobi_ops_params:boolean(Params, ~"guest") of
+        {ok, true} -> kura_query:where(Query, asobi_guest_purge:clause(undefined));
+        {ok, false} -> kura_query:where(Query, {'not', asobi_guest_purge:clause(undefined)});
+        none -> Query
     end.
 
 -doc """

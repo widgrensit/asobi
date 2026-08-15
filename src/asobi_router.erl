@@ -264,6 +264,17 @@ ops_routes() ->
                 methods => [get, options]
             }},
             {~"/players/:id", fun asobi_ops_controller:player/1, #{methods => [get, options]}},
+            %% After every `:id` route, and that is the asobi#326 trap rather
+            %% than a style choice. routing_tree prepends on insert and returns
+            %% on the first *matching sibling* without backtracking, so the
+            %% `:id` binding happily matches the literal segment `guests` and
+            %% then fails to find `purge` beneath it. Declared last, the literal
+            %% is prepended ahead of the binding and is tried first.
+            %% `asobi_router_tests` resolves every declared route and fails if
+            %% this moves back up.
+            {~"/players/guests/purge", fun asobi_ops_controller:purge_guests/1, #{
+                methods => [post, options]
+            }},
             {~"/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
             {~"/matches/:id", fun asobi_ops_controller:match/1, #{methods => [get, options]}},
             {~"/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}},

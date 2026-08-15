@@ -164,20 +164,23 @@ What a reader arriving from another console will look for and not find:
   plane.
 - The players screen shows the ops projection only: `id`, `username`,
   `display_name`, `avatar_url`, `metadata`, `inserted_at`, `updated_at`. No
-  linked providers, no guest status, no device verifiers.
+  linked providers, no guest status, no device verifiers. The list can be
+  *narrowed* to unclaimed guests with `?guest=true`, but no row says which it
+  is; the filter is a set, not a column.
 - The matches screen is the **finished-match record**. Live matches are visible
   only through the player-facing `GET /api/v1/matches/live`.
 
 ## What it cannot do
 
-Core's ops routes are reads apart from two account-lifecycle routes:
+Core's ops routes are reads apart from three account-lifecycle routes:
 
 ```
 GET  /api/v1/ops/players/:id/export     Everything held about one player
 POST /api/v1/ops/players/:id/erase      Delete one player. Irreversible.
+POST /api/v1/ops/players/guests/purge   Delete abandoned guests. Irreversible.
 ```
 
-Both are covered in
+All three are covered in
 [Erasing and exporting a player](rest-api.md#erasing-and-exporting-a-player).
 They exist because an operator must be able to answer a deletion or access
 request without a database shell, and because an Apache-2 self-hoster

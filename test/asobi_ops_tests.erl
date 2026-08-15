@@ -191,6 +191,45 @@ players_no_search_no_filter_test() ->
     {ok, #kura_query{wheres = Wheres}} = asobi_ops_players:query(#{}),
     ?assertEqual([], Wheres).
 
+%% The list an operator reads before purging that cohort has to agree with the
+%% purge itself, so it narrows on the purge's own predicate rather than a
+%% second reading of "is this a guest".
+players_guest_filter_uses_the_purge_predicate_test() ->
+    {ok, #kura_query{wheres = Wheres}} = asobi_ops_players:query(#{~"guest" => ~"true"}),
+    ?assertEqual([asobi_guest_purge:clause(undefined)], Wheres).
+
+players_guest_false_negates_the_same_predicate_test() ->
+    {ok, #kura_query{wheres = Wheres}} = asobi_ops_players:query(#{~"guest" => ~"false"}),
+    ?assertEqual([{'not', asobi_guest_purge:clause(undefined)}], Wheres).
+
+%% An absent or unparseable value narrows nothing, the same as every other
+%% filter on this plane: a caller gets a superset and the rows to prove it.
+players_guest_filter_absent_narrows_nothing_test() ->
+    {ok, #kura_query{wheres = None}} = asobi_ops_players:query(#{}),
+    {ok, #kura_query{wheres = Junk}} = asobi_ops_players:query(#{~"guest" => ~"maybe"}),
+    ?assertEqual([], None),
+    ?assertEqual([], Junk).
+
+%% The list filter must not carry a cutoff. A purge deletes only guests older
+%% than one; a list that quietly applied the same cutoff would hide the guests
+%% an operator is about to be told are in the set.
+players_guest_filter_has_no_cutoff_test() ->
+    {ok, #kura_query{wheres = [Clause]}} = asobi_ops_players:query(#{~"guest" => ~"true"}),
+    ?assertEqual(asobi_guest_purge:clause(undefined), Clause),
+    ?assertNotEqual(asobi_guest_purge:clause({{2026, 1, 1}, {0, 0, 0}}), Clause).
+
+players_guest_filter_composes_with_search_test() ->
+    {ok, #kura_query{wheres = Wheres}} = asobi_ops_players:query(
+        #{~"q" => ~"kai", ~"guest" => ~"true"}
+    ),
+    ?assertEqual(
+        [
+            {'or', [{username, ilike, ~"%kai%"}, {display_name, ilike, ~"%kai%"}]},
+            asobi_guest_purge:clause(undefined)
+        ],
+        Wheres
+    ).
+
 %% The projection is a positive allowlist, so a credential column cannot leak
 %% even if a future schema change adds one.
 players_projection_drops_credentials_test() ->
@@ -299,31 +338,37 @@ ops_routes_are_mounted_behind_the_operator_check_test() ->
      || {Path, _Handler, Opts} <- Routes, not extension_route(Path)
     ].
 
-%% One route on core's plane answers a write method, and it is stated here so a
-%% second cannot appear without editing this line.
+%% The two routes on core's plane that answer a write method, stated here so a
+%% third cannot appear without editing these lines.
 expected_methods(~"/players/:id/erase") -> [post, options];
+expected_methods(~"/players/guests/purge") -> [post, options];
 expected_methods(_Path) -> [get, options].
 
-%% Core's plane is a read plane plus exactly two account-lifecycle routes, and
+%% Core's plane is a read plane plus account-lifecycle routes, and
 %% `asobi_ops_notifications:broadcast/5` is still deliberately not a route at
 %% all. Anything else non-read is a write surface that grew by accident.
 %%
 %% `erasure` is its own class rather than `player_data` because it is the only
 %% irreversible action here; `export` is `player_data` rather than `read`
-%% because it returns everything about one identified person.
+%% because it returns everything about one identified person. The guest purge
+%% shares `erasure` with the single erase on purpose: same action, wider
+%% fan-out, and a capability that separated them would read as "may erase, but
+%% only slowly".
 core_ops_non_read_classes_are_only_account_lifecycle_test() ->
     ?assertEqual(
         [
             {get, [~"players", '_', ~"export"], player_data},
-            {post, [~"players", '_', ~"erase"], erasure}
+            {post, [~"players", '_', ~"erase"], erasure},
+            {post, [~"players", ~"guests", ~"purge"], erasure}
         ],
         [Route || {_M, _S, Class} = Route <- asobi_ops_caps:classes(), Class =/= read]
     ).
 
-%% Stated once so it cannot widen quietly: two routes carry a write method, the
-%% erasure and the extension dispatch. Neither is an exception to the audit -
-%% the extension dispatch runs inside `asobi_ops_audit:mutation/4`, and the
-%% erasure writes its row inside its own transaction.
+%% Stated once so it cannot widen quietly: three routes carry a write method,
+%% the two erasures and the extension dispatch. None is an exception to the
+%% audit - the extension dispatch runs inside `asobi_ops_audit:mutation/4`, the
+%% single erasure writes its row inside its own transaction, and the guest
+%% purge writes one row for the batch once the deletes have committed.
 ops_routes_carrying_a_write_method_test() ->
     #{routes := Routes} = ops_group(),
     Writing = [
@@ -331,7 +376,9 @@ ops_routes_carrying_a_write_method_test() ->
      || {Path, _Handler, Opts} <- Routes,
         [] =/= [M || M <- maps:get(methods, Opts), M =/= get, M =/= options]
     ],
-    ?assertEqual([~"/players/:id/erase", ~"/ext/:extension/:action"], Writing).
+    ?assertEqual(
+        [~"/players/:id/erase", ~"/players/guests/purge", ~"/ext/:extension/:action"], Writing
+    ).
 
 %% asobi#326: routing_tree returns on the first matching sibling and a binding
 %% matches any segment, so `/players/:id` declared first would not swallow a
@@ -342,6 +389,17 @@ erase_and_export_are_declared_before_the_player_binding_test() ->
     Paths = [Path || {Path, _Handler, _Opts} <- Routes],
     ?assert(index_of(~"/players/:id/erase", Paths) < index_of(~"/players/:id", Paths)),
     ?assert(index_of(~"/players/:id/export", Paths) < index_of(~"/players/:id", Paths)).
+
+%% The other half of asobi#326, and the direction that actually bites: a
+%% *literal* segment where a sibling route has a binding must be declared
+%% AFTER it, because prepend-on-insert then puts the literal in front and it is
+%% tried first. Declared before, `:id` matches "guests", the lookup commits to
+%% that subtree, finds no "purge" under it and 404s a route that exists.
+guest_purge_is_declared_after_the_player_binding_test() ->
+    #{routes := Routes} = ops_group(),
+    Paths = [Path || {Path, _Handler, _Opts} <- Routes],
+    ?assert(index_of(~"/players/guests/purge", Paths) > index_of(~"/players/:id", Paths)),
+    ?assert(index_of(~"/players/guests/purge", Paths) > index_of(~"/players/:id/erase", Paths)).
 
 index_of(Needle, List) ->
     length(lists:takewhile(fun(Item) -> Item =/= Needle end, List)).

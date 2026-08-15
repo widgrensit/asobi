@@ -64,6 +64,25 @@ class_is_undefined_for_a_method_the_route_does_not_carry_test() ->
     ?assertEqual(undefined, asobi_ops_caps:class(~"POST", ~"/api/v1/ops/players")),
     ?assertEqual(undefined, asobi_ops_caps:class(~"OPTIONS", ~"/api/v1/ops/players")).
 
+%% Same class as the single erase: a credential trusted to erase one player is
+%% trusted to erase a cohort. A separate class would be a "may erase, but only
+%% slowly" capability, which is not a thing the threat model asks for.
+guest_purge_carries_the_erasure_class_test() ->
+    ?assertEqual(
+        erasure, asobi_ops_caps:class(~"POST", ~"/api/v1/ops/players/guests/purge")
+    ).
+
+%% The route table matches `guests` as a literal, so a player whose id happened
+%% to be the string "guests" could not reach the purge through the erase route
+%% or the other way about.
+guest_purge_does_not_collide_with_the_single_erase_test() ->
+    ?assertEqual(
+        erasure, asobi_ops_caps:class(~"POST", ~"/api/v1/ops/players/guests/erase")
+    ),
+    ?assertEqual(
+        undefined, asobi_ops_caps:class(~"GET", ~"/api/v1/ops/players/guests/purge")
+    ).
+
 class_is_undefined_outside_the_ops_prefix_test() ->
     [
         ?assertEqual(undefined, asobi_ops_caps:class(~"GET", Path))

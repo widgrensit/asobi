@@ -24,7 +24,7 @@ transaction. See `m:asobi_player_erase`.
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kura/include/kura.hrl").
 
--export([players/1, player/1, erase_player/1, export_player/1]).
+-export([players/1, player/1, erase_player/1, export_player/1, purge_guests/1]).
 -export([matches/1, match/1, features/1, stats/1]).
 -export([leaderboards/1, leaderboard_entries/1, matchmaker/1]).
 -export([economy_items/1, economy_item/1, economy_listings/1, economy_listing/1]).
@@ -120,6 +120,117 @@ erased({error, Reason}, Id) ->
 -spec blocker_detail(term()) -> binary().
 blocker_detail(Table) when is_binary(Table) -> Table;
 blocker_detail(_Blocker) -> ~"unknown".
+
+-doc """
+Erase the unclaimed guests nobody has signed in as since a cutoff.
+
+The bulk counterpart to `erase_player/1`, and it takes the same position on
+confirmation from a different angle. One player is confirmed by echoing
+something only a caller who looked at the row can know; a cohort has no such
+handle, so what stands in for it is that **`inactive_for_seconds` has no
+default**. An empty POST to this route selects nothing and answers 400, which
+is the property the username echo buys over there: an unattended request is
+never sufficient.
+
+`inactive_for_seconds: 0` means "every unclaimed guest, including the one that
+signed in a second ago". That is the "clear them all" case, and it is spelled
+out rather than defaulted to.
+
+Three optional keys tighten or widen it:
+
+* `dry_run: true` counts and deletes nothing. Free, and worth doing first.
+* `confirm_count: N` refuses the call unless the server counts exactly `N`
+  right now. For an operator working from a preview; a live game minting
+  guests will move under it, which is the point.
+* `limit: N` caps this call at `N` deletions (default
+  `asobi_guest_purge:default_limit/0`, ceiling `max_limit/0`). The response
+  reports `remaining`, and a caller that wants the whole cohort repeats until
+  it reaches `0` - one request is never held open across an unbounded table.
+""".
+-spec purge_guests(cowboy_req:req()) -> response().
+purge_guests(#{auth_data := #{ops_actor := Actor}} = Req) ->
+    case inactive_for(Req) of
+        {ok, Seconds} -> counted(asobi_guest_purge:cutoff(Seconds), Req, Actor);
+        error -> {asobi_error, ~"ops.invalid_cutoff"}
+    end.
+
+-spec counted(asobi_guest_purge:cutoff(), cowboy_req:req(), asobi_ops_auth:actor()) -> response().
+counted(Cutoff, Req, Actor) ->
+    case asobi_guest_purge:count(Cutoff) of
+        {ok, Matched} ->
+            case confirmed_count(Req, Matched) of
+                ok -> purge_or_preview(Cutoff, Matched, Req, Actor);
+                mismatch -> {asobi_error, ~"ops.purge_count_mismatch", #{matched => Matched}}
+            end;
+        {error, Reason} ->
+            error_response({query_failed, Reason})
+    end.
+
+-spec purge_or_preview(
+    asobi_guest_purge:cutoff(), non_neg_integer(), cowboy_req:req(), asobi_ops_auth:actor()
+) -> response().
+purge_or_preview(Cutoff, Matched, Req, Actor) ->
+    case dry_run(Req) of
+        true ->
+            {json, #{data => summary(Matched, 0, 0, Matched, true)}};
+        false ->
+            case asobi_guest_purge:run(Cutoff, purge_limit(Req), Matched, Actor) of
+                {ok, #{deleted := Deleted, skipped := Skipped}} ->
+                    {json, #{
+                        data => summary(Matched, Deleted, Skipped, Matched - Deleted, false)
+                    }};
+                {error, Reason} ->
+                    ?LOG_ERROR(#{msg => ~"ops guest purge failed", reason => Reason}),
+                    {asobi_error, ~"ops.purge_failed"}
+            end
+    end.
+
+%% `remaining` is the count this call started from minus what it erased, not a
+%% second count: a re-count here would read a table other requests are still
+%% writing to and report a number that was never true of this call. It is what
+%% is left of the cohort this call measured, which is the question a caller
+%% looping on it is asking.
+-spec summary(
+    non_neg_integer(), non_neg_integer(), non_neg_integer(), integer(), boolean()
+) -> map().
+summary(Matched, Deleted, Skipped, Remaining, DryRun) ->
+    #{
+        matched => Matched,
+        deleted => Deleted,
+        skipped => Skipped,
+        remaining => max(0, Remaining),
+        dry_run => DryRun
+    }.
+
+%% Absent, wrong-typed and negative are one answer, because none of them says
+%% which cohort to delete. A float is not "close enough" to a cutoff either.
+-spec inactive_for(cowboy_req:req()) -> {ok, non_neg_integer()} | error.
+inactive_for(#{json := #{~"inactive_for_seconds" := Seconds}}) when
+    is_integer(Seconds), Seconds >= 0
+->
+    {ok, Seconds};
+inactive_for(_Req) ->
+    error.
+
+-spec dry_run(cowboy_req:req()) -> boolean().
+dry_run(#{json := #{~"dry_run" := true}}) -> true;
+dry_run(_Req) -> false.
+
+-spec confirmed_count(cowboy_req:req(), non_neg_integer()) -> ok | mismatch.
+confirmed_count(#{json := #{~"confirm_count" := Matched}}, Matched) when is_integer(Matched) -> ok;
+confirmed_count(#{json := #{~"confirm_count" := Given}}, _Matched) when is_integer(Given) ->
+    mismatch;
+confirmed_count(_Req, _Matched) ->
+    ok.
+
+%% Clamped rather than rejected: an oversized batch is a caller asking for more
+%% work in one request than this route will hold open, and the honest answer is
+%% the batch it will do plus the `remaining` that says to call again.
+-spec purge_limit(cowboy_req:req()) -> pos_integer().
+purge_limit(#{json := #{~"limit" := Limit}}) when is_integer(Limit), Limit > 0 ->
+    min(Limit, asobi_guest_purge:max_limit());
+purge_limit(_Req) ->
+    asobi_guest_purge:default_limit().
 
 %% `undefined` is "no confirmation sent", which is a different answer from a
 %% confirmation that did not match - an operator who typed the wrong name

@@ -63,7 +63,13 @@ classes() ->
         %% Not `read`. `read` grants a leaderboard view; this grants
         %% everything the deployment holds about one identified person.
         {get, [~"players", '_', ~"export"], player_data},
-        {post, [~"players", '_', ~"erase"], erasure}
+        {post, [~"players", '_', ~"erase"], erasure},
+        %% Same class as the single erase, because it is the same action at a
+        %% different fan-out. A credential trusted to erase one player is
+        %% trusted to erase a cohort; one that is not, is not. Splitting it
+        %% would mint a "may erase, but only slowly" capability, which nothing
+        %% in the threat model asks for.
+        {post, [~"players", ~"guests", ~"purge"], erasure}
     ].
 
 -doc """
