@@ -45,7 +45,9 @@ the set is chosen; the Erlang is how each member is confirmed.
 
 `run/4` deletes at most `Limit` players and reports what is left, rather than
 holding one request open across an unbounded table. A caller that wants the
-whole set repeats the call until `remaining` reaches `0`.
+whole set repeats the call while `deleted` is above zero - not until nothing is
+left, because a player that cannot be erased stays in the set and is selected
+again every time.
 """.
 
 -include_lib("kernel/include/logger.hrl").
@@ -103,20 +105,40 @@ Erase up to `Limit` unclaimed guests older than `Cutoff`, and audit the batch.
 
 Returns the counts, never the ids: an operator page reports how many went, and
 the ids that did are in the audit row for anyone who has to answer for it
-later. A player whose in-transaction re-check now says "claimed" is counted
-`skipped`, not `failed` - nothing went wrong, the answer changed.
+later.
+
+`skipped` and `failed` are separate counts because they ask for opposite
+responses. A player whose in-transaction re-check now says "claimed" is
+`skipped` - nothing went wrong, the answer changed, and they have left the set.
+A player whose erasure raised is `failed`: something is wrong, they are still
+in the set, and the next call will select them again. Collapsing the two would
+report a stuck cohort as a quiet success.
+
+That is also why a caller loops while `deleted` is above zero rather than until
+`remaining` reaches zero. A player who cannot be erased - orphaned extension
+rows are the case `m:asobi_player_erase` names - never leaves `remaining`, so
+"loop until empty" would not terminate.
 
 One audit row per call, carrying every erased id as a subject, so a purge is
 one entry an operator can point at rather than N entries they have to correlate.
 """.
 -spec run(cutoff(), pos_integer(), non_neg_integer(), asobi_ops_auth:actor()) ->
-    {ok, #{deleted := non_neg_integer(), skipped := non_neg_integer()}} | {error, term()}.
+    {ok, #{
+        deleted := non_neg_integer(),
+        skipped := non_neg_integer(),
+        failed := non_neg_integer()
+    }}
+    | {error, term()}.
 run(Cutoff, Limit, Matched, Actor) when is_integer(Limit), Limit > 0 ->
     case candidates(Cutoff, min(Limit, ?MAX_LIMIT)) of
         {ok, Ids} ->
-            {Erased, Skipped} = erase_each(Ids),
-            audit(Erased, Skipped, Matched, Actor),
-            {ok, #{deleted => length(Erased), skipped => length(Skipped)}};
+            {Erased, Skipped, Failed} = erase_each(Ids),
+            audit(Erased, Skipped, Failed, Matched, Actor),
+            {ok, #{
+                deleted => length(Erased),
+                skipped => length(Skipped),
+                failed => length(Failed)
+            }};
         {error, Reason} ->
             {error, Reason}
     end.
@@ -188,17 +210,26 @@ candidates(Cutoff, Limit) ->
         {error, Reason} -> {error, Reason}
     end.
 
--spec erase_each([binary()]) -> {[binary()], [binary()]}.
+-spec erase_each([binary()]) -> {[binary()], [{binary(), term()}], [{binary(), term()}]}.
 erase_each(Ids) ->
     Outcomes = [{Id, erase_one(Id)} || Id <- Ids],
-    {[Id || {Id, erased} <- Outcomes], [Id || {Id, skipped} <- Outcomes]}.
+    {
+        [Id || {Id, erased} <- Outcomes],
+        [{Id, Reason} || {Id, {skipped, Reason}} <- Outcomes],
+        [{Id, Reason} || {Id, {failed, Reason}} <- Outcomes]
+    }.
 
 %% One transaction per player, not one around the batch: a batch-wide
 %% transaction would roll 500 erasures back because the 501st hit an
 %% extension's orphaned rows, and it would hold write locks across the whole
 %% cohort while it did. The re-check lives inside each transaction for the
 %% reason `m:asobi_guest_reaper` gives - a concurrent upgrade must win.
--spec erase_one(binary()) -> erased | skipped.
+%% The re-check losing to a concurrent upgrade is the ONLY skip. Everything
+%% else - a rolled-back transaction, an unexpected return, a raise - is a
+%% failure, because the player is still unclaimed, still matches the predicate,
+%% and will be selected again by the next call. Reporting those as skips is how
+%% a cohort that cannot be erased reads as a cohort that did not need erasing.
+-spec erase_one(binary()) -> erased | {skipped, term()} | {failed, term()}.
 erase_one(PlayerId) ->
     Fun = fun() ->
         case asobi_guest_reaper:unclaimed_guest(PlayerId) of
@@ -210,19 +241,27 @@ erase_one(PlayerId) ->
         ok ->
             asobi_player_erase:after_commit(PlayerId),
             erased;
+        {error, claimed_during_purge} ->
+            ?LOG_DEBUG(#{
+                event => guest_purge_skipped,
+                player_id => PlayerId,
+                reason => claimed_during_purge
+            }),
+            {skipped, claimed_during_purge};
         {error, Reason} ->
-            ?LOG_DEBUG(#{event => guest_purge_skipped, player_id => PlayerId, reason => Reason}),
-            skipped;
+            ?LOG_WARNING(#{event => guest_purge_failed, player_id => PlayerId, reason => Reason}),
+            {failed, Reason};
         Other ->
             ?LOG_WARNING(#{event => guest_purge_unexpected, player_id => PlayerId, result => Other}),
-            skipped
+            {failed, unexpected_result}
     catch
         Class:Reason:Stacktrace ->
-            log_failure(PlayerId, Class, Reason, Stacktrace),
-            skipped
+            {failed, log_failure(PlayerId, Class, Reason, Stacktrace)}
     end.
 
--spec log_failure(binary(), atom(), term(), erlang:stacktrace()) -> ok.
+%% Returns the reason it logged, so the audit row records why this player
+%% survived rather than restating the caller's assumption about why.
+-spec log_failure(binary(), atom(), term(), erlang:stacktrace()) -> term().
 log_failure(PlayerId, Class, Reason, Stacktrace) ->
     case asobi_player_erase:orphan_blocker(Reason) of
         {orphaned_extension_rows, Table} ->
@@ -230,7 +269,8 @@ log_failure(PlayerId, Class, Reason, Stacktrace) ->
                 event => guest_purge_orphaned_extension_rows,
                 player_id => PlayerId,
                 table => Table
-            });
+            }),
+            {orphaned_extension_rows, Table};
         not_orphaned ->
             ?LOG_ERROR(#{
                 event => guest_purge_rolled_back,
@@ -238,9 +278,9 @@ log_failure(PlayerId, Class, Reason, Stacktrace) ->
                 class => Class,
                 reason => Reason,
                 stacktrace => Stacktrace
-            })
-    end,
-    ok.
+            }),
+            {Class, Reason}
+    end.
 
 %% `record/4`, not `record_strict/4`. The single-player erase is strict because
 %% it can still roll its own transaction back when the audit insert fails; here
@@ -248,18 +288,29 @@ log_failure(PlayerId, Class, Reason, Stacktrace) ->
 %% a strict failure would have no answer to give. The insert failing is loud in
 %% the log either way - see `m:asobi_ops_audit` on why that trade is stated
 %% rather than assumed.
--spec audit([binary()], [binary()], non_neg_integer(), asobi_ops_auth:actor()) -> ok.
-audit(Erased, Skipped, Matched, Actor) ->
+%%
+%% Each non-erased subject carries the reason it actually had. The row is the
+%% only evidence left of what this call did, so stamping one reason across
+%% every subject would make it evidence of something that did not happen.
+-spec audit(
+    [binary()],
+    [{binary(), term()}],
+    [{binary(), term()}],
+    non_neg_integer(),
+    asobi_ops_auth:actor()
+) -> ok.
+audit(Erased, Skipped, Failed, Matched, Actor) ->
     asobi_ops_audit:record(
         Actor,
         ?ACTION,
         {?TARGET_TYPE, undefined},
-        {ok, Erased, [{Id, claimed_during_purge} || Id <- Skipped]}
+        {ok, Erased, Skipped ++ Failed}
     ),
     ?LOG_INFO(#{
         event => guest_cohort_purged,
         deleted => length(Erased),
         skipped => length(Skipped),
+        failed => length(Failed),
         matched => Matched
     }),
     ok.

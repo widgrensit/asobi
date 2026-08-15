@@ -944,13 +944,18 @@ no identity of any other provider - whose guest identity has not been touched
 since the cutoff. A player who claimed their guest account or linked an OAuth
 provider fails that predicate and is unreachable here.
 
-`inactive_for_seconds` has no default, and that is the confirmation. The single
-erase is guarded by echoing a username nobody can know without looking at the
-row; a cohort has no such handle, so what stands in for it is that an empty
-POST selects nothing and answers `400 ops.invalid_cutoff`. An unattended
-request is never sufficient.
+Two things have to be named before anything is deleted. `inactive_for_seconds`
+has no default, so an empty POST selects nothing and answers
+`400 ops.invalid_cutoff`. And `confirm_count` is required on any call that is
+not a dry run, so a request that names a cutoff but no count answers
+`400 ops.confirmation_required`. The single erase is guarded by echoing a
+username nobody can know without looking at the row; a cohort echoes its size
+instead, which nobody can know without running the preview. An unattended
+request is never sufficient, and the larger blast radius does not get the
+weaker guard.
 
-Preview first - it counts and deletes nothing:
+Preview first - it counts and deletes nothing, and it is where the
+`confirm_count` for the real call comes from:
 
 ```bash
 curl -X POST \
@@ -961,40 +966,56 @@ curl -X POST \
 ```
 
 ```json
-{"data": {"matched": 14032, "deleted": 0, "skipped": 0, "remaining": 14032, "dry_run": true}}
+{"data": {"matched": 14032, "deleted": 0, "skipped": 0, "failed": 0, "remaining": 14032, "dry_run": true}}
 ```
 
-Then delete. One call erases at most `limit` players (default 500, ceiling
-5000) so a request is never held open across an unbounded table, and
-`remaining` says whether to call again:
+Then delete, echoing that count back. One call erases at most `limit` players
+(default 500, ceiling 5000) so a request is never held open across an unbounded
+table:
 
 ```bash
 curl -X POST \
   -H "Authorization: Bearer $ASOBI_OPS_SECRET" \
   -H 'Content-Type: application/json' \
-  -d '{"inactive_for_seconds": 2592000, "limit": 500}' \
+  -d '{"inactive_for_seconds": 2592000, "confirm_count": 14032, "limit": 500}' \
   https://game.example.com/api/v1/ops/players/guests/purge
 ```
 
 ```json
-{"data": {"matched": 14032, "deleted": 500, "skipped": 0, "remaining": 13532, "dry_run": false}}
+{"data": {"matched": 14032, "deleted": 500, "skipped": 0, "failed": 0, "remaining": 13532, "dry_run": false}}
 ```
+
+**Loop while `deleted` is above zero, not until `remaining` reaches it.** A
+player who cannot be erased is still unclaimed, still matches the predicate,
+and is selected again by the next call, so they never leave `remaining` and a
+loop waiting for zero would not terminate. A call that deleted nothing and
+reports `failed` above zero is that cohort; the reason is in the server log and
+in the audit row.
+
+`confirm_count` refuses the call with `409 ops.purge_count_mismatch` unless the
+server counts exactly that many right now. A live game minting guests will move
+under it between the preview and the delete, which is the point: re-preview and
+re-confirm rather than deleting a set nobody has looked at.
 
 To clear **every** guest, including the one that signed in a second ago, pass
 `inactive_for_seconds: 0`. On a game whose onboarding is guest-first that is
 the entire player base, which is why it has to be typed rather than defaulted
-to.
-
-`confirm_count` is optional and refuses the call with `409
-ops.purge_count_mismatch` unless the server counts exactly that many right
-now. It is for an operator working from a preview; a live game minting guests
-will move under it, which is the point of offering it rather than requiring it.
+to - and why the count has to be echoed too.
 
 Each player is erased in its own transaction, through the same delete sequence
 and the same severed tables as the single erase, and the unclaimed check is
-re-run inside that transaction: a guest who calls `/auth/guest/upgrade` between
-the select and their own delete survives and is reported under `skipped`, not
-`deleted`. One audit row covers the batch, carrying every erased id.
+re-run inside that transaction. The two non-deleted outcomes are reported
+separately because they ask for opposite responses:
+
+* `skipped` - a guest who called `/auth/guest/upgrade` between the select and
+  their own delete. Nothing went wrong, the answer changed, and they have left
+  the set.
+* `failed` - the erasure did not commit, most often because an extension left
+  orphaned rows behind. Something is wrong, they are still in the set, and the
+  next call will select them again.
+
+One audit row covers the batch, carrying every erased id and, for each player
+that was not erased, the reason it actually had.
 
 This is the on-demand half of guest retention. The automatic half is
 `guest_reap_after`, a background sweep that never runs unless the server sets

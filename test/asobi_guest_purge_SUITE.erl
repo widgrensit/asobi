@@ -18,7 +18,9 @@ whatever it was told.
     spares_a_claimed_account/1,
     zero_seconds_takes_every_unclaimed_guest/1,
     count_agrees_with_what_run_deletes/1,
-    limit_bounds_one_call_and_remaining_says_so/1
+    limit_bounds_one_call_and_remaining_says_so/1,
+    a_blocked_erase_is_failed_not_skipped/1,
+    the_cohort_size_has_to_be_echoed_back/1
 ]).
 
 all() ->
@@ -28,7 +30,9 @@ all() ->
         spares_a_claimed_account,
         zero_seconds_takes_every_unclaimed_guest,
         count_agrees_with_what_run_deletes,
-        limit_bounds_one_call_and_remaining_says_so
+        limit_bounds_one_call_and_remaining_says_so,
+        a_blocked_erase_is_failed_not_skipped,
+        the_cohort_size_has_to_be_echoed_back
     ].
 
 %% Guest auth is set after the app starts, for the reason `asobi_guest_SUITE`
@@ -200,3 +204,95 @@ limit_bounds_one_call_and_remaining_says_so(Config) ->
     {ok, #{deleted := 2}} = asobi_guest_purge:run(Cutoff, 2, 2, actor()),
     ?assertEqual({ok, 0}, asobi_guest_purge:count(Cutoff)),
     Config.
+
+%% A guest the erase cannot delete is `failed`, and the distinction is the
+%% whole reason the two counts are separate. Collapsed into `skipped`, a cohort
+%% that CANNOT be erased reads exactly like a cohort that did not need erasing,
+%% and the caller loops forever: the player never leaves the set, so `remaining`
+%% never falls, so "repeat until remaining reaches 0" does not terminate.
+a_blocked_erase_is_failed_not_skipped(Config) ->
+    {ok, _} = purge(0, 1000),
+    Blocked = guest(Config),
+    Clear = guest(Config),
+    age_identity(Blocked),
+    age_identity(Clear),
+    blocking_table(Blocked),
+
+    Cutoff = asobi_guest_purge:cutoff(3600),
+    ?assertEqual({ok, 2}, asobi_guest_purge:count(Cutoff)),
+    ?assertMatch(
+        {ok, #{deleted := 1, skipped := 0, failed := 1}},
+        asobi_guest_purge:run(Cutoff, 100, 2, actor())
+    ),
+    ?assert(exists(Blocked)),
+    ?assertNot(exists(Clear)),
+
+    %% Still in the set, and a second call makes no progress on it. This is the
+    %% loop that used to have no exit, so the contract is "call again while
+    %% `deleted` is above zero", not "until nothing is left".
+    ?assertEqual({ok, 1}, asobi_guest_purge:count(Cutoff)),
+    ?assertMatch(
+        {ok, #{deleted := 0, skipped := 0, failed := 1}},
+        asobi_guest_purge:run(Cutoff, 100, 1, actor())
+    ),
+
+    unblock(),
+    Config.
+
+%% An extension-owned table core knows nothing about, holding a row that
+%% references the player without `ON DELETE CASCADE` - the orphaned-rows case
+%% `asobi_player_erase:orphan_blocker/1` classifies, reproduced rather than
+%% simulated so the failure arrives through the same 23503 the real one does.
+blocking_table(PlayerId) ->
+    _ = kura_db:query(
+        asobi_repo,
+        ~"CREATE TABLE IF NOT EXISTS purge_suite_ext_rows (player_id UUID PRIMARY KEY REFERENCES players (id))",
+        []
+    ),
+    _ = kura_db:query(
+        asobi_repo, ~"INSERT INTO purge_suite_ext_rows (player_id) VALUES ($1)", [PlayerId]
+    ),
+    ok.
+
+unblock() ->
+    _ = kura_db:query(asobi_repo, ~"DROP TABLE IF EXISTS purge_suite_ext_rows", []),
+    ok.
+
+%% Erasing one player has to echo that player's username. Erasing a cohort has
+%% to echo its size, or the call with the larger blast radius would be the one
+%% an unattended POST could make.
+the_cohort_size_has_to_be_echoed_back(Config) ->
+    {ok, _} = purge(0, 1000),
+    Id = guest(Config),
+    age_identity(Id),
+    Cutoff = #{~"inactive_for_seconds" => 3600},
+
+    ?assertMatch(
+        {asobi_error, ~"ops.confirmation_required", _},
+        asobi_ops_controller:purge_guests(req(Cutoff))
+    ),
+    ?assert(exists(Id)),
+
+    %% The dry run is exempt, because it is where the count comes from.
+    ?assertMatch(
+        {json, #{data := #{matched := 1, deleted := 0, dry_run := true}}},
+        asobi_ops_controller:purge_guests(req(Cutoff#{~"dry_run" => true}))
+    ),
+    ?assert(exists(Id)),
+
+    %% A wrong count is a mismatch, which is a different answer from sending none.
+    ?assertMatch(
+        {asobi_error, ~"ops.purge_count_mismatch", _},
+        asobi_ops_controller:purge_guests(req(Cutoff#{~"confirm_count" => 99}))
+    ),
+    ?assert(exists(Id)),
+
+    ?assertMatch(
+        {json, #{data := #{deleted := 1, skipped := 0, failed := 0, remaining := 0}}},
+        asobi_ops_controller:purge_guests(req(Cutoff#{~"confirm_count" => 1}))
+    ),
+    ?assertNot(exists(Id)),
+    Config.
+
+req(Json) ->
+    #{auth_data => #{ops_actor => actor()}, json => Json}.
