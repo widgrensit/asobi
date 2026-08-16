@@ -487,7 +487,7 @@ operator half.
 | `guest_verifier_pepper` | none | Key-id -> pepper map, or a single binary. Each pepper must be at least 32 bytes; a shorter one is treated as absent. Presence is the operator's on switch |
 | `guest_verifier_key_id` | `~"v1"` | Which pepper key id to use when minting new verifiers |
 | `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity`. Anything else falls back to the default and logs `invalid_guest_unlinked_cap` |
-| `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent |
+| `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent. On cloud this is the **Guests** picker on the environment row, not a key you write |
 
 The cap is a soft ceiling, not an exact one: the count comes from a short-TTL
 cache rather than a `COUNT` per create, so it can overshoot by roughly (TTL x
@@ -498,9 +498,14 @@ full deployment. Both log `guest_create_denied` with a `reason`; the cap denial
 also logs the `count` and `cap` it compared, which is what tells you whether
 the ceiling is anywhere near.
 
-Clients can shed guests themselves with `POST /api/v1/players/me/erase`
-(see [REST API](rest-api.md#erasing-your-own-account)), which is the only guest
-removal available when `guest_reap_after` is not settable.
+Clients can also shed guests themselves with `POST /api/v1/players/me/erase`
+(see [REST API](rest-api.md#erasing-your-own-account)). Reach for it when a
+player asks to be deleted, not as a way to do housekeeping: a client-side
+erasure is one HTTP request per account, issued by a process that may be on its
+way out. Several engines bind a response callback to the object that made the
+call, so the natural place to put it - a quit, a teardown, a screen closing -
+is exactly where the reply is dropped and the request may never land. Retention
+is the server's job; use this setting for it.
 
 Measured from the last resume, not from account creation. Under device auth a
 guest stays unclaimed for life - there is no password to set - so account age

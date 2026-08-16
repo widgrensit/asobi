@@ -354,18 +354,29 @@ all. This is the largest gap on the list. If your game needs platform sign-in
 or store receipt validation today, self-host.
 
 **Guest auth beyond the toggle.** The per-environment pepper is injected for
-you, so `guest_auth = true` in your Lua works. `guest_verifier_key_id`,
-`guest_unlinked_cap`, `guest_reap_after` and `guest_reap_interval_ms` are not
-settable, so unclaimed guests are never reaped automatically and only the
-default soft cap applies. Pepper rotation is not yours either. Two things still
-clear them: a client can shed accounts one at a time with
-`POST /api/v1/players/me/erase`
+you, so `guest_auth = true` in your Lua works. `guest_verifier_key_id` and
+`guest_reap_interval_ms` are not settable and only the default soft cap
+(`guest_unlinked_cap`) applies. Pepper rotation is not yours either.
+
+Retention **is** yours. The environment row on the dashboard carries a
+**Guests** picker - keep for ever, or delete after 7, 30, 90 or 365 days
+without a resume - which is `guest_reap_after` under another name. New
+environments keep guests for ever until you choose otherwise, because the
+reaper erases permanently and a retention period is not something to arrive at
+by default. Applying a change restarts the environment, since the engine reads
+the policy at boot.
+
+Two things clear guests besides the reaper: a client can shed accounts one at a
+time with `POST /api/v1/players/me/erase`
 ([REST API](rest-api.md#erasing-your-own-account)), and an operator can delete
-the abandoned cohort in bulk with
-[`POST /api/v1/ops/players/guests/purge`](rest-api.md#purging-abandoned-guests),
-which needs no server-side configuration. A client that mints a throwaway
-device pair per launch should still erase the account it abandons rather than
-leave the purge to clean up after it.
+the abandoned cohort in bulk from the console, or with
+[`POST /api/v1/ops/players/guests/purge`](rest-api.md#purging-abandoned-guests).
+
+Use the client route for a player who asks to be deleted, not for housekeeping.
+It is one request per account issued by a process that may be shutting down,
+and several engines bind the response callback to the object that made the
+call, so a quit or a teardown is where the reply gets dropped. Set a retention
+period instead and let the server do it.
 
 **Ops-plane shape.** `ops_secret`, `console_erasure`, `console_session_ttl`,
 `console_secure_cookie`, `console_api_base`, `console_label`,
