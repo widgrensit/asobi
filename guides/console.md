@@ -19,9 +19,10 @@ needs `ops_token_secret` and `env_id`, neither set by default.)
 The two look coupled because enabling the console with neither credential
 configured turns the console back off, below.
 
-This plane is reads plus account lifecycle - erasing and exporting one player.
-If you came here for moderation actions, skip to
-[What it cannot do](#what-it-cannot-do) first.
+This plane is reads plus account lifecycle - erasing and exporting one player,
+and erasing the unclaimed-guest cohort. If you came here for moderation
+actions, skip to [What it cannot do](#what-it-cannot-do) first; if you came to
+delete somebody, [Erasing from the console](#erasing-from-the-console).
 
 ## Turning it on
 
@@ -137,12 +138,15 @@ has apart from logging out.
 
 ## What the console shows
 
-Nine screens, all of them reads:
+Nine screens. Every one of them reads; two of them also erase, for a session
+holding `erasure`:
 
 - **Overview** - online players, node version, queue depth, installed
   extensions, and the runtime panel from `/api/v1/ops/stats`, polled every two
   seconds.
-- **Players** - the player list, searchable across username and display name.
+- **Players** - the player list, searchable across username and display name,
+  narrowable to unclaimed guests, and the place the guest purge is run from.
+  One player is erased from their own detail page.
 - **Matches** - the recorded match history, with the game-authored result on
   the detail page. Core writes one row per match when it finishes, so every row
   reads `finished` whatever the status filter offers.
@@ -170,7 +174,7 @@ What a reader arriving from another console will look for and not find:
 - The matches screen is the **finished-match record**. Live matches are visible
   only through the player-facing `GET /api/v1/matches/live`.
 
-## What it cannot do
+## Erasing from the console
 
 Core's ops routes are reads apart from three account-lifecycle routes:
 
@@ -185,6 +189,32 @@ All three are covered in
 They exist because an operator must be able to answer a deletion or access
 request without a database shell, and because an Apache-2 self-hoster
 otherwise inherits an obligation the library gives them no way to discharge.
+
+The two erasures have screens. Both are collapsed until asked for, both sit
+below everything else on their screen, and **neither renders at all unless the
+session holds `erasure`** - which a console session does not by default. Where
+the controls would be, a session without the class gets a note saying so and
+naming `console_erasure`, because a button that is simply absent is
+indistinguishable from a console that cannot do it.
+
+- **One player**, from their detail page: confirm by typing the username. The
+  route checks that echo against the row, so the field is the guard and not a
+  formality, and the console returns to the list rather than re-reading a
+  record that is gone.
+- **The unclaimed-guest cohort**, from the bottom of the players screen: choose
+  a window, count the cohort, then erase exactly the number that was counted.
+  No window is preselected, because `inactive_for_seconds` has no server-side
+  default and an unattended purge must never be one click away. The count is
+  discarded whenever the window changes, whenever a batch completes, and
+  whenever the server disagrees with it - each of those means the cohort moved.
+
+A purge returns a batch, not a completion. The console offers the next batch
+**only when the last one deleted something**, never on `remaining` being above
+zero: a player who could not be erased is still unclaimed and still matches, so
+they are re-selected every call and a loop watching `remaining` would never
+finish. A batch that deleted nothing and failed some says so and stops.
+
+## What it cannot do
 
 Everything else is still absent: no ban, no grant, no refund, no broadcast, no
 ticket cancel and no match end. If you arrived expecting Nakama Console,

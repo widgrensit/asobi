@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { count, json, text } from './format.js';
 
@@ -23,6 +23,40 @@ export function ErrorBanner({ error, onRetry }) {
 
 export function Empty({ children }) {
   return <div className="empty">{children}</div>;
+}
+
+// The result of something that already happened, which is not an error and so
+// must not look like one. `bad` here means "the action did not do what you
+// asked", not "the request failed" - that is still `ErrorBanner`.
+export function Note({ tone, children }) {
+  return (
+    <div className={`banner banner-${tone || 'warn'}`} role="status">
+      {children}
+    </div>
+  );
+}
+
+// Everything irreversible on a screen, in one place, below everything else,
+// and only rendered for an actor holding the class. Collapsed until asked for:
+// the erase controls sit on a screen an operator opens to read, and a live
+// confirm field next to a player's record is one stray Enter from a deletion.
+export function Danger({ title, summary, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="card card-danger">
+      <h2 className="card-title">{title}</h2>
+      <p className="card-note">{summary}</p>
+      {open ? (
+        children
+      ) : (
+        <div className="chips">
+          <button type="button" className="btn btn-danger" onClick={() => setOpen(true)}>
+            {title}…
+          </button>
+        </div>
+      )}
+    </section>
+  );
 }
 
 // The search box focuses on `/` and clears on Escape. Both are muscle memory

@@ -290,9 +290,8 @@ On cloud, no shared secret ever reaches you:
 1. You open the console link on the environment's dashboard page.
 2. The control plane runs the same ownership guard every other environment
    action uses, then maps your **team role** onto capability classes:
-   `owner` and `admin` get `read`, `player_data` and `config`; `member` gets
-   `read` and `player_data`; anything else gets nothing. No role maps to
-   `erasure`, so no cloud credential can reach it - see below.
+   `owner` and `admin` get all four, `erasure` included; `member` gets `read`
+   and `player_data`; anything else gets nothing.
 3. It signs a token with `ASOBI_OPS_TOKEN_SECRET`, read out of that
    environment's own Kubernetes Secret at mint time. The control plane keeps no
    copy, so a database compromise does not confer the ability to mint.
@@ -312,7 +311,7 @@ because it lands in that environment's audit rows.
 | | Self-hosted | Cloud |
 | --- | --- | --- |
 | Credential | one `ops_secret` you set and keep | a 15-minute token, minted per person per environment |
-| Privilege | every class over a bearer header; every class but `erasure` in the console, unless `console_erasure` is set | mapped from your team role; `member` cannot reach `config`, and nobody reaches `erasure` |
+| Privilege | every class over a bearer header; every class but `erasure` in the console, unless `console_erasure` is set | mapped from your team role; `owner` and `admin` hold all four, `member` reaches neither `config` nor `erasure` |
 | Attribution | the `x-asobi-operator` header, a label with no authority behind it | the `sub` claim, marked attested, from an authenticated user |
 | Revocation | change `ops_secret` | rotate the per-environment signing secret, which revokes every outstanding token for it at once |
 | Turning it on | `{console, true}` plus a credential; off by default | already on |
@@ -321,14 +320,20 @@ There is no non-interactive path to the ops plane on cloud. A minted token
 needs a browser session to mint it, so the CI-calls-the-ops-API pattern is a
 self-hosting capability.
 
-**Player erasure is not reachable on cloud.** `POST
-/api/v1/ops/players/:id/erase` carries the `erasure` class, and the two
-credentials that hold it - the `ops_secret` bearer header, and a console
-session on a node with `console_erasure` set - are both operator config a cloud
-tenant does not have. `GET /api/v1/ops/players/:id/export` is `player_data`, so
-exporting one player's record does work from the cloud console; erasing them
-does not. If you have to answer deletion requests yourself, that is a reason to
-self-host. Ask us in the meantime and we will run it against your environment.
+**Player erasure is reachable on cloud, for `owner` and `admin`.** A minted
+token carries exactly the classes the control plane put in it - the engine
+subtracts nothing from a minted credential, unlike the `console_erasure`
+default it applies to a session opened with a shared secret - so those two
+roles erase from the console and `member` does not.
+
+The medium is a browser either way, and what answers that is the route rather
+than the role: erasing one player requires echoing that player's username and
+the echo is checked against the row, and purging the guest cohort requires an
+exact count the server re-verifies before it deletes anything. Neither is
+reachable by a single unattended POST, which is what a clickjack gets.
+
+`member` is left out for the reason it is left out of `config`: erasure is the
+one ops action no later call undoes, and it is not a teammate's to take.
 
 ## What a cloud tenant cannot configure
 
@@ -364,8 +369,8 @@ leave the purge to clean up after it.
 
 **Ops-plane shape.** `ops_secret`, `console_erasure`, `console_session_ttl`,
 `console_secure_cookie`, `console_api_base`, `console_label`,
-`console_production`. `ops_secret` and `console_erasure` are the two that
-between them put the `erasure` class out of reach.
+`console_production`. None of them gates erasure for you: your role is what
+carries that class, and the control plane decides it at mint time.
 
 **Rate limiting and abuse control.** `rate_limits` and all of its buckets,
 `client_gate`, `client_gate_timeout`, `client_gate_on_error`,
@@ -501,9 +506,6 @@ Self-host when any of these is true. None of them is a hypothetical.
 - **You need more than one node.** Cloud is one replica per environment.
 - **You need server-to-server access to the ops plane.** An `ops_secret` works
   from CI; a minted token needs a browser.
-- **You have to erase players yourself.** The `erasure` class needs operator
-  config a cloud tenant cannot reach, so deletion requests go through us.
-  Export works from the cloud console; erasure does not.
 - **You need a specific database, version, port or pool size**, or Postgres
   somewhere you already run it.
 - **Data residency or procurement says the data stays with you.** You do not

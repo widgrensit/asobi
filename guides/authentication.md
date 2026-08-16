@@ -364,9 +364,10 @@ curl -X POST http://localhost:8084/api/v1/players/me/erase \
   -H 'Content-Type: application/json' -d '{}'
 ```
 
-It is the only erasure path that needs no operator secret, which makes it the
-only one a cloud tenant can reach: `guest_reap_after` and the ops erasure route
-are both operator keys a cloud tenant cannot set.
+It is the only erasure path that needs no operator credential at all - the
+player's own token is the authority. A cloud tenant reaches the ops erasure
+routes as well, through a console token minted for an `owner` or `admin`; what
+stays out of reach there is `guest_reap_after`, which is an operator key.
 
 **A device secret is now a destruction credential, not just an impersonation
 one.** Anyone holding it can resume the account and erase it, with no password

@@ -346,6 +346,21 @@ a {
   background: transparent;
 }
 
+/* Not the coral of `.btn-primary`. Coral is this console's ordinary accent and
+   sits on Refresh and Sign in; the one button that deletes people has to be
+   the only thing on the screen wearing this. */
+.btn-danger {
+  background: transparent;
+  border-color: var(--coral-deep);
+  color: var(--coral-deep);
+  font-weight: 600;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--coral-deep);
+  color: #fff;
+}
+
 /* ---------- table ---------- */
 
 .table-wrap {
@@ -507,6 +522,37 @@ a {
   font-size: 13px;
 }
 
+/* Set apart rather than shouted at. The card holds the only actions on this
+   console that cannot be undone, so it reads as a different kind of thing from
+   the cards above it without turning the screen into a warning. */
+.card-danger {
+  border-color: var(--coral-deep);
+  background: color-mix(in srgb, var(--coral) 4%, var(--paper));
+  margin-top: 8px;
+}
+
+/* An explanation, not an action. It occupies the same slot as `.card-danger`
+   and must not be mistaken for it at a glance. */
+.card-quiet {
+  border-style: dashed;
+  background: transparent;
+  margin-top: 8px;
+}
+
+.danger-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.danger-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -642,9 +688,20 @@ a {
   gap: 8px;
 }
 
-.banner-error {
+.banner-error,
+.banner-bad {
   border: 1px solid var(--coral-deep);
   background: color-mix(in srgb, var(--coral) 10%, var(--paper));
+}
+
+.banner-good {
+  border: 1px solid var(--leaf);
+  background: color-mix(in srgb, var(--leaf) 10%, var(--paper));
+}
+
+.banner-warn {
+  border: 1px solid var(--ember);
+  background: color-mix(in srgb, var(--ember) 10%, var(--paper));
 }
 
 .banner-head {

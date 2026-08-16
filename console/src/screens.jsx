@@ -1,17 +1,21 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { config } from './config.js';
-import { login } from './api.js';
+import { erasePlayer, login, purgeGuests } from './api.js';
+import { useActorCap } from './context.js';
 import { useDebounced, useListParams, useOps } from './hooks.js';
 import { ago, bytes, count, duration, shortId, text, timestamp } from './format.js';
+import { GUEST_WINDOWS, purgeOutcome, windowLabel } from './purge.js';
 import {
   Bool,
+  Danger,
   DataTable,
   Detail,
   Empty,
   ErrorBanner,
   JsonBlock,
   Mono,
+  Note,
   Pager,
   Pill,
   Screen,
@@ -40,6 +44,7 @@ function ListScreen({
   poll = 0,
   empty,
   extra,
+  footer,
 }) {
   const params = useListParams();
   const [typed, setTyped] = useState(params.q);
@@ -96,6 +101,10 @@ function ListScreen({
         empty={empty}
       />
       <Pager page={data?.page} loading={loading} onOffset={(offset) => params.set({ offset })} />
+      {/* Below the rows, not above them: `extra` summarises the set and reads
+          first, a footer acts on it and reads last. It takes `refresh` because
+          anything that changes the set has to be able to reload it. */}
+      {footer ? footer(data, refresh) : null}
     </Screen>
   );
 }
@@ -295,7 +304,101 @@ export function Overview() {
   );
 }
 
+// The purge, as a sequence the route already enforces: name a window, count
+// the cohort, then erase exactly the number that was counted. The count is not
+// remembered across a window change or a completed batch, because a stale one
+// is either refused by the server or - worse - happens to still match a
+// different set of people.
+function GuestPurge({ onPurged }) {
+  const [seconds, setSeconds] = useState('');
+  const [matched, setMatched] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  function reset(next) {
+    setSeconds(next);
+    setMatched(null);
+    setSummary(null);
+    setError(null);
+  }
+
+  async function run(confirmCount) {
+    setBusy(true);
+    setError(null);
+    try {
+      const body = await purgeGuests({ inactiveForSeconds: Number(seconds), confirmCount });
+      if (confirmCount === undefined) {
+        setMatched(body.data.matched);
+        setSummary(null);
+      } else {
+        setSummary(body.data);
+        // Never reusable: the cohort just changed under it.
+        setMatched(null);
+        onPurged();
+      }
+    } catch (cause) {
+      // A count the server no longer agrees with is not a failure to explain
+      // away - it is the guard working. Drop it and make them count again.
+      if (cause.code === 'ops.purge_count_mismatch') setMatched(null);
+      setError(cause);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const outcome = purgeOutcome(summary);
+  return (
+    <Danger
+      title="Purge unclaimed guests"
+      summary="Erases every guest account nobody has ever signed in to claim, within the window you choose. Irreversible, and it takes their matches, balances, inventories and chat with them."
+    >
+      <div className="danger-row">
+        <Select
+          label="Window"
+          value={seconds}
+          onChange={reset}
+          options={[{ value: '', label: 'choose a window…' }, ...GUEST_WINDOWS]}
+        />
+        <button type="button" className="btn" disabled={busy || seconds === ''} onClick={() => run(undefined)}>
+          {busy && matched === null ? 'Counting…' : 'Count them'}
+        </button>
+      </div>
+      {matched !== null ? (
+        <div className="danger-row">
+          {matched === 0 ? (
+            <span>No unclaimed guest is {windowLabel(seconds)}.</span>
+          ) : (
+            <>
+              <span>
+                <strong>{count(matched)}</strong> unclaimed guests are {windowLabel(seconds)}.
+              </span>
+              <button type="button" className="btn btn-danger" disabled={busy} onClick={() => run(matched)}>
+                {busy ? 'Erasing…' : `Erase ${count(matched)} for ever`}
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
+      {outcome ? (
+        <Note tone={outcome.tone}>
+          <span>{outcome.message}</span>
+          {outcome.again ? (
+            <div className="chips">
+              <button type="button" className="btn" disabled={busy} onClick={() => run(undefined)}>
+                Count the rest
+              </button>
+            </div>
+          ) : null}
+        </Note>
+      ) : null}
+      <ErrorBanner error={error} />
+    </Danger>
+  );
+}
+
 export function Players() {
+  const mayErase = useActorCap('erasure');
   return (
     <ListScreen
       title="Players"
@@ -303,6 +406,21 @@ export function Players() {
       path="/players"
       searchPlaceholder="username or display name  ( / )"
       rowLink={(row) => `/players/${encodeURIComponent(row.id)}`}
+      // No column says which rows are guests, because the endpoint does not
+      // project it. This narrows the set instead, on the same predicate the
+      // purge deletes by - a filter that disagreed with it would show the
+      // operator a different cohort from the one they are about to erase.
+      filters={[
+        {
+          name: 'guest',
+          label: 'Guests',
+          options: [
+            { value: 'true', label: 'unclaimed only' },
+            { value: 'false', label: 'excluded' },
+          ],
+        },
+      ]}
+      footer={(data, refresh) => (mayErase ? <GuestPurge onPurged={refresh} /> : <NoErasure />)}
       columns={[
         { key: 'username', label: 'Username', sort: 'username', render: (row) => text(row.username) },
         {
@@ -329,8 +447,86 @@ export function Players() {
   );
 }
 
+// Why the erase controls are not here, said out loud.
+//
+// A missing button is indistinguishable from a console that cannot do it at
+// all, which is how an operator concludes the feature does not exist and goes
+// looking for a database shell. `erasure` is withheld from a console session
+// by default on purpose - a browser can be clickjacked and an erasure cannot
+// be undone - so the honest thing is to name the decision and the way out of
+// it rather than render nothing.
+function NoErasure() {
+  return (
+    <section className="card card-quiet">
+      <h2 className="card-title">Erasure is not in this session</h2>
+      <p className="card-note">
+        The <code className="code">erasure</code> class is held back from console sessions by default, because a
+        browser can be clickjacked into posting once and an erased account cannot be restored. A self-hosted node
+        allows it with <code className="code">console_erasure</code> set to <code className="code">true</code>; the{' '}
+        <code className="code">ops_secret</code> bearer header always holds it. On cloud it is carried by the owner
+        and admin roles only.
+      </p>
+    </section>
+  );
+}
+
+// The username echo the route requires, asked for the way the route means it:
+// as proof the operator read the row they are on. It is checked here to save a
+// round trip and checked again server-side against the record, which is the
+// check that counts - this one is a courtesy to the operator, not a guard.
+function PlayerErase({ player }) {
+  const navigate = useNavigate();
+  const [echo, setEcho] = useState('');
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await erasePlayer(player.id, echo);
+      // Back to the list, because the record this screen reads is gone and
+      // re-reading it would answer 404 at an operator who did nothing wrong.
+      navigate('/players', { replace: true });
+    } catch (cause) {
+      setError(cause);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Danger
+      title="Erase this player"
+      summary="Deletes the account and everything core holds about it - matches, balances, inventories, chat, leaderboard entries and notifications. Irreversible, and there is no second call that undoes it."
+    >
+      <form className="danger-form" onSubmit={submit}>
+        <label className="field">
+          <span className="field-label">Type the username to confirm</span>
+          <input
+            className="input"
+            type="text"
+            value={echo}
+            spellCheck="false"
+            autoComplete="off"
+            placeholder={text(player.username)}
+            onChange={(event) => setEcho(event.target.value)}
+          />
+        </label>
+        <ErrorBanner error={error} />
+        <div className="chips">
+          <button className="btn btn-danger" type="submit" disabled={busy || echo !== player.username}>
+            {busy ? 'Erasing…' : 'Erase for ever'}
+          </button>
+        </div>
+      </form>
+    </Danger>
+  );
+}
+
 export function PlayerDetail() {
   const { id } = useParams();
+  const mayErase = useActorCap('erasure');
   return (
     <DetailScreen
       title="Player"
@@ -365,6 +561,7 @@ export function PlayerDetail() {
               <Slot id="player.actions" ctx={{ player }} />
             </div>
           </section>
+          {mayErase ? <PlayerErase player={player} /> : <NoErasure />}
         </>
       )}
     />
