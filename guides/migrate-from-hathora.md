@@ -308,9 +308,11 @@ applies when you decide to move.
 
 ## Things asobi does not do
 
-- **No UDP transport.** WebSocket over TCP only. A twitch FPS, fighting game or
-  racer that needs sub-3ms physics should pair asobi with a UDP relay and use
-  asobi for auth, matchmaking, economy, leaderboards and social.
+- **No UDP transport.** WebSocket over TCP only. The cost is the retransmission
+  tail on a lossy path, not the median RTT: TCP will not deliver the next state
+  frame until it has redelivered the lost one. A twitch FPS, fighting game or
+  racer should run the simulation over its own UDP netcode and use asobi for
+  auth, matchmaking, economy, leaderboards and social.
 - **Guest auth is opt-in and off by default.** It exists and it is device-backed
   rather than a throwaway username, but it stays off until the game declares
   `guest_auth` and the operator supplies a pepper of at least 32 bytes.

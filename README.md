@@ -103,9 +103,11 @@ Single node, 8 cores, same-machine client. See [guides/benchmarks.md](guides/ben
 | REST reads (matches / friends / wallets) | 7-14 ms p50 |
 | Memory per connection | ~15 KB |
 
-Not a twitch-FPS backend; WebSocket/TCP has a latency floor. Excellent for
-turn-based, casual, MMO zone, roguelike, co-op, and party games. Pair with a
-UDP relay if you need sub-3ms physics.
+Not a twitch-FPS backend. WebSocket over TCP has a latency floor, and under
+packet loss retransmission adds a tail that no tuning removes. Excellent for
+turn-based, casual, MMO zone, roguelike, co-op, and party games. For hitscan
+shooters and fighting games, run the simulation yourself and use asobi for
+everything around it.
 
 ## Client SDKs
 
@@ -170,8 +172,11 @@ pivot, you still have the code - see [guides/exit.md](guides/exit.md).
 ## FAQ
 
 **Does asobi replace Nakama / Colyseus / PlayFab?**
-For the indie-2D multiplayer slot, yes. For AAA shooters needing
-per-match dedicated UDP servers, no; pair asobi with a UDP relay.
+For the indie-2D multiplayer slot, yes. For AAA shooters needing per-match
+dedicated servers with their own UDP netcode, no. Worth knowing that Nakama and
+Colyseus are WebSocket-over-TCP too, so that is a property of this category
+rather than a gap unique to asobi; PlayFab is the one with Azure dedicated
+servers behind it.
 
 **Can I write my game logic in something other than Lua?**
 Yes. Depend on asobi as an Erlang library and write match code in Erlang,

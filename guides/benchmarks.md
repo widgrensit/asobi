@@ -82,9 +82,16 @@ than a single node can hold, adding nodes does not help. See
 
 ### Competitive real-time (FPS, fighting, racing)
 
-Not the target. WebSocket over TCP has a 5-25ms RTT floor and these genres want
-UDP under 3ms. Run a UDP transport for game state alongside asobi and use asobi
-for everything else: auth, matchmaking, economy, social, leaderboards.
+Not the target, and the reason is head-of-line blocking rather than the median.
+The RTT table above measures 1.4ms to 5.8ms p50 depending on load, which is fine
+for most genres. What these ones cannot absorb is the retransmission tail when a
+packet is lost: TCP will not deliver frame N+1 until it has redelivered frame N,
+so a lossy path inflates the tail well past the p99 figures above, and no
+server-side tuning changes that. The numbers here are measured on a clean local
+path and say nothing about behaviour at 1% loss.
+
+Run the simulation over your own UDP netcode and use asobi for everything around
+it: auth, matchmaking, economy, social, leaderboards.
 
 ## Bottlenecks and tuning
 
