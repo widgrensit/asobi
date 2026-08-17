@@ -522,24 +522,44 @@ fake_session(PlayerId, Owner) ->
     ok = pg:join(nova_scope, {player, PlayerId}, Pid),
     Pid.
 
-%% Blocks until PlayerId's forwarded messages include a zone_delta mentioning
-%% EntityId, or the timeout elapses.
+%% Blocks until PlayerId's forwarded messages mention EntityId in ANY of the
+%% three world.tick carriers, or the timeout elapses.
+%%
+%% All three are needed since the join keyframe stopped being a snapshot of
+%% `entities`. A backfilled entity now reaches an existing subscriber through the
+%% shared broadcast, which is pre-encoded JSON precisely so one encode serves
+%% every subscriber (ADR 0001), so a helper that only reads the tuple carriers
+%% would sit blind through the frame that actually delivers it.
 received_entity(PlayerId, EntityId) ->
     receive
-        {PlayerId, {asobi_message, {zone_delta, _Tick, Ops}}} ->
-            HasEntity = lists:any(
-                fun
-                    (#{~"id" := Id}) -> Id =:= EntityId;
-                    (_) -> false
-                end,
-                Ops
-            ),
-            case HasEntity of
-                true -> true;
-                false -> received_entity(PlayerId, EntityId)
+        {PlayerId, {asobi_message, Msg}} ->
+            case tick_ops(Msg) of
+                skip ->
+                    received_entity(PlayerId, EntityId);
+                Ops ->
+                    case lists:any(fun(Op) -> op_id(Op) =:= EntityId end, Ops) of
+                        true -> true;
+                        false -> received_entity(PlayerId, EntityId)
+                    end
             end
     after 500 -> false
     end.
+
+%% The op list out of whichever world.tick carrier this is, or `skip` for a
+%% message that is not one.
+tick_ops({zone_keyframe, _Meta, Ops}) -> Ops;
+tick_ops({zone_removals, _Coords, Ops}) -> Ops;
+tick_ops({zone_delta_raw, PreEncoded}) -> decoded_ops(PreEncoded);
+tick_ops(_Other) -> skip.
+
+decoded_ops(PreEncoded) ->
+    case json:decode(PreEncoded) of
+        #{~"type" := ~"world.tick", ~"payload" := #{~"updates" := Ops}} -> Ops;
+        _ -> skip
+    end.
+
+op_id(#{~"id" := Id}) -> Id;
+op_id(_) -> undefined.
 
 %% Regression for widgrensit/asobi#275: a zone that a crossing brings into
 %% existence for the first time must pick up every already-connected player
@@ -669,7 +689,16 @@ script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
 %% (op "r") for EntityId, or the timeout elapses.
 received_removal(PlayerId, EntityId) ->
     receive
-        {PlayerId, {asobi_message, {zone_delta, _Tick, Ops}}} ->
+        {PlayerId, {asobi_message, Msg}} when
+            element(1, Msg) =:= zone_removals;
+            element(1, Msg) =:= zone_delta_raw;
+            element(1, Msg) =:= zone_keyframe
+        ->
+            Ops =
+                case tick_ops(Msg) of
+                    skip -> [];
+                    L -> L
+                end,
             HasRemoval = lists:any(
                 fun
                     (#{~"op" := ~"r", ~"id" := Id}) -> Id =:= EntityId;

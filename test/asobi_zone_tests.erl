@@ -353,18 +353,23 @@ recv_ack() ->
 %% of this zone freezes at its last known state forever (the zone never
 %% sends it another update once the subscription is gone).
 unsubscribe_sends_removals_for_entities() ->
-    Pid = start_zone(),
+    %% broadcast_interval 1 so one tick is one broadcast: the leave frame removes
+    %% what the client was TOLD about (broadcast_entities), not what the zone
+    %% happens to hold, so the entities have to reach the client first.
+    Pid = start_zone(#{broadcast_interval => 1}),
     asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
     asobi_zone:add_entity(Pid, ~"e2", #{x => 2, y => 2, type => ~"npc"}),
     timer:sleep(10),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     timer:sleep(10),
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
     flush_messages(),
 
     asobi_zone:unsubscribe(Pid, ~"p1"),
     Removals =
         receive
-            {asobi_message, {zone_delta, 0, Deltas}} -> Deltas
+            {asobi_message, {zone_removals, {0, 0}, Deltas}} -> Deltas
         after 200 -> []
         end,
     ?assertEqual(
@@ -447,11 +452,14 @@ resubscribe_new_pid_replaces_and_demonitors_old() ->
     #{subscribers := #{~"p1" := {NewPid, NewRef}}} = sys:get_state(Pid),
     ?assertEqual(self(), NewPid),
     ?assertNotEqual(OldRef, NewRef),
+    %% The re-subscribe keyframe is built from the shared broadcast baseline, so
+    %% before any broadcast tick it is legitimately empty. What matters here is
+    %% that a keyframe arrives at all, and that it is marked as one.
     ?assertMatch(
-        [_ | _],
+        {#{~"kf" := true, ~"zone" := [0, 0]}, _},
         receive
-            {asobi_message, {zone_delta, 0, Snapshot}} -> Snapshot
-        after 200 -> []
+            {asobi_message, {zone_keyframe, Meta, Snapshot}} -> {Meta, Snapshot}
+        after 200 -> timeout
         end
     ),
 
@@ -466,13 +474,16 @@ tick_broadcasts() ->
     timer:sleep(10),
     asobi_zone:subscribe(Pid, {<<"p1">>, self()}),
     timer:sleep(10),
-    %% Subscribe sends immediate snapshot
+    %% Subscribe sends a keyframe built from the shared broadcast baseline. e1 was
+    %% added but never broadcast, so it is NOT in the keyframe - it arrives as an
+    %% op:"a" in the first delta instead. Snapshotting `entities` here is what
+    %% used to send it twice, once in the snapshot and again in that first delta.
     receive
-        {asobi_message, {zone_delta, 0, Snapshot}} ->
-            ?assertEqual(1, length(Snapshot)),
-            [S] = Snapshot,
-            ?assertEqual(~"a", maps:get(~"op", S)),
-            ?assertEqual(<<"e1">>, maps:get(~"id", S))
+        {asobi_message, {zone_keyframe, Meta, Snapshot}} ->
+            ?assertEqual(true, maps:get(~"kf", Meta)),
+            ?assertEqual(0, maps:get(~"frame_seq", Meta)),
+            ?assertEqual([0, 0], maps:get(~"zone", Meta)),
+            ?assertEqual([], Snapshot)
     after 1000 ->
         ?assert(false)
     end,

@@ -298,8 +298,22 @@ websocket_info({asobi_message, {match_event, Event, Payload}}, State) when
     end;
 websocket_info({asobi_message, {zone_delta_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
     {reply, {text, PreEncoded}, State};
-websocket_info({asobi_message, {zone_delta, TickN, Deltas}}, State) ->
-    Reply = encode_reply(undefined, ~"world.tick", #{tick => TickN, updates => Deltas}),
+websocket_info({asobi_message, {zone_keyframe, Meta, Deltas}}, State) when is_map(Meta) ->
+    %% A per-connection baseline. Carries the zone's CURRENT frame_seq and
+    %% `kf: true`, so a client adopts it unconditionally and resets its
+    %% high-water mark to that value - which is what makes a zone restart
+    %% recoverable, since the restart resets the sequence while the zone
+    %% identity is unchanged and a monotonic guard would otherwise reject the
+    %% one frame that repairs it.
+    Reply = encode_reply(undefined, ~"world.tick", Meta#{~"tick" => 0, ~"updates" => Deltas}),
+    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {zone_removals, {ZX, ZY}, Deltas}}, State) ->
+    %% The leave mirror. Carries `zone` so the client knows which table to empty,
+    %% and deliberately no frame_seq: it is not a position in the zone's stream
+    %% and is applied ungated.
+    Reply = encode_reply(undefined, ~"world.tick", #{
+        ~"zone" => [ZX, ZY], ~"tick" => 0, ~"updates" => Deltas
+    }),
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {world_ack, TickN, Seq}}, State) ->
     %% asobi#474: per-connection input ack, sent beside the shared world.tick.

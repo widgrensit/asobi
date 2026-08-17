@@ -210,6 +210,20 @@ init(Config) ->
             prev_entities => #{},
             broadcast_entities => #{},
             broadcast_interval => maps:get(broadcast_interval, Config, 3),
+            %% Counts world.tick frames this zone has BROADCAST, so a client can
+            %% tell a lost or reordered frame from a quiet tick. Distinct from
+            %% `tick`: the tick number skips on `broadcast_interval` and is
+            %% suppressed entirely when a tick produces no deltas, so a gap in it
+            %% is ambiguous between "nothing changed" and "you missed one".
+            %% frame_seq has no gaps by construction.
+            %%
+            %% Only the shared broadcast path advances it. Per-connection frames
+            %% (a join keyframe) carry the CURRENT value and never advance it, so
+            %% they anchor to the shared stream rather than desynchronising every
+            %% other subscriber. 53-bit ceiling, matching the inbound bound at
+            %% asobi_ws_handler:world_input_seq/1: at 20 Hz that is 14 million
+            %% years, so there is no wrap rule to get wrong.
+            wire_seq => 0,
             subscribers => #{},
             zone_state => ZoneState,
             input_queue => [],
@@ -439,14 +453,15 @@ handle_cast(
 ) when is_binary(PlayerId), is_pid(PlayerPid) ->
     subscribe_new(PlayerId, PlayerPid, State);
 handle_cast(
-    {unsubscribe, PlayerId}, #{subscribers := Subs, entities := Entities} = State
+    {unsubscribe, PlayerId},
+    #{subscribers := Subs, broadcast_entities := BroadcastEntities, coords := Coords} = State
 ) ->
     case maps:get(PlayerId, Subs, undefined) of
         undefined ->
             {noreply, State};
         {Pid, MonRef} ->
             demonitor(MonRef, [flush]),
-            send_leave_removals(Pid, Entities),
+            send_leave_removals(Pid, Coords, BroadcastEntities),
             {noreply, State#{subscribers => maps:remove(PlayerId, Subs)}}
     end;
 handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) when is_map(Config) ->
@@ -528,18 +543,31 @@ terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities
 subscribe_new(
     PlayerId,
     PlayerPid,
-    #{subscribers := Subs, entities := Entities, coords := Coords} = State
+    #{
+        subscribers := Subs,
+        broadcast_entities := BroadcastEntities,
+        coords := Coords,
+        wire_seq := WireSeq
+    } = State
 ) ->
     MonRef = monitor(process, PlayerPid),
-    %% Send immediate snapshot so new subscribers see all current entities
-    _ =
-        case map_size(Entities) of
-            0 ->
-                ok;
-            _ ->
-                Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(Entities)],
-                PlayerPid ! {asobi_message, {zone_delta, 0, Snapshot}}
-        end,
+    %% The join keyframe is the client's baseline, and it is built from
+    %% `broadcast_entities` rather than `entities` for a reason that is easy to
+    %% get wrong. The delta stream diffs against `broadcast_entities` (do_tick/2),
+    %% which only advances on a broadcast tick, so with the default
+    %% `broadcast_interval` of 3 `entities` can be two sim ticks ahead of it.
+    %% Snapshotting `entities` therefore hands the client a baseline AHEAD of the
+    %% stream that follows, and the next `op:"u"` diff never re-sends the fields
+    %% that changed in between - they are already equal to the server's own
+    %% baseline, so `compute_deltas/2` emits nothing for them and the client
+    %% keeps the newer value it was never told to expect. Anchoring both to the
+    %% same map is what makes `frame_seq` mean anything.
+    %%
+    %% Sent unconditionally, including when the zone is empty. An empty zone
+    %% still has a sequence position, and a client that receives no keyframe has
+    %% no baseline to reject a stale delta against.
+    Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(BroadcastEntities)],
+    PlayerPid ! {asobi_message, {zone_keyframe, frame_meta(Coords, WireSeq, true), Snapshot}},
     _ =
         case maps:get(terrain_store_pid, State, undefined) of
             undefined ->
@@ -554,14 +582,39 @@ subscribe_new(
         end,
     {noreply, State#{subscribers => Subs#{PlayerId => {PlayerPid, MonRef}}}}.
 
-%% Mirror of subscribe_new/3's snapshot, in reverse. See widgrensit/asobi#293.
--spec send_leave_removals(pid(), map()) -> ok.
-send_leave_removals(_Pid, Entities) when map_size(Entities) =:= 0 ->
+%% Mirror of subscribe_new/3's keyframe, in reverse. See widgrensit/asobi#293.
+%%
+%% Carries `zone` but deliberately no `frame_seq`, and the client applies it
+%% ungated. It is not a position in the zone's stream: it is the last thing this
+%% connection hears from a zone it is leaving, and gating it behind a sequence
+%% guard would let a client that was mid-gap keep a table of ghosts forever.
+%% Built from `broadcast_entities` for the same reason the keyframe is - removing
+%% the ids the client was actually told about, rather than the ids the zone
+%% happens to hold this sim tick.
+-spec send_leave_removals(pid(), {integer(), integer()}, map()) -> ok.
+send_leave_removals(_Pid, _Coords, Entities) when map_size(Entities) =:= 0 ->
     ok;
-send_leave_removals(Pid, Entities) ->
+send_leave_removals(Pid, Coords, Entities) ->
     Removals = encode_deltas([{removed, Id} || Id <- maps:keys(Entities)]),
-    Pid ! {asobi_message, {zone_delta, 0, Removals}},
+    Pid ! {asobi_message, {zone_removals, Coords, Removals}},
     ok.
+
+%% The three fields stage 1 adds to world.tick, in one place so the shared and
+%% per-connection paths cannot disagree about their shape.
+%%
+%% `zone` is the field that fixes the corruption bug, and it is the reason this
+%% work exists: a player subscribes to an interest ring of several zones
+%% (asobi_world_server:subscribe_interest_zones/4), each an independent process
+%% sending to the same session pid, and Erlang orders messages per
+%% sender-receiver pair only. A zone crossing emits `op:"r"` from the old zone
+%% and `op:"a"` from the new one, from two different senders, so they can arrive
+%% inverted - and a client applying both into one flat table then deletes the
+%% entity and never hears about it again. Per-zone tables make that unreachable.
+%% Binary keys, matching broadcast_deltas/4's own payload, so the shared and
+%% per-connection frames are byte-identical in shape and one merge covers both.
+-spec frame_meta({integer(), integer()}, non_neg_integer(), boolean()) -> map().
+frame_meta({ZX, ZY}, WireSeq, IsKeyframe) ->
+    #{~"zone" => [ZX, ZY], ~"frame_seq" => WireSeq, ~"kf" => IsKeyframe}.
 
 do_tick(
     TickN,
@@ -573,6 +626,7 @@ do_tick(
         prev_entities := _PrevEntities,
         broadcast_entities := BroadcastEntities,
         broadcast_interval := BroadcastInterval,
+        wire_seq := WireSeq,
         zone_state := ZoneState,
         input_queue := Queue,
         subscribers := Subs,
@@ -623,9 +677,9 @@ do_tick(
         case TickN rem BroadcastInterval of
             0 ->
                 Deltas = compute_deltas(BroadcastEntities, Entities4),
-                broadcast_deltas(TickN, Deltas, Subs),
+                WireSeq1 = broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs),
                 broadcast_acks(TickN, PlayerAck1, Subs),
-                State#{broadcast_entities => Entities4};
+                State#{broadcast_entities => Entities4, wire_seq => WireSeq1};
             _ ->
                 State
         end,
@@ -747,19 +801,34 @@ compute_deltas(OldEntities, NewEntities) ->
     ],
     Updates ++ Removed.
 
-broadcast_deltas(_TickN, [], _Subs) ->
-    ok;
-broadcast_deltas(TickN, Deltas, Subs) ->
+%% Returns the zone's new frame_seq, which is the ONLY place it advances.
+%%
+%% It advances on a frame actually sent, not on a broadcast tick. An empty delta
+%% list sends nothing (the clause below), so advancing there would put a gap in
+%% the sequence for a tick where nothing happened, and a gap is precisely what
+%% the client treats as loss. The `tick` field cannot serve this purpose for
+%% exactly that reason and is left alone: it stays the sim tick, ADR 0010 froze
+%% it, and clients read it.
+-spec broadcast_deltas(
+    {integer(), integer()}, non_neg_integer(), non_neg_integer(), [term()], map()
+) -> non_neg_integer().
+broadcast_deltas(_Coords, _TickN, WireSeq, [], _Subs) ->
+    WireSeq;
+broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs) ->
+    Seq = WireSeq + 1,
     EncodedDeltas = encode_deltas(Deltas),
+    Meta = frame_meta(Coords, Seq, false),
     Payload = #{
-        ~"type" => ~"world.tick", ~"payload" => #{~"tick" => TickN, ~"updates" => EncodedDeltas}
+        ~"type" => ~"world.tick",
+        ~"payload" => Meta#{~"tick" => TickN, ~"updates" => EncodedDeltas}
     },
     PreEncoded = iolist_to_binary(json:encode(Payload)),
     RawMsg = {asobi_message, {zone_delta_raw, PreEncoded}},
     maps:foreach(
         fun(_PlayerId, {Pid, _MonRef}) -> Pid ! RawMsg end,
         Subs
-    ).
+    ),
+    Seq.
 
 %% asobi#474: input ack, addressed to one connection. Iterate the opted-in
 %% players (those with a recorded seq) and send world.ack only to the ones still

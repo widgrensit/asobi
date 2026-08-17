@@ -58,7 +58,8 @@ clauses against the same named type rather than an ad-hoc guess.
     | {world_joined, pid(), pid() | undefined}
     | {world_zone_changed, pid()}
     | {world_event, event_name(), map()}
-    | {zone_delta, non_neg_integer(), [map()]}
+    | {zone_keyframe, map(), [map()]}
+    | {zone_removals, {integer(), integer()}, [map()]}
     | {zone_delta_raw, binary()}
     | {terrain_chunk, {integer(), integer()}, binary()}
     | {dm_message, map()}
