@@ -498,3 +498,53 @@ terminate_tolerates_a_non_map_state_test() ->
     Count = count_events(Ref, [asobi, ws, disconnected]),
     ?assertEqual(ok, asobi_ws_handler:terminate(normal, undefined, undefined)),
     ?assertEqual(0, Count()).
+
+%% --- Binary wire negotiation (ADR 0013, decision 2) ---
+
+%% The connection picks; nothing is encoded here. A json-wire connection getting
+%% a dual-buffer message must still send the text buffer, or the frozen 1.0 wire
+%% breaks for every client that never asked for anything.
+dual_buffer_delta_defaults_to_text_test() ->
+    Msg = {asobi_message, {zone_delta_raw, ~"{\"json\":1}", <<1, 2, 3>>}},
+    ?assertMatch(
+        {reply, {text, ~"{\"json\":1}"}, _}, asobi_ws_handler:websocket_info(Msg, fresh_state())
+    ).
+
+dual_buffer_delta_honours_a_negotiated_binary_wire_test() ->
+    Msg = {asobi_message, {zone_delta_raw, ~"{\"json\":1}", <<1, 2, 3>>}},
+    State = (fresh_state())#{wire => ~"binary"},
+    ?assertMatch({reply, {binary, <<1, 2, 3>>}, _}, asobi_ws_handler:websocket_info(Msg, State)).
+
+%% The keyframe is where a binary client's slot bindings come from, so it has to
+%% follow the negotiated wire too - and a json client must get the same text
+%% frame it got before the binary companion existed.
+dual_buffer_keyframe_follows_the_wire_test() ->
+    Meta = #{~"zone" => [0, 0], ~"frame_seq" => 3, ~"kf" => true},
+    Msg = {asobi_message, {zone_keyframe, Meta, [], <<9, 9>>}},
+    ?assertMatch(
+        {reply, {binary, <<9, 9>>}, _},
+        asobi_ws_handler:websocket_info(Msg, #{
+            wire => ~"binary"
+        })
+    ),
+    {reply, {text, Frame}, _} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertMatch(#{~"type" := ~"world.tick", ~"payload" := #{~"kf" := true}}, decode(Frame)).
+
+dual_buffer_removals_follow_the_wire_test() ->
+    Msg = {asobi_message, {zone_removals, {2, 2}, [], <<7>>}},
+    ?assertMatch(
+        {reply, {binary, <<7>>}, _},
+        asobi_ws_handler:websocket_info(Msg, #{wire => ~"binary"})
+    ),
+    {reply, {text, Frame}, _} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertMatch(#{~"payload" := #{~"zone" := [2, 2]}}, decode(Frame)).
+
+%% Binary frames used to fall through the catch-all and vanish without a word.
+%% That silence is the defect: an SDK author sending one gets an answer now.
+binary_uplink_is_refused_out_loud_test() ->
+    {reply, {text, Frame}, _State} =
+        asobi_ws_handler:websocket_handle({binary, <<1, 2, 3>>}, fresh_state()),
+    ?assertMatch(
+        #{~"payload" := #{~"reason" := ~"binary_uplink_unsupported"}},
+        decode(Frame)
+    ).

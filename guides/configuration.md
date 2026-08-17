@@ -302,6 +302,29 @@ A rejected request gets `403 client_gate_denied`, with the gate's own reason in
 runs after the rate limiter, so a flood is shed by the cheap in-memory check
 before it reaches an external verification service.
 
+## Binary `world.tick`
+
+Off by default. Turning it on lets a client ask for `world.tick` as a binary
+frame at `session.connect`, roughly a fifth of the bytes and several times
+cheaper to decode - the numbers and the encoding are in
+[the protocol guide](websocket-protocol.md#binary-worldtick).
+
+```erlang
+{binary_wire, true}
+```
+
+A zone reads this once when it starts, so an already-running world keeps the
+setting it started with.
+
+What it costs while on: a zone can have subscribers on both wires, so it builds
+two buffers per broadcast instead of one. That is two encodes per zone per tick
+rather than one per subscriber, and it is paid whether or not anyone has
+negotiated binary. Measured at roughly 50 us per zone per broadcast tick against
+a 50 ms budget.
+
+Clients that never ask see exactly what they saw before, so turning it on is
+safe for a live deployment. Leave it off if no client in your game asks for it.
+
 ## WebSocket origin allowlist
 
 By default the `/ws` upgrade accepts any `Origin`: web builds are served from

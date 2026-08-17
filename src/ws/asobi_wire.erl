@@ -23,7 +23,7 @@ can add a field without either side being told.
 
 ## Layout
 
-    frame    Type:8, ZX:32/signed, ZY:32/signed, FrameSeq:64, Kf:8, Tick:64,
+    frame    Kind:8, ZX:32/signed, ZY:32/signed, FrameSeq:64, Kf:8, Tick:64,
              DictLen:8, Dict, RecCount:16, Records
 
     dict     for each name: Len:8, Name/binary          (up to 32 names)
@@ -33,6 +33,13 @@ can add a field without either side being told.
 `Op` is 0 add, 1 update, 2 remove. The entity id is present on an **add only**,
 which is where the slot binding is established (ADR 0013, decision 4); update and
 remove carry the slot alone.
+
+`Kind` is 1 for a frame that holds a position in the zone's sequence and 2 for
+one that does not. The text wire says the same thing by omitting `frame_seq`,
+which a fixed-layout binary frame cannot do, so the distinction moves into the
+header. It is load-bearing: the leave-removal frame a client gets on the way out
+of a zone must be applied ungated, and encoding it as sequence 0 would have every
+client past its first frame discard the one message that clears the ghosts.
 
 The field header packs type and dictionary index into one byte rather than two.
 Five bits of index caps a frame at 32 distinct field names, which is far past any
@@ -66,7 +73,11 @@ without knowing how the wire encoded it.
 
 -define(MAX_DICT, 32).
 
+-define(KIND_SEQUENCED, 1).
+-define(KIND_UNGATED, 2).
+
 -type frame() :: #{
+    kind := sequenced | ungated,
     zone := {integer(), integer()},
     frame_seq := non_neg_integer(),
     kf := boolean(),
@@ -91,7 +102,9 @@ field names exceed 32. Silently dropping fields would be undetectable corruption
 on the client; a refused frame is a server-side error someone can see.
 """.
 -spec encode(frame()) -> {ok, binary()} | {error, dict_too_large}.
-encode(#{zone := {ZX, ZY}, frame_seq := Seq, kf := Kf, tick := Tick, records := Recs}) ->
+encode(#{
+    kind := Kind, zone := {ZX, ZY}, frame_seq := Seq, kf := Kf, tick := Tick, records := Recs
+}) ->
     Names = dict_names(Recs),
     case length(Names) > ?MAX_DICT of
         true ->
@@ -101,7 +114,7 @@ encode(#{zone := {ZX, ZY}, frame_seq := Seq, kf := Kf, tick := Tick, records := 
             Dict = <<<<(byte_size(N)):8, N/binary>> || N <- Names>>,
             Body = <<<<(encode_record(R, Index))/binary>> || R <- Recs>>,
             {ok, <<
-                1:8,
+                (kind_byte(Kind)):8,
                 ZX:32/signed,
                 ZY:32/signed,
                 Seq:64,
@@ -126,13 +139,16 @@ decoder.
 -spec decode(binary()) -> {ok, frame()} | {error, malformed}.
 decode(Bin) ->
     try
-        <<1:8, ZX:32/signed, ZY:32/signed, Seq:64, KfByte:8, Tick:64, DictLen:8, Rest0/binary>> =
+        <<KindByte:8, ZX:32/signed, ZY:32/signed, Seq:64, KfByte:8, Tick:64, DictLen:8,
+            Rest0/binary>> =
             Bin,
+        Kind = kind_atom(KindByte),
         {Names, Rest1} = decode_dict(DictLen, Rest0, []),
         <<RecCount:16, Rest2/binary>> = Rest1,
         NameTuple = list_to_tuple(Names),
         {Recs, <<>>} = decode_records(RecCount, Rest2, NameTuple, []),
         {ok, #{
+            kind => Kind,
             zone => {ZX, ZY},
             frame_seq => Seq,
             kf => KfByte =/= 0,
@@ -266,6 +282,12 @@ decode_value(?T_TRUE, R) -> {true, R};
 decode_value(?T_FALSE, R) -> {false, R};
 decode_value(?T_STR, <<Len:16, V:Len/binary, R/binary>>) -> {V, R};
 decode_value(?T_NULL, R) -> {null, R}.
+
+kind_byte(sequenced) -> ?KIND_SEQUENCED;
+kind_byte(ungated) -> ?KIND_UNGATED.
+
+kind_atom(?KIND_SEQUENCED) -> sequenced;
+kind_atom(?KIND_UNGATED) -> ungated.
 
 op_byte(add) -> ?OP_ADD;
 op_byte(update) -> ?OP_UPDATE;

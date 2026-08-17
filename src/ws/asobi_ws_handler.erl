@@ -261,6 +261,28 @@ idle_auth_timeout_ms() ->
         _ -> ?DEFAULT_IDLE_AUTH_TIMEOUT_MS
     end.
 
+%% The wire a client asked for, granted only if the server can actually serve it
+%% (ADR 0013, decision 2). The reply always states what it got rather than
+%% acknowledging what it asked for: a client that requests binary against a
+%% server with the binary wire off must be able to tell, and silently leaving it
+%% to infer the answer from the first frame's opcode is the kind of guessing
+%% game that produces two incompatible SDK behaviours.
+%%
+%% Only `world.tick` is affected either way. world.ack, match.*, world.terrain
+%% and every error stay JSON text on both wires, so a binary client is a client
+%% that handles both frame types, not one that stops handling text.
+-spec negotiate_wire(map()) -> binary().
+negotiate_wire(#{~"wire" := ~"binary"}) ->
+    case application:get_env(asobi, binary_wire, false) of
+        true -> ~"binary";
+        _ -> ~"json"
+    end;
+negotiate_wire(_Payload) ->
+    ~"json".
+
+-spec binary_wire(map()) -> boolean().
+binary_wire(State) -> maps:get(wire, State, ~"json") =:= ~"binary".
+
 -spec websocket_handle({text | binary, binary()}, map()) ->
     {ok, map()} | {reply, {text, binary()}, map()}.
 websocket_handle({text, Raw}, State) ->
@@ -288,12 +310,29 @@ websocket_handle({text, Raw}, State) ->
                     {reply, {text, Reply}, State1}
             end
     end;
+%% The uplink is text-only. Binary frames used to fall through the catch-all
+%% below and vanish without a word, which is the silent dev-facing failure an SDK
+%% author then spends an afternoon on; say no out loud instead.
+%%
+%% Rate-limited on the same budget as text, and answered one-for-one, so an
+%% attacker spraying binary frames gets no amplification and no cheaper path than
+%% the text one they already had.
+websocket_handle({binary, _Data}, State) ->
+    case check_ws_rate_limit(State) of
+        {ok, State1} ->
+            Reply = encode_error(undefined, ~"binary_uplink_unsupported"),
+            {reply, {text, Reply}, State1};
+        {rate_limited, State1} ->
+            Reply = encode_error(undefined, ~"rate_limited"),
+            {reply, {text, Reply}, State1}
+    end;
 websocket_handle(_Frame, State) ->
     {ok, State}.
 
 -spec websocket_info(term(), map()) ->
     {ok, map()}
     | {reply, {text, binary()}, map()}
+    | {reply, {binary, binary()}, map()}
     | {reply, [{text, binary()}], map()}
     | {reply, {close, non_neg_integer(), binary()}, map()}
     | {stop, map()}.
@@ -326,6 +365,28 @@ websocket_info({asobi_message, {match_event, Event, Payload}}, State) when
     end;
 websocket_info({asobi_message, {zone_delta_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
     {reply, {text, PreEncoded}, State};
+%% Both wires arrive in one message, already encoded once for the whole zone
+%% (ADR 0001 as amended by ADR 0013, decision 4). The connection picks; nothing
+%% is encoded here, per connection, ever.
+websocket_info({asobi_message, {zone_delta_raw, PreEncoded, Bin}}, State) when
+    is_binary(PreEncoded), is_binary(Bin)
+->
+    case binary_wire(State) of
+        true -> {reply, {binary, Bin}, State};
+        false -> {reply, {text, PreEncoded}, State}
+    end;
+websocket_info({asobi_message, {zone_keyframe, Meta, Deltas, Bin}}, State) when
+    is_map(Meta), is_binary(Bin)
+->
+    case binary_wire(State) of
+        true -> {reply, {binary, Bin}, State};
+        false -> websocket_info({asobi_message, {zone_keyframe, Meta, Deltas}}, State)
+    end;
+websocket_info({asobi_message, {zone_removals, Coords, Deltas, Bin}}, State) when is_binary(Bin) ->
+    case binary_wire(State) of
+        true -> {reply, {binary, Bin}, State};
+        false -> websocket_info({asobi_message, {zone_removals, Coords, Deltas}}, State)
+    end;
 websocket_info({asobi_message, {zone_keyframe, Meta, Deltas}}, State) when is_map(Meta) ->
     %% A per-connection baseline. Carries the zone's CURRENT frame_seq and
     %% `kf: true`, so a client adopts it unconditionally and resets its
@@ -541,9 +602,14 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
                 _ ->
                     ok
             end,
-            Reply = encode_reply(Cid, ~"session.connected", #{player_id => PlayerId}),
+            Wire = negotiate_wire(Payload),
+            Reply = encode_reply(Cid, ~"session.connected", #{
+                player_id => PlayerId, wire => Wire
+            }),
             State1 = cancel_idle_auth_timer(State),
-            {reply, {text, Reply}, State1#{session => SessionPid, player_id => PlayerId}};
+            {reply, {text, Reply}, State1#{
+                session => SessionPid, player_id => PlayerId, wire => Wire
+            }};
         {error, Reason} ->
             Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}

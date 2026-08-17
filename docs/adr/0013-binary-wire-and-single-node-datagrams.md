@@ -111,7 +111,87 @@ beside the engine on one box and opens one port. Nothing in asobi may assume a
 multi-tenant control plane, a per-environment fan-out, or any particular network
 fabric; the fleet shape is `asobi_saas`'s decision and it currently says no.
 
-**4. The protocol design is inherited, not redone.** ADR 0012's protocol survived
+**4. Entity ids on the binary wire are 2-byte slots, scoped to a ZONE.**
+
+A raw 16-byte UUID costs 34 bytes per record; a 2-byte slot costs 20. That is
+about 40% off a delta frame, and it changes the outcome in exactly one band -
+400 entities at 10% churn is 1385 bytes with UUIDs, so 1.2x the MTU and
+fragmenting, against 825 with slots, which fits one datagram. That band is the
+plausible steady state for the MMO this ADR reopens the question for.
+
+**Zone-scoped, and the scope is the load-bearing part.** A per-connection id
+space would mean different bytes for every subscriber, which destroys ADR 0001's
+encode-once fan-out - the whole point of building one buffer per zone per tick.
+Scoping slots to the zone keeps one buffer, because the mapping is a property of
+the zone rather than of who is listening. It also composes with ADR 0011 rather
+than fighting it: clients already keep a table per zone, so that table is now
+keyed by slot instead of by UUID, and slot 5 in one zone being unrelated to slot
+5 in another is expected rather than surprising.
+
+**The binding rides the `add`, so there is no mapping message.** An `op:"a"`
+record carries slot AND the full entity id; `op:"u"` and `op:"r"` carry only the
+slot. An add is the only op that introduces an entity, so it is the natural place
+for the binding, and a client can always recover the real id when it needs to
+correlate - its own player, say.
+
+**Resync re-establishes every binding for free.** A keyframe is all-adds by
+construction (ADR 0011, decision 3), so a client that has lost the mapping asks
+for the resync it would ask for anyway and gets the whole zone's bindings back.
+No new mechanism, no separate mapping state to keep in sync.
+
+**Reuse is safe, and the reasoning matters more than the rule.** A freed slot
+being reused is the classic ABA hazard: miss the `remove` for entity X on slot 5,
+then apply an `update` meant for entity Y to X. It does not bite here, because a
+new entity always enters via an `add`, and an `add` carries the id and REPLACES
+the client's binding. The only sequence that corrupts is missing both the remove
+of X and the add of Y and then receiving an update - and that is a gap, which
+`frame_seq` detects and `world.resync` repairs. So the existing detector bounds
+the hazard and no generation counter is needed. Slots are allocated
+monotonically with wraparound so that reuse is as distant as the space allows.
+
+**Exhaustion fails loudly.** 65536 concurrently-live entities in a single zone is
+far outside any sane grid config (the default is 10x10 cells of 200 units), so the
+allocator logs and refuses rather than wrapping into live slots. Silently
+rebinding an in-use slot would be undetectable corruption; a loud failure is a
+capacity conversation.
+
+**Cost to ADR 0001, stated honestly.** Negotiation means a zone can have both JSON
+and binary subscribers, and it must then produce two buffers per broadcast instead
+of one. That is 2 encodes per zone per tick, not N - the fan-out is still one
+shared buffer per wire. ADR 0001's property is preserved in substance; its literal
+"one encode" becomes "one encode per wire in use".
+
+**5. Both buffers travel in ONE message, and falling back to text is always
+allowed.**
+
+Three consequences of decision 4 that only surface when it is built.
+
+*The zone does not track who negotiated what.* A broadcast puts both buffers in
+a single message and the connection picks. The alternative - per-subscriber wire
+state in the zone - buys one skipped encode and costs a race between negotiation
+and subscription, plus a wire preference threaded through `asobi_world_server`'s
+join and reconnect paths. The dual encode is gated on `asobi.binary_wire`
+instead, off by default, so a deployment with no binary clients pays nothing and
+one with any pays the two encodes decision 4 already accounted for.
+
+*A frame the encoder cannot produce is sent as text, never dropped or mangled.*
+Negotiating binary covers `world.tick` alone - `world.ack`, `match.*`,
+`world.terrain` and every error are text on both wires - so a binary client is
+by construction one that still handles text, and the fallback costs bandwidth
+rather than correctness. It fires on slot exhaustion, on a dictionary past 32
+names, and on an entity field with no binary form. That last case is a whole-zone
+decision on purpose: dropping a list-valued field from the binary frame while the
+text frame keeps it would make the two wires disagree about what an entity IS,
+which is a worse failure than not using the binary wire.
+
+*The frame header carries a kind byte.* The text wire says "this frame holds no
+position in the zone's sequence" by omitting `frame_seq`, which a fixed-layout
+binary frame cannot do. Encoding the leave-removal frame as sequence 0 instead
+would have every client past its first frame discard the one message that clears
+its ghosts, so the distinction moves into the header: kind 1 sequenced, kind 2
+ungated.
+
+**6. The protocol design is otherwise inherited, not redone.** ADR 0012's protocol survived
 architectural review; only its authorisation failed. Frame layout, the two-phase
 challenge binding, `conn_id` as the sole demux key, the no-fragmentation rule, the
 amplification invariant and the downlink-authenticity decision carry over as

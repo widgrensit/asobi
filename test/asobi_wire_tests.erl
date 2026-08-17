@@ -75,17 +75,29 @@ forty_update_delta_fits_a_datagram_test() ->
 %% must refuse the frame: silently dropping fields is corruption the client can
 %% never detect.
 too_many_distinct_field_names_is_refused_test() ->
-    Fields = maps:from_list([
-        {integer_to_binary(I), 1.0}
-     || I <- lists:seq(1, 33)
-    ]),
+    Fields = #{integer_to_binary(I) => 1.0 || I <- lists:seq(1, 33)},
     F = frame([#{op => update, slot => 1, fields => Fields}]),
     ?assertEqual({error, dict_too_large}, asobi_wire:encode(F)),
     %% Exactly 32 is still fine, so the boundary is where it says it is.
-    Ok = maps:from_list([{integer_to_binary(I), 1.0} || I <- lists:seq(1, 32)]),
+    Ok = #{integer_to_binary(I) => 1.0 || I <- lists:seq(1, 32)},
     ?assertMatch(
         {ok, _}, asobi_wire:encode(F#{records => [#{op => update, slot => 1, fields => Ok}]})
     ).
+
+%% The leave-removal frame carries no position in the zone's stream - on the text
+%% wire that is said by omitting frame_seq, which a fixed-layout binary frame
+%% cannot do. If the kind byte did not survive, that frame would decode as
+%% sequence 0 and every client past its first frame would discard the one message
+%% that clears its ghosts.
+frame_kind_survives_and_is_distinguishable_test() ->
+    Recs = [#{op => remove, slot => 3}],
+    Seq = frame(Recs),
+    Ungated = (frame(Recs))#{kind => ungated, frame_seq => 0},
+    ?assertEqual({ok, Seq}, roundtrip(Seq)),
+    ?assertEqual({ok, Ungated}, roundtrip(Ungated)),
+    {ok, A} = asobi_wire:encode(Seq),
+    {ok, B} = asobi_wire:encode(Ungated),
+    ?assertNotEqual(binary:first(A), binary:first(B)).
 
 %% --- Codec: hostile input ---
 
@@ -100,7 +112,7 @@ decode_is_total_test() ->
         {"truncated envelope", binary:part(Good, 0, 10)},
         {"truncated mid-record", binary:part(Good, 0, byte_size(Good) - 2)},
         {"trailing junk", <<Good/binary, 0, 0, 0>>},
-        {"wrong version byte", <<9, (binary:part(Good, 1, byte_size(Good) - 1))/binary>>},
+        {"unknown kind byte", <<9, (binary:part(Good, 1, byte_size(Good) - 1))/binary>>},
         {"declared count too high", <<
             (binary:part(Good, 0, byte_size(Good) - 6))/binary, 255, 255
         >>}
@@ -220,10 +232,39 @@ exhaustion_is_an_error_not_a_silent_rebind_test() ->
     {ok, S} = asobi_wire_slots:sync(Full, asobi_wire_slots:new()),
     ?assertEqual({error, exhausted}, asobi_wire_slots:sync(Full#{~"one_too_many" => 1}, S)).
 
+%% --- Fixture corpus ---
+
+%% The committed corpus is the only thing seven SDK decoders can check themselves
+%% against, so it has to still be what the encoder produces. A codec change that
+%% nobody propagated fails here rather than in a shipped game.
+%%
+%% If this fails and the change was intended: asobi_wire_fixtures:generate(),
+%% commit the bytes, and update every SDK decoder in the same change.
+fixture_corpus_matches_the_encoder_test() ->
+    ?assertMatch({ok, N} when N > 0, asobi_wire_fixtures:check()).
+
+%% And the corpus must survive the decoder, or an SDK author debugging against it
+%% is chasing a fault in the fixture rather than in their code.
+fixture_corpus_round_trips_test() ->
+    [
+        begin
+            {ok, Bin} = file:read_file(asobi_wire_fixtures:path(Name)),
+            ?assertEqual({ok, Frame}, asobi_wire:decode(Bin), Name)
+        end
+     || {Name, Frame} <- asobi_wire_fixtures:frames()
+    ].
+
 %% --- Helpers ---
 
 frame(Records) ->
-    #{zone => {0, 0}, frame_seq => 17, kf => false, tick => 4711, records => Records}.
+    #{
+        kind => sequenced,
+        zone => {0, 0},
+        frame_seq => 17,
+        kf => false,
+        tick => 4711,
+        records => Records
+    }.
 
 roundtrip(F) ->
     {ok, Bin} = asobi_wire:encode(F),

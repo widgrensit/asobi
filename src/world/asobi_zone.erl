@@ -240,6 +240,11 @@ init(Config) ->
             %% asobi_ws_handler:world_input_seq/1: at 20 Hz that is 14 million
             %% years, so there is no wrap rule to get wrong.
             wire_seq => 0,
+            %% Read once at init rather than per tick. A zone that started under
+            %% one setting keeps it for its life, which is what makes the two
+            %% wires consistent for every subscriber of that zone.
+            binary_wire => application:get_env(asobi, binary_wire, false) =:= true,
+            slots => asobi_wire_slots:new(),
             subscribers => #{},
             zone_state => ZoneState,
             input_queue => [],
@@ -477,7 +482,7 @@ handle_cast(
             {noreply, State};
         {Pid, MonRef} ->
             demonitor(MonRef, [flush]),
-            send_leave_removals(Pid, Coords, BroadcastEntities),
+            send_leave_removals(Pid, Coords, BroadcastEntities, frame_slots(State)),
             {noreply, State#{subscribers => maps:remove(PlayerId, Subs)}}
     end;
 handle_cast(
@@ -497,7 +502,7 @@ handle_cast(
         undefined ->
             ok;
         {Pid, _MonRef} ->
-            send_keyframe(Pid, Coords, WireSeq, BroadcastEntities)
+            send_keyframe(Pid, Coords, WireSeq, BroadcastEntities, frame_slots(State))
     end,
     {noreply, State};
 handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) when is_map(Config) ->
@@ -587,7 +592,7 @@ subscribe_new(
     } = State
 ) ->
     MonRef = monitor(process, PlayerPid),
-    send_keyframe(PlayerPid, Coords, WireSeq, BroadcastEntities),
+    send_keyframe(PlayerPid, Coords, WireSeq, BroadcastEntities, frame_slots(State)),
     _ =
         case maps:get(terrain_store_pid, State, undefined) of
             undefined ->
@@ -611,12 +616,24 @@ subscribe_new(
 %% Built from `broadcast_entities` for the same reason the keyframe is - removing
 %% the ids the client was actually told about, rather than the ids the zone
 %% happens to hold this sim tick.
--spec send_leave_removals(pid(), {integer(), integer()}, map()) -> ok.
-send_leave_removals(_Pid, _Coords, Entities) when map_size(Entities) =:= 0 ->
+-spec send_leave_removals(
+    pid(), {integer(), integer()}, map(), asobi_wire_slots:slots() | undefined
+) -> ok.
+send_leave_removals(_Pid, _Coords, Entities, _Slots) when map_size(Entities) =:= 0 ->
     ok;
-send_leave_removals(Pid, Coords, Entities) ->
-    Removals = encode_deltas([{removed, Id} || Id <- maps:keys(Entities)]),
-    Pid ! {asobi_message, {zone_removals, Coords, Removals}},
+send_leave_removals(Pid, Coords, Entities, Slots) ->
+    Deltas = [{removed, Id} || Id <- maps:keys(Entities)],
+    Removals = encode_deltas(Deltas),
+    %% `ungated` is the binary frame's way of saying what the text frame says by
+    %% omitting frame_seq: this is not a position in the zone's stream. Encoding
+    %% it as sequence 0 instead would have every client past its first frame
+    %% discard the one message that clears the ghosts.
+    Msg =
+        case encode_binary(ungated, Coords, 0, 0, false, Deltas, Slots) of
+            skip -> {zone_removals, Coords, Removals};
+            {ok, Bin} -> {zone_removals, Coords, Removals, Bin}
+        end,
+    Pid ! {asobi_message, Msg},
     ok.
 
 %% The three fields stage 1 adds to world.tick, in one place so the shared and
@@ -646,10 +663,28 @@ send_leave_removals(Pid, Coords, Entities) ->
 %% Sent unconditionally, including for an empty zone. An empty zone still has a
 %% sequence position, and a client with no keyframe has no baseline to reject a
 %% stale delta against.
--spec send_keyframe(pid(), {integer(), integer()}, non_neg_integer(), map()) -> ok.
-send_keyframe(PlayerPid, Coords, WireSeq, BroadcastEntities) ->
-    Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(BroadcastEntities)],
-    PlayerPid ! {asobi_message, {zone_keyframe, frame_meta(Coords, WireSeq, true), Snapshot}},
+%%
+%% The binary companion matters more here than anywhere else: the slot->id
+%% bindings ride the `add` records (ADR 0013, decision 4) and a keyframe is
+%% all-adds, so this is the frame that gives a binary client its whole mapping.
+%% A binary client handed only the text keyframe would have no bindings at all.
+-spec send_keyframe(
+    pid(),
+    {integer(), integer()},
+    non_neg_integer(),
+    map(),
+    asobi_wire_slots:slots() | undefined
+) -> ok.
+send_keyframe(PlayerPid, Coords, WireSeq, BroadcastEntities, Slots) ->
+    Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || Id := E <- BroadcastEntities],
+    Adds = [{added, Id, E} || Id := E <- BroadcastEntities],
+    Meta = frame_meta(Coords, WireSeq, true),
+    Msg =
+        case encode_binary(sequenced, Coords, WireSeq, 0, true, Adds, Slots) of
+            skip -> {zone_keyframe, Meta, Snapshot};
+            {ok, Bin} -> {zone_keyframe, Meta, Snapshot, Bin}
+        end,
+    PlayerPid ! {asobi_message, Msg},
     ok.
 
 %% Binary keys, matching broadcast_deltas/5's own payload, so the shared and
@@ -719,9 +754,17 @@ do_tick(
         case TickN rem BroadcastInterval of
             0 ->
                 Deltas = compute_deltas(BroadcastEntities, Entities4),
-                WireSeq1 = broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs),
+                {FrameSlots, Slots1} = advance_slots(
+                    maps:get(binary_wire, State),
+                    BroadcastEntities,
+                    Entities4,
+                    maps:get(slots, State)
+                ),
+                WireSeq1 = broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs, FrameSlots),
                 broadcast_acks(TickN, PlayerAck1, Subs),
-                State#{broadcast_entities => Entities4, wire_seq => WireSeq1};
+                State#{
+                    broadcast_entities => Entities4, wire_seq => WireSeq1, slots => Slots1
+                };
             _ ->
                 State
         end,
@@ -852,11 +895,16 @@ compute_deltas(OldEntities, NewEntities) ->
 %% exactly that reason and is left alone: it stays the sim tick, ADR 0010 froze
 %% it, and clients read it.
 -spec broadcast_deltas(
-    {integer(), integer()}, non_neg_integer(), non_neg_integer(), [term()], map()
+    {integer(), integer()},
+    non_neg_integer(),
+    non_neg_integer(),
+    [term()],
+    map(),
+    asobi_wire_slots:slots() | undefined
 ) -> non_neg_integer().
-broadcast_deltas(_Coords, _TickN, WireSeq, [], _Subs) ->
+broadcast_deltas(_Coords, _TickN, WireSeq, [], _Subs, _FrameSlots) ->
     WireSeq;
-broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs) ->
+broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs, FrameSlots) ->
     Seq = WireSeq + 1,
     EncodedDeltas = encode_deltas(Deltas),
     Meta = frame_meta(Coords, Seq, false),
@@ -865,12 +913,158 @@ broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs) ->
         ~"payload" => Meta#{~"tick" => TickN, ~"updates" => EncodedDeltas}
     },
     PreEncoded = iolist_to_binary(json:encode(Payload)),
-    RawMsg = {asobi_message, {zone_delta_raw, PreEncoded}},
+    RawMsg = delta_msg(
+        PreEncoded, encode_binary(sequenced, Coords, Seq, TickN, false, Deltas, FrameSlots)
+    ),
     maps:foreach(
         fun(_PlayerId, {Pid, _MonRef}) -> Pid ! RawMsg end,
         Subs
     ),
     Seq.
+
+%% One shared buffer per wire in use, never one per subscriber - that is the
+%% whole point of ADR 0001's encode-once fan-out and the reason both buffers
+%% travel in ONE message. The connection picks; the zone does not need to know
+%% who negotiated what, so no per-subscriber state and no race between
+%% negotiation and subscription.
+delta_msg(Json, skip) -> {asobi_message, {zone_delta_raw, Json}};
+delta_msg(Json, {ok, Bin}) -> {asobi_message, {zone_delta_raw, Json, Bin}}.
+
+%% `undefined` when the binary wire is off, so the per-connection paths do the
+%% same nothing the broadcast path does rather than encoding against an empty
+%% slot map and warning once per entity.
+-spec frame_slots(map()) -> asobi_wire_slots:slots() | undefined.
+frame_slots(#{binary_wire := true, slots := Slots}) -> Slots;
+frame_slots(_State) -> undefined.
+
+%% Slots have to cover BOTH sides of the diff for the length of one frame: a
+%% removal names an entity that has already left the new baseline, so releasing
+%% first would leave it slotless in the very frame that announces its departure.
+%% Hence the union for the frame, then the real baseline for what the zone keeps.
+-spec advance_slots(boolean(), map(), map(), asobi_wire_slots:slots()) ->
+    {asobi_wire_slots:slots() | undefined, asobi_wire_slots:slots()}.
+advance_slots(false, _Old, _New, Slots) ->
+    {undefined, Slots};
+advance_slots(true, Old, New, Slots) ->
+    case asobi_wire_slots:sync(maps:merge(Old, New), Slots) of
+        {ok, FrameSlots} ->
+            case asobi_wire_slots:sync(New, FrameSlots) of
+                {ok, Next} -> {FrameSlots, Next};
+                %% Unreachable: this sync only releases relative to the one
+                %% above. Handled rather than matched so an invariant break
+                %% degrades to the text wire instead of killing a shared zone.
+                {error, exhausted} -> {FrameSlots, FrameSlots}
+            end;
+        {error, exhausted} ->
+            ?LOG_WARNING(#{
+                msg => ~"zone slot space exhausted, binary wire disabled for this frame",
+                live_entities => map_size(New)
+            }),
+            {undefined, Slots}
+    end.
+
+%% `skip` rather than an error: binary negotiation covers `world.tick` alone and
+%% every other frame is text regardless, so a client that asked for binary can
+%% always take a text frame. Falling back therefore costs bandwidth, not
+%% correctness, and is the right answer when a frame cannot be encoded.
+-spec encode_binary(
+    sequenced | ungated,
+    {integer(), integer()},
+    non_neg_integer(),
+    non_neg_integer(),
+    boolean(),
+    [term()],
+    asobi_wire_slots:slots() | undefined
+) -> {ok, binary()} | skip.
+encode_binary(_Kind, _Coords, _Seq, _TickN, _Kf, _Deltas, undefined) ->
+    skip;
+encode_binary(Kind, {ZX, ZY}, Seq, TickN, Kf, Deltas, Slots) ->
+    case wire_records(Deltas, Slots) of
+        {ok, Records} ->
+            Frame = #{
+                kind => Kind,
+                zone => {ZX, ZY},
+                frame_seq => Seq,
+                kf => Kf,
+                tick => TickN,
+                records => Records
+            },
+            case asobi_wire:encode(Frame) of
+                {ok, Bin} ->
+                    {ok, Bin};
+                {error, Reason} ->
+                    ?LOG_WARNING(#{
+                        msg => ~"binary world.tick frame refused, falling back to text",
+                        reason => Reason
+                    }),
+                    skip
+            end;
+        skip ->
+            skip
+    end.
+
+%% Built from the delta TUPLES rather than from encode_deltas/1's JSON maps: the
+%% op and the entity id are structural here and only become `~"op"`/`~"id"` keys
+%% on the text wire, so re-deriving them from the encoded map would make the
+%% binary wire depend on the text wire's field naming.
+%% Built head-first rather than accumulated and reversed: lists:reverse/1's
+%% eqWAlizer overlay erases the element type, and a list of `term()` is not a list
+%% of records the encoder can be trusted with. Recursion depth is one frame's
+%% delta count, which a zone's entity count already bounds.
+-spec wire_records([term()], asobi_wire_slots:slots()) ->
+    {ok, [asobi_wire:delta()]} | skip.
+wire_records([], _Slots) ->
+    {ok, []};
+wire_records([Delta | Rest], Slots) ->
+    case wire_record(Delta, Slots) of
+        skip ->
+            skip;
+        {ok, Rec} ->
+            case wire_records(Rest, Slots) of
+                skip -> skip;
+                {ok, Recs} -> {ok, [Rec | Recs]}
+            end
+    end.
+
+wire_record({added, Id, FullState}, Slots) ->
+    with_slot(Id, Slots, FullState, fun(Slot, Fields) ->
+        #{op => add, slot => Slot, id => Id, fields => Fields}
+    end);
+wire_record({updated, Id, Diff}, Slots) ->
+    with_slot(Id, Slots, Diff, fun(Slot, Fields) ->
+        #{op => update, slot => Slot, fields => Fields}
+    end);
+wire_record({removed, Id}, Slots) ->
+    with_slot(Id, Slots, #{}, fun(Slot, _Fields) -> #{op => remove, slot => Slot} end).
+
+with_slot(Id, Slots, Fields, Build) ->
+    case {asobi_wire_slots:slot_of(Id, Slots), wire_encodable(Fields)} of
+        {{ok, Slot}, true} ->
+            {ok, Build(Slot, Fields)};
+        {error, _} ->
+            %% advance_slots/4 syncs against the union of both baselines, so
+            %% every id in the diff has a slot. Missing one means the two have
+            %% drifted, and a frame encoded around the gap would bind the wrong
+            %% entity on a client; drop to text and say so.
+            ?LOG_WARNING(#{msg => ~"entity has no wire slot, falling back to text", id => Id}),
+            skip;
+        {_, false} ->
+            ?LOG_WARNING(#{
+                msg => ~"entity field has no binary form, falling back to text", id => Id
+            }),
+            skip
+    end.
+
+%% asobi_wire carries six scalar value types. A game is free to put a list or a
+%% nested map in an entity, and dropping such a field from the binary frame while
+%% the text frame keeps it would make the two wires disagree about what an entity
+%% IS. So a zone holding a non-scalar field stays on text entirely: the wires are
+%% equivalent or the binary one is not used.
+wire_encodable(Fields) ->
+    lists:all(fun is_wire_value/1, maps:values(Fields)).
+
+is_wire_value(V) when is_number(V); is_boolean(V); is_binary(V); V =:= null -> true;
+is_wire_value(_) -> false.
 
 %% asobi#474: input ack, addressed to one connection. Iterate the opted-in
 %% players (those with a recorded seq) and send world.ack only to the ones still
