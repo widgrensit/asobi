@@ -9,6 +9,11 @@ start(_StartType, _StartArgs) ->
     %% read from the `console` key, so the environment has to have been folded
     %% in by now.
     asobi_console_env:apply(),
+    %% Guest retention is read the same way and for the same reason, but it is
+    %% not console configuration, so it gets its own module rather than a
+    %% second meaning for that one. Order does not matter: the reaper reads the
+    %% key at sweep time, not at start.
+    asobi_guest_env:apply(),
     setup_telemetry(),
     asobi_error:register_handler(),
     register_lua_game_modes(),

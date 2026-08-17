@@ -487,7 +487,7 @@ operator half.
 | `guest_verifier_pepper` | none | Key-id -> pepper map, or a single binary. Each pepper must be at least 32 bytes; a shorter one is treated as absent. Presence is the operator's on switch |
 | `guest_verifier_key_id` | `~"v1"` | Which pepper key id to use when minting new verifiers |
 | `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity`. Anything else falls back to the default and logs `invalid_guest_unlinked_cap` |
-| `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent. On cloud this is the **Guests** picker on the environment row, not a key you write |
+| `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent. Also reads `ASOBI_GUEST_REAP_AFTER`. On cloud this is the **Guests** picker on the environment row, not a key you write |
 
 The cap is a soft ceiling, not an exact one: the count comes from a short-TTL
 cache rather than a `COUNT` per create, so it can overshoot by roughly (TTL x
@@ -632,6 +632,12 @@ five - `console_session_ttl`, `console_secure_cookie`, `console_api_base`,
 `console_erasure` and `console_bundle_app` - have no environment variable and
 need a `sys.config`. A variable overrides `sys.config` only when it is set, so
 the two coexist.
+
+`guest_reap_after` reads `ASOBI_GUEST_REAP_AFTER`, in seconds, on the same
+terms. Anything that is not a positive integer leaves it unset, which means
+guests are kept for ever: a node that cannot parse its own retention setting
+must not fall back to deleting accounts on a schedule nobody chose. `0` is the
+explicit "off".
 
 `console_bundle_app` is only for a host whose extensions ship their own operator
 screens; see [Extending the operator console](console-extensions.md). It has no
