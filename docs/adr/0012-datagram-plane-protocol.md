@@ -1,8 +1,16 @@
-# ADR 0012: The datagram plane protocol, designed and rejected
+# ADR 0012: The datagram plane protocol, designed, rejected, then superseded
 
 Date: 2026-08-16
 
 ## Status
+
+**Superseded by ADR 0013** (2026-08-17), which accepts the protocol below in its
+single-node self-hostable form. Read 0013 first: it records what changed, which
+was the basis of the decision rather than the measurements, and it narrows the
+scope. The fleet deployment half remains rejected in `asobi_saas` ADR 0013.
+
+The original ruling, kept because the reasoning is still the best account of why
+this is hard, and because 0013 reverses it on strategy rather than on evidence:
 
 **Rejected.** Not gated, not deferred: closed. Nothing here shipped and nothing here
 is scheduled. Recorded rather than discarded because a rejection carrying its
