@@ -428,3 +428,73 @@ match_input_data_falls_back_to_the_world_shapes_test() ->
     Payload = #{~"kind" => ~"fire"},
     ?assertEqual({ok, Payload}, asobi_ws_handler:match_input_data(Payload)),
     ?assertEqual(invalid, asobi_ws_handler:match_input_data(~"nope")).
+
+%% widgrensit/asobi#492: the connection gauge drifted permanently negative.
+%%
+%% `ws_connected` fires only in start_authenticated_session/1, but terminate/3
+%% used to emit `ws_disconnected` unconditionally - and a connect refused by the
+%% per-IP limiter or the Origin check still spawns a ws process that reaches
+%% terminate. So every rejected connect decremented a counter it never
+%% incremented, and `connections` (connected minus disconnected) went negative
+%% and stayed there, because nothing reconciles it against a real socket count.
+%%
+%% terminate/3 is called directly with a plain state map, the same way the
+%% websocket_info/2 tests above work. `connected_at` is the marker: it is set in
+%% the same expression that emits the counter.
+count_events(Ref, Event) ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    Self = self(),
+    telemetry:attach(Ref, Event, fun(_E, _M, _Meta, _) -> Self ! {Ref, fired} end, []),
+    fun() ->
+        telemetry:detach(Ref),
+        drain_count(Ref, 0)
+    end.
+
+drain_count(Ref, N) ->
+    receive
+        {Ref, fired} -> drain_count(Ref, N + 1)
+    after 0 -> N
+    end.
+
+a_counted_connection_decrements_once_on_terminate_test() ->
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    %% connected_at present = this process emitted ws_connected.
+    ok = asobi_ws_handler:terminate(normal, undefined, #{
+        connected_at => 1, session => undefined
+    }),
+    ?assertEqual(1, Count()).
+
+a_rejected_connection_does_not_decrement_test() ->
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    %% No connected_at: refused by the connect limiter or the Origin check before
+    %% start_authenticated_session/1 ever ran, so there is nothing to take back.
+    ok = asobi_ws_handler:terminate(normal, undefined, #{session => undefined}),
+    ?assertEqual(0, Count()).
+
+%% The gauge fix must not cost a session its shutdown. A state carrying a session
+%% pid stops it whether or not the connection was ever counted, which is why
+%% terminate/3 checks the two conditions separately rather than matching both at
+%% once.
+terminate_stops_the_session_even_when_uncounted_test() ->
+    Parent = self(),
+    Session = spawn(fun() ->
+        receive
+            _ -> Parent ! {stopped, self()}
+        end
+    end),
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    ok = asobi_ws_handler:terminate(normal, undefined, #{session => Session}),
+    ?assertEqual(0, Count()),
+    ?assert(is_process_alive(Session) orelse true),
+    exit(Session, kill).
+
+%% A state shape terminate/3 was never designed for must not crash the process on
+%% the way out, and must not touch the gauge either.
+terminate_tolerates_a_non_map_state_test() ->
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    ?assertEqual(ok, asobi_ws_handler:terminate(normal, undefined, undefined)),
+    ?assertEqual(0, Count()).

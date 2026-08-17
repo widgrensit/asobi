@@ -491,12 +491,37 @@ plain_tag(_) ->
     unknown.
 
 -spec terminate(term(), term(), map()) -> ok.
-terminate(_Reason, _Req, #{session := undefined}) ->
-    asobi_telemetry:ws_disconnected(),
+%% Decrements the connection gauge ONLY if this process incremented it, which is
+%% not every process that reaches here.
+%%
+%% `ws_connected` fires in start_authenticated_session/1 alone, so a connect
+%% refused by the per-IP limiter or the Origin check never increments - but it
+%% still spawns a ws process, still replies `{close, 1008, _}`, and therefore
+%% still runs terminate/3. Emitting unconditionally decremented a counter that
+%% was never incremented, and `connections` (connected minus disconnected in
+%% asobi_engine_metrics) drifted permanently negative under any connect flood or
+%% a client stuck on a disallowed Origin. It never recovered: nothing
+%% reconciles the gauge against a real socket count, and it is one of the nine
+%% fields the control plane stores and shows tenants.
+%%
+%% `connected_at` is the marker rather than a new flag, because it is set in the
+%% same expression that emits the counter - so the two cannot drift apart in a
+%% later edit the way a separate boolean could.
+%%
+%% One clause rather than two: the session must be stopped whether or not this
+%% process was counted, and a version that pattern-matched both conditions
+%% together could skip the stop for a state shape nobody anticipated.
+terminate(_Reason, _Req, State) when is_map(State) ->
+    case maps:is_key(connected_at, State) of
+        true -> asobi_telemetry:ws_disconnected();
+        false -> ok
+    end,
+    case maps:get(session, State, undefined) of
+        undefined -> ok;
+        SessionPid -> asobi_player_session:stop(SessionPid)
+    end,
     ok;
-terminate(_Reason, _Req, #{session := SessionPid}) ->
-    asobi_telemetry:ws_disconnected(),
-    asobi_player_session:stop(SessionPid),
+terminate(_Reason, _Req, _State) ->
     ok.
 
 %% --- Message Routing ---
