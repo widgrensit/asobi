@@ -23,6 +23,14 @@ can add a field without either side being told.
 
 ## Layout
 
+Every multi-byte integer and float is **little-endian**, which is worth one
+sentence of explanation because it is not what a wire format usually chooses.
+Godot's `PackedByteArray.decode_*` reads little-endian and has no big-endian
+counterpart, so network byte order would force a hand-rolled byte loop in
+interpreted GDScript - and the native calls are precisely what made the codec
+2.4x faster than JSON there rather than slower. Every other target reads either
+order for the same price, so the runtime with no room to spare picks.
+
     frame    Kind:8, ZX:32/signed, ZY:32/signed, FrameSeq:64, Kf:8, Tick:64,
              DictLen:8, Dict, RecCount:16, Records
 
@@ -115,14 +123,14 @@ encode(#{
             Body = <<<<(encode_record(R, Index))/binary>> || R <- Recs>>,
             {ok, <<
                 (kind_byte(Kind)):8,
-                ZX:32/signed,
-                ZY:32/signed,
-                Seq:64,
+                ZX:32/signed-little,
+                ZY:32/signed-little,
+                Seq:64/little,
                 (bool_byte(Kf)):8,
-                Tick:64,
+                Tick:64/little,
                 (length(Names)):8,
                 Dict/binary,
-                (length(Recs)):16,
+                (length(Recs)):16/little,
                 Body/binary
             >>}
     end.
@@ -139,12 +147,13 @@ decoder.
 -spec decode(binary()) -> {ok, frame()} | {error, malformed}.
 decode(Bin) ->
     try
-        <<KindByte:8, ZX:32/signed, ZY:32/signed, Seq:64, KfByte:8, Tick:64, DictLen:8,
+        <<KindByte:8, ZX:32/signed-little, ZY:32/signed-little, Seq:64/little, KfByte:8,
+            Tick:64/little, DictLen:8,
             Rest0/binary>> =
             Bin,
         Kind = kind_atom(KindByte),
         {Names, Rest1} = decode_dict(DictLen, Rest0, []),
-        <<RecCount:16, Rest2/binary>> = Rest1,
+        <<RecCount:16/little, Rest2/binary>> = Rest1,
         NameTuple = list_to_tuple(Names),
         {Recs, <<>>} = decode_records(RecCount, Rest2, NameTuple, []),
         {ok, #{
@@ -229,18 +238,18 @@ encode_record(#{op := Op, slot := Slot} = R, Index) ->
             _ ->
                 <<>>
         end,
-    <<(op_byte(Op)):8, Slot:16, IdBin/binary, (map_size(Fields)):8, FieldBin/binary>>.
+    <<(op_byte(Op)):8, Slot:16/little, IdBin/binary, (map_size(Fields)):8, FieldBin/binary>>.
 
 encode_field(Name, Value, Index) ->
     Idx = maps:get(Name, Index),
     Tag = field_type_tag(Value),
     <<Tag:3, Idx:5, (encode_value(Tag, Value))/binary>>.
 
-encode_value(?T_F32, V) -> <<V:32/float>>;
-encode_value(?T_I32, V) -> <<V:32/signed>>;
+encode_value(?T_F32, V) -> <<V:32/float-little>>;
+encode_value(?T_I32, V) -> <<V:32/signed-little>>;
 encode_value(?T_TRUE, _) -> <<>>;
 encode_value(?T_FALSE, _) -> <<>>;
-encode_value(?T_STR, V) -> <<(byte_size(V)):16, V/binary>>;
+encode_value(?T_STR, V) -> <<(byte_size(V)):16/little, V/binary>>;
 encode_value(?T_NULL, _) -> <<>>.
 
 decode_dict(0, Rest, Acc) ->
@@ -250,7 +259,7 @@ decode_dict(N, <<Len:8, Name:Len/binary, Rest/binary>>, Acc) ->
 
 decode_records(0, Rest, _Names, Acc) ->
     {lists:reverse(Acc), Rest};
-decode_records(N, <<OpByte:8, Slot:16, Rest0/binary>>, Names, Acc) ->
+decode_records(N, <<OpByte:8, Slot:16/little, Rest0/binary>>, Names, Acc) ->
     Op = op_atom(OpByte),
     {Base, Rest1} =
         case Op of
@@ -276,11 +285,11 @@ decode_fields(N, <<Tag:3, Idx:5, Rest0/binary>>, Names, Acc) ->
     {Value, Rest1} = decode_value(Tag, Rest0),
     decode_fields(N - 1, Rest1, Names, Acc#{Name => Value}).
 
-decode_value(?T_F32, <<V:32/float, R/binary>>) -> {V, R};
-decode_value(?T_I32, <<V:32/signed, R/binary>>) -> {V, R};
+decode_value(?T_F32, <<V:32/float-little, R/binary>>) -> {V, R};
+decode_value(?T_I32, <<V:32/signed-little, R/binary>>) -> {V, R};
 decode_value(?T_TRUE, R) -> {true, R};
 decode_value(?T_FALSE, R) -> {false, R};
-decode_value(?T_STR, <<Len:16, V:Len/binary, R/binary>>) -> {V, R};
+decode_value(?T_STR, <<Len:16/little, V:Len/binary, R/binary>>) -> {V, R};
 decode_value(?T_NULL, R) -> {null, R}.
 
 kind_byte(sequenced) -> ?KIND_SEQUENCED;

@@ -784,7 +784,13 @@ materially cheaper to decode: measured against native JSON, 2.4x faster in
 Godot's GDScript and 33x faster than the pure-Lua parser Defold and LOVE ship.
 Every other message type still arrives as JSON text.
 
-All integers are big-endian.
+All multi-byte integers and floats are **little-endian**. That is not the usual
+choice for a wire format, and it is deliberate: Godot's
+`PackedByteArray.decode_*` reads little-endian and has no big-endian counterpart,
+so network byte order would force a hand-rolled byte loop in interpreted
+GDScript - and those native calls are exactly why the codec beats JSON there
+rather than losing to it. Every other target reads either order for the same
+price, so the runtime with no room to spare picks.
 
 ```
 frame    Kind:8, ZX:32/signed, ZY:32/signed, FrameSeq:64, Kf:8, Tick:64,

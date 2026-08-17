@@ -184,6 +184,14 @@ decision on purpose: dropping a list-valued field from the binary frame while th
 text frame keeps it would make the two wires disagree about what an entity IS,
 which is a worse failure than not using the binary wire.
 
+*The wire is little-endian, not network byte order.* Godot's
+`PackedByteArray.decode_*` reads little-endian and ships no big-endian
+counterpart, so big-endian would force a hand-rolled byte loop in interpreted
+GDScript - and those native calls are the entire reason decision 1's benchmark
+came out 2.4x in favour rather than against. Every other target reads either
+order for the same price. Found by running the Godot decoder against the fixture
+corpus, which is the case for building the corpus first.
+
 *The frame header carries a kind byte.* The text wire says "this frame holds no
 position in the zone's sequence" by omitting `frame_seq`, which a fixed-layout
 binary frame cannot do. Encoding the leave-removal frame as sequence 0 instead
