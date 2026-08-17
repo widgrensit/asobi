@@ -296,7 +296,26 @@ register_limiters() ->
         %% own 5/sec budget scales that blocking load linearly with attacker
         %% count. Same reasoning as guest_global. Size from your real
         %% concurrent-player target; this default is a placeholder.
-        rehome_global => #{algorithm => sliding_window, limit => 200, window => 1000}
+        rehome_global => #{algorithm => sliding_window, limit => 200, window => 1000},
+        %% world.resync is the one inbound frame whose response is orders of
+        %% magnitude larger than the request: a ~120-byte ask produces a full
+        %% zone keyframe, measured at ~50 KB of JSON for a 400-entity zone, so
+        %% roughly 400x. Two limiters because one cannot cover both shapes of
+        %% abuse. Per player bounds a single client looping the request; the
+        %% global bucket bounds the aggregate, because per-player alone lets N
+        %% players cost N times the egress and the node's uplink does not care
+        %% whose request it was.
+        %%
+        %% Keyed on player_id rather than IP on purpose. The frame is only
+        %% reachable on an authenticated session, and IP keying would starve
+        %% every player behind one carrier-grade NAT - the same reasoning
+        %% asobi_sup already applies to the rehome pair.
+        %%
+        %% An honest client needs this once per detected gap, and a gap on a TCP
+        %% wire should be impossible, so 2 per 10 s is generous. A client hitting
+        %% the limit is already broken and backing it off is the correct answer.
+        resync => #{algorithm => sliding_window, limit => 2, window => 10000},
+        resync_global => #{algorithm => sliding_window, limit => 20, window => 1000}
     },
     Configured =
         case application:get_env(asobi, rate_limits, #{}) of
@@ -330,7 +349,9 @@ limiter_name(erase) -> asobi_erase_limiter;
 limiter_name(guest_global) -> asobi_guest_global_limiter;
 limiter_name(script_log) -> asobi_script_log_limiter;
 limiter_name(rehome) -> asobi_rehome_limiter;
-limiter_name(rehome_global) -> asobi_rehome_global_limiter.
+limiter_name(rehome_global) -> asobi_rehome_global_limiter;
+limiter_name(resync) -> asobi_world_resync_limiter;
+limiter_name(resync_global) -> asobi_world_resync_global_limiter.
 
 cluster_spec() ->
     #{

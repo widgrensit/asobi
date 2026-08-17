@@ -39,6 +39,9 @@ zone_test_() ->
             fun unsubscribe_sends_removals_for_entities/0},
         {"unsubscribe of an unknown player sends nothing",
             fun unsubscribe_unknown_player_is_noop/0},
+        {"resync re-sends a keyframe to a subscriber", fun resync_sends_keyframe/0},
+        {"resync for a player who is not subscribed sends nothing",
+            fun resync_unsubscribed_sends_nothing/0},
         {"resubscribing the same pid is idempotent", fun resubscribe_same_pid_is_idempotent/0},
         {"resubscribing a new pid replaces and demonitors the old one",
             fun resubscribe_new_pid_replaces_and_demonitors_old/0},
@@ -352,6 +355,50 @@ recv_ack() ->
 %% send an `r` for every entity still held, or the departing client's copy
 %% of this zone freezes at its last known state forever (the zone never
 %% sends it another update once the subscription is gone).
+%% The repair half of frame_seq. A client that saw a gap asks for a baseline and
+%% gets one carrying the zone's CURRENT frame_seq with kf: true, which is what it
+%% resets its high-water mark to.
+resync_sends_keyframe() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    %% One broadcast so the zone has a non-zero frame_seq and a real baseline,
+    %% which is what makes the assertion below distinguishable from the join
+    %% keyframe's frame_seq of 0.
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
+    flush_messages(),
+
+    asobi_zone:resync(Pid, ~"p1"),
+    receive
+        {asobi_message, {zone_keyframe, Meta, Snapshot}} ->
+            ?assertEqual(true, maps:get(~"kf", Meta)),
+            ?assertEqual([0, 0], maps:get(~"zone", Meta)),
+            ?assertEqual(1, maps:get(~"frame_seq", Meta)),
+            ?assertEqual([~"e1"], [Id || #{~"id" := Id} <- Snapshot])
+    after 500 ->
+        ?assert(false)
+    end,
+    gen_server:stop(Pid).
+
+%% A resync naming a zone the requester is not subscribed to is dropped, not
+%% answered. Answering would make the frame a way to read any zone in the world,
+%% and there is nothing to repair for a client that was never told anything.
+resync_unsubscribed_sends_nothing() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    flush_messages(),
+
+    asobi_zone:resync(Pid, ~"never_subscribed"),
+    receive
+        {asobi_message, {zone_keyframe, _, _}} -> ?assert(false)
+    after 200 -> ok
+    end,
+    gen_server:stop(Pid).
+
 unsubscribe_sends_removals_for_entities() ->
     %% broadcast_interval 1 so one tick is one broadcast: the leave frame removes
     %% what the client was TOLD about (broadcast_entities), not what the zone

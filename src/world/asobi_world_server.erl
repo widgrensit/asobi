@@ -28,6 +28,7 @@ transient matches use `asobi_match_server` instead.
 -export([spawn_at/3, spawn_at/4]).
 -export([zone_created/3]).
 -export([reconnect/2]).
+-export([resync/3]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
 -export([whereis/1]).
 -export([pos_to_zone/3]).
@@ -57,6 +58,29 @@ transient matches use `asobi_match_server` instead.
 -spec start_link(map()) -> gen_statem:start_ret().
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
+
+-doc """
+Ask one zone of this world to re-send `PlayerId` a keyframe.
+
+The server half of `world.resync`. Deliberately ONE zone per request, named by
+its coords, rather than the player's whole interest ring: the ring is
+`(2*view_radius+1)^2` zones, nine at the default `view_radius` of 1, so a ring
+resync turns a ~120-byte request into nine keyframes and the amplification ratio
+goes with it. It is also the wrong shape on the merits, because `frame_seq` is
+per zone and a client that detects a gap knows exactly which zone gapped.
+
+Resolves through `asobi_zone_manager:get_zone/2`, which does NOT create a zone
+that is not loaded. A client must never be able to spin up world state by asking
+for it.
+
+Authorisation is the zone's own subscriber map, checked in `asobi_zone`, not an
+interest lookup here: the subscriber map is the ground truth for "did this
+client ever receive frames from this zone", which is exactly the question a
+repair request asks.
+""".
+-spec resync(pid(), binary(), {integer(), integer()}) -> ok.
+resync(Pid, PlayerId, Coords) ->
+    gen_statem:cast(Pid, {resync, PlayerId, Coords}).
 
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
@@ -330,6 +354,25 @@ running(cast, {move_player, PlayerId, NewPos, Entity}, State) ->
     handle_move(PlayerId, NewPos, Entity, State);
 running(cast, {zone_created, Coords, ZonePid}, #{player_zones := PlayerZones}) ->
     backfill_zone_subscribers(Coords, ZonePid, undefined, PlayerZones),
+    keep_state_and_data;
+%% Guards narrow both cast arguments rather than trusting the sender. The ws
+%% handler validates the frame before it gets here, so this is defence in depth,
+%% and it is also what lets the call sites below be typed: a gen_statem cast
+%% payload is `term()`, and `is_pid` on the manager is the honest narrowing that
+%% `=/= undefined` only looks like.
+running(cast, {resync, PlayerId, {ZX, ZY} = Coords}, #{zone_manager_pid := ZMPid}) when
+    is_binary(PlayerId), is_integer(ZX), is_integer(ZY), is_pid(ZMPid)
+->
+    %% get_zone, never ensure_zone: a resync request must not be able to load a
+    %% zone. An unloaded zone has nothing to repair, so the request is dropped.
+    case asobi_zone_manager:get_zone(ZMPid, Coords) of
+        {ok, ZonePid} -> asobi_zone:resync(ZonePid, PlayerId);
+        _ -> ok
+    end,
+    keep_state_and_data;
+%% A resync before the zone manager is up, or with a payload that did not survive
+%% the guards, is dropped. There is nothing to repair and nothing to answer.
+running(cast, {resync, _PlayerId, _Coords}, _State) ->
     keep_state_and_data;
 running(
     cast,

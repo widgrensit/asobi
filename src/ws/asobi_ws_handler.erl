@@ -164,6 +164,34 @@ world_input_data(Payload) when is_map(Payload) ->
 world_input_data(_) ->
     invalid.
 
+%% `zone` comes off the wire as the same [X, Y] pair asobi puts on world.tick and
+%% world.terrain, so a client echoes back exactly the value it was given rather
+%% than constructing one. Bounded to a plain integer pair: the coords index a
+%% zone grid, so anything else - a float, a bignum, a third element - names no
+%% zone and is refused before it reaches a gen_statem cast.
+-spec resync_coords(term()) -> {integer(), integer()} | invalid.
+resync_coords(#{~"zone" := [X, Y]}) when
+    is_integer(X), is_integer(Y), abs(X) =< 16#FFFFFFFF, abs(Y) =< 16#FFFFFFFF
+->
+    {X, Y};
+resync_coords(_) ->
+    invalid.
+
+%% Both buckets, per player and fleet-wide, and the per-player one is checked
+%% first so a single looping client is refused without consuming global budget
+%% that honest clients share.
+-spec resync_allowed(binary()) -> boolean().
+resync_allowed(PlayerId) ->
+    case seki:check(asobi_world_resync_limiter, PlayerId) of
+        {allow, _} ->
+            case seki:check(asobi_world_resync_global_limiter, ~"global") of
+                {allow, _} -> true;
+                {deny, _} -> false
+            end;
+        {deny, _} ->
+            false
+    end.
+
 %% match.input carries the same shapes plus one of its own: a sole `data` holding
 %% a JSON *string*, which predates world.input and is what asobi-unity's
 %% SendMatchInput sends. The decode is total - `json:decode/1` RAISES on malformed
@@ -974,6 +1002,44 @@ handle_message(
     catch
         exit:{noproc, _} ->
             {ok, State#{session => undefined}}
+    end;
+%% The repair half of `frame_seq`: a client that sees a gap in a zone's frame
+%% sequence asks for a fresh baseline for THAT zone. One zone per request, named
+%% by its coords, because frame_seq is per zone and a client that detects a gap
+%% knows which zone gapped - and because the interest ring is nine zones at the
+%% default view_radius, so a ring-shaped resync would multiply one small request
+%% into nine keyframes.
+%%
+%% Rate limited on two buckets before any work happens, because this is the one
+%% inbound frame whose response is hundreds of times larger than the request.
+%% Refused quietly rather than with an error frame: a gap is the client's problem
+%% to back off from, and an error reply on a repair path is one more thing for a
+%% broken client to loop on.
+handle_message(
+    #{~"type" := ~"world.resync", ~"payload" := Payload},
+    #{session := SessionPid} = State
+) when SessionPid =/= undefined ->
+    case resync_coords(Payload) of
+        invalid ->
+            {ok, State};
+        Coords ->
+            try asobi_player_session:get_state(SessionPid) of
+                #{player_id := PlayerId} = SState ->
+                    case maps:get(world_pid, SState, undefined) of
+                        undefined ->
+                            {ok, State};
+                        WorldPid ->
+                            _ =
+                                case resync_allowed(PlayerId) of
+                                    true -> asobi_world_server:resync(WorldPid, PlayerId, Coords);
+                                    false -> ok
+                                end,
+                            {ok, State}
+                    end
+            catch
+                exit:{noproc, _} ->
+                    {ok, State#{session => undefined}}
+            end
     end;
 %% The extension wire (Wave 2b). Everything about the call - `cid` validation,
 %% readiness, the method table, the error object - belongs to asobi_rpc; this

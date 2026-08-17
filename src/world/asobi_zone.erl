@@ -10,7 +10,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -export([start_link/1, reap/1]).
 -export([tick/2, player_input/3, player_input/4, add_entity/3, remove_entity/2]).
 -export([spawn_entity/3, spawn_entity/4, spawn_entities/2, despawn_entity/2]).
--export([subscribe/2, unsubscribe/2]).
+-export([subscribe/2, unsubscribe/2, resync/2]).
 -export([get_entities/1, get_subscriber_count/1, sync/1]).
 -export([start_entity_timer/2, cancel_entity_timer/3]).
 -export([query_radius/3, query_rect/3]).
@@ -75,6 +75,22 @@ subscribe(Pid, {PlayerId, PlayerPid}) ->
 -spec unsubscribe(pid(), binary()) -> ok.
 unsubscribe(Pid, PlayerId) ->
     gen_server:cast(Pid, {unsubscribe, PlayerId}).
+
+-doc """
+Re-send `PlayerId` a keyframe for this zone, on their own request.
+
+The repair half of `frame_seq`: a client that sees a gap asks for a fresh
+baseline rather than carrying a corrupted entity table for the life of the
+world.
+
+The keyframe goes to the pid in this zone's own subscriber map, never to a pid
+the request names, and a player who is not subscribed here gets nothing. That is
+what stops the frame being redirected or used to read a zone the requester is
+not in.
+""".
+-spec resync(pid(), binary()) -> ok.
+resync(Pid, PlayerId) ->
+    gen_server:cast(Pid, {resync, PlayerId}).
 
 -spec get_entities(pid()) -> map().
 get_entities(Pid) ->
@@ -464,6 +480,26 @@ handle_cast(
             send_leave_removals(Pid, Coords, BroadcastEntities),
             {noreply, State#{subscribers => maps:remove(PlayerId, Subs)}}
     end;
+handle_cast(
+    {resync, PlayerId},
+    #{
+        subscribers := Subs,
+        broadcast_entities := BroadcastEntities,
+        coords := Coords,
+        wire_seq := WireSeq
+    } = State
+) ->
+    %% Serves the pid this zone already holds for PlayerId. A request naming a
+    %% zone the player is not subscribed to is dropped silently rather than
+    %% answered: there is nothing to repair, and answering would turn resync into
+    %% a way to read any zone in the world.
+    case maps:get(PlayerId, Subs, undefined) of
+        undefined ->
+            ok;
+        {Pid, _MonRef} ->
+            send_keyframe(Pid, Coords, WireSeq, BroadcastEntities)
+    end,
+    {noreply, State};
 handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) when is_map(Config) ->
     {noreply, State#{entity_timers => asobi_entity_timer:start_timer(Config, ET)}};
 handle_cast({cancel_entity_timer, EntityId, TimerId}, #{entity_timers := ET} = State) when
@@ -551,23 +587,7 @@ subscribe_new(
     } = State
 ) ->
     MonRef = monitor(process, PlayerPid),
-    %% The join keyframe is the client's baseline, and it is built from
-    %% `broadcast_entities` rather than `entities` for a reason that is easy to
-    %% get wrong. The delta stream diffs against `broadcast_entities` (do_tick/2),
-    %% which only advances on a broadcast tick, so with the default
-    %% `broadcast_interval` of 3 `entities` can be two sim ticks ahead of it.
-    %% Snapshotting `entities` therefore hands the client a baseline AHEAD of the
-    %% stream that follows, and the next `op:"u"` diff never re-sends the fields
-    %% that changed in between - they are already equal to the server's own
-    %% baseline, so `compute_deltas/2` emits nothing for them and the client
-    %% keeps the newer value it was never told to expect. Anchoring both to the
-    %% same map is what makes `frame_seq` mean anything.
-    %%
-    %% Sent unconditionally, including when the zone is empty. An empty zone
-    %% still has a sequence position, and a client that receives no keyframe has
-    %% no baseline to reject a stale delta against.
-    Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(BroadcastEntities)],
-    PlayerPid ! {asobi_message, {zone_keyframe, frame_meta(Coords, WireSeq, true), Snapshot}},
+    send_keyframe(PlayerPid, Coords, WireSeq, BroadcastEntities),
     _ =
         case maps:get(terrain_store_pid, State, undefined) of
             undefined ->
@@ -610,7 +630,29 @@ send_leave_removals(Pid, Coords, Entities) ->
 %% and `op:"a"` from the new one, from two different senders, so they can arrive
 %% inverted - and a client applying both into one flat table then deletes the
 %% entity and never hears about it again. Per-zone tables make that unreachable.
-%% Binary keys, matching broadcast_deltas/4's own payload, so the shared and
+%% The client's baseline, and the one frame it adopts unconditionally.
+%%
+%% Built from `broadcast_entities` rather than `entities` for a reason that is
+%% easy to get wrong. The delta stream diffs against `broadcast_entities`
+%% (do_tick/2), which only advances on a broadcast tick, so with the default
+%% `broadcast_interval` of 3 `entities` can be two sim ticks ahead of it.
+%% Snapshotting `entities` hands the client a baseline AHEAD of the stream that
+%% follows, and the next `op:"u"` diff never re-sends the fields that changed in
+%% between - they already equal the server's own baseline, so compute_deltas/2
+%% emits nothing for them and the client keeps a value it was never told to
+%% expect. Anchoring both to the same map is what makes `frame_seq` mean
+%% anything.
+%%
+%% Sent unconditionally, including for an empty zone. An empty zone still has a
+%% sequence position, and a client with no keyframe has no baseline to reject a
+%% stale delta against.
+-spec send_keyframe(pid(), {integer(), integer()}, non_neg_integer(), map()) -> ok.
+send_keyframe(PlayerPid, Coords, WireSeq, BroadcastEntities) ->
+    Snapshot = [E#{~"op" => ~"a", ~"id" => Id} || {Id, E} <- maps:to_list(BroadcastEntities)],
+    PlayerPid ! {asobi_message, {zone_keyframe, frame_meta(Coords, WireSeq, true), Snapshot}},
+    ok.
+
+%% Binary keys, matching broadcast_deltas/5's own payload, so the shared and
 %% per-connection frames are byte-identical in shape and one merge covers both.
 -spec frame_meta({integer(), integer()}, non_neg_integer(), boolean()) -> map().
 frame_meta({ZX, ZY}, WireSeq, IsKeyframe) ->
