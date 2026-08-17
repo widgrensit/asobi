@@ -157,11 +157,26 @@ authenticate(#{body := Body} = Req) when is_binary(Body), Body =/= ~"" ->
 authenticate(_Req) ->
     {asobi_error, ~"missing_field"}.
 
+%% A minted token opens one session and then stops being a credential.
+%%
+%% Verifying it says only that it is authentic, never that it is unspent, so
+%% until `consume_token/2` existed an exchanged token stayed live for the rest
+%% of its fifteen minutes - usable here again, or as a bearer header on the ops
+%% plane. That is also what made this endpoint a session-fixation primitive:
+%% `SameSite` governs which requests carry a cookie, not which may set one.
+%%
+%% A spent token is refused exactly like an invalid one, so presenting one
+%% teaches nothing about whether it was ever real.
 minted(Token, Req, Reply) ->
     case asobi_ops_token:verify(Token) of
-        {ok, #{sub := Sub, caps := Caps, exp := Exp}} ->
-            {ok, Session} = asobi_console_session:create(Sub, Caps, Exp),
-            granted(Session, Req, Reply);
+        {ok, #{sub := Sub, caps := Caps, exp := Exp, id := TokenId}} ->
+            case asobi_console_session:consume_token(TokenId, Exp) of
+                ok ->
+                    {ok, Session} = asobi_console_session:create(Sub, Caps, Exp),
+                    granted(Session, Req, Reply);
+                {error, replayed} ->
+                    rejected(Req)
+            end;
         {error, _Reason} ->
             rejected(Req)
     end.

@@ -39,12 +39,17 @@ while a tab sits open is the wrong default for a surface that bans players.
 -include_lib("kernel/include/logger.hrl").
 
 -export([start_link/0, create/1, create/3, resolve/2, delete/1, csrf/1, ttl_seconds/0]).
+-export([consume_token/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 -ifdef(TEST).
 -export([expire/1, sweep/0]).
 -endif.
 
 -define(TABLE, ?MODULE).
+%% Minted tokens already spent on a session. Keyed by the token's MAC, valued
+%% by its own expiry, so a row costs nothing to reason about: it is needed for
+%% exactly as long as the token it refuses could still be presented.
+-define(SEEN_TABLE, asobi_console_session_seen).
 -define(SECRET_KEY, {?MODULE, secret}).
 -define(ID_BYTES, 32).
 -define(SECRET_BYTES, 32).
@@ -114,6 +119,38 @@ create(Label, Caps, NotAfter) ->
     gen_server:call(?MODULE, {create, label(Label), Caps, NotAfter}).
 
 -doc """
+Spend a minted token, so it can open exactly one session.
+
+`verify/1` proving a token authentic says nothing about whether it has already
+been used, and until this existed nothing did: exchanging a token at
+`/console/session` left it valid for the rest of its fifteen minutes, usable
+again there or directly as a bearer header on the ops plane. Anyone who read
+it in transit, out of a log, or off a shared machine had a live credential for
+as long as the person it was minted for did.
+
+It also closes the login-CSRF half of the same hole. `SameSite` governs which
+requests carry a cookie, not which may set one, so any origin could post a
+token it held to a victim's browser and land them in a session the attacker
+chose. There is no privilege gain - the token is env-scoped and role-derived -
+but every audit row the victim then wrote would name the attacker's `sub`, on
+the one plane whose rows are the only surviving evidence of an erasure.
+
+`{error, replayed}` is deliberately not distinguishable from a bad token by
+the caller's response: both answer 403 the same way, so presenting a spent
+token teaches nothing about whether it was ever real.
+""".
+-spec consume_token(binary(), integer()) -> ok | {error, replayed}.
+consume_token(TokenId, NotAfter) ->
+    %% Not a pass-through: `gen_server:call/2` is typed `term()`, and this is
+    %% the one call in this module whose answer decides whether a credential is
+    %% honoured. Narrowing it here means an unexpected reply crashes at the
+    %% boundary rather than being read as something it is not.
+    case gen_server:call(?MODULE, {consume_token, TokenId, NotAfter}) of
+        ok -> ok;
+        {error, replayed} -> {error, replayed}
+    end.
+
+-doc """
 Resolve a cookie and its CSRF token to a live session.
 
 Both halves are required. A cookie alone is not a credential here: that is
@@ -153,6 +190,7 @@ ttl_seconds() ->
 -spec init([]) -> {ok, #{}}.
 init([]) ->
     _ = ets:new(?TABLE, [named_table, protected, set, {read_concurrency, true}]),
+    _ = ets:new(?SEEN_TABLE, [named_table, protected, set, {read_concurrency, true}]),
     persistent_term:put(?SECRET_KEY, crypto:strong_rand_bytes(?SECRET_BYTES)),
     _ = erlang:send_after(?SWEEP_MS, self(), sweep),
     {ok, #{}}.
@@ -171,6 +209,14 @@ handle_call({create, Label, Caps, NotAfter}, _From, State) ->
             expires_at => ExpiresAt
         }},
         State};
+handle_call({consume_token, TokenId, NotAfter}, _From, State) ->
+    %% `insert_new` is the whole mechanism: the first exchange wins and every
+    %% later one loses, atomically, without a read-then-write the second
+    %% request could interleave with.
+    case ets:insert_new(?SEEN_TABLE, {TokenId, NotAfter}) of
+        true -> {reply, ok, State};
+        false -> {reply, {error, replayed}, State}
+    end;
 handle_call({delete, Id}, _From, State) ->
     true = ets:delete(?TABLE, Id),
     {reply, ok, State};
@@ -207,9 +253,15 @@ handle_info(_Message, State) ->
 %% so that running it cannot also schedule another one.
 -spec sweep_expired() -> ok.
 sweep_expired() ->
+    Now = erlang:system_time(second),
     Removed = ets:select_delete(?TABLE, [
-        {{'_', '$1', '_', '_'}, [{'<', '$1', erlang:system_time(second)}], [true]}
+        {{'_', '$1', '_', '_'}, [{'<', '$1', Now}], [true]}
     ]),
+    %% A spent token past its own expiry can no longer be presented, so
+    %% remembering it buys nothing. Not logged: this is bookkeeping about
+    %% credentials that already died of old age, and a count of it would only
+    %% dilute the session sweep line that operators actually read.
+    _ = ets:select_delete(?SEEN_TABLE, [{{'_', '$1'}, [{'<', '$1', Now}], [true]}]),
     log_sweep(Removed).
 
 -spec lookup(binary()) -> {ok, session()} | {error, reason()}.
