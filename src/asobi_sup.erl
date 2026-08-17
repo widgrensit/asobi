@@ -103,12 +103,17 @@ dgram_link_children() ->
 %% The asobi_lua merge: asobi_lua used to be its own OTP application, whose
 %% start callback loaded the Lua game config and then started asobi_lua_sup.
 %% That application started AFTER asobi, so the config load landed after every
-%% asobi_sup child was already up - asobi_guest_reaper in particular reads
-%% `guest_auth` in start_link/0, and read it before asobi_lua_config could set
-%% it. Keeping these two entries last preserves that order exactly (core
-%% children -> config load -> Lua children) rather than quietly changing what
-%% the core sees at boot. Moving the load earlier is a real behaviour change
-%% and belongs in its own PR.
+%% asobi_sup child was already up. Keeping these two entries last preserves
+%% that order exactly (core children -> config load -> Lua children) rather
+%% than quietly changing what the core sees at boot.
+%%
+%% What still depends on the order, concretely: asobi_lua_config_watcher reads
+%% the mode registry in its own init/1 (via scan/0), so the load has to precede
+%% asobi_lua_sup. Nothing reads the auth posture at boot any more -
+%% asobi_guest_reaper reads it when a sweep runs (asobi#327), the guest
+%% controller per request - and since ADR 0011 the load cannot overwrite an
+%% operator's `guest_auth` at all, because it writes the script layer. Moving
+%% the load earlier is still a real behaviour change and belongs in its own PR.
 lua_game_config_spec() ->
     #{
         id => asobi_lua_config,

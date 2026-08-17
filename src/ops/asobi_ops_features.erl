@@ -20,6 +20,11 @@ needs to know whether Steam auth will work on this deployment, and "the module
 exists" does not answer that. Each entry is a name and a boolean only - never
 the configured value, which is usually a secret.
 
+A capability whose owning module already has the predicate calls it rather than
+re-deriving one here - `asobi_storage:enabled/0`, and `asobi_game_config:guest_auth/0`
+for the two-layer guest flag (ADR 0011), which `configured/1` cannot answer
+because it reports a key set to `false` as configured.
+
 `lua` is the exception and is a module check, because since the runtime merged
 into asobi there is nothing to configure: it is present in every stock release.
 It stays in the list so a console rendering against a stripped custom release
@@ -106,7 +111,7 @@ capabilities() ->
         #{name => Name, enabled => Enabled}
      || {Name, Enabled} <- lists:sort([
             {~"clustering", configured(cluster)},
-            {~"guest_auth", configured(guest_auth)},
+            {~"guest_auth", asobi_game_config:guest_auth()},
             {~"iap_apple", configured(apple_bundle_id)},
             {~"iap_google", configured(google_package_name)},
             {~"lua", module_available(asobi_lua_match)},

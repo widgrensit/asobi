@@ -8,8 +8,10 @@
 %% provider_metadata (see provider=guest metadata: salt/key_id/verifier/revoked,
 %% base64) - the secret itself is never stored or logged.
 %%
-%% Opt-in: disabled unless `guest_auth` is true AND a `guest_verifier_pepper`
-%% is configured; both missing/false fail closed. Upgrade to a real account:
+%% Opt-in: disabled unless `asobi_game_config:guest_auth/0` is true AND a
+%% `guest_verifier_pepper` is configured; both missing/false fail closed. The
+%% flag itself has two layers, the operator's `sys.config` key over the game's
+%% declaration (ADR 0011). Upgrade to a real account:
 %% POST /auth/guest/upgrade (username+password, revokes the device verifier) or
 %% the existing /auth/link path (OAuth). Guardian + beam-security-reviewer gate.
 %%
@@ -453,7 +455,7 @@ insert_identity(PlayerId, DeviceId, SecretBin) ->
 
 -spec guest_enabled() -> boolean().
 guest_enabled() ->
-    case application:get_env(asobi, guest_auth, false) of
+    case asobi_game_config:guest_auth() of
         true ->
             case pepper(current_key_id()) of
                 undefined ->

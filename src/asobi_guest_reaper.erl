@@ -170,7 +170,7 @@ schedule() ->
 
 -spec run_sweep() -> non_neg_integer().
 run_sweep() ->
-    GuestAuth = application:get_env(asobi, guest_auth, false),
+    GuestAuth = asobi_game_config:guest_auth(),
     case application:get_env(asobi, guest_reap_after, undefined) of
         Seconds when GuestAuth =:= true, is_integer(Seconds), Seconds > 0 ->
             Cutoff = subtract_seconds(erlang:universaltime(), Seconds),

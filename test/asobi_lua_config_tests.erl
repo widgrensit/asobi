@@ -91,6 +91,10 @@ config_test_() ->
         {"guest_auth truthy non-bool does not enable", fun guest_auth_truthy_nonbool_stays_off/0},
         {"guest_auth resets a stale true when a later bundle omits it",
             fun guest_auth_stale_true_is_reset/0},
+        {"an operator guest_auth survives a boot with no bundle at all",
+            fun operator_guest_auth_survives_a_bundleless_boot/0},
+        {"an operator guest_auth = false beats a bundle that declares true",
+            fun operator_guest_auth_false_beats_a_declaring_bundle/0},
         {"registration global sets the effective registration mode",
             fun registration_global_sets_mode/0},
         {"registration global is read from config.lua in multi-mode",
@@ -144,8 +148,12 @@ single_mode_minimal() ->
     ?assertEqual(2, maps:get(max_players, Mode)),
     cleanup_temp_dir(TmpDir).
 
+%% These assert through asobi_game_config:guest_auth/0 rather than the raw app
+%% env, the way the registration cases below assert through
+%% asobi_registration:mode/0: what a script declares is the script layer, and
+%% the effective flag is that layer composed with the operator's (ADR 0011).
 guest_auth_global_enables() ->
-    application:unset_env(asobi, guest_auth),
+    reset_guest_auth(),
     TmpDir = make_temp_dir(),
     ok = file:write_file(
         filename:join(TmpDir, "match.lua"),
@@ -153,21 +161,22 @@ guest_auth_global_enables() ->
     ),
     application:set_env(asobi, game_dir, TmpDir),
     ok = asobi_lua_config:maybe_load_game_config(),
-    ?assertEqual({ok, true}, application:get_env(asobi, guest_auth)),
-    application:unset_env(asobi, guest_auth),
+    ?assertEqual({ok, true}, application:get_env(asobi, script_guest_auth)),
+    ?assert(asobi_game_config:guest_auth()),
+    reset_guest_auth(),
     cleanup_temp_dir(TmpDir).
 
 guest_auth_absent_leaves_off() ->
-    application:unset_env(asobi, guest_auth),
+    reset_guest_auth(),
     TmpDir = make_temp_dir(),
     ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
     application:set_env(asobi, game_dir, TmpDir),
     ok = asobi_lua_config:maybe_load_game_config(),
-    ?assertNotEqual({ok, true}, application:get_env(asobi, guest_auth)),
+    ?assertNot(asobi_game_config:guest_auth()),
     cleanup_temp_dir(TmpDir).
 
 guest_auth_truthy_nonbool_stays_off() ->
-    application:unset_env(asobi, guest_auth),
+    reset_guest_auth(),
     TmpDir = make_temp_dir(),
     ok = file:write_file(
         filename:join(TmpDir, "match.lua"),
@@ -175,19 +184,63 @@ guest_auth_truthy_nonbool_stays_off() ->
     ),
     application:set_env(asobi, game_dir, TmpDir),
     ok = asobi_lua_config:maybe_load_game_config(),
-    ?assertNotEqual({ok, true}, application:get_env(asobi, guest_auth)),
-    application:unset_env(asobi, guest_auth),
+    ?assertNot(asobi_game_config:guest_auth()),
+    reset_guest_auth(),
     cleanup_temp_dir(TmpDir).
 
+%% The stale value a new bundle has to clear is the previous *bundle's*, so the
+%% reset lands in the script layer. Seed it there, not in the operator's key.
 guest_auth_stale_true_is_reset() ->
-    application:set_env(asobi, guest_auth, true),
+    reset_guest_auth(),
+    application:set_env(asobi, script_guest_auth, true),
     TmpDir = make_temp_dir(),
     ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
     application:set_env(asobi, game_dir, TmpDir),
     ok = asobi_lua_config:maybe_load_game_config(),
-    ?assertEqual({ok, false}, application:get_env(asobi, guest_auth)),
-    application:unset_env(asobi, guest_auth),
+    ?assertEqual({ok, false}, application:get_env(asobi, script_guest_auth)),
+    ?assertNot(asobi_game_config:guest_auth()),
+    reset_guest_auth(),
     cleanup_temp_dir(TmpDir).
+
+%% The reported bug: a release that embeds asobi as an Erlang library ships no
+%% Lua bundle, so this loader took the "no config script" branch and wrote the
+%% flag `false` straight over the operator's `{guest_auth, true}` - silently, on
+%% every boot, leaving POST /auth/guest answering 403 guest.disabled forever.
+%% The loader still writes that `false`, which is what resets a stale bundle,
+%% but it writes it to the script layer where the operator's key outranks it.
+operator_guest_auth_survives_a_bundleless_boot() ->
+    reset_guest_auth(),
+    application:set_env(asobi, guest_auth, true),
+    %% No config.lua and no match.lua, like a /app/game that does not exist.
+    TmpDir = make_temp_dir(),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, true}, application:get_env(asobi, guest_auth)),
+    ?assertEqual({ok, false}, application:get_env(asobi, script_guest_auth)),
+    ?assert(asobi_game_config:guest_auth()),
+    reset_guest_auth(),
+    cleanup_temp_dir(TmpDir).
+
+%% The other direction, and the half that keeps ADR 0004's trust boundary: a
+%% bundle cannot open an unauthenticated endpoint on a deployment that said no.
+operator_guest_auth_false_beats_a_declaring_bundle() ->
+    reset_guest_auth(),
+    application:set_env(asobi, guest_auth, false),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nguest_auth = true\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, true}, application:get_env(asobi, script_guest_auth)),
+    ?assertNot(asobi_game_config:guest_auth()),
+    reset_guest_auth(),
+    cleanup_temp_dir(TmpDir).
+
+reset_guest_auth() ->
+    application:unset_env(asobi, guest_auth),
+    application:unset_env(asobi, script_guest_auth).
 
 %% asobi_lua#122: an engine-hosted game has no sys.config, so a posture it
 %% cannot declare is a posture it never gets. Assert the effective mode
@@ -919,7 +972,10 @@ teardown_modes() ->
 
 reset_modes() ->
     application:set_env(asobi, game_modes, #{}),
-    application:set_env(asobi, script_game_modes, #{}).
+    application:set_env(asobi, script_game_modes, #{}),
+    %% Both auth layers too: the guest cases write these, and eunit runs every
+    %% module in one node, so a leftover `true` would decide a later assertion.
+    reset_guest_auth().
 
 -spec assert_luerl_state(dynamic()) -> dynamic().
 assert_luerl_state(St) when is_tuple(St), element(1, St) =:= luerl ->

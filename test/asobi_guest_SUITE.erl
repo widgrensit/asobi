@@ -41,24 +41,22 @@ all() ->
         a_failing_count_is_asked_once_per_ttl
     ].
 
-%% Set AFTER the app starts, not before. Booting asobi runs
-%% `asobi_lua_config:maybe_load_game_config/0`, and a node with no game bundle
-%% takes the `error` branch of `declared_config/1`, which writes
-%% `{guest_auth, false}` unconditionally - by design, so a stale `true` from a
-%% previous bundle cannot survive a reload. A `set_env` before the start is
-%% therefore overwritten during it, guest auth is off for the whole suite, and
-%% every create returns 403 `guest.disabled`.
+%% Set BEFORE the app starts, which is the deployment this suite represents: an
+%% operator with `{guest_auth, true}` in sys.config and no Lua bundle at all.
 %%
-%% Setting it afterwards is safe because nothing here is read at boot:
-%% `asobi_guest_controller:guest_enabled/0` reads both keys per request, and the
-%% reaper is an unconditional child that reads `guest_reap_after` at sweep time
-%% (asobi#327).
+%% That ordering is itself the regression test. Until ADR 0011 the flag was a
+%% single key: booting asobi runs `asobi_lua_config:maybe_load_game_config/0`,
+%% a node with no game bundle takes the `error` branch of `declared_config/1`,
+%% and the `{guest_auth, false}` it derives was written straight over whatever
+%% the operator had set. These three set_env calls had to run after the start to
+%% survive at all. The flag now has an operator layer over a script layer, the
+%% loader writes only the script layer, and if that ever regresses every case
+%% here fails with 403 `guest.disabled`.
 init_per_suite(Config0) ->
-    Config = asobi_test_helpers:start(Config0),
     application:set_env(asobi, guest_auth, true),
     application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
     application:set_env(asobi, guest_reap_after, 1),
-    Config.
+    asobi_test_helpers:start(Config0).
 
 end_per_suite(Config) ->
     Config.

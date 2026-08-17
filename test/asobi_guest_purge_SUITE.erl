@@ -35,9 +35,9 @@ all() ->
         the_cohort_size_has_to_be_echoed_back
     ].
 
-%% Guest auth is set after the app starts, for the reason `asobi_guest_SUITE`
-%% documents at length: booting with no game bundle writes `guest_auth = false`
-%% unconditionally, so anything set before the start is overwritten during it.
+%% Guest auth is set before the app starts, the way an operator's sys.config
+%% would have it - see `asobi_guest_SUITE` for why that ordering is the
+%% regression test for the boot-time clobber (ADR 0011).
 %%
 %% `guest_reap_after` is deliberately NOT set. This is the on-demand half of
 %% retention, and it has to work on a deployment that never configured the
@@ -45,11 +45,10 @@ all() ->
 %% first place. A stray background sweep would also delete the fixtures out
 %% from under these tests and make them pass for the wrong reason.
 init_per_suite(Config0) ->
-    Config = asobi_test_helpers:start(Config0),
     application:set_env(asobi, guest_auth, true),
     application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
     application:unset_env(asobi, guest_reap_after),
-    Config.
+    asobi_test_helpers:start(Config0).
 
 end_per_suite(Config) ->
     Config.

@@ -687,6 +687,38 @@ features_capability_reflects_configuration_test() ->
         end
     end.
 
+%% guest_auth is a two-layer flag, so the capability goes through
+%% asobi_game_config:guest_auth/0 rather than "is the key set" - which reported
+%% `true` for a key set to `false`, and the boot-time config load set exactly
+%% that on every node without a Lua bundle (ADR 0011).
+features_guest_auth_capability_reads_both_layers_test() ->
+    Saved = [{K, application:get_env(asobi, K)} || K <- [guest_auth, script_guest_auth]],
+    try
+        [application:unset_env(asobi, K) || K <- [guest_auth, script_guest_auth]],
+        ?assertEqual(false, capability_enabled(~"guest_auth")),
+
+        %% The game's own declaration is enough.
+        application:set_env(asobi, script_guest_auth, true),
+        ?assertEqual(true, capability_enabled(~"guest_auth")),
+
+        %% An operator that pinned it off is reported off, not "configured".
+        application:set_env(asobi, guest_auth, false),
+        ?assertEqual(false, capability_enabled(~"guest_auth")),
+
+        %% And an operator with no bundle at all is reported on.
+        application:unset_env(asobi, script_guest_auth),
+        application:set_env(asobi, guest_auth, true),
+        ?assertEqual(true, capability_enabled(~"guest_auth"))
+    after
+        [
+            case V of
+                {ok, Value} -> application:set_env(asobi, K, Value);
+                undefined -> application:unset_env(asobi, K)
+            end
+         || {K, V} <- Saved
+        ]
+    end.
+
 %% Storage is on by default (asobi_storage:enabled/0), unlike the configured
 %% capabilities above which are off until set. `false` is the only value that
 %% reports it disabled.

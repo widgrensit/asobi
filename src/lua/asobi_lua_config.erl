@@ -36,7 +36,7 @@ game_type      = "world"                    -- optional, "match" (default) or "w
 listed         = true                       -- optional, browsable via match.list / world.list (matches default false, worlds true)
 quick_play     = true                       -- optional, reachable via world.find_or_create (default true)
 state_strategy = "shared"                   -- optional, "shared" picks asobi_lua_match_shared (encode-once broadcast)
-guest_auth     = true                       -- optional, offer anonymous no-account play (needs an operator pepper; ADR 0004)
+guest_auth     = true                       -- optional, offer anonymous no-account play (needs an operator pepper; ADR 0004. Operator sys.config wins)
 registration   = "closed"                   -- optional, "open" | "oauth_only" | "closed" (operator sys.config wins)
 
 -- World mode config (large session games, game_type = "world"):
@@ -61,7 +61,11 @@ which uses the `asobi_lua_match` bridge (tick/1 + wrapped-state callbacks).
 `guest_auth` and `registration` are read from `match.lua` in single-mode and
 from `config.lua` (the manifest) in multi-mode. `guest_auth` only *declares*
 intent; guest auth is on iff the operator also supplies a >= 32-byte pepper
-(ADR 0004). `registration` declares a signup posture for a deployment that
+(ADR 0004). Like `registration`, it lands in a script layer that
+`asobi_game_config:guest_auth/0` reads only when the operator's `sys.config`
+leaves `guest_auth` unset, so an operator can turn anonymous play on for a
+release that ships no Lua at all, and off for one that does (ADR 0011).
+`registration` declares a signup posture for a deployment that
 states none: it lands in the script layer `asobi_registration` reads only when
 the operator's `sys.config` leaves `registration` unset, and an unrecognised
 value is logged and dropped rather than downgrading the posture.
@@ -99,7 +103,8 @@ maybe_load_game_config() ->
             asobi_game_config:apply_config(Declared#{modes => Modes});
         {error, _} = Err ->
             %% A broken bundle must still land its auth posture: leaving a stale
-            %% `true` behind is the one failure the loader cannot fail soft on.
+            %% `true` in the script layer behind is the one failure the loader
+            %% cannot fail soft on.
             ok = asobi_game_config:apply_config(Declared),
             Err
     end.
@@ -143,8 +148,10 @@ game_dir() ->
 %% global and hand it to core, which owns the flag; the operator still has to
 %% supply a >= 32-byte guest_verifier_pepper, so guest auth is on iff BOTH
 %% agree (ADR 0004). Best-effort: any error just leaves the flag at its `false`
-%% default. Shared with asobi_engine's bundle loader so managed cloud behaves
-%% the same.
+%% default. The write lands in the script layer, so an operator that sets
+%% `guest_auth` in sys.config overrides whatever the bundle declares, in both
+%% directions (ADR 0011). Shared with asobi_engine's bundle loader so managed
+%% cloud behaves the same.
 -spec apply_guest_auth(string() | binary()) -> ok.
 apply_guest_auth(GameDir) ->
     asobi_game_config:apply_config(
@@ -162,7 +169,9 @@ apply_registration_mode(GameDir) ->
     ).
 
 %% The whole config term the game's script declares. `guest_auth` is always
-%% present because a stale `true` from a previous bundle has to be reset;
+%% present because a stale `true` from a previous bundle has to be reset - that
+%% write lands in the script layer (`script_guest_auth`), so it resets what the
+%% previous bundle said and can never touch the operator's own key (ADR 0011).
 %% `registration` is present only when the script declares a recognised value,
 %% since an absent key is what leaves the operator's layer alone (ADR 0006).
 -spec declared_config(string() | binary()) -> asobi_game_config:config().

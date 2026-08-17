@@ -76,6 +76,9 @@ decode_secret_upper_bound_test() ->
 
 authenticate_disabled_returns_403_test() ->
     application:unset_env(asobi, guest_auth),
+    %% Both layers: eunit runs every module in one node, and asobi_lua_config_tests
+    %% writes the script layer, which would otherwise turn this deployment on.
+    application:unset_env(asobi, script_guest_auth),
     Req = fake_req(#{
         json => #{
             ~"device_id" => ~"dev-abc",

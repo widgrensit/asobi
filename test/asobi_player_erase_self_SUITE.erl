@@ -35,14 +35,12 @@ all() ->
         erase_takes_the_children_and_frees_the_device
     ].
 
-%% Guest auth is set after the app starts, for the reason asobi_guest_SUITE
-%% documents at length: booting asobi pins `guest_auth` to false when no game
-%% bundle is present, so a set_env before the start is overwritten during it.
+%% Operator-layer guest auth, set before the start the way a sys.config would
+%% have it - see asobi_guest_SUITE for why the ordering matters (ADR 0011).
 init_per_suite(Config0) ->
-    Config = asobi_test_helpers:start(Config0),
     application:set_env(asobi, guest_auth, true),
     application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
-    Config.
+    asobi_test_helpers:start(Config0).
 
 end_per_suite(Config) ->
     Config.

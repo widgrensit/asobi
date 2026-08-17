@@ -12,6 +12,9 @@ reaper_test_() ->
         {"starts even with guest_auth unset", fun starts_without_guest_auth/0},
         {"sweep is a no-op while guest auth is off", fun sweep_skipped_when_disabled/0},
         {"guest_auth set after start: a sweep queries", fun sweep_runs_when_enabled_later/0},
+        {"a script-declared flag runs a sweep too", fun sweep_runs_on_a_script_declared_flag/0},
+        {"an operator false stops a sweep the bundle asked for",
+            fun operator_false_stops_the_sweep/0},
         {"timer tick picks up a flag set after boot", fun timer_sweep_self_corrects/0},
         {"an installed extension erases before core deletes", fun extension_erases_first/0},
         {"a refusing extension leaves the player alone", fun refusing_extension_aborts_reap/0}
@@ -19,6 +22,7 @@ reaper_test_() ->
 
 setup() ->
     application:unset_env(asobi, guest_auth),
+    application:unset_env(asobi, script_guest_auth),
     application:set_env(asobi, guest_reap_after, 60),
     asobi_extensions:reset(),
     asobi_fixture_erase:reset(),
@@ -36,6 +40,7 @@ cleanup(_) ->
     asobi_fixture_erase:reset(),
     asobi_extensions:reset(),
     application:unset_env(asobi, guest_auth),
+    application:unset_env(asobi, script_guest_auth),
     application:unset_env(asobi, guest_reap_after),
     application:unset_env(asobi, guest_reap_interval_ms),
     ok.
@@ -54,6 +59,23 @@ sweep_runs_when_enabled_later() ->
     application:set_env(asobi, guest_auth, true),
     ?assertEqual({ok, 0}, asobi_guest_reaper:sweep_now()),
     ?assertEqual(1, meck:num_calls(asobi_repo, all, '_')).
+
+%% The reaper reads the composed flag, so a game that declares guest_auth in
+%% its Lua gets its guests reaped without the operator setting anything.
+sweep_runs_on_a_script_declared_flag() ->
+    {ok, _} = asobi_guest_reaper:start_link(),
+    application:set_env(asobi, script_guest_auth, true),
+    ?assertEqual({ok, 0}, asobi_guest_reaper:sweep_now()),
+    ?assertEqual(1, meck:num_calls(asobi_repo, all, '_')).
+
+%% And an operator that pinned guest auth off gets no sweep, whatever the
+%% bundle declared (ADR 0011).
+operator_false_stops_the_sweep() ->
+    {ok, _} = asobi_guest_reaper:start_link(),
+    application:set_env(asobi, script_guest_auth, true),
+    application:set_env(asobi, guest_auth, false),
+    ?assertEqual({ok, 0}, asobi_guest_reaper:sweep_now()),
+    ?assertEqual(0, meck:num_calls(asobi_repo, all, '_')).
 
 timer_sweep_self_corrects() ->
     application:set_env(asobi, guest_reap_interval_ms, 25),

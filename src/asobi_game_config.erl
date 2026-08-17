@@ -24,12 +24,21 @@ so neither source can clobber the other:
 layer on top. An operator mode therefore wins a name clash, and no bundle
 reload can redefine or drop it. Every reader goes through `modes/0`.
 
-## guest_auth is replaced, not merged
+## guest_auth is a second layer too
 
 `guest_auth` is the game's half of ADR 0004's two-key AND (the operator owns
-the pepper), so a declared value simply replaces the current flag. It is
-written before the modes so a reader waking on the mode change already sees
-the final auth posture.
+the pepper). A declared value replaces the script layer wholesale, in
+`script_guest_auth`, and never lands in `guest_auth` - the operator's key from
+`sys.config`. `guest_auth/0` composes the two the way `modes/0` does, except
+that the operator layer wins on key *presence* rather than on truth: an
+operator `false` pins guest auth off against a bundle that declares `true`, and
+an operator `true` survives a boot with no bundle at all. Before ADR 0011 there
+was no operator layer, and the loader's unconditional write meant a release
+embedding asobi with no Lua bundle had its `{guest_auth, true}` silently
+overwritten with `false` on every boot.
+
+It is written before the modes so a reader waking on the mode change already
+sees the final auth posture.
 
 ## registration is a second layer, like the modes
 
@@ -47,7 +56,7 @@ auth posture at runtime.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([apply_config/1, modes/0]).
+-export([apply_config/1, modes/0, guest_auth/0]).
 
 -type modes() :: #{binary() => map() | module()}.
 -type config() :: #{
@@ -63,6 +72,14 @@ auth posture at runtime.
 modes() ->
     maps:merge(env_modes(script_game_modes), env_modes(game_modes)).
 
+-doc "The effective guest-auth flag: the operator's key when set, else the script's.".
+-spec guest_auth() -> boolean().
+guest_auth() ->
+    case application:get_env(asobi, guest_auth) of
+        undefined -> application:get_env(asobi, script_guest_auth, false) =:= true;
+        {ok, Value} -> Value =:= true
+    end.
+
 -doc "Apply a declared game config. The only supported writer of these keys.".
 -spec apply_config(config()) -> ok.
 apply_config(Config) ->
@@ -72,7 +89,7 @@ apply_config(Config) ->
 
 -spec write_guest_auth(config()) -> ok.
 write_guest_auth(#{guest_auth := Declared}) when is_boolean(Declared) ->
-    application:set_env(asobi, guest_auth, Declared);
+    application:set_env(asobi, script_guest_auth, Declared);
 write_guest_auth(_) ->
     ok.
 
