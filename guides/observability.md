@@ -13,7 +13,7 @@ which is a different question with a different tool. See
 
 ## What you get
 
-- **40 telemetry events**, listed below. Stable names; the measurement and
+- **53 telemetry events**, listed below. Stable names; the measurement and
   metadata keys are documented per-event in `m:asobi_telemetry`.
 - **Structured JSON logs** on stdout, one object per line, via
   `nova_jsonlogger`. No configuration needed - a container log shipper reads
@@ -109,7 +109,7 @@ both are the kind of thing that is otherwise noticed a day later.
 
 ## The events
 
-Fifty-two, grouped by what they are about. Measurement and metadata keys
+Fifty-three, grouped by what they are about. Measurement and metadata keys
 are in `m:asobi_telemetry`, which is also the list `asobi_telemetry:events/0`
 returns - attach to that rather than restating the names.
 
@@ -127,6 +127,7 @@ asobi.dgram.input_undelivered    asobi.dgram.input_unknown
 asobi.dgram.input_undecodable    asobi.dgram.canary_missed
 asobi.dgram.link_up              asobi.dgram.link_closed
 asobi.dgram.link_error           asobi.dgram.pose_saturated
+asobi.wire.binary_refused
 ```
 
 The `asobi.dgram.*` events fire only on a node in the
@@ -158,6 +159,21 @@ that is `asobi.dgram.recv_failed` plus client-side telemetry.
 configured scale. Any sustained rate means the `scale` in
 [`dgram_pose`](configuration.md#describing-your-transform-fields) is wrong for
 this game's world size, and the fix is configuration rather than code.
+
+`asobi.wire.binary_refused` fires on the **engine**, not the gateway, and counts
+`world.tick` frames the binary encoder could not produce, which are sent as text
+instead. One is not a fault - a client that
+negotiated binary still handles text - but a sustained rate is, and it is a
+quiet one: an entity introduced by a text frame carries no slot, so it stays
+unbound on every binary client and asobi withholds its pose datagrams rather
+than send records that would be dropped there. The entity keeps moving on
+`world.tick` and loses only the UDP fast path. `reason` says which:
+`dict_too_large` for a frame past the 32 field names the dictionary can index
+(count the fields on your widest entity), `unencodable_field` for a list or a
+nested map where the wire carries scalars, `bad_field_name` for a field name
+that is neither an atom nor a binary, and `no_slot` for a slot map that has
+drifted from the baseline. The matching log line names the zone and the widest
+entity, throttled to one per zone per minute.
 
 `asobi.dgram.link_error` with `reason = bad_auth` is worth an alert. The engine
 link is loopback-only, so a failed authentication is either a misconfigured
