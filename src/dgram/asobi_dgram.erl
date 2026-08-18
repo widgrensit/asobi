@@ -247,12 +247,15 @@ decode_uplink(Bin) ->
     non_neg_integer()
 ) -> binary().
 encode_uplink(#{opcode := Opcode, conn_id := ConnId, cseq := CSeq} = Frame, KUp, PadTo) ->
-    Body = maps:get(body, Frame, <<>>),
+    %% The padding goes INSIDE the MAC's coverage, not after it. Appended after
+    %% the tag it would both break verification - the last 16 bytes would be
+    %% padding rather than the tag - and let an attacker strip it back down to
+    %% recover the amplification ratio the padding exists to remove.
+    Body = pad(maps:get(body, Frame, <<>>), PadTo - ?PREFIX_BYTES - ?CSEQ_BYTES - ?MAC_BYTES),
     Signed =
         <<?MAGIC:8, ?VERSION:8, (op_byte(Opcode)):8, 0:8, ConnId:32/little, 0:64, CSeq:64/little,
             Body/binary>>,
-    Datagram = <<Signed/binary, (mac(Signed, KUp))/binary>>,
-    pad(Datagram, PadTo).
+    <<Signed/binary, (mac(Signed, KUp))/binary>>.
 
 -doc """
 Decodes a downlink datagram.
@@ -362,7 +365,7 @@ popcount(Byte) -> popcount(Byte, 0).
 popcount(0, N) -> N;
 popcount(B, N) -> popcount(B bsr 1, N + (B band 1)).
 
-pad(Bin, PadTo) when byte_size(Bin) >= PadTo ->
+pad(Bin, PadTo) when PadTo =< 0; byte_size(Bin) >= PadTo ->
     Bin;
 pad(Bin, PadTo) ->
     <<Bin/binary, 0:((PadTo - byte_size(Bin)) * 8)>>.

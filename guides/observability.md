@@ -109,7 +109,7 @@ both are the kind of thing that is otherwise noticed a day later.
 
 ## The events
 
-Forty-one, grouped by what they are about. Measurement and metadata keys
+Forty-five, grouped by what they are about. Measurement and metadata keys
 are in `m:asobi_telemetry`, which is also the list `asobi_telemetry:events/0`
 returns - attach to that rather than restating the names.
 
@@ -121,12 +121,29 @@ asobi.ws.connected               asobi.ws.disconnected
 asobi.ws.message_in              asobi.ws.message_out
 asobi.ws.connect_rate_limited    asobi.ws.idle_auth_timeout
 asobi.ws.origin_rejected         asobi.ws.legacy_input_unwrap
-asobi.dgram.bindings_expired
+asobi.dgram.bindings_expired     asobi.dgram.dropped
+asobi.dgram.send_failed          asobi.dgram.recv_failed
+asobi.dgram.input_undelivered
 ```
 
-`asobi.dgram.bindings_expired` fires only on a node in the
-[`dgram_gw` role](configuration.md#the-datagram-gateway-role), once per sweep,
-counting datagram credentials that were minted and never used. A rising count is
+The `asobi.dgram.*` events fire only on a node in the
+[`dgram_gw` role](configuration.md#the-datagram-gateway-role).
+
+`asobi.dgram.dropped` is the one to build a dashboard on, and `gate` is why it is
+one event rather than seven. Nothing is ever sent back to a rejected datagram, so
+this counter is the only evidence a rejection happened at all.
+
+| `gate` rising | What it means |
+| --- | --- |
+| `parse` alone | Someone is pointing a scanner at the port. Uninteresting. |
+| `parse` + `ingress_global` | A volumetric flood. The global tier is doing its job. |
+| `unknown_conn` | Guessing at `conn_id`s, which is a 32-bit space. |
+| `mac` | **Wake up.** Someone has a live `conn_id` and not the key. |
+| `ingress` / `input` | One connection over its budget: a broken client, usually. |
+| `binding` | Replays or a flapping path. Check `reason`. |
+
+`asobi.dgram.bindings_expired` fires once per sweep, counting datagram
+credentials that were minted and never used. A rising count is
 a client-side fault rather than an attack - minting costs an authenticated
 WebSocket, so this is clients opening the plane and walking away, not anyone
 getting something for free.

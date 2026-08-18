@@ -21,6 +21,10 @@
     ws_message_out/1,
     ws_connect_rate_limited/1,
     dgram_bindings_expired/1,
+    dgram_dropped/2,
+    dgram_send_failed/1,
+    dgram_recv_failed/1,
+    dgram_input_undelivered/2,
     join_rate_limited/1,
     rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
@@ -80,6 +84,10 @@ events() ->
         [asobi, ws, message_in],
         [asobi, ws, message_out],
         [asobi, dgram, bindings_expired],
+        [asobi, dgram, dropped],
+        [asobi, dgram, send_failed],
+        [asobi, dgram, recv_failed],
+        [asobi, dgram, input_undelivered],
         [asobi, ws, connect_rate_limited],
         [asobi, ws, idle_auth_timeout],
         [asobi, ws, origin_rejected],
@@ -304,6 +312,56 @@ join_rate_limited(PlayerId) ->
     telemetry:execute(
         [asobi, join, rate_limited], #{count => 1}, #{player_id => PlayerId}
     ).
+
+-doc """
+A receiver socket returned an error other than a timeout or a close.
+
+The loop continues regardless: one bad read must not take a shard down, because
+a shard restarting rebinds its socket and the kernel reshuffles every flow that
+was landing on it.
+""".
+-spec dgram_recv_failed(term()) -> ok.
+dgram_recv_failed(Reason) ->
+    telemetry:execute([asobi, dgram, recv_failed], #{count => 1}, #{reason => Reason}).
+
+-doc """
+A verified uplink input had nowhere to go.
+
+Fires once per input while the gateway-to-engine seam is unbuilt. Any non-zero
+rate here means clients are successfully using the datagram uplink and the engine
+is not receiving it, which is the one failure that would otherwise look exactly
+like a quiet plane.
+""".
+-spec dgram_input_undelivered(non_neg_integer(), non_neg_integer()) -> ok.
+dgram_input_undelivered(ConnId, Bytes) ->
+    telemetry:execute(
+        [asobi, dgram, input_undelivered], #{count => 1, bytes => Bytes}, #{conn_id => ConnId}
+    ).
+
+-doc """
+A downlink datagram could not be handed to the kernel.
+
+Almost always local buffer pressure rather than anything about the network: a
+connectionless socket has no delivery to fail. Nothing is retried, because the
+next pose supersedes this one. Worth an alert only if it is sustained, which
+means the gateway is producing faster than the host can send.
+""".
+-spec dgram_send_failed(term()) -> ok.
+dgram_send_failed(Reason) ->
+    telemetry:execute([asobi, dgram, send_failed], #{count => 1}, #{reason => Reason}).
+
+-doc """
+A datagram was dropped, labelled by which gate rejected it.
+
+`gate` is the interesting dimension and the reason this is one event rather than
+seven. `parse` and `ingress_global` rising together is a flood; `mac` rising
+alone means someone has a live `conn_id` and not the key, which is the one shape
+worth waking up for. Nothing is ever sent back, so this counter is the only
+evidence a rejection happened at all.
+""".
+-spec dgram_dropped(atom(), atom()) -> ok.
+dgram_dropped(Gate, Reason) ->
+    telemetry:execute([asobi, dgram, dropped], #{count => 1}, #{gate => Gate, reason => Reason}).
 
 -doc """
 Datagram bindings swept for expiry, per sweep.

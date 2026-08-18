@@ -16,10 +16,10 @@ this gets exactly what it had.
 ## Shape
 
     asobi_dgram_gw_sup  (one_for_one)
+      asobi_dgram_limits    the rate-limit tiers, registered once
       asobi_dgram_table     the binding table's owner
       asobi_dgram_sender    owns the send socket
       asobi_dgram_rx_sup    one receiver per SO_REUSEPORT shard
-      asobi_dgram_canary    readiness, by real loopback exchange
 
 `one_for_one` and not `rest_for_one`: a receiver crashing must not take down the
 binding table, because the table holds every live connection's credential and
@@ -77,9 +77,44 @@ start_link() ->
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 10, period => 60},
-    {ok, {SupFlags, [table_spec()]}}.
+    %% Order matters on the way up and is the reason this is a list rather than
+    %% a set: limiters before anything can be received, the table before a
+    %% datagram can name a conn_id, and the sender before a receiver can need to
+    %% answer one. The receivers come last because they are the only child that
+    %% can be handed work by someone outside the node.
+    {ok, {SupFlags, [limits_spec(), table_spec(), sender_spec(), rx_sup_spec()]}}.
 
 %% --- Internal ---
+
+%% Registered before anything can receive a packet. `temporary` and `ignore`ing:
+%% seki owns the limiters' own processes, so this child exists to run the
+%% registration once in the right order, not to be supervised.
+limits_spec() ->
+    #{
+        id => asobi_dgram_limits,
+        start => {erlang, apply, [fun asobi_dgram_limits:register/0, []]},
+        restart => temporary
+    }.
+
+sender_spec() ->
+    #{
+        id => asobi_dgram_sender,
+        start => {asobi_dgram_sender, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [asobi_dgram_sender]
+    }.
+
+rx_sup_spec() ->
+    #{
+        id => asobi_dgram_rx_sup,
+        start => {asobi_dgram_rx_sup, start_link, []},
+        restart => permanent,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [asobi_dgram_rx_sup]
+    }.
 
 table_spec() ->
     #{
