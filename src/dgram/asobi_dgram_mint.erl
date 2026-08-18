@@ -153,13 +153,16 @@ handle_call({open, PlayerId, SessionPid}, _From, #{by_conn := ByConn, epoch := E
                 epoch => Epoch,
                 expires_at => ExpiresAt
             },
-            Reply = #{
-                conn_id => ConnId,
-                kup => base64:encode(KUp),
-                epoch => Epoch,
-                endpoint => endpoint(),
-                expires_in => ?TTL_MS div 1000
-            },
+            Reply = maps:merge(
+                #{
+                    conn_id => ConnId,
+                    kup => base64:encode(KUp),
+                    epoch => Epoch,
+                    endpoint => endpoint(),
+                    expires_in => ?TTL_MS div 1000
+                },
+                pose_manifest()
+            ),
             true = ets:insert(?MIRROR, {PlayerId, ConnId}),
             {reply, {ok, Reply}, State#{by_conn => ByConn#{ConnId => Mint}}};
         {error, Reason} ->
@@ -204,6 +207,21 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 %% --- Internal ---
+
+%% The transform field list and its scales, delivered once here rather than on
+%% every datagram. That is what lets a pose record be a fixed layout with no field
+%% names in it at all, and it is why the decoder on the client is a byte loop
+%% rather than a parser.
+pose_manifest() ->
+    case asobi_dgram_pose:manifest() of
+        disabled ->
+            #{fields => [], period_ticks => 0};
+        {ok, #{fields := Fields, period_ticks := Period}} ->
+            #{
+                fields => [#{name => N, scale => S} || #{name := N, scale := S} <- Fields],
+                period_ticks => Period
+            }
+    end.
 
 %% What the client is told to send to. In the mint response rather than resolved
 %% by the client, which is what makes the plane independent of DNS and of SNI and
