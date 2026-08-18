@@ -28,6 +28,7 @@
     dgram_input_unknown/1,
     dgram_input_undecodable/1,
     dgram_canary_missed/2,
+    dgram_pose_saturated/1,
     dgram_link_up/0,
     dgram_link_closed/0,
     dgram_link_error/1,
@@ -97,6 +98,7 @@ events() ->
         [asobi, dgram, input_unknown],
         [asobi, dgram, input_undecodable],
         [asobi, dgram, canary_missed],
+        [asobi, dgram, pose_saturated],
         [asobi, dgram, link_up],
         [asobi, dgram, link_closed],
         [asobi, dgram, link_error],
@@ -335,6 +337,18 @@ was landing on it.
 -spec dgram_recv_failed(term()) -> ok.
 dgram_recv_failed(Reason) ->
     telemetry:execute([asobi, dgram, recv_failed], #{count => 1}, #{reason => Reason}).
+
+-doc """
+Transform values that did not fit their configured scale, per tick.
+
+Saturated to the edge of the range rather than wrapped, so an entity pinned at
+the boundary is what a player sees instead of one teleporting across the world.
+Any sustained rate means the scale in `dgram_pose` is wrong for this game's world
+size, and the fix is configuration rather than code.
+""".
+-spec dgram_pose_saturated(non_neg_integer()) -> ok.
+dgram_pose_saturated(Count) ->
+    telemetry:execute([asobi, dgram, pose_saturated], #{count => Count}, #{}).
 
 -doc "An engine attached to the gateway's link and authenticated.".
 -spec dgram_link_up() -> ok.

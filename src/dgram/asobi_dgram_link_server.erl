@@ -254,12 +254,28 @@ apply_message({ok, {register, Binding}}) ->
     });
 apply_message({ok, {unregister, ConnId}}) ->
     asobi_dgram_table:unregister(ConnId);
+apply_message({ok, {pose, SharedBody, ConnIds}}) ->
+    %% The fan-out happens here rather than in the engine, which is the whole
+    %% reason the engine hands over one body and a list: the prefix is built per
+    %% subscriber and the body is referenced, never copied.
+    asobi_dgram_sender:send(pose, SharedBody, targets(ConnIds, []));
 apply_message({ok, {input, _ConnId, _Body}}) ->
     %% Wrong direction. The engine never sends input to the gateway, so this is a
     %% confused or hostile peer either way.
     asobi_telemetry:dgram_link_error(unexpected_input);
 apply_message({error, Reason}) ->
     asobi_telemetry:dgram_link_error(Reason).
+
+%% Only connections that have completed a challenge get a datagram. One that has
+%% not is skipped in silence: it is mid-handshake, not broken, and the next pose
+%% is 50ms away.
+targets([], Acc) ->
+    lists:reverse(Acc);
+targets([ConnId | Rest], Acc) ->
+    case asobi_dgram_table:sendable(ConnId) of
+        {ok, Handle} -> targets(Rest, [{ConnId, 0, Handle} | Acc]);
+        error -> targets(Rest, Acc)
+    end.
 
 close(undefined) -> ok;
 close(Socket) -> gen_tcp:close(Socket).

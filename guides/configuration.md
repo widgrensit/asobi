@@ -360,6 +360,46 @@ and is the wrong one: dist is all-or-nothing, so a node that can reach another c
 call any function in it. Handing that to the process parsing packets from the
 internet gives back most of what the two-role split is for.
 
+### Describing your transform fields
+
+Nothing is sent on the plane until you say what a position *is*. There is no
+default and that is deliberate: guessing `x` and `y` at some scale would silently
+pick a precision for a world that might be a thousand times larger.
+
+```erlang
+{dgram_pose, #{
+    period_ticks => 20,
+    fields => [
+        #{name => ~"x",  scale => 100},
+        #{name => ~"y",  scale => 100},
+        #{name => ~"vx", scale => 100},
+        #{name => ~"vy", scale => 100}
+    ]
+}}
+```
+
+The list is the canonical order, so a client decodes a fixed layout and the wire
+carries no field names at all. **At most eight fields** - the per-record bitmask
+is one byte - and a ninth disables the plane rather than dropping a field
+silently.
+
+`scale` converts to the `int16` the wire carries: `100` gives two decimal places
+and a range of about +/-327 world units. A bigger world needs a smaller scale and
+coarser steps, which is a trade only your game can make. **A value outside the
+range saturates and is counted** on `asobi.dgram.pose_saturated`, never wrapped -
+wrapping would teleport an entity across the world, which looks like a game bug,
+where saturation looks like what it is.
+
+`period_ticks` is the axial refresh. An entity that stops moving stops being
+mentioned, so a client that missed its last update would keep it wrong forever;
+each tick additionally re-sends every entity whose slot falls in that tick's
+slice, so at 20 ticks nothing is stale for more than a second. It costs no acks,
+no per-client state and no extra encode.
+
+Only these fields travel on the plane. Everything else about an entity -
+including its creation and removal - rides `world.tick` on the WebSocket, where
+it is ordered and cannot be lost.
+
 ### Clients ask for it over the WebSocket
 
 A client mints with `rpc.call` on the method `asobi.datagram.open`, which is a

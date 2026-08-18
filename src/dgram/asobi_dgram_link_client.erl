@@ -26,7 +26,7 @@ TCP.
 
 -behaviour(gen_server).
 
--export([start_link/0, enabled/0, register/1, unregister/1, connected/0]).
+-export([start_link/0, enabled/0, register/1, unregister/1, pose/2, connected/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(RECONNECT_MS, 2_000).
@@ -68,6 +68,23 @@ register(Binding) ->
     catch
         _:Reason -> {error, Reason}
     end.
+
+-doc """
+Sends one zone's pose body and the connections it goes to.
+
+Fire and forget, and lossy on purpose: this is called on a zone's tick budget and
+the next pose is 50ms behind it. Blocking a zone on a socket to deliver one
+movement frame is how a slow gateway becomes a stalled simulation.
+""".
+-spec pose(binary(), [non_neg_integer()]) -> ok.
+pose(SharedBody, ConnIds) ->
+    _ =
+        try
+            gen_server:cast(?MODULE, {send, {pose, SharedBody, ConnIds}})
+        catch
+            _:_ -> ok
+        end,
+    ok.
 
 -doc "Revokes a binding. Fire and forget: see the module doc.".
 -spec unregister(non_neg_integer()) -> ok.

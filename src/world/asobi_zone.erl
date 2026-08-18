@@ -240,6 +240,15 @@ init(Config) ->
             %% asobi_ws_handler:world_input_seq/1: at 20 Hz that is 14 million
             %% years, so there is no wrap rule to get wrong.
             wire_seq => 0,
+            %% Read once at init, like binary_wire. `disabled` unless a game has
+            %% described its transform fields, because guessing a scale for a
+            %% world of unknown size is worse than not doing this at all.
+            pose_manifest => asobi_dgram_pose:manifest(),
+            %% Counts pose datagrams this zone has emitted, so a client can tell
+            %% a lost one from a quiet tick. Independent of wire_seq: the two
+            %% carriers lose frames independently and sharing a counter would
+            %% make each look like it had gaps the other caused.
+            pose_seq => 0,
             %% Read once at init rather than per tick. A zone that started under
             %% one setting keeps it for its life, which is what makes the two
             %% wires consistent for every subscriber of that zone.
@@ -755,15 +764,19 @@ do_tick(
             0 ->
                 Deltas = compute_deltas(BroadcastEntities, Entities4),
                 {FrameSlots, Slots1} = advance_slots(
-                    maps:get(binary_wire, State),
+                    maps:get(binary_wire, State) orelse pose_enabled(State),
                     BroadcastEntities,
                     Entities4,
                     maps:get(slots, State)
                 ),
                 WireSeq1 = broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs, FrameSlots),
                 broadcast_acks(TickN, PlayerAck1, Subs),
+                PoseSeq1 = broadcast_pose(Coords, TickN, State, Deltas, Entities4, Slots1, Subs),
                 State#{
-                    broadcast_entities => Entities4, wire_seq => WireSeq1, slots => Slots1
+                    broadcast_entities => Entities4,
+                    wire_seq => WireSeq1,
+                    slots => Slots1,
+                    pose_seq => PoseSeq1
                 };
             _ ->
                 State
@@ -921,6 +934,82 @@ broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs, FrameSlots) ->
         Subs
     ),
     Seq.
+
+%% Slots are needed by the binary wire AND by the pose plane, and they are the
+%% same slots: two allocations for one zone would eventually disagree about which
+%% entity holds a slot, which is the class of defect ADR 0011 exists to close.
+-spec pose_enabled(map()) -> boolean().
+pose_enabled(#{pose_manifest := {ok, _}}) -> true;
+pose_enabled(_State) -> false.
+
+%% The datagram plane's half of the tick. Returns the zone's new pose sequence.
+%%
+%% Absolute transform state only: a pose can never create or remove an entity,
+%% and structurally has nowhere to say so. Creation and removal ride the reliable
+%% ordered world.tick and only that.
+-spec broadcast_pose(
+    {integer(), integer()},
+    non_neg_integer(),
+    map(),
+    [term()],
+    map(),
+    asobi_wire_slots:slots(),
+    map()
+) -> non_neg_integer().
+broadcast_pose(Coords, TickN, State, Deltas, Entities, Slots, Subs) ->
+    PoseSeq = maps:get(pose_seq, State),
+    case maps:get(pose_manifest, State) of
+        disabled ->
+            PoseSeq;
+        {ok, Manifest} ->
+            case pose_targets(Subs) of
+                [] ->
+                    %% Nobody on the plane. Building a body for no one is the one
+                    %% cost this whole path can trivially avoid.
+                    PoseSeq;
+                ConnIds ->
+                    emit_pose(Coords, TickN, PoseSeq, Manifest, Deltas, Entities, Slots, ConnIds)
+            end
+    end.
+
+emit_pose(Coords, TickN, PoseSeq, Manifest, Deltas, Entities, Slots, ConnIds) ->
+    Changed = changed_fields(Deltas, #{}),
+    {Records, Saturated} = asobi_dgram_pose:records(Changed, Entities, Slots, Manifest, TickN),
+    _ =
+        case Saturated of
+            0 -> ok;
+            _ -> asobi_telemetry:dgram_pose_saturated(Saturated)
+        end,
+    case Records of
+        [] ->
+            PoseSeq;
+        _ ->
+            Bodies = asobi_dgram:pack_pose(
+                TickN, PoseSeq, Coords, asobi_dgram_pose:fieldmask(Manifest), 0, Records
+            ),
+            _ = [asobi_dgram_link_client:pose(B, ConnIds) || B <- Bodies],
+            PoseSeq + length(Bodies)
+    end.
+
+%% Which transform fields moved, from the delta list the JSON wire already
+%% computed. Reusing it is what keeps the two carriers anchored to one baseline:
+%% a second diff would drift the moment either changed.
+changed_fields([], Acc) ->
+    Acc;
+changed_fields([{updated, Id, Diff} | Rest], Acc) ->
+    changed_fields(Rest, Acc#{Id => maps:keys(Diff)});
+changed_fields([{added, Id, Full} | Rest], Acc) ->
+    changed_fields(Rest, Acc#{Id => maps:keys(Full)});
+changed_fields([_Removed | Rest], Acc) ->
+    %% A removal has no pose. The client learns it from world.tick, where it is
+    %% ordered and cannot be lost.
+    changed_fields(Rest, Acc).
+
+%% Subscribers that hold a datagram credential. Read from the mint's ETS mirror
+%% rather than by asking it, because this runs once per subscriber per broadcast
+%% tick and a gen_server call there would put one process in every zone's path.
+pose_targets(Subs) ->
+    [C || PlayerId := _ <- Subs, {ok, C} <- [asobi_dgram_mint:conn_of(PlayerId)]].
 
 %% One shared buffer per wire in use, never one per subscriber - that is the
 %% whole point of ADR 0001's encode-once fan-out and the reason both buffers

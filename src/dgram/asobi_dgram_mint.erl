@@ -29,13 +29,20 @@ metric labels.
 
 -behaviour(gen_server).
 
--export([start_link/0, open/2, close/1, player_of/1]).
+-export([start_link/0, open/2, close/1, player_of/1, conn_of/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 %% How long a mint is good for if the client never opens the plane. Long enough
 %% for a slow client to finish probing, short enough that a client that mints and
 %% walks away does not hold a gateway table slot all session.
 -define(TTL_MS, 60_000).
+
+%% A read-only mirror of player_id -> conn_id, for the one caller that cannot
+%% afford a gen_server call: a zone resolving its subscribers on every broadcast
+%% tick. This is the escape hatch asobi_dgram_table's own doc names - a mirror of
+%% a lookup, written only by the owner, never a move of the state machine into
+%% ETS.
+-define(MIRROR, asobi_dgram_conns).
 
 -type mint() :: #{
     conn_id := non_neg_integer(),
@@ -74,6 +81,23 @@ open(PlayerId, SessionPid) ->
 -spec close(non_neg_integer()) -> ok.
 close(ConnId) -> gen_server:cast(?MODULE, {close, ConnId}).
 
+-doc """
+This player's `conn_id`, or `error`.
+
+Reads the mirror directly, with no message to this process at all: a zone calls
+it once per subscriber per broadcast tick, and a gen_server call there would put
+one process in the path of every zone's tick.
+""".
+-spec conn_of(binary()) -> {ok, non_neg_integer()} | error.
+conn_of(PlayerId) ->
+    try ets:lookup(?MIRROR, PlayerId) of
+        [{_, ConnId}] when is_integer(ConnId) -> {ok, ConnId};
+        _ -> error
+    catch
+        %% No mirror: the plane is not configured on this node.
+        error:badarg -> error
+    end.
+
 -doc "Who holds this `conn_id`, for the uplink. Reads the engine's own record.".
 -spec player_of(non_neg_integer()) -> {ok, mint()} | error.
 player_of(ConnId) ->
@@ -98,6 +122,7 @@ player_of(ConnId) ->
 
 -spec init([]) -> {ok, state()}.
 init([]) ->
+    _ = ets:new(?MIRROR, [named_table, protected, {read_concurrency, true}]),
     _ = erlang:send_after(?TTL_MS, self(), sweep),
     %% The epoch changes every time this process starts, so a client holding a
     %% credential from before a restart is told to re-mint rather than being
@@ -135,6 +160,7 @@ handle_call({open, PlayerId, SessionPid}, _From, #{by_conn := ByConn, epoch := E
                 endpoint => endpoint(),
                 expires_in => ?TTL_MS div 1000
             },
+            true = ets:insert(?MIRROR, {PlayerId, ConnId}),
             {reply, {ok, Reply}, State#{by_conn => ByConn#{ConnId => Mint}}};
         {error, Reason} ->
             {reply, {error, Reason}, State}
@@ -160,6 +186,7 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast({close, non_neg_integer()}, state()) -> {noreply, state()}.
 handle_cast({close, ConnId}, #{by_conn := ByConn} = State) when is_integer(ConnId) ->
     ok = asobi_dgram_link_client:unregister(ConnId),
+    _ = forget(ConnId, ByConn),
     {noreply, State#{by_conn => maps:remove(ConnId, ByConn)}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -169,6 +196,9 @@ handle_info(sweep, #{by_conn := ByConn} = State) ->
     _ = erlang:send_after(?TTL_MS, self(), sweep),
     Now = erlang:system_time(millisecond),
     Live = #{C => M || C := #{expires_at := E} = M <- ByConn, E > Now},
+    %% The mirror is swept with the map it mirrors, in the same pass, so it can
+    %% never outlive the record it was derived from.
+    _ = [forget(C, ByConn) || C := _ <- maps:without(maps:keys(Live), ByConn)],
     {noreply, State#{by_conn => Live}};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -182,6 +212,20 @@ endpoint() ->
     case application:get_env(asobi, dgram_endpoint) of
         {ok, E} when is_binary(E) -> E;
         _ -> ~""
+    end.
+
+%% Deletes by player rather than by conn_id, and only when the mirror still points
+%% at THIS conn_id: a player who re-minted already overwrote the entry, and
+%% deleting it then would blank a live credential.
+forget(ConnId, ByConn) ->
+    case ByConn of
+        #{ConnId := #{player_id := PlayerId}} ->
+            case ets:lookup(?MIRROR, PlayerId) of
+                [{_, ConnId}] -> ets:delete(?MIRROR, PlayerId);
+                _ -> true
+            end;
+        _ ->
+            true
     end.
 
 rand_epoch() -> binary:decode_unsigned(crypto:strong_rand_bytes(2)).

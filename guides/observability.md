@@ -109,7 +109,7 @@ both are the kind of thing that is otherwise noticed a day later.
 
 ## The events
 
-Fifty-one, grouped by what they are about. Measurement and metadata keys
+Fifty-two, grouped by what they are about. Measurement and metadata keys
 are in `m:asobi_telemetry`, which is also the list `asobi_telemetry:events/0`
 returns - attach to that rather than restating the names.
 
@@ -126,7 +126,7 @@ asobi.dgram.send_failed          asobi.dgram.recv_failed
 asobi.dgram.input_undelivered    asobi.dgram.input_unknown
 asobi.dgram.input_undecodable    asobi.dgram.canary_missed
 asobi.dgram.link_up              asobi.dgram.link_closed
-asobi.dgram.link_error
+asobi.dgram.link_error           asobi.dgram.pose_saturated
 ```
 
 The `asobi.dgram.*` events fire only on a node in the
@@ -153,6 +153,11 @@ cover: `SO_REUSEPORT` means the kernel chooses which shard receives the probe, s
 a healthy canary proves **at least one** shard is alive, not all of them. A single
 wedged shard shows up as a fraction of players timing out, and the place to catch
 that is `asobi.dgram.recv_failed` plus client-side telemetry.
+
+`asobi.dgram.pose_saturated` counts transform values that did not fit their
+configured scale. Any sustained rate means the `scale` in
+[`dgram_pose`](configuration.md#describing-your-transform-fields) is wrong for
+this game's world size, and the fix is configuration rather than code.
 
 `asobi.dgram.link_error` with `reason = bad_auth` is worth an alert. The engine
 link is loopback-only, so a failed authentication is either a misconfigured

@@ -22,11 +22,19 @@ out arbitrary execution from a malformed binary. So this is defence in depth
 rather than a response to a known hole. It costs three message types and a length
 prefix, which is cheap enough that the argument for dist is convenience alone.
 
-## Three messages, and no more
+## Four messages, and no more
 
     engine -> gateway   register    a minted binding
     engine -> gateway   unregister  a revocation, on session death
+    engine -> gateway   pose        one shared body plus who it goes to
     gateway -> engine   input       a verified uplink payload
+
+`pose` travels over TCP, which looks like it defeats the point until you notice
+which hop it is: engine to gateway on loopback, where there is no loss to
+head-of-line-block on. The hop that matters is gateway to client, and that one is
+a datagram. The engine hands over **one** shared body and a list of `conn_id`s,
+so the O(N) fan-out happens where the socket is and the body is encoded once
+(ADR 0012, decision 14).
 
 Nothing else crosses. The gateway cannot ask the engine for anything, cannot name
 a module or a function, and cannot address a process. `input` carries a `conn_id`
@@ -59,7 +67,8 @@ authenticates to the engine, because it never asks for anything.
         expires_at := integer()
     }}
     | {unregister, non_neg_integer()}
-    | {input, non_neg_integer(), binary()}.
+    | {input, non_neg_integer(), binary()}
+    | {pose, binary(), [non_neg_integer()]}.
 
 -doc """
 Frames one message: `Len:32, Payload`.
@@ -87,7 +96,10 @@ encode(
 encode({unregister, ConnId}) ->
     frame(<<2:8, ConnId:32/little>>);
 encode({input, ConnId, Body}) ->
-    frame(<<3:8, ConnId:32/little, Body/binary>>).
+    frame(<<3:8, ConnId:32/little, Body/binary>>);
+encode({pose, SharedBody, ConnIds}) ->
+    Ids = <<<<C:32/little>> || C <- ConnIds>>,
+    frame(<<4:8, (length(ConnIds)):16/little, Ids/binary, SharedBody/binary>>).
 
 -doc """
 Decodes one complete frame's payload, without its length prefix.
@@ -113,6 +125,14 @@ decode(<<2:8, ConnId:32/little>>) ->
     {ok, {unregister, ConnId}};
 decode(<<3:8, ConnId:32/little, Body/binary>>) ->
     {ok, {input, ConnId, Body}};
+decode(<<4:8, Count:16/little, Rest/binary>>) ->
+    IdBytes = Count * 4,
+    case Rest of
+        <<Ids:IdBytes/binary, SharedBody/binary>> ->
+            {ok, {pose, SharedBody, [C || <<C:32/little>> <= Ids]}};
+        _ ->
+            {error, malformed}
+    end;
 decode(_) ->
     {error, malformed}.
 
