@@ -14,6 +14,11 @@ start(_StartType, _StartArgs) ->
     %% second meaning for that one. Order does not matter: the reaper reads the
     %% key at sweep time, not at start.
     asobi_guest_env:apply(),
+    %% Before asobi_sup reads `role`, because the role decides which supervision
+    %% tree starts at all. Without this the whole datagram plane is unreachable
+    %% from the published image, which is configured by environment variables
+    %% rather than by a sys.config nobody using that image can edit.
+    asobi_dgram_env:apply(),
     setup_telemetry(),
     asobi_error:register_handler(),
     register_lua_game_modes(),

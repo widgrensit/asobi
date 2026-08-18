@@ -59,6 +59,29 @@ ENV ASOBI_PORT=8084 \
 # secret-bearing (the release already sets a small crash-dump policy).
 ENV ASOBI_GUEST_VERIFIER_PEPPER=""
 
+# The datagram plane (ADR 0013). Every one of these is unset by default and the
+# plane does not exist until they are: ASOBI_ROLE stays `engine`, nothing binds a
+# UDP port, and a client asking to open the plane is told it is unavailable.
+#
+#   ASOBI_ROLE                     `engine` (default) or `dgram_gw`. One image,
+#                                  two roles, run as two containers - the gateway
+#                                  parses packets from the internet and must not
+#                                  share a process tree with the Lua sandbox or
+#                                  the database credentials.
+#   ASOBI_DGRAM_PORT               UDP port the gateway binds (default 7777).
+#   ASOBI_DGRAM_LINK_PORT          Engine link, loopback only (default 7778).
+#   ASOBI_DGRAM_SHARDS             SO_REUSEPORT receivers. Fixed at boot.
+#   ASOBI_DGRAM_LINK_SECRET        Shared secret for the engine link. Prefer the
+#   ASOBI_DGRAM_LINK_SECRET_FILE   file form: it stays out of `docker inspect`.
+#   ASOBI_DGRAM_GATEWAY            host:port the ENGINE dials. Its opt-in.
+#   ASOBI_DGRAM_ENDPOINT           host:port clients are told to send to.
+#   ASOBI_DGRAM_POSE_FIELDS        `x:100,y:100,vx:100,vy:100` - name and scale,
+#                                  in canonical order. Reordering changes what
+#                                  every field on the wire means.
+#   ASOBI_DGRAM_POSE_PERIOD        Axial refresh, in ticks (default 20).
+#
+# See guides/self-hosting.md for a two-service compose file.
+
 # Erlang term fragment spliced into kura's socket_options list.
 # Default forces IPv4; set to "inet6" for IPv6-only Postgres networks.
 ENV ASOBI_DB_SOCKET_OPTS=inet

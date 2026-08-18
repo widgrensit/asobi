@@ -335,6 +335,84 @@ a player or refund a purchase.
 Both share the game port, so anyone who can reach your game can reach
 `/console`. Restrict it at the proxy.
 
+## Adding the datagram plane
+
+Optional, off by default, and worth it only if your game moves things around: it
+puts entity **positions** on UDP so one lost packet costs one frame of staleness
+rather than stalling everything behind a TCP retransmit. Everything else -
+including entity creation, removal and every non-transform field - keeps
+travelling on the WebSocket, in every state, whatever happens to the plane.
+
+**It is two containers from the same image.** The gateway binds a UDP port and
+parses packets from anyone on the internet, so it must not share a process tree
+with your Lua sandbox or your database credentials. In the `dgram_gw` role no
+zone, world, match, Lua VM or database pool is ever started.
+
+```bash
+openssl rand -hex 32 > dgram_secret.txt
+printf 'dgram_secret.txt\n' >> .gitignore
+```
+
+```yaml
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
+    # ...everything from the compose above, plus:
+    environment:
+      # Where to dial the gateway. This is the engine's opt-in: without it
+      # nothing is dialled and clients are told the plane is unavailable.
+      ASOBI_DGRAM_GATEWAY: "dgram:7778"
+      # What clients are told to send to. Your public address, not the
+      # container's - and it is delivered in the mint reply, which is why the
+      # plane needs no DNS and no SNI and why a non-standard port is free.
+      ASOBI_DGRAM_ENDPOINT: "udp.example.com:7777"
+      ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
+      # What a position IS, in canonical order. No default: guessing a scale
+      # would silently pick a precision for a world that might be a thousand
+      # times larger. `100` gives two decimals and a range of about +/-327 world
+      # units - a bigger world needs a smaller scale and coarser steps.
+      ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
+    volumes:
+      - ./dgram_secret.txt:/run/secrets/dgram:ro
+
+  dgram:
+    image: ghcr.io/widgrensit/asobi:latest
+    environment:
+      ASOBI_ROLE: dgram_gw
+      ASOBI_DGRAM_PORT: 7777
+      ASOBI_DGRAM_LINK_PORT: 7778
+      ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
+      # Same manifest as the engine. The gateway does not read it, but a future
+      # version might, and two copies that can disagree is worse than one.
+      ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
+    ports:
+      - "7777:7777/udp"
+    volumes:
+      - ./dgram_secret.txt:/run/secrets/dgram:ro
+    restart: unless-stopped
+```
+
+Open **UDP** 7777 on your firewall. The link port is loopback-only inside the
+compose network and must never be published: it carries mint secrets and has no
+transport security of its own.
+
+Clients opt in per SDK - `realtime.request_datagram = true` in Defold and LOVE
+today. A client on a network that blocks UDP, or a web export where raw UDP does
+not exist, silently stays on the WebSocket and loses nothing but latency.
+
+### Checking it works
+
+```
+asobi.dgram.link_up          the engine attached to the gateway
+asobi.dgram.canary_missed    consecutive >= 2 means the receive loop is wedged
+asobi.dgram.dropped          gate=mac is the one to wake up for
+asobi.dgram.pose_saturated   your scale is wrong for your world size
+```
+
+The gateway proves itself by sending itself a real datagram every five seconds
+and waiting for the reply, so a wedged receive loop fails readiness where a
+port-bound check would not. It does **not** prove every shard: the kernel chooses
+which one receives the probe, so a healthy canary means at least one is alive.
+
 ## Tuning knobs
 
 All five go under `{asobi, [...]}`; an existing `{asobi_lua, [...]}` block also
