@@ -3,6 +3,8 @@
 
 -export([start/2, stop/1]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -spec start(application:start_type(), term()) -> {ok, pid()} | {error, term()}.
 start(_StartType, _StartArgs) ->
     %% Before the router compiles: whether the console routes exist at all is
@@ -38,18 +40,24 @@ start(_StartType, _StartArgs) ->
 %% where the loopback link actually connects) it also raced the engine for the
 %% port and sometimes won (asobi#511).
 %%
-%% Stopped rather than never started: nova is an application dependency and binds
-%% its listener before asobi's start callback runs, so this is the first moment
-%% the role is known. The window is one boot, not the life of the container.
+%% Suspended rather than never started: nova is an application dependency and
+%% binds its listener before asobi's start callback runs, so this is the first
+%% moment the role is known. The window is one boot, not the life of the
+%% container.
+%%
+%% And suspended rather than STOPPED, which is not a detail: suspending closes the
+%% listening socket and frees the port, but leaves the listener registered with
+%% ranch. `nova_app:prep_stop/1` calls `ranch:suspend_listener/1` and
+%% `ranch:info/1` on the way down, and both raise `badarg` on a listener that has
+%% been removed - so stopping it made every gateway shutdown produce a crash
+%% report for a state the operator configured deliberately.
 start_gateway() ->
-    _ =
-        case cowboy:stop_listener(nova_listener) of
-            ok ->
-                logger:notice(#{msg => ~"http_listener_stopped", reason => ~"role=dgram_gw"});
-            {error, Reason} ->
-                logger:warning(#{msg => ~"http_listener_stop_failed", error => Reason})
-        end,
-    ok.
+    case ranch:suspend_listener(nova_listener) of
+        ok ->
+            ?LOG_NOTICE(#{msg => ~"http_listener_suspended", reason => ~"role=dgram_gw"});
+        {error, Reason} ->
+            ?LOG_WARNING(#{msg => ~"http_listener_suspend_failed", error => Reason})
+    end.
 
 %% Everything the gateway role must not do: it has no database, no Lua runtime and
 %% no extensions, and running any of it there is either a crash or a connection to

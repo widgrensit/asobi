@@ -162,18 +162,20 @@ this game's world size, and the fix is configuration rather than code.
 
 `asobi.wire.binary_refused` fires on the **engine**, not the gateway, and counts
 `world.tick` frames the binary encoder could not produce, which are sent as text
-instead. One is not a fault - a client that
-negotiated binary still handles text - but a sustained rate is, and it is a
-quiet one: an entity introduced by a text frame carries no slot, so it stays
-unbound on every binary client and asobi withholds its pose datagrams rather
-than send records that would be dropped there. The entity keeps moving on
-`world.tick` and loses only the UDP fast path. `reason` says which:
-`dict_too_large` for a frame past the 32 field names the dictionary can index
-(count the fields on your widest entity), `unencodable_field` for a list or a
-nested map where the wire carries scalars, `bad_field_name` for a field name
-that is neither an atom nor a binary, and `no_slot` for a slot map that has
-drifted from the baseline. The matching log line names the zone and the widest
-entity, throttled to one per zone per minute.
+instead. One is not a fault - a client that negotiated binary still handles text,
+and the frame after it is a keyframe that rebinds every slot. A **sustained** rate
+is: it means the zone is refusing, repairing and refusing again, and a zone whose
+rebind keyframe also refuses drops off the binary wire and the datagram plane for
+its life (look for `binary wire disabled for this zone`).
+
+`reason` says which: `dict_too_large` for a frame past the 32 field names the
+dictionary can index - count the fields on your widest entity, the log line names
+it - `unencodable_field` for a list or a nested map where the wire carries
+scalars, `bad_field_name` and `bad_entity_id` for a name or id that is not text or
+is past 255 bytes, `ambiguous_field_name` for two names that collide once atoms
+are rendered as text, `value_too_large` for a string past 65535 bytes, and
+`no_slot` for a slot map that has drifted from the baseline. The matching log line
+is throttled to one per zone per minute and carries the count it suppressed.
 
 `asobi.dgram.link_error` with `reason = bad_auth` is worth an alert. The engine
 link is loopback-only, so a failed authentication is either a misconfigured

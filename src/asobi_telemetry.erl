@@ -360,9 +360,11 @@ handles text - but a sustained rate is one: an entity introduced by a text frame
 carries no slot, so it stays unbound on every binary client and its pose
 datagrams are dropped there (asobi#510). `reason` is `dict_too_large` for a frame
 past the 32 field names the dictionary can index, `unencodable_field` for a list
-or map where the wire carries scalars, `bad_field_name` for a field name that is
-neither an atom nor a binary, and `no_slot` for a slot map that has drifted from
-the baseline.
+or map where the wire carries scalars, `bad_field_name` and `bad_entity_id` for a
+name or id that is not text or is past 255 bytes, `ambiguous_field_name` for two
+names that collide once atoms are rendered as text, `value_too_large` for a string
+past 65535 bytes, and `no_slot` for a slot map that has drifted from the
+baseline.
 """.
 -spec binary_wire_refused(atom()) -> ok.
 binary_wire_refused(Reason) ->

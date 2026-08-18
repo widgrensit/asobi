@@ -276,6 +276,42 @@ build. The sizes came out with room to spare: padded `hello` 64 against
 
 ## Consequences
 
+**Amended 2026-08-18 (asobi#509, asobi#510, asobi#511), in two places.**
+
+*The binary wire is a precondition for the datagram plane, not an independent
+switch.* Decision 5 gates the dual encode on `asobi.binary_wire`, off by default,
+"so a deployment with no binary clients pays nothing". What was not said is that a
+deployment with a pose manifest and the wire off pays worse than nothing: a pose
+carries a slot and only decision 4's `add` binds one, and `negotiate_wire/1`
+serves no client the binary wire while the flag is off, so every datagram was
+unresolvable by construction. `asobi_dgram_pose:manifest/0` now answers `disabled`
+when the wire is off, which is one predicate read by the zone that emits poses and
+the mint that advertises the manifest - splitting them let the mint promise a
+plane the zone would never send.
+
+*A refused frame is repaired by a keyframe, and a zone that cannot be repaired
+latches to text.* Decision 5 says a frame the encoder cannot produce "is sent as
+text, never dropped or mangled", and calls the cost "bandwidth rather than
+correctness". That holds for the frame and not for the stream: a text add carries
+no slot, so the entities it introduced are unbound on every binary client, and the
+next frame that does encode names them in `op:"u"` records the client must drop -
+with a contiguous `frame_seq` that gives it no reason to resync. The repair is
+decision 4's own ("a keyframe is all-adds, so `world.resync` re-establishes every
+binding"), applied by the server without being asked: the frame after a refusal is
+a keyframe. A refusal *of that keyframe* means the cause is the shape of the
+game's entities rather than one frame, and the zone drops to the text wire for its
+life - decision 5's "whole-zone decision on purpose" extended from one frame to
+the zone's lifetime.
+
+**Deploying decision 14's two roles requires a shared network namespace.** The
+gateway binds its engine link on loopback, so two containers on a network cannot
+reach each other over it. The roles therefore run as a sidecar or a single pod,
+which means they also share an EPMD and a loopback: they must be given different
+Erlang cookies and different node names, or a bug in the code parsing internet
+packets is `rpc:call` into the node running the Lua sandbox. Decision 14's
+isolation is the container boundary, and the container boundary does not include
+the network namespace. What remains un-split is tracked in asobi#513.
+
 **The prerequisite chain is real and unchanged.** The codec is 6-11 person-weeks
 across seven SDKs; the datagram plane 10-20 more. ADR 0011's 6.5 are already
 spent. This is the largest single commitment on the roadmap and it competes with

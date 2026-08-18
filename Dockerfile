@@ -90,9 +90,11 @@ ENV ASOBI_DB_SOCKET_OPTS=inet
 # vm.args has `-setcookie ${ERLANG_COOKIE}`. Left unset, relx renders an
 # EMPTY value and erlexec silently consumes the next flag (+pc) as the
 # cookie, so `+pc unicode` never applies and bin/asobi rpc/remote
-# can't attach. Distribution stays container-internal (-sname, no epmd
-# port exposed), so a static default is fine; override per deploy if you
-# expose distribution.
+# can't attach. The default is the literal string `asobi` and therefore
+# public: override it per deploy. It is not enough that no epmd port is
+# published - two containers sharing a network namespace share a loopback
+# and an epmd, so the engine and the datagram gateway must be given
+# DIFFERENT cookies or either one can rpc into the other.
 ENV ERLANG_COOKIE=asobi
 
 ENTRYPOINT ["tini", "--"]

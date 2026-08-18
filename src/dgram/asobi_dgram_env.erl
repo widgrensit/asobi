@@ -137,30 +137,47 @@ set_endpoint() ->
         undefined -> set_binary(dgram_endpoint, "ASOBI_DGRAM_ENDPOINT")
     end.
 
-%% Not a datagram variable, and here anyway. The binary `world.tick` is what binds
-%% a slot to an entity (ADR 0013, decision 4) and a pose datagram carries a slot
-%% and nothing else, so the plane cannot work without it - and until this existed
-%% there was no way to turn it on from the published image at all, which made the
-%% whole plane unreachable for exactly the audience that configures asobi with
-%% environment variables.
+%% Not a datagram variable, and here anyway: the datagram plane cannot work
+%% without it, and until this existed there was no way to turn the binary wire on
+%% from the published image at all - which made the whole plane unreachable for
+%% exactly the audience that configures asobi with environment variables.
 set_binary_wire() ->
     case {application:get_env(asobi, binary_wire), os:getenv("ASOBI_BINARY_WIRE")} of
         {undefined, Value} when Value =:= "1"; Value =:= "true" ->
             application:set_env(asobi, binary_wire, true);
         {undefined, Value} when Value =:= "0"; Value =:= "false" ->
             application:set_env(asobi, binary_wire, false);
+        {undefined, Value} when is_list(Value), Value =/= "" ->
+            %% Said rather than swallowed, like every other malformed value in
+            %% this module. `ASOBI_BINARY_WIRE=yes` otherwise leaves the wire off
+            %% and the operator is then told to set the variable they did set.
+            ?LOG_ERROR(#{
+                msg => ~"binary_wire_malformed",
+                detail => ~"expected 1, true, 0 or false",
+                value => list_to_binary(Value)
+            });
         _ ->
             ok
     end.
 
-%% A pose manifest with the binary wire off is a plane that mints, sends and is
-%% discarded by every client: `asobi_ws_handler:negotiate_wire/1` answers `"json"`
-%% while `binary_wire` is off, so no client ever receives the `add` records the
-%% slots are bound by, and every pose names a slot the decoder cannot resolve
-%% (asobi#509). Reported here, once at boot, rather than left to be found from a
-%% game that looks like it has no other players.
+%% A pose manifest with the binary wire off configures a plane that can never
+%% deliver anything (`asobi_dgram_pose:manifest/0` has the why). Said once at boot
+%% rather than left to be found from a game that looks like it has no other
+%% players (asobi#509).
 -spec check_pose_carrier() -> ok | {error, no_binary_wire}.
+%% Engine only. The gateway carries the same manifest so the two roles cannot
+%% disagree about it, and never encodes a frame, so the carrier rule is not its
+%% business - reporting it there would put an error in every gateway's boot log
+%% for the configuration the guides themselves recommend, which is how a boot
+%% error stops being read.
 check_pose_carrier() ->
+    case asobi_dgram_gw_sup:enabled() of
+        true -> ok;
+        false -> check_engine_pose_carrier()
+    end.
+
+-spec check_engine_pose_carrier() -> ok | {error, no_binary_wire}.
+check_engine_pose_carrier() ->
     case {application:get_env(asobi, dgram_pose), application:get_env(asobi, binary_wire, false)} of
         {{ok, _Manifest}, true} ->
             ok;

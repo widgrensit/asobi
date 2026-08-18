@@ -77,9 +77,25 @@ The configured manifest, or `disabled`.
 has not described its transform fields cannot have them quantised, and guessing
 at `x` and `y` would silently pick a scale for a game whose world is a thousand
 times larger.
+
+Also `disabled` when `asobi.binary_wire` is off, and that is the whole of the
+plane's carrier rule in one place. A pose record names a slot and nothing else,
+and the only frame that binds a slot to an entity is an `add` on the binary
+`world.tick` (ADR 0013, decision 4) - which the socket's wire negotiation refuses
+to serve while the wire is off. Every reader goes through here, so the
+zone stops emitting AND the mint stops advertising a manifest it cannot honour:
+a client told `period_ticks` and then sent nothing decides the plane is degraded,
+re-sends `hello`, and is torn down by the rebind limiter (asobi#509).
 """.
 -spec manifest() -> {ok, manifest()} | disabled.
 manifest() ->
+    case application:get_env(asobi, binary_wire, false) of
+        true -> configured_manifest();
+        _Off -> disabled
+    end.
+
+-spec configured_manifest() -> {ok, manifest()} | disabled.
+configured_manifest() ->
     case application:get_env(asobi, dgram_pose) of
         {ok, #{fields := Fields}} when is_list(Fields), Fields =/= [] ->
             case validate(Fields, []) of

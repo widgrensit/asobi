@@ -10,9 +10,10 @@ zone_pose_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         {"a zone with no manifest emits nothing", fun no_manifest_no_pose/0},
         {"a zone with the binary wire off emits nothing", fun no_binary_wire_no_pose/0},
-        {"an entity whose add fell back to text gets no pose", fun unannounced_entity_no_pose/0},
-        {"one unencodable entity does not cost the others their plane",
-            fun bound_entities_keep_their_poses/0},
+        {"an entity the wire cannot carry takes the zone off the plane",
+            fun unencodable_entity_stops_the_plane/0},
+        {"a passing refusal costs one tick of poses, not the plane",
+            fun passing_refusal_recovers/0},
         {"a zone with no datagram subscribers emits nothing", fun no_subscribers_no_pose/0},
         {"a moving entity produces a decodable pose", fun moving_entity_produces_pose/0},
         {"pose and the binary wire share one slot map", fun one_slot_map/0},
@@ -29,9 +30,8 @@ setup() ->
         period_ticks => 20,
         fields => [#{name => ~"x", scale => 100}, #{name => ~"y", scale => 100}]
     }),
-    %% The plane's precondition, not a detail of the fixture: a pose names a slot
-    %% and only the binary `world.tick` binds one, so every test that expects a
-    %% pose needs the wire that makes it resolvable (asobi#509).
+    %% The plane's precondition, not a detail of the fixture - see
+    %% `asobi_dgram_pose:manifest/0`.
     application:set_env(asobi, binary_wire, true),
     %% Stand in for the mint's ETS mirror. The zone reads it directly, so a test
     %% can populate it without a whole engine behind it.
@@ -74,10 +74,8 @@ no_manifest_no_pose() ->
     ?assertEqual(no_pose, recv_pose()),
     gen_server:stop(Pid).
 
-%% A pose carries a slot and nothing else, and the only frame that binds a slot to
-%% an entity is an `add` on the binary wire - which no client is served while
-%% `binary_wire` is off. Emitting poses into that configuration burned an encode
-%% per tick to produce datagrams every client discarded (asobi#509).
+%% asobi#509. Emitting poses with the wire off burned an encode per tick to
+%% produce datagrams every client discarded.
 no_binary_wire_no_pose() ->
     application:set_env(asobi, binary_wire, false),
     Pid = start_zone(),
@@ -88,12 +86,12 @@ no_binary_wire_no_pose() ->
     ?assertEqual(no_pose, recv_pose()),
     gen_server:stop(Pid).
 
-%% asobi#510. An entity the encoder cannot take rides the text wire, and a text
-%% add carries no slot, so the client has no binding for it - a pose naming that
-%% slot is dropped there and the entity looks frozen for the whole session. The
-%% zone therefore keeps it off the plane entirely and lets `world.tick` carry it,
-%% which is the carrier that can name it.
-unannounced_entity_no_pose() ->
+%% asobi#510. An entity the encoder cannot take drops the frame to text, and a
+%% text add carries no slot - so no client can resolve a pose, for this entity or
+%% any other in the zone. The zone latches to the text wire instead of streaming
+%% datagrams every client would discard, and every entity keeps moving on
+%% `world.tick`, which is the carrier that can name them.
+unencodable_entity_stops_the_plane() ->
     Pid = start_zone(),
     ets:insert(asobi_dgram_conns, {~"p1", 4242}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
@@ -104,27 +102,29 @@ unannounced_entity_no_pose() ->
     ?assertEqual(no_pose, recv_pose()),
     gen_server:stop(Pid).
 
-%% The other half of asobi#510: a refusal is a whole-frame decision, so without a
-%% record of what was actually announced the safe answer would be to stop the
-%% plane for the zone. An entity bound by an earlier frame keeps its poses; only
-%% the one that never made it onto the wire is held back.
-bound_entities_keep_their_poses() ->
+%% A refusal that passes must not cost the zone its plane. The frame that follows
+%% one is a keyframe, so every client is rebound in a single broadcast interval
+%% and the poses resume - the plane pauses for one tick rather than latching off.
+passing_refusal_recovers() ->
     Pid = start_zone(),
     ets:insert(asobi_dgram_conns, {~"p1", 4242}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
     asobi_zone:tick(Pid, 1),
-    {pose, _First, _} = recv_pose(),
+    ?assertMatch({pose, _, _}, recv_pose()),
 
-    %% e2 cannot ride the wire, so the frame carrying both is text and e2 is
-    %% never bound. e1 was bound by the frame before it and moves on.
+    %% A frame the encoder refuses: no poses this tick, because no client can be
+    %% sure of its slot table until the repair lands.
     asobi_zone:add_entity(Pid, ~"e2", #{~"x" => 5.0, ~"y" => 5.0, ~"path" => [1, 2]}),
-    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 3.0, ~"y" => 2.0}),
     asobi_zone:tick(Pid, 2),
-    {pose, Body, _} = recv_pose(),
-    <<_Tick:32/little, _Seq:32/little, _ZX:16/signed-little, _ZY:16/signed-little, _Mask:8, Count:8,
-        _Epoch:16/little, _Rest/binary>> = Body,
-    ?assertEqual(1, Count),
+    ?assertEqual(no_pose, recv_pose()),
+
+    %% The offending entity leaves, the keyframe rebinds everyone, poses resume.
+    asobi_zone:remove_entity(Pid, ~"e2"),
+    asobi_zone:tick(Pid, 3),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 7.0, ~"y" => 2.0}),
+    asobi_zone:tick(Pid, 4),
+    ?assertMatch({pose, _, _}, recv_pose()),
     gen_server:stop(Pid).
 
 %% Building a body for nobody is the one cost on this path that is trivially

@@ -64,13 +64,30 @@ Everything with authority travels only on the TLS WebSocket, in every state.
 ## Server setup
 
 Two containers from the same image. The gateway binds a UDP port and parses
-packets from anyone on the internet, so it must not share a process tree with
-your Lua sandbox or your database credentials: in the `dgram_gw` role no zone,
-world, match, Lua VM or database pool is ever started.
+packets from anyone on the internet, so it must not run your game: in the
+`dgram_gw` role no zone, world, match, Lua VM, extension or HTTP listener is
+started, and no migration is run.
+
+What that does **not** yet cover: `kura` and `shigoto` are application
+dependencies and start before asobi reads its role, so the gateway container does
+open a database pool with your credentials. See the note in
+[self-hosting](self-hosting.md#adding-the-datagram-plane) and
+[asobi#513](https://github.com/widgrensit/asobi/issues/513).
 
 ```bash
 openssl rand -hex 32 > dgram_secret.txt
 printf 'dgram_secret.txt\n' >> .gitignore
+```
+
+The two roles also need **different Erlang cookies**. They share a network
+namespace, so they share a loopback and an EPMD, and a shared cookie means the
+container parsing hostile UDP can `rpc:call` into the one holding your Lua
+sandbox and your database credentials. The image ships a public default, so
+setting both is not optional:
+
+```bash
+echo "ERLANG_COOKIE=$(openssl rand -hex 24)"    # engine, in your .env
+echo "DGRAM_COOKIE=$(openssl rand -hex 24)"     # gateway, in your .env
 ```
 
 ```yaml
@@ -93,12 +110,12 @@ printf 'dgram_secret.txt\n' >> .gitignore
       ASOBI_DGRAM_ENDPOINT: "udp.example.com:7777"
       ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
-      # The plane's precondition. A pose carries a slot and nothing else, and the
-      # only frame that binds a slot to an entity is an `add` on the binary
-      # `world.tick`, which no client is served while this is off - so every pose
-      # would be discarded by every client. asobi logs an error at boot and
-      # disables poses if you configure the manifest without it.
+      # The plane's precondition: only the binary `world.tick` binds a slot, and
+      # no client is served it while this is off - so every pose would be
+      # discarded client-side. asobi logs an error at boot and disables poses if
+      # the manifest is configured without it.
       ASOBI_BINARY_WIRE: "1"
+      ERLANG_COOKIE: ${ERLANG_COOKIE:?set ERLANG_COOKIE in .env}
     ports:
       # The gateway's UDP port, published here because it lives in this
       # container's network namespace.
@@ -122,6 +139,14 @@ printf 'dgram_secret.txt\n' >> .gitignore
       # A distinct Erlang node name. One namespace means one EPMD, and two nodes
       # registering the same name means the second one does not boot.
       ASOBI_NODE_NAME: asobi_gw
+      # A DIFFERENT cookie from the engine's. One namespace means one loopback,
+      # and a shared cookie makes distribution a path from the process parsing
+      # internet packets into the one running your game.
+      ERLANG_COOKIE: ${DGRAM_COOKIE:?set DGRAM_COOKIE in .env}
+      # The gateway role starts no HTTP listener, so it does not contend for the
+      # engine's port. Set anyway: the variable is read while the release boots,
+      # before the role is known.
+      ASOBI_PORT: 8085
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
     restart: unless-stopped
@@ -129,10 +154,13 @@ printf 'dgram_secret.txt\n' >> .gitignore
 
 **The two roles share a network namespace.** That is a `network_mode:
 "service:asobi"` sidecar in compose, and two containers in one pod on Kubernetes
-(where they already do). It is not a weakening of the split: the gateway keeps
-its own environment, its own filesystem and its own process tree, and those are
-where the isolation is. What it does not keep is a private loopback, which is
-exactly what the link needs to be reachable.
+(where they already do). The gateway keeps its own environment, its own
+filesystem and its own process tree, which is where most of the split lives. What
+it does not keep is a private loopback - which is exactly what makes the link
+reachable, and also what puts both nodes on one EPMD. **Give them different
+`ERLANG_COOKIE`s**, as below: a shared cookie lets the container parsing hostile
+UDP `rpc:call` into the one running your Lua and holding your database
+credentials, and the image default is public.
 
 Open **UDP** 7777 on your firewall. Never publish the link port: it carries mint
 credentials and has no transport security of its own, which is why it binds

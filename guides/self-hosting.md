@@ -289,9 +289,12 @@ close a quiet WebSocket, which surfaces as players dropping on a timer nobody
 configured.
 
 `ASOBI_NODE_HOST` is not in that compose on purpose. It names the Erlang node
-(`-name asobi@${ASOBI_NODE_HOST}` in `config/vm.args.src`), not a bind address;
-the port asobi listens on is `ASOBI_PORT`. The image default `127.0.0.1` is
-what you want for a single-node deploy.
+(`-name ${ASOBI_NODE_NAME}@${ASOBI_NODE_HOST}` in `config/vm.args.src`), not a
+bind address; the port asobi listens on is `ASOBI_PORT`. The image default
+`127.0.0.1` is what you want for a single-node deploy. `ASOBI_NODE_NAME`
+defaults to `asobi` and only needs changing to run two asobi nodes in one
+network namespace, which the [datagram gateway](#adding-the-datagram-plane)
+does.
 
 For a single node, also close distribution off. The shipped `vm.args` carries
 the line commented out:
@@ -344,9 +347,17 @@ including entity creation, removal and every non-transform field - keeps
 travelling on the WebSocket, in every state, whatever happens to the plane.
 
 **It is two containers from the same image.** The gateway binds a UDP port and
-parses packets from anyone on the internet, so it must not share a process tree
-with your Lua sandbox or your database credentials. In the `dgram_gw` role no
-zone, world, match, Lua VM, database pool or HTTP listener is ever started.
+parses packets from anyone on the internet, so it must not run your game. In the
+`dgram_gw` role no zone, world, match, Lua VM, extension or HTTP listener is
+started, and no migration is run.
+
+Be precise about what that is worth, because one image with a role switch is not
+a security boundary on its own. `kura` and `shigoto` are application
+dependencies, so they start **before** asobi reads its role: the gateway
+container does open a pool with your `ASOBI_DB_*` credentials. Treat those
+credentials as reachable from the gateway and give it a database user you are
+willing to see there, until [asobi#513](https://github.com/widgrensit/asobi/issues/513)
+splits the roles into separate releases.
 
 They **share a network namespace** - a sidecar in compose, two containers in one
 pod on Kubernetes. The engine dials the gateway over loopback, because the
@@ -354,12 +365,29 @@ gateway binds its link port on `127.0.0.1`: the link carries mint credentials
 with no transport security of its own, so it must never touch a routable address.
 A gateway on its own compose network is therefore unreachable whatever you point
 `ASOBI_DGRAM_GATEWAY` at, and the plane silently degrades to WebSocket for every
-player (asobi#511). Sharing the namespace costs none of the isolation that
-matters: the gateway keeps its own environment, filesystem and process tree.
+player (asobi#511).
+
+What the shared namespace keeps is the isolation that does the work: the gateway
+has its own environment, its own filesystem and its own process tree. What it
+gives up is a private loopback, and **that is where Erlang distribution lives**.
+Give the two roles different cookies and different `ASOBI_NODE_NAME`s, both shown
+below; without that, a bug in the code parsing internet packets is a shell on the
+node running your game.
 
 ```bash
 openssl rand -hex 32 > dgram_secret.txt
 printf 'dgram_secret.txt\n' >> .gitignore
+```
+
+The two roles also need **different Erlang cookies**. They share a network
+namespace, so they share a loopback and an EPMD, and a shared cookie means the
+container parsing hostile UDP can `rpc:call` into the one holding your Lua
+sandbox and your database credentials. The image ships a public default, so
+setting both is not optional:
+
+```bash
+echo "ERLANG_COOKIE=$(openssl rand -hex 24)"    # engine, in your .env
+echo "DGRAM_COOKIE=$(openssl rand -hex 24)"     # gateway, in your .env
 ```
 
 ```yaml
@@ -381,12 +409,12 @@ printf 'dgram_secret.txt\n' >> .gitignore
       # times larger. `100` gives two decimals and a range of about +/-327 world
       # units - a bigger world needs a smaller scale and coarser steps.
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
-      # The plane's precondition. A pose carries a slot and nothing else, and the
-      # only frame that binds a slot to an entity is an `add` on the binary
-      # `world.tick` - which no client is served while this is off, so every pose
-      # would be discarded client-side. asobi logs an error at boot and disables
-      # poses if the manifest is configured without it.
+      # The plane's precondition: only the binary `world.tick` binds a slot, and
+      # no client is served it while this is off - so every pose would be
+      # discarded client-side. asobi logs an error at boot and disables poses if
+      # the manifest is configured without it.
       ASOBI_BINARY_WIRE: "1"
+      ERLANG_COOKIE: ${ERLANG_COOKIE:?set ERLANG_COOKIE in .env}
     ports:
       # The gateway's UDP port, published here: it is this container's namespace.
       - "7777:7777/udp"
@@ -409,6 +437,14 @@ printf 'dgram_secret.txt\n' >> .gitignore
       # A distinct Erlang node name. One network namespace means one EPMD, and
       # two nodes registering the same name means the second one does not boot.
       ASOBI_NODE_NAME: asobi_gw
+      # A DIFFERENT cookie from the engine's. One namespace means one loopback,
+      # and a shared cookie makes distribution a path from the process parsing
+      # internet packets into the one running your game.
+      ERLANG_COOKIE: ${DGRAM_COOKIE:?set DGRAM_COOKIE in .env}
+      # The gateway role starts no HTTP listener, so it does not contend for the
+      # engine's port. Set anyway: the variable is read while the release boots,
+      # before the role is known.
+      ASOBI_PORT: 8085
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
     restart: unless-stopped

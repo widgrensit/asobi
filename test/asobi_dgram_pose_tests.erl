@@ -15,11 +15,15 @@ pose_test_() ->
         {"entities at rest are refreshed by the axial rotation", fun axial_rotation/0},
         {"the whole zone is covered within one period", fun axial_covers_everything/0},
         {"a non-numeric transform field is skipped, not guessed", fun non_numeric_skipped/0},
-        {"an entity with no slot is skipped silently", fun no_slot_skipped/0}
+        {"an entity with no slot is skipped silently", fun no_slot_skipped/0},
+        {"no binary wire, no manifest", fun no_binary_wire_no_manifest/0}
     ]}.
 
 setup() ->
-    Prev = application:get_env(asobi, dgram_pose),
+    Prev = [{K, application:get_env(asobi, K)} || K <- [dgram_pose, binary_wire]],
+    %% `manifest/0` is the plane's carrier rule: the binary wire is what binds a
+    %% slot to an entity, so without it there is no manifest to have.
+    application:set_env(asobi, binary_wire, true),
     application:set_env(asobi, dgram_pose, #{
         period_ticks => 4,
         fields => [
@@ -30,8 +34,15 @@ setup() ->
     }),
     Prev.
 
-cleanup(undefined) -> application:unset_env(asobi, dgram_pose);
-cleanup({ok, V}) -> application:set_env(asobi, dgram_pose, V).
+cleanup(Prev) ->
+    [
+        case V of
+            undefined -> application:unset_env(asobi, K);
+            {ok, Val} -> application:set_env(asobi, K, Val)
+        end
+     || {K, V} <- Prev
+    ],
+    ok.
 
 %% --- The manifest ---
 
@@ -178,3 +189,12 @@ phase_miss(Slots) ->
     hd([T || T <- lists:seq(0, 3), not lists:member(T, [S rem 4 || S <- Taken])]).
 
 count_bits(N) -> length([B || B <- lists:seq(0, 7), N band (1 bsl B) =/= 0]).
+
+%% asobi#509. One predicate for the plane's carrier rule, read by the zone that
+%% emits poses AND by the mint that advertises the manifest to a client. Splitting
+%% them let the mint promise a plane the zone would never send, which a client
+%% reads as degraded and answers with a rebind storm.
+no_binary_wire_no_manifest() ->
+    ?assertMatch({ok, #{fields := [_ | _]}}, asobi_dgram_pose:manifest()),
+    application:set_env(asobi, binary_wire, false),
+    ?assertEqual(disabled, asobi_dgram_pose:manifest()).

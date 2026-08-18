@@ -135,7 +135,10 @@ pose_parses() ->
         }},
         application:get_env(asobi, dgram_pose)
     ),
-    %% ...and it is the shape the manifest reader accepts, not merely a map.
+    %% ...and it is the shape the manifest reader accepts, not merely a map. The
+    %% reader also holds the plane's carrier rule, so the wire has to be on for it
+    %% to answer at all.
+    application:set_env(asobi, binary_wire, true),
     ?assertMatch({ok, #{fields := [_, _, _]}}, asobi_dgram_pose:manifest()).
 
 pose_malformed() ->

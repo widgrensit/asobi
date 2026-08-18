@@ -89,6 +89,17 @@ without knowing how the wire encoded it.
 
 -define(MAX_DICT, 32).
 
+%% The lengths the frame layout can express. Erlang's bit syntax TRUNCATES rather
+%% than raising - `<<300:8>>` is `<<44>>` - so an unchecked length does not produce
+%% a big frame, it produces a frame whose every following byte is read at the wrong
+%% offset. `decode/1` then rejects the whole thing and every entity in it, and the
+%% encoder has already reported success. These three are the only unbounded values
+%% the layout writes, and a game script chooses all three: field names and entity
+%% ids are the keys of the map `zone_tick` returns.
+-define(MAX_NAME, 255).
+-define(MAX_ID, 255).
+-define(MAX_STR, 65_535).
+
 -define(KIND_SEQUENCED, 1).
 -define(KIND_UNGATED, 2).
 
@@ -129,20 +140,37 @@ without knowing how the wire encoded it.
 -doc """
 Encodes one `world.tick` frame.
 
-Total on the field names, which is the whole reason this returns a tagged tuple.
-A game's entity is an open map built by a Lua script, so its keys are whatever
-that script wrote: atoms are normalised to their text form, matching what the
-text wire's `json:encode/1` does with the same key, and anything else refuses the
-frame as `{error, bad_field_name}`. Calling `byte_size/1` on such a key instead
-would kill the zone gen_server mid-tick and take every subscriber's session with
-it (asobi#509).
+Total. Every value it writes comes from a map a Lua script built, so nothing here
+may raise and nothing may truncate - this runs inside the zone's tick, and a
+`badarg` kills the zone gen_server and every subscriber's session with it
+(asobi#509).
 
-Returns `{error, dict_too_large}` rather than truncating when a frame's distinct
-field names exceed 32. Silently dropping fields would be undetectable corruption
-on the client; a refused frame is a server-side error someone can see.
+Field names are normalised: atoms become their text form, matching what the text
+wire's `json:encode/1` does with the same key, so the two wires agree. Everything
+the layout cannot express refuses the frame as a value instead:
+
+- `bad_field_name` - a name that is neither an atom nor a binary, or one past 255
+  bytes, which is what the dictionary's length prefix can count.
+- `ambiguous_field_name` - two names that normalise to the same one. The text wire
+  emits both, so keeping one would make the wires disagree about the entity.
+- `bad_entity_id` - an id that is not a binary, or one past 255 bytes.
+- `value_too_large` - a string value past 65535 bytes.
+- `dict_too_large` - more than 32 distinct field names, which is all a 5-bit index
+  can address.
+
+Refusing rather than truncating is the whole point: a truncated length is not a
+big frame, it is a frame read at the wrong offset from that byte on, which
+`decode/1` rejects entirely - so silent corruption on the client instead of a
+server-side error someone can see.
 """.
 -spec encode(frame()) ->
-    {ok, binary()} | {error, dict_too_large | bad_field_name | ambiguous_field_name}.
+    {ok, binary()}
+    | {error,
+        dict_too_large
+        | bad_field_name
+        | ambiguous_field_name
+        | bad_entity_id
+        | value_too_large}.
 encode(#{records := Recs0} = Frame) ->
     case normalise_records(Recs0) of
         {ok, Recs} -> encode_normalised(Frame, Recs);
@@ -230,7 +258,8 @@ field_type_tag(null) -> ?T_NULL.
 %% dropping one here would make the two wires disagree about what the entity is,
 %% which is the same call `asobi_zone` makes for a field with no binary form.
 -spec normalise_records([delta()]) ->
-    {ok, [wire_delta()]} | {error, bad_field_name | ambiguous_field_name}.
+    {ok, [wire_delta()]}
+    | {error, bad_field_name | ambiguous_field_name | bad_entity_id | value_too_large}.
 normalise_records([]) ->
     {ok, []};
 normalise_records([Rec | Rest]) ->
@@ -245,10 +274,16 @@ normalise_records([Rec | Rest]) ->
     end.
 
 -spec normalise_record(delta()) ->
-    {ok, wire_delta()} | {error, bad_field_name | ambiguous_field_name}.
+    {ok, wire_delta()}
+    | {error, bad_field_name | ambiguous_field_name | bad_entity_id | value_too_large}.
+%% The id is checked before the fields because it is the cheaper refusal and
+%% because it is the one that used to raise: `encode_record/2` calls `byte_size/1`
+%% on it, and only an `add` carries one.
+normalise_record(#{id := Id}) when not is_binary(Id); byte_size(Id) > ?MAX_ID ->
+    {error, bad_entity_id};
 normalise_record(#{fields := Fields} = Rec) ->
     case normalise_fields(maps:to_list(Fields), #{}) of
-        error -> {error, bad_field_name};
+        {error, _} = Err -> Err;
         {ok, Named} when map_size(Named) =:= map_size(Fields) -> {ok, Rec#{fields => Named}};
         {ok, _Collided} -> {error, ambiguous_field_name}
     end;
@@ -259,15 +294,24 @@ normalise_record(#{op := Op, slot := Slot, gen := Gen} = Rec) ->
     end.
 
 -spec normalise_fields([{atom() | binary(), term()}], #{binary() => term()}) ->
-    {ok, #{binary() => term()}} | error.
+    {ok, #{binary() => term()}} | {error, bad_field_name | value_too_large}.
 normalise_fields([], Acc) ->
     {ok, Acc};
-normalise_fields([{Name, Value} | Rest], Acc) when is_binary(Name) ->
+normalise_fields([{_Name, Value} | _Rest], _Acc) when
+    is_binary(Value), byte_size(Value) > ?MAX_STR
+->
+    {error, value_too_large};
+normalise_fields([{Name, Value} | Rest], Acc) when
+    is_binary(Name), byte_size(Name) =< ?MAX_NAME
+->
     normalise_fields(Rest, Acc#{Name => Value});
 normalise_fields([{Name, Value} | Rest], Acc) when is_atom(Name) ->
-    normalise_fields(Rest, Acc#{atom_to_binary(Name, utf8) => Value});
+    case atom_to_binary(Name, utf8) of
+        Text when byte_size(Text) =< ?MAX_NAME -> normalise_fields(Rest, Acc#{Text => Value});
+        _Long -> {error, bad_field_name}
+    end;
 normalise_fields(_Fields, _Acc) ->
-    error.
+    {error, bad_field_name}.
 
 %% Distinct field names in first-appearance order, so a frame's dictionary is
 %% deterministic for a given record list and the encoder is testable by equality.

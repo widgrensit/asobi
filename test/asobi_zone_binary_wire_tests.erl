@@ -23,7 +23,11 @@ binary_wire_test_() ->
         {"a non-scalar field drops the whole zone to text rather than diverging",
             fun non_scalar_field_falls_back_to_text/0},
         {"an atom-keyed entity encodes rather than killing the zone",
-            fun atom_field_names_survive_the_tick/0}
+            fun atom_field_names_survive_the_tick/0},
+        {"a passing refusal is repaired by a keyframe on the next frame",
+            fun refusal_is_repaired_by_a_keyframe/0},
+        {"a structural refusal latches the zone to text rather than stranding slots",
+            fun structural_refusal_latches_to_text/0}
     ]}.
 
 setup() ->
@@ -217,4 +221,63 @@ atom_field_names_survive_the_tick() ->
     {ok, #{records := [#{fields := Fields}]}} = asobi_wire:decode(Bin),
     ?assertEqual(#{~"type" => ~"ship", ~"x" => 1.0}, Fields),
     ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid).
+
+%% asobi#510. A text frame carries no slots, so every binding its `add` records
+%% would have established is missing on every binary client - and the NEXT
+%% successful binary frame then names those slots in `op:"u"` records the client
+%% drops, with a contiguous `frame_seq` that gives it no reason to resync. The
+%% repair is the one ADR 0013 decision 4 already names: send a keyframe, which is
+%% all-adds and re-establishes the whole mapping.
+refusal_is_repaired_by_a_keyframe() ->
+    application:set_env(asobi, binary_wire, true),
+    Pid = start_zone(),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    _ = recv(),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0}),
+    asobi_zone:tick(Pid, 1),
+    ?assertMatch({zone_delta_raw, _, _}, recv_delta()),
+
+    %% A list has no binary form, so the frame introducing e2 is text.
+    asobi_zone:add_entity(Pid, ~"e2", #{~"x" => 2.0, ~"path" => [1, 2]}),
+    asobi_zone:tick(Pid, 2),
+    ?assertMatch({zone_delta_raw, _}, recv_delta()),
+
+    %% e2 leaves, so the zone can encode again - and what it sends is a keyframe,
+    %% not the delta, because a binary client's slot table is a frame behind.
+    asobi_zone:remove_entity(Pid, ~"e2"),
+    asobi_zone:tick(Pid, 3),
+    {zone_delta_raw, _Json, Bin} = recv_delta(),
+    {ok, #{kf := Kf, records := Records}} = asobi_wire:decode(Bin),
+    ?assert(Kf),
+    ?assertEqual([{add, ~"e1"}], [{Op, Id} || #{op := Op, id := Id} <- Records]),
+    gen_server:stop(Pid).
+
+%% When the cause is the shape of the game's entities rather than one frame, every
+%% keyframe after it refuses too. Streaming binary frames whose slots no client can
+%% bind is worse than not using the wire, so the zone gives it up for its life and
+%% everyone falls back to text - which carries everything, and which a binary
+%% client handles by construction.
+structural_refusal_latches_to_text() ->
+    application:set_env(asobi, binary_wire, true),
+    Pid = start_zone(),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    _ = recv(),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0}),
+    asobi_zone:add_entity(Pid, ~"e2", #{~"x" => 2.0, ~"path" => [1, 2]}),
+    asobi_zone:tick(Pid, 1),
+    ?assertMatch({zone_delta_raw, _}, recv_delta()),
+
+    %% The rebind keyframe refuses for the same reason, so the wire latches off.
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 3.0}),
+    asobi_zone:tick(Pid, 2),
+    ?assertMatch({zone_delta_raw, _}, recv_delta()),
+
+    %% And stays off, including for an entity that could be encoded on its own.
+    asobi_zone:remove_entity(Pid, ~"e2"),
+    asobi_zone:tick(Pid, 3),
+    ?assertMatch({zone_delta_raw, _}, recv_delta()),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 4.0}),
+    asobi_zone:tick(Pid, 4),
+    ?assertMatch({zone_delta_raw, _}, recv_delta()),
     gen_server:stop(Pid).

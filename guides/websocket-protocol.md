@@ -828,15 +828,24 @@ frame, not per entity, but one entity is what usually spends it: a delta names
 only the fields that changed, while the `add` that introduces an entity names all
 of them. An entity with 33 fields therefore cannot ride this wire at all.
 
-A frame past the budget is sent as text instead - correct, and slower, and it
-costs more than bandwidth. **A text add carries no slot**, so an entity
-introduced by one is never bound in your slot table, and the datagram `pose`
-records that name its slot have nothing to bind to. The server will not send
-poses for an entity it knows it announced as text (asobi#510), so the entity
-keeps moving on `world.tick` rather than disappearing - but it loses the UDP fast
-path for the life of the zone. If entities in your game seem to be missing the
-datagram plane, count their fields first and look for
-`binary world.tick frame refused` in the server log; the line names the zone, the
+A frame past the budget is sent as text instead. That is safe for the frame and
+not safe on its own for what follows: **a text add carries no slot**, so the
+entities it introduced are not in your table, and the next binary frame names
+them in `op:"u"` records you have to drop - with a contiguous `frame_seq` that
+gives you no reason to resync.
+
+So the server repairs it rather than leaving it to you. The frame after a refused
+one is a **keyframe** - `kf: true`, all adds - which re-establishes every binding.
+Nothing is required of a client that already applies keyframes the way this guide
+describes. If that keyframe is refused too, the cause is the shape of the game's
+entities rather than one frame, and the zone gives the binary wire up for its
+life: every client on it falls back to text, which carries everything, and the
+datagram plane switches off with it.
+
+Both outcomes are visible server-side, and neither is silent on the client's
+behalf. If a game seems to be missing the datagram plane, count the fields on its
+widest entity and look for `binary world.tick frame refused` or
+`binary wire disabled for this zone` in the server log; both name the zone, the
 distinct-name count and the widest entity.
 
 **Entities are 2-byte slots, and the slot is scoped to the zone.** A record
