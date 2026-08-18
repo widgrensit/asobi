@@ -192,6 +192,17 @@ came out 2.4x in favour rather than against. Every other target reads either
 order for the same price. Found by running the Godot decoder against the fixture
 corpus, which is the case for building the corpus first.
 
+*Each record carries a generation byte, for a plane that does not exist yet.* The
+reuse argument above is sound on this wire and does NOT carry to the datagram
+plane, where loss is real and records have no per-entity ordering to gap-detect
+against: ADR 0012's merge rule needs a generation to tell the entity holding slot
+5 now from the one that held it a moment ago. That generation has to come from
+somewhere, and the only carrier that introduces an entity is the `add` on this
+wire. Two slot tables that could disagree is exactly the class of defect ADR 0011
+existed to close, so there is one table, and one byte per record is what buys it.
+Decided while both wires were unmerged, because the same change after the codec
+ships is a wire that moves under shipped games.
+
 *The frame header carries a kind byte.* The text wire says "this frame holds no
 position in the zone's sequence" by omitting `frame_seq`, which a fixed-layout
 binary frame cannot do. Encoding the leave-removal frame as sequence 0 instead

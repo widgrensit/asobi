@@ -1027,20 +1027,22 @@ wire_records([Delta | Rest], Slots) ->
     end.
 
 wire_record({added, Id, FullState}, Slots) ->
-    with_slot(Id, Slots, FullState, fun(Slot, Fields) ->
-        #{op => add, slot => Slot, id => Id, fields => Fields}
+    with_slot(Id, Slots, FullState, fun(Slot, Gen, Fields) ->
+        #{op => add, slot => Slot, gen => Gen, id => Id, fields => Fields}
     end);
 wire_record({updated, Id, Diff}, Slots) ->
-    with_slot(Id, Slots, Diff, fun(Slot, Fields) ->
-        #{op => update, slot => Slot, fields => Fields}
+    with_slot(Id, Slots, Diff, fun(Slot, Gen, Fields) ->
+        #{op => update, slot => Slot, gen => Gen, fields => Fields}
     end);
 wire_record({removed, Id}, Slots) ->
-    with_slot(Id, Slots, #{}, fun(Slot, _Fields) -> #{op => remove, slot => Slot} end).
+    with_slot(Id, Slots, #{}, fun(Slot, Gen, _Fields) ->
+        #{op => remove, slot => Slot, gen => Gen}
+    end).
 
 with_slot(Id, Slots, Fields, Build) ->
     case {asobi_wire_slots:slot_of(Id, Slots), wire_encodable(Fields)} of
-        {{ok, Slot}, true} ->
-            {ok, Build(Slot, Fields)};
+        {{ok, {Slot, Gen}}, true} ->
+            {ok, Build(Slot, Gen, Fields)};
         {error, _} ->
             %% advance_slots/4 syncs against the union of both baselines, so
             %% every id in the diff has a slot. Missing one means the two have

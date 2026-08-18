@@ -46,15 +46,20 @@ every client watching that zone; a loud failure is a capacity conversation.
 
 -define(SPACE, 65536).
 
+-define(GEN_SPACE, 256).
+
 -opaque slots() :: #{
-    by_id := #{binary() => non_neg_integer()},
+    by_id := #{binary() => {non_neg_integer(), 0..255}},
     by_slot := #{non_neg_integer() => binary()},
+    %% The CURRENT generation of every slot ever handed out, kept after release
+    %% so the next binding can advance it. Bounded by ?SPACE, never pruned.
+    gens := #{non_neg_integer() => 0..255},
     next := non_neg_integer()
 }.
 
 -doc "An empty mapping, for a zone with no entities yet.".
 -spec new() -> slots().
-new() -> #{by_id => #{}, by_slot => #{}, next => 0}.
+new() -> #{by_id => #{}, by_slot => #{}, gens => #{}, next => 0}.
 
 -doc """
 Brings the mapping in line with a new broadcast baseline.
@@ -79,8 +84,16 @@ sync(Entities, #{by_id := ById} = Slots) ->
     Slots1 = lists:foldl(fun release/2, Slots, Released),
     allocate_missing(maps:keys(Entities), Slots1).
 
--doc "The slot bound to `Id`, or `error` if the entity is not in the baseline.".
--spec slot_of(binary(), slots()) -> {ok, non_neg_integer()} | error.
+-doc """
+The slot and generation bound to `Id`, or `error` if it is not in the baseline.
+
+The generation advances every time a slot is rebound to a different entity, and
+it is what lets a lossy carrier tell a pose for the entity that holds slot 5 now
+from one for the entity that held it a moment ago. On the ordered, reliable
+WebSocket wire the sequencing already covers that, so this is carried but only
+consulted by clients that also run the datagram plane (ADR 0012, decision 12).
+""".
+-spec slot_of(binary(), slots()) -> {ok, {non_neg_integer(), 0..255}} | error.
 slot_of(Id, #{by_id := ById}) ->
     maps:find(Id, ById).
 
@@ -99,10 +112,18 @@ allocate_missing([Id | Rest], #{by_id := ById} = Slots) ->
         false ->
             case take_free_slot(Slots) of
                 {ok, Slot, Slots1} ->
-                    #{by_id := B1, by_slot := S1} = Slots1,
+                    #{by_id := B1, by_slot := S1, gens := G1} = Slots1,
+                    %% Fresh slots start at generation 0 and every rebinding
+                    %% advances by one, wrapping at 256. Wrapping is safe by
+                    %% arithmetic rather than by hope: aliasing needs the same
+                    %% slot rebound 256 times between a datagram being sent and
+                    %% applied, which at 65536 slots is 16.7M allocations in one
+                    %% zone inside a packet's flight time.
+                    Gen = (maps:get(Slot, G1, ?GEN_SPACE - 1) + 1) rem ?GEN_SPACE,
                     allocate_missing(Rest, Slots1#{
-                        by_id => B1#{Id => Slot},
-                        by_slot => S1#{Slot => Id}
+                        by_id => B1#{Id => {Slot, Gen}},
+                        by_slot => S1#{Slot => Id},
+                        gens => G1#{Slot => Gen}
                     });
                 {error, exhausted} ->
                     {error, exhausted}
@@ -123,9 +144,12 @@ take_free_slot(Slots, BySlot, Cursor, Remaining) ->
         true -> take_free_slot(Slots, BySlot, (Cursor + 1) rem ?SPACE, Remaining - 1)
     end.
 
+%% Drops the binding but KEEPS the generation, which is the whole point of
+%% holding it in a separate map: a slot handed out again must not restart at the
+%% generation a client may still have in flight for its previous occupant.
 release(Id, #{by_id := ById, by_slot := BySlot} = Slots) ->
     case ById of
-        #{Id := Slot} ->
+        #{Id := {Slot, _Gen}} ->
             Slots#{by_id => maps:remove(Id, ById), by_slot => maps:remove(Slot, BySlot)};
         _ ->
             Slots

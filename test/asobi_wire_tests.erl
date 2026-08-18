@@ -17,7 +17,7 @@ all_value_types_round_trip_test() ->
         ~"type" => ~"player",
         ~"target" => null
     },
-    F = frame([#{op => add, slot => 5, id => uuid(), fields => Fields}]),
+    F = frame([#{op => add, slot => 5, gen => 0, id => uuid(), fields => Fields}]),
     ?assertEqual({ok, F}, roundtrip(F)).
 
 envelope_round_trips_including_negative_coords_test() ->
@@ -30,9 +30,9 @@ envelope_round_trips_including_negative_coords_test() ->
 %% alone. That asymmetry is the whole reason no separate mapping message exists.
 only_an_add_carries_the_entity_id_test() ->
     F = frame([
-        #{op => add, slot => 1, id => uuid(), fields => #{~"x" => 1.0}},
-        #{op => update, slot => 1, fields => #{~"x" => 2.0}},
-        #{op => remove, slot => 1}
+        #{op => add, slot => 1, gen => 0, id => uuid(), fields => #{~"x" => 1.0}},
+        #{op => update, slot => 1, gen => 0, fields => #{~"x" => 2.0}},
+        #{op => remove, slot => 1, gen => 0}
     ]),
     {ok, #{records := [A, U, R]}} = roundtrip(F),
     ?assert(maps:is_key(id, A)),
@@ -44,7 +44,7 @@ only_an_add_carries_the_entity_id_test() ->
 %% player_id session.connected gave it without knowing how the wire packed it.
 entity_id_survives_byte_for_byte_test() ->
     Id = ~"01a0115f-547e-714f-829f-408c855ab77b",
-    F = frame([#{op => add, slot => 0, id => Id, fields => #{}}]),
+    F = frame([#{op => add, slot => 0, gen => 0, id => Id, fields => #{}}]),
     {ok, #{records := [#{id := Back}]}} = roundtrip(F),
     ?assertEqual(Id, Back).
 
@@ -52,8 +52,8 @@ entity_id_survives_byte_for_byte_test() ->
 %% sharing four names must not cost a hundred and sixty names.
 repeated_field_names_are_paid_for_once_test() ->
     Fields = #{~"x" => 1.0, ~"y" => 2.0, ~"vx" => 0.5, ~"vy" => -0.5},
-    One = frame([#{op => update, slot => 1, fields => Fields}]),
-    Forty = frame([#{op => update, slot => I, fields => Fields} || I <- lists:seq(1, 40)]),
+    One = frame([#{op => update, slot => 1, gen => 0, fields => Fields}]),
+    Forty = frame([#{op => update, slot => I, gen => 0, fields => Fields} || I <- lists:seq(1, 40)]),
     {ok, B1} = asobi_wire:encode(One),
     {ok, B40} = asobi_wire:encode(Forty),
     %% Per-record growth must be the record cost alone, with no name text in it.
@@ -64,7 +64,7 @@ repeated_field_names_are_paid_for_once_test() ->
 %% The number the design turns on: a steady-state delta has to fit one datagram.
 forty_update_delta_fits_a_datagram_test() ->
     Fields = #{~"x" => 1.0, ~"y" => 2.0, ~"vx" => 0.5, ~"vy" => -0.5},
-    F = frame([#{op => update, slot => I, fields => Fields} || I <- lists:seq(1, 40)]),
+    F = frame([#{op => update, slot => I, gen => 0, fields => Fields} || I <- lists:seq(1, 40)]),
     {ok, Bin} = asobi_wire:encode(F),
     ?assert(byte_size(Bin) =< 1200),
     %% And decisively smaller than the JSON it replaces.
@@ -76,12 +76,13 @@ forty_update_delta_fits_a_datagram_test() ->
 %% never detect.
 too_many_distinct_field_names_is_refused_test() ->
     Fields = #{integer_to_binary(I) => 1.0 || I <- lists:seq(1, 33)},
-    F = frame([#{op => update, slot => 1, fields => Fields}]),
+    F = frame([#{op => update, slot => 1, gen => 0, fields => Fields}]),
     ?assertEqual({error, dict_too_large}, asobi_wire:encode(F)),
     %% Exactly 32 is still fine, so the boundary is where it says it is.
     Ok = #{integer_to_binary(I) => 1.0 || I <- lists:seq(1, 32)},
     ?assertMatch(
-        {ok, _}, asobi_wire:encode(F#{records => [#{op => update, slot => 1, fields => Ok}]})
+        {ok, _},
+        asobi_wire:encode(F#{records => [#{op => update, slot => 1, gen => 0, fields => Ok}]})
     ).
 
 %% The leave-removal frame carries no position in the zone's stream - on the text
@@ -90,7 +91,7 @@ too_many_distinct_field_names_is_refused_test() ->
 %% sequence 0 and every client past its first frame would discard the one message
 %% that clears its ghosts.
 frame_kind_survives_and_is_distinguishable_test() ->
-    Recs = [#{op => remove, slot => 3}],
+    Recs = [#{op => remove, slot => 3, gen => 0}],
     Seq = frame(Recs),
     Ungated = (frame(Recs))#{kind => ungated, frame_seq => 0},
     ?assertEqual({ok, Seq}, roundtrip(Seq)),
@@ -105,7 +106,9 @@ frame_kind_survives_and_is_distinguishable_test() ->
 %% so decode must be TOTAL. A decoder that raises is a remote crash; one that only
 %% works on its own output is not a decoder.
 decode_is_total_test() ->
-    {ok, Good} = asobi_wire:encode(frame([#{op => update, slot => 1, fields => #{~"x" => 1.0}}])),
+    {ok, Good} = asobi_wire:encode(
+        frame([#{op => update, slot => 1, gen => 0, fields => #{~"x" => 1.0}}])
+    ),
     Cases = [
         {"empty", <<>>},
         {"one byte", <<1>>},
@@ -133,7 +136,7 @@ slots_track_the_baseline_test() ->
     S0 = asobi_wire_slots:new(),
     {ok, S1} = asobi_wire_slots:sync(#{~"a" => 1, ~"b" => 1}, S0),
     ?assertEqual(2, asobi_wire_slots:count(S1)),
-    ?assertMatch({ok, _}, asobi_wire_slots:slot_of(~"a", S1)),
+    ?assertMatch({ok, {_Slot, _Gen}}, asobi_wire_slots:slot_of(~"a", S1)),
     %% An entity leaving the baseline releases its slot.
     {ok, S2} = asobi_wire_slots:sync(#{~"b" => 1}, S1),
     ?assertEqual(error, asobi_wire_slots:slot_of(~"a", S2)),
@@ -158,7 +161,7 @@ slots_are_unique_while_live_test() ->
     {ok, S} = asobi_wire_slots:sync(maps:from_keys(Ids, 1), asobi_wire_slots:new()),
     Assigned = [
         begin
-            {ok, N} = asobi_wire_slots:slot_of(I, S),
+            {ok, {N, _}} = asobi_wire_slots:slot_of(I, S),
             N
         end
      || I <- Ids
@@ -171,10 +174,10 @@ slots_are_unique_while_live_test() ->
 %% frame_seq as the actual guarantee.
 freed_slots_are_not_reused_immediately_test() ->
     {ok, S1} = asobi_wire_slots:sync(#{~"a" => 1, ~"b" => 1}, asobi_wire_slots:new()),
-    {ok, SlotA} = asobi_wire_slots:slot_of(~"a", S1),
+    {ok, {SlotA, _}} = asobi_wire_slots:slot_of(~"a", S1),
     {ok, S2} = asobi_wire_slots:sync(#{~"b" => 1}, S1),
     {ok, S3} = asobi_wire_slots:sync(#{~"b" => 1, ~"c" => 1}, S2),
-    {ok, SlotC} = asobi_wire_slots:slot_of(~"c", S3),
+    {ok, {SlotC, _}} = asobi_wire_slots:slot_of(~"c", S3),
     ?assertNotEqual(SlotA, SlotC).
 
 %% Wraparound has to find the freed gap rather than hand out a live slot or spin.
@@ -193,7 +196,7 @@ wraparound_reuses_freed_slots_without_stealing_live_ones_test() ->
     Kept = maps:from_keys(Full -- Freed, 1),
     FreedSlots = lists:sort([
         begin
-            {ok, N} = asobi_wire_slots:slot_of(I, S1),
+            {ok, {N, _}} = asobi_wire_slots:slot_of(I, S1),
             N
         end
      || I <- Freed
@@ -207,7 +210,7 @@ wraparound_reuses_freed_slots_without_stealing_live_ones_test() ->
     ?assertEqual(65536, asobi_wire_slots:count(S3)),
     NewSlots = lists:sort([
         begin
-            {ok, N} = asobi_wire_slots:slot_of(I, S3),
+            {ok, {N, _}} = asobi_wire_slots:slot_of(I, S3),
             N
         end
      || I <- [~"n1", ~"n2", ~"n3"]
@@ -217,12 +220,32 @@ wraparound_reuses_freed_slots_without_stealing_live_ones_test() ->
     %% And nothing that was kept moved or collided.
     Live = [
         begin
-            {ok, N} = asobi_wire_slots:slot_of(I, S3),
+            {ok, {N, _}} = asobi_wire_slots:slot_of(I, S3),
             N
         end
      || I <- maps:keys(New)
     ],
     ?assertEqual(65536, length(lists:usort(Live))).
+
+%% The generation is what lets a lossy carrier tell the entity holding slot 5 now
+%% from the one that held it a moment ago (ADR 0012, decision 12). It must advance
+%% on REBIND and hold steady otherwise, or a datagram client either drops live
+%% poses or applies stale ones.
+generation_advances_only_when_a_slot_is_rebound_test() ->
+    {ok, S1} = asobi_wire_slots:sync(#{~"a" => 1}, asobi_wire_slots:new()),
+    {ok, {Slot, Gen0}} = asobi_wire_slots:slot_of(~"a", S1),
+
+    %% A baseline that changed nothing must not churn the generation.
+    {ok, S2} = asobi_wire_slots:sync(#{~"a" => 1}, S1),
+    ?assertEqual({ok, {Slot, Gen0}}, asobi_wire_slots:slot_of(~"a", S2)),
+
+    %% Free it, then force the cursor all the way round so the same slot comes
+    %% back. Its generation must not come back with it.
+    {ok, S3} = asobi_wire_slots:sync(#{}, S2),
+    Filler = maps:from_keys([integer_to_binary(I) || I <- lists:seq(1, 65535)], 1),
+    {ok, S4} = asobi_wire_slots:sync(Filler, S3),
+    {ok, S5} = asobi_wire_slots:sync(Filler#{~"b" => 1}, S4),
+    ?assertEqual({ok, {Slot, (Gen0 + 1) rem 256}}, asobi_wire_slots:slot_of(~"b", S5)).
 
 %% One past the space is exhaustion, and it must be an error rather than a
 %% rebound live slot: rebinding a slot in use is corruption every client in the

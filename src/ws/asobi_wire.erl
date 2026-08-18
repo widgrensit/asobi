@@ -35,12 +35,19 @@ order for the same price, so the runtime with no room to spare picks.
              DictLen:8, Dict, RecCount:16, Records
 
     dict     for each name: Len:8, Name/binary          (up to 32 names)
-    record   Op:8, Slot:16, [IdLen:8, Id/binary]?, FieldCount:8, Fields
+    record   Op:8, Slot:16, Gen:8, [IdLen:8, Id/binary]?, FieldCount:8, Fields
     field    Type:3, Idx:5, Value                       (one header byte)
 
 `Op` is 0 add, 1 update, 2 remove. The entity id is present on an **add only**,
 which is where the slot binding is established (ADR 0013, decision 4); update and
-remove carry the slot alone.
+remove carry the slot and generation alone.
+
+`Gen` advances every time a slot is rebound to a different entity. On this wire it
+is redundant - the stream is ordered and reliable, and `frame_seq` already bounds
+the reuse hazard - and it is carried anyway because the datagram plane (ADR 0012,
+decision 12) cannot manage without it and must agree with this wire about which
+entity holds a slot. One byte per record buys a client the ability to run both
+carriers against one slot table instead of two.
 
 `Kind` is 1 for a frame that holds a position in the zone's sequence and 2 for
 one that does not. The text wire says the same thing by omitting `frame_seq`,
@@ -98,6 +105,7 @@ without knowing how the wire encoded it.
 -type delta() :: #{
     op := add | update | remove,
     slot := non_neg_integer(),
+    gen := 0..255,
     id => binary(),
     fields => #{binary() => term()}
 }.
@@ -224,7 +232,7 @@ name_index(Names) -> name_index(Names, 0, #{}).
 name_index([], _I, Acc) -> Acc;
 name_index([N | Rest], I, Acc) -> name_index(Rest, I + 1, Acc#{N => I}).
 
-encode_record(#{op := Op, slot := Slot} = R, Index) ->
+encode_record(#{op := Op, slot := Slot, gen := Gen} = R, Index) ->
     Fields = maps:get(fields, R, #{}),
     FieldBin = <<
         <<(encode_field(K, V, Index))/binary>>
@@ -238,7 +246,7 @@ encode_record(#{op := Op, slot := Slot} = R, Index) ->
             _ ->
                 <<>>
         end,
-    <<(op_byte(Op)):8, Slot:16/little, IdBin/binary, (map_size(Fields)):8, FieldBin/binary>>.
+    <<(op_byte(Op)):8, Slot:16/little, Gen:8, IdBin/binary, (map_size(Fields)):8, FieldBin/binary>>.
 
 encode_field(Name, Value, Index) ->
     Idx = maps:get(Name, Index),
@@ -259,15 +267,15 @@ decode_dict(N, <<Len:8, Name:Len/binary, Rest/binary>>, Acc) ->
 
 decode_records(0, Rest, _Names, Acc) ->
     {lists:reverse(Acc), Rest};
-decode_records(N, <<OpByte:8, Slot:16/little, Rest0/binary>>, Names, Acc) ->
+decode_records(N, <<OpByte:8, Slot:16/little, Gen:8, Rest0/binary>>, Names, Acc) ->
     Op = op_atom(OpByte),
     {Base, Rest1} =
         case Op of
             add ->
                 <<IdLen:8, Id:IdLen/binary, R/binary>> = Rest0,
-                {#{op => add, slot => Slot, id => Id}, R};
+                {#{op => add, slot => Slot, gen => Gen, id => Id}, R};
             _ ->
-                {#{op => Op, slot => Slot}, Rest0}
+                {#{op => Op, slot => Slot, gen => Gen}, Rest0}
         end,
     <<FieldCount:8, Rest2/binary>> = Rest1,
     {Fields, Rest3} = decode_fields(FieldCount, Rest2, Names, #{}),

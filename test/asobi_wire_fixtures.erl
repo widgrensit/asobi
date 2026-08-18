@@ -94,6 +94,7 @@ frames() ->
                 #{
                     op => add,
                     slot => 7,
+                    gen => 0,
                     id => ~"01a0115f-547e-714f-829f-408c855ab77b",
                     fields => #{
                         ~"x" => 12.5,
@@ -119,6 +120,7 @@ frames() ->
                 #{
                     op => update,
                     slot => I,
+                    gen => 0,
                     fields => #{
                         ~"x" => I * 1.5, ~"y" => I * -0.25, ~"vx" => 0.5, ~"vy" => -0.5
                     }
@@ -138,6 +140,9 @@ frames() ->
                 #{
                     op => add,
                     slot => I,
+                    %% A different generation per record, so a decoder that reads
+                    %% the byte at the wrong offset cannot pass by accident.
+                    gen => I,
                     id => iolist_to_binary(
                         io_lib:format("0000000~2..0b-0000-7000-8000-000000000000", [I])
                     ),
@@ -153,7 +158,7 @@ frames() ->
             frame_seq => 12,
             kf => false,
             tick => 240,
-            records => [#{op => remove, slot => S} || S <- [1, 2, 65535]]
+            records => [#{op => remove, slot => S, gen => 7} || S <- [1, 2, 65535]]
         }},
         %% The leave mirror, and the one frame a client must apply WITHOUT the
         %% sequence check. An SDK that gates it on frame_seq keeps ghosts forever.
@@ -163,7 +168,7 @@ frames() ->
             frame_seq => 0,
             kf => false,
             tick => 0,
-            records => [#{op => remove, slot => S} || S <- [3, 9]]
+            records => [#{op => remove, slot => S, gen => 255} || S <- [3, 9]]
         }},
         %% An empty zone still has a sequence position. A decoder that treats zero
         %% records as an error rejects a legitimate baseline.
@@ -184,7 +189,7 @@ frames() ->
             frame_seq => 16#1FFFFFFFFFFFFF,
             kf => false,
             tick => 16#1FFFFFFFFFFFFF,
-            records => [#{op => update, slot => 0, fields => #{~"x" => 0.0}}]
+            records => [#{op => update, slot => 0, gen => 255, fields => #{~"x" => 0.0}}]
         }}
     ].
 
@@ -204,8 +209,8 @@ to_json(#{kind := Kind, zone := {ZX, ZY}} = F) ->
         ~"records" => [record_json(R) || R <- maps:get(records, F)]
     }.
 
-record_json(#{op := Op, slot := Slot} = R) ->
-    Base = #{~"op" => atom_to_binary(Op), ~"slot" => Slot},
+record_json(#{op := Op, slot := Slot, gen := Gen} = R) ->
+    Base = #{~"op" => atom_to_binary(Op), ~"slot" => Slot, ~"gen" => Gen},
     Base1 =
         case R of
             #{id := Id} -> Base#{~"id" => Id};

@@ -823,7 +823,13 @@ reconnect.
 
 **Entities are 2-byte slots, and the slot is scoped to the zone.** A record
 carries the full entity id on an **add only**, which is where the binding is
-established; update and remove carry the slot alone. Keep a slot-to-id table per
+established; update and remove carry the slot and generation alone.
+
+`Gen` advances every time a slot is rebound to a different entity. On this wire it
+is redundant, because the stream is ordered and reliable and `frame_seq` already
+bounds the reuse hazard, and it is carried anyway so that a client also running
+the datagram plane can keep one slot table for both carriers rather than two that
+can disagree. If you are only on the WebSocket you can ignore it. Keep a slot-to-id table per
 zone - slot 5 in one zone has nothing to do with slot 5 in another - and let an
 add REPLACE any binding already there, because a freed slot is eventually
 reused. There is no mapping message and none is needed: a keyframe is all-adds,
