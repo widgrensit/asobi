@@ -20,6 +20,7 @@
     ws_message_in/1,
     ws_message_out/1,
     ws_connect_rate_limited/1,
+    dgram_bindings_expired/1,
     join_rate_limited/1,
     rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
@@ -78,6 +79,7 @@ events() ->
         [asobi, ws, disconnected],
         [asobi, ws, message_in],
         [asobi, ws, message_out],
+        [asobi, dgram, bindings_expired],
         [asobi, ws, connect_rate_limited],
         [asobi, ws, idle_auth_timeout],
         [asobi, ws, origin_rejected],
@@ -302,6 +304,18 @@ join_rate_limited(PlayerId) ->
     telemetry:execute(
         [asobi, join, rate_limited], #{count => 1}, #{player_id => PlayerId}
     ).
+
+-doc """
+Datagram bindings swept for expiry, per sweep.
+
+A mint that is never followed by a `hello` holds a table slot until the session
+dies, so the sweep is what bounds a client that opens the plane and walks away.
+A rising count here means clients are minting and not connecting, which is a
+client-side fault rather than an attack: minting costs an authenticated WebSocket.
+""".
+-spec dgram_bindings_expired(non_neg_integer()) -> ok.
+dgram_bindings_expired(Count) ->
+    telemetry:execute([asobi, dgram, bindings_expired], #{count => Count}, #{}).
 
 -spec ws_connect_rate_limited(binary()) -> ok.
 ws_connect_rate_limited(PeerIp) ->

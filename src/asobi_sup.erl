@@ -18,7 +18,32 @@ init([]) ->
         intensity => 10,
         period => 60
     },
-    Children = [
+    {ok, {SupFlags, children(role())}}.
+
+%% Narrowed here rather than taken from application:get_env/3, which types as
+%% term(). An operator typo must not silently select neither role and boot an
+%% empty tree that looks healthy.
+-spec role() -> engine | dgram_gw.
+role() ->
+    case application:get_env(asobi, role, engine) of
+        dgram_gw -> dgram_gw;
+        _ -> engine
+    end.
+
+%% One image, two roles. The datagram gateway binds a UDP port and parses packets
+%% from anyone on the internet, so it must not share a process tree with the Lua
+%% sandbox or the tenant database credentials (ADR 0012, decision 14). Running it
+%% as its own role rather than its own repo keeps the codec shared and the build
+%% single; the isolation that matters is at the container boundary, and this is
+%% what draws it.
+%%
+%% `engine` is the default, so a deployment that has never heard of the gateway
+%% gets exactly what it had.
+-spec children(engine | dgram_gw) -> [supervisor:child_spec()].
+children(dgram_gw) ->
+    [dgram_gw_sup()];
+children(_Engine) ->
+    [
         rate_limit_spec(),
         oidc_providers_spec(),
         auth_cache_spec(),
@@ -38,8 +63,17 @@ init([]) ->
         lua_game_config_spec(),
         lua_sup(),
         extension_sup()
-    ],
-    {ok, {SupFlags, Children}}.
+    ].
+
+dgram_gw_sup() ->
+    #{
+        id => asobi_dgram_gw_sup,
+        start => {asobi_dgram_gw_sup, start_link, []},
+        restart => permanent,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [asobi_dgram_gw_sup]
+    }.
 
 %% The asobi_lua merge: asobi_lua used to be its own OTP application, whose
 %% start callback loaded the Lua game config and then started asobi_lua_sup.

@@ -302,6 +302,32 @@ A rejected request gets `403 client_gate_denied`, with the gate's own reason in
 runs after the rate limiter, so a flood is shed by the cheap in-memory check
 before it reaches an external verification service.
 
+## The datagram gateway role
+
+One image, two roles. `role` defaults to `engine` and gives you exactly what you
+have today; `dgram_gw` starts the datagram gateway **and nothing else**.
+
+```erlang
+{role, dgram_gw},
+{dgram, #{port => 7777, shards => 4}}
+```
+
+Run them as two containers from the same image. That separation is the point
+rather than a deployment convenience: the gateway binds a UDP port and parses
+packets from anyone on the internet, and it must not share a process tree with
+the Lua sandbox or your database credentials. In the `dgram_gw` role no zone, no
+world, no match, no Lua VM and no database pool is ever started.
+
+`shards` is the number of `SO_REUSEPORT` receiver sockets and defaults to the
+scheduler count capped at 8. **It is fixed at boot.** Adding or removing a socket
+reshuffles the kernel's hash and breaks every flow already running through the
+gateway, so there is no reload path and changing it is a restart with a
+reconnect for every player on the plane.
+
+The plane itself is optional in every state: the WebSocket carries everything
+throughout, and a client that never reaches the gateway is degraded rather than
+broken. See [ADR 0013](https://github.com/widgrensit/asobi/blob/main/docs/adr/0013-binary-wire-and-single-node-datagrams.md).
+
 ## Binary `world.tick`
 
 Off by default. Turning it on lets a client ask for `world.tick` as a binary
