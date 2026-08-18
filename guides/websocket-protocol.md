@@ -835,6 +835,9 @@ add REPLACE any binding already there, because a freed slot is eventually
 reused. There is no mapping message and none is needed: a keyframe is all-adds,
 so `world.resync` re-establishes every binding for you.
 
+The binary wire is also what the [datagram plane](datagram-plane.md) builds on:
+its `pose` frames carry slots, and the bindings come from the `add` records here.
+
 A committed fixture corpus lives in `priv/wire_fixtures/` - one `.bin` per case
 plus a `manifest.json` saying what each decodes to. Test your decoder against
 it; the server's own CI asserts those bytes are still what it produces.

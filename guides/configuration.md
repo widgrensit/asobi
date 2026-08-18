@@ -409,7 +409,9 @@ and `expires_in`.
 
 The plane is optional in every state: the WebSocket carries everything
 throughout, and a client that never reaches the gateway is degraded rather than
-broken. See [ADR 0013](https://github.com/widgrensit/asobi/blob/main/docs/adr/0013-binary-wire-and-single-node-datagrams.md).
+broken. **[The datagram plane](datagram-plane.md) is the whole story end to end**
+- what it carries, the compose file, the client side, and what happens when it
+does not work.
 
 ## Binary `world.tick`
 

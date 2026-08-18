@@ -395,8 +395,9 @@ Open **UDP** 7777 on your firewall. The link port is loopback-only inside the
 compose network and must never be published: it carries mint secrets and has no
 transport security of its own.
 
-Clients opt in per SDK - `realtime.request_datagram = true` in Defold and LOVE
-today. A client on a network that blocks UDP, or a web export where raw UDP does
+Clients opt in per SDK - `realtime.request_datagram = true` in Godot, Defold and
+LOVE today; see [the datagram plane](datagram-plane.md) for the client side and
+the SDK support table. A client on a network that blocks UDP, or a web export where raw UDP does
 not exist, silently stays on the WebSocket and loses nothing but latency.
 
 ### Checking it works

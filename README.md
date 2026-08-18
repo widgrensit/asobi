@@ -131,6 +131,7 @@ everything around it.
 - [**Cloud**](guides/cloud.md) - the managed version: the CLI, how Lua reaches an environment, and when to self-host instead
 - [**Architecture**](guides/architecture.md) - supervision tree, modules, design
 - [**REST API**](guides/rest-api.md) · [**WebSocket protocol**](guides/websocket-protocol.md)
+- [**Datagram plane**](guides/datagram-plane.md) - optional UDP for entity positions, self-hosting only
 - [**Matchmaking**](guides/matchmaking.md) · [**Lobbies**](guides/lobbies.md) · [**Voting**](guides/voting.md) · [**Phases**](guides/phases.md)
 - [**Testing with multiple players**](guides/testing-multiple-players.md) - why two clients on one machine are one player, and how to get two
 - [**World server**](guides/world-server.md) · [**Large worlds**](guides/large-worlds.md)
