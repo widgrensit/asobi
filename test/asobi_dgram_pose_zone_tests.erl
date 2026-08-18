@@ -9,6 +9,8 @@
 zone_pose_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         {"a zone with no manifest emits nothing", fun no_manifest_no_pose/0},
+        {"a zone with the binary wire off emits nothing", fun no_binary_wire_no_pose/0},
+        {"an entity whose add fell back to text gets no pose", fun unannounced_entity_no_pose/0},
         {"a zone with no datagram subscribers emits nothing", fun no_subscribers_no_pose/0},
         {"a moving entity produces a decodable pose", fun moving_entity_produces_pose/0},
         {"pose and the binary wire share one slot map", fun one_slot_map/0},
@@ -25,6 +27,10 @@ setup() ->
         period_ticks => 20,
         fields => [#{name => ~"x", scale => 100}, #{name => ~"y", scale => 100}]
     }),
+    %% The plane's precondition, not a detail of the fixture: a pose names a slot
+    %% and only the binary `world.tick` binds one, so every test that expects a
+    %% pose needs the wire that makes it resolvable (asobi#509).
+    application:set_env(asobi, binary_wire, true),
     %% Stand in for the mint's ETS mirror. The zone reads it directly, so a test
     %% can populate it without a whole engine behind it.
     ensure_table(asobi_dgram_conns, [named_table, public, {read_concurrency, true}]),
@@ -66,6 +72,36 @@ no_manifest_no_pose() ->
     ?assertEqual(no_pose, recv_pose()),
     gen_server:stop(Pid).
 
+%% A pose carries a slot and nothing else, and the only frame that binds a slot to
+%% an entity is an `add` on the binary wire - which no client is served while
+%% `binary_wire` is off. Emitting poses into that configuration burned an encode
+%% per tick to produce datagrams every client discarded (asobi#509).
+no_binary_wire_no_pose() ->
+    application:set_env(asobi, binary_wire, false),
+    Pid = start_zone(),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(no_pose, recv_pose()),
+    gen_server:stop(Pid).
+
+%% asobi#510. An entity the encoder cannot take rides the text wire, and a text
+%% add carries no slot, so the client has no binding for it - a pose naming that
+%% slot is dropped there and the entity looks frozen for the whole session. The
+%% zone therefore keeps it off the plane entirely and lets `world.tick` carry it,
+%% which is the carrier that can name it.
+unannounced_entity_no_pose() ->
+    Pid = start_zone(),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    %% A list is not one of the six scalar types the wire carries, so the frame
+    %% announcing this entity is refused and sent as text.
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0, ~"path" => [1, 2]}),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(no_pose, recv_pose()),
+    gen_server:stop(Pid).
+
 %% Building a body for nobody is the one cost on this path that is trivially
 %% avoidable, and a zone whose players are all on the WebSocket is the common case.
 no_subscribers_no_pose() ->
@@ -103,7 +139,6 @@ moving_entity_produces_pose() ->
 %% the pose plane and the binary wire read the SAME slot, and this proves it by
 %% comparing the two wires' own bytes.
 one_slot_map() ->
-    application:set_env(asobi, binary_wire, true),
     Pid = start_zone(),
     ets:insert(asobi_dgram_conns, {~"p1", 4242}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
@@ -117,7 +152,6 @@ one_slot_map() ->
 
     ?assertEqual(WireSlot, PoseSlot),
     ?assertEqual(WireGen, PoseGen),
-    application:unset_env(asobi, binary_wire),
     gen_server:stop(Pid).
 
 %% The two carriers lose frames independently, so sharing a counter would make

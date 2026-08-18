@@ -103,7 +103,22 @@ without knowing how the wire encoded it.
 
 %% Named `delta()` and not `record()`: the latter is a built-in type name and
 %% shadowing it is a compile error, the same trap as clashing with a BIF name.
+%%
+%% Field names are accepted as atoms as well as binaries, because a Luerl table
+%% hands the zone whichever the game happened to write and the text wire renders
+%% both as the same JSON key. `encode/1` normalises them before anything reads a
+%% name, so only `wire_delta()` below ever reaches the encoder.
 -type delta() :: #{
+    op := add | update | remove,
+    slot := non_neg_integer(),
+    gen := 0..255,
+    id => binary(),
+    fields => #{atom() | binary() => term()}
+}.
+
+%% A delta whose field names are already binaries. Separate from `delta()` so the
+%% dictionary index is built from a list the type system knows is binaries.
+-type wire_delta() :: #{
     op := add | update | remove,
     slot := non_neg_integer(),
     gen := 0..255,
@@ -114,14 +129,30 @@ without knowing how the wire encoded it.
 -doc """
 Encodes one `world.tick` frame.
 
+Total on the field names, which is the whole reason this returns a tagged tuple.
+A game's entity is an open map built by a Lua script, so its keys are whatever
+that script wrote: atoms are normalised to their text form, matching what the
+text wire's `json:encode/1` does with the same key, and anything else refuses the
+frame as `{error, bad_field_name}`. Calling `byte_size/1` on such a key instead
+would kill the zone gen_server mid-tick and take every subscriber's session with
+it (asobi#509).
+
 Returns `{error, dict_too_large}` rather than truncating when a frame's distinct
 field names exceed 32. Silently dropping fields would be undetectable corruption
 on the client; a refused frame is a server-side error someone can see.
 """.
--spec encode(frame()) -> {ok, binary()} | {error, dict_too_large}.
-encode(#{
-    kind := Kind, zone := {ZX, ZY}, frame_seq := Seq, kf := Kf, tick := Tick, records := Recs
-}) ->
+-spec encode(frame()) ->
+    {ok, binary()} | {error, dict_too_large | bad_field_name | ambiguous_field_name}.
+encode(#{records := Recs0} = Frame) ->
+    case normalise_records(Recs0) of
+        {ok, Recs} -> encode_normalised(Frame, Recs);
+        {error, _} = Err -> Err
+    end.
+
+-spec encode_normalised(frame(), [wire_delta()]) -> {ok, binary()} | {error, dict_too_large}.
+encode_normalised(
+    #{kind := Kind, zone := {ZX, ZY}, frame_seq := Seq, kf := Kf, tick := Tick}, Recs
+) ->
     Names = dict_names(Recs),
     case length(Names) > ?MAX_DICT of
         true ->
@@ -188,15 +219,65 @@ field_type_tag(null) -> ?T_NULL.
 
 %% --- Internal ---
 
+%% Atom keys to their text form, and a refusal for anything else. Built as a whole
+%% new record list rather than fixed up inside the encoder so that the dictionary,
+%% the index and every field header read the same names - a normalisation applied
+%% in one of those three places and not the others would put a name in the
+%% dictionary that no record refers to.
+%%
+%% Two keys that normalise to the same name (`type` and `~"type"` in one entity)
+%% refuse the frame rather than silently keeping one. The text wire emits both, so
+%% dropping one here would make the two wires disagree about what the entity is,
+%% which is the same call `asobi_zone` makes for a field with no binary form.
+-spec normalise_records([delta()]) ->
+    {ok, [wire_delta()]} | {error, bad_field_name | ambiguous_field_name}.
+normalise_records([]) ->
+    {ok, []};
+normalise_records([Rec | Rest]) ->
+    case normalise_record(Rec) of
+        {error, _} = Err ->
+            Err;
+        {ok, Normalised} ->
+            case normalise_records(Rest) of
+                {error, _} = Err -> Err;
+                {ok, Recs} -> {ok, [Normalised | Recs]}
+            end
+    end.
+
+-spec normalise_record(delta()) ->
+    {ok, wire_delta()} | {error, bad_field_name | ambiguous_field_name}.
+normalise_record(#{fields := Fields} = Rec) ->
+    case normalise_fields(maps:to_list(Fields), #{}) of
+        error -> {error, bad_field_name};
+        {ok, Named} when map_size(Named) =:= map_size(Fields) -> {ok, Rec#{fields => Named}};
+        {ok, _Collided} -> {error, ambiguous_field_name}
+    end;
+normalise_record(#{op := Op, slot := Slot, gen := Gen} = Rec) ->
+    case Rec of
+        #{id := Id} -> {ok, #{op => Op, slot => Slot, gen => Gen, id => Id}};
+        _ -> {ok, #{op => Op, slot => Slot, gen => Gen}}
+    end.
+
+-spec normalise_fields([{atom() | binary(), term()}], #{binary() => term()}) ->
+    {ok, #{binary() => term()}} | error.
+normalise_fields([], Acc) ->
+    {ok, Acc};
+normalise_fields([{Name, Value} | Rest], Acc) when is_binary(Name) ->
+    normalise_fields(Rest, Acc#{Name => Value});
+normalise_fields([{Name, Value} | Rest], Acc) when is_atom(Name) ->
+    normalise_fields(Rest, Acc#{atom_to_binary(Name, utf8) => Value});
+normalise_fields(_Fields, _Acc) ->
+    error.
+
 %% Distinct field names in first-appearance order, so a frame's dictionary is
 %% deterministic for a given record list and the encoder is testable by equality.
--spec dict_names([delta()]) -> [binary()].
+-spec dict_names([wire_delta()]) -> [binary()].
 dict_names(Recs) -> dict_names(Recs, [], []).
 
 %% Threaded explicitly rather than via lists:append/1 over a comprehension: that
 %% shape erases the element type on the way through, and the dictionary index is
 %% only sound if the names are known to be binaries.
--spec dict_names([delta()], [binary()], [binary()]) -> [binary()].
+-spec dict_names([wire_delta()], [binary()], [binary()]) -> [binary()].
 dict_names([], _Seen, Acc) ->
     Acc;
 dict_names([R | Rest], Seen, Acc) ->
@@ -219,7 +300,7 @@ add_names([K | Rest], Seen, Acc) ->
 %% Pattern-matched rather than maps:get/3 with a default: the default widens the
 %% map type and the key type goes with it, so the dictionary ends up untypeable
 %% for the sake of one line of brevity.
--spec field_keys(delta()) -> [binary()].
+-spec field_keys(wire_delta()) -> [binary()].
 field_keys(#{fields := Fields}) -> maps:keys(Fields);
 field_keys(_) -> [].
 

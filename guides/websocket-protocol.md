@@ -125,8 +125,9 @@ frame that happens to arrive.
 Asking for binary changes `world.tick` and nothing else. `world.ack`,
 `world.terrain`, `match.*`, `module.*` and every `error` stay JSON text on both
 wires, so a binary client is one that handles both frame types, not one that
-stops handling text. A frame the server cannot encode as binary (an entity field
-holding a list or a nested map, for instance) also arrives as text.
+stops handling text. A frame the server cannot encode as binary also arrives as
+text: an entity field holding a list or a nested map, or a frame needing more
+than the 32 field names the dictionary can index.
 
 The uplink is text-only on both wires. A binary frame sent to the server answers
 `error` with reason `binary_uplink_unsupported`.
@@ -820,6 +821,23 @@ A `2` frame is the leave-removal list, and it is applied ungated.
 `x, y, vx, vy` pay for four names rather than a hundred and sixty. The frame is
 self-describing: nothing is negotiated up front and nothing survives a
 reconnect.
+
+**Five bits of index means a frame carries at most 32 distinct field names**, and
+this is a budget worth knowing before you hit it. It is counted across the whole
+frame, not per entity, but one entity is what usually spends it: a delta names
+only the fields that changed, while the `add` that introduces an entity names all
+of them. An entity with 33 fields therefore cannot ride this wire at all.
+
+A frame past the budget is sent as text instead - correct, and slower, and it
+costs more than bandwidth. **A text add carries no slot**, so an entity
+introduced by one is never bound in your slot table, and the datagram `pose`
+records that name its slot have nothing to bind to. The server will not send
+poses for an entity it knows it announced as text (asobi#510), so the entity
+keeps moving on `world.tick` rather than disappearing - but it loses the UDP fast
+path for the life of the zone. If entities in your game seem to be missing the
+datagram plane, count their fields first and look for
+`binary world.tick frame refused` in the server log; the line names the zone, the
+distinct-name count and the widest entity.
 
 **Entities are 2-byte slots, and the slot is scoped to the zone.** A record
 carries the full entity id on an **add only**, which is where the binding is

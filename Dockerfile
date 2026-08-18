@@ -44,6 +44,7 @@ EXPOSE 8084
 
 ENV ASOBI_PORT=8084 \
     ASOBI_NODE_HOST=127.0.0.1 \
+    ASOBI_NODE_NAME=asobi \
     ASOBI_DB_HOST=db \
     ASOBI_DB_NAME=asobi \
     ASOBI_DB_USER=postgres \

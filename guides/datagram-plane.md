@@ -80,34 +80,67 @@ printf 'dgram_secret.txt\n' >> .gitignore
     environment:
       # Where to dial the gateway. This is the engine's opt-in: without it
       # nothing is dialled and clients are told the plane is unavailable.
-      ASOBI_DGRAM_GATEWAY: "dgram:7778"
+      #
+      # Loopback, not a compose service name. The gateway binds its link port on
+      # 127.0.0.1 - it carries mint credentials with no transport security of its
+      # own - so a gateway on its own compose network is unreachable no matter
+      # what you point this at, and the plane degrades to WebSocket for everyone
+      # (asobi#511). The two roles share one network namespace instead.
+      ASOBI_DGRAM_GATEWAY: "127.0.0.1:7778"
       # What clients are told to send to - your public address, not the
       # container's. Delivered in the mint reply, which is why the plane needs
       # no DNS and no SNI and why a non-standard port costs nothing.
       ASOBI_DGRAM_ENDPOINT: "udp.example.com:7777"
       ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
+      # The plane's precondition. A pose carries a slot and nothing else, and the
+      # only frame that binds a slot to an entity is an `add` on the binary
+      # `world.tick`, which no client is served while this is off - so every pose
+      # would be discarded by every client. asobi logs an error at boot and
+      # disables poses if you configure the manifest without it.
+      ASOBI_BINARY_WIRE: "1"
+    ports:
+      # The gateway's UDP port, published here because it lives in this
+      # container's network namespace.
+      - "7777:7777/udp"
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
 
   dgram:
     image: ghcr.io/widgrensit/asobi:latest
+    # The engine's network namespace. On Kubernetes this is a second container in
+    # the same pod, where it comes for free.
+    network_mode: "service:asobi"
+    depends_on:
+      - asobi
     environment:
       ASOBI_ROLE: dgram_gw
       ASOBI_DGRAM_PORT: 7777
       ASOBI_DGRAM_LINK_PORT: 7778
       ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
-    ports:
-      - "7777:7777/udp"
+      # A distinct Erlang node name. One namespace means one EPMD, and two nodes
+      # registering the same name means the second one does not boot.
+      ASOBI_NODE_NAME: asobi_gw
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
     restart: unless-stopped
 ```
 
+**The two roles share a network namespace.** That is a `network_mode:
+"service:asobi"` sidecar in compose, and two containers in one pod on Kubernetes
+(where they already do). It is not a weakening of the split: the gateway keeps
+its own environment, its own filesystem and its own process tree, and those are
+where the isolation is. What it does not keep is a private loopback, which is
+exactly what the link needs to be reachable.
+
 Open **UDP** 7777 on your firewall. Never publish the link port: it carries mint
-credentials, has no transport security of its own, and binds loopback for that
-reason.
+credentials and has no transport security of its own, which is why it binds
+loopback and why the namespace is shared rather than the port exposed.
+
+The gateway role starts no HTTP listener, so it does not compete for
+`ASOBI_PORT` and there is no half-booted API answering requests from a node with
+no auth subsystem behind it.
 
 The engine dials the gateway rather than the other way round, so the gateway
 needs no knowledge of where the engine is. The link is deliberately **not**
@@ -224,6 +257,18 @@ asobi.dgram.canary_missed    consecutive >= 2 means the receive loop is wedged
 asobi.dgram.dropped          gate=mac is the one to wake up for
 asobi.dgram.pose_saturated   your scale is wrong for your world size
 ```
+
+Two log lines say the plane is not working, and both name the cause:
+
+- `dgram link unreachable, datagram plane is down` - the engine cannot reach the
+  gateway. Almost always the topology: the link port binds loopback, so the two
+  roles have to share a network namespace. Every client is answered
+  `datagram_unavailable` until this clears.
+- `binary world.tick frame refused, falling back to text` - a zone's entities do
+  not fit the binary wire, so the entities that frame introduced get no poses.
+  The line carries the zone, the distinct field-name count (the cap is 32) and
+  the widest entity, and it is throttled to one per zone per minute with the
+  suppressed count attached.
 
 The gateway proves itself by sending itself a real datagram every five seconds
 and waiting for the reply, so a wedged receive loop fails readiness where a

@@ -36,7 +36,8 @@
     rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
     ws_origin_rejected/0,
-    ws_legacy_input_unwrap/0
+    ws_legacy_input_unwrap/0,
+    binary_wire_refused/1
 ]).
 -export([anticheat_violation/3]).
 -export([game_error/1, game_error/2]).
@@ -99,6 +100,7 @@ events() ->
         [asobi, dgram, input_undecodable],
         [asobi, dgram, canary_missed],
         [asobi, dgram, pose_saturated],
+        [asobi, wire, binary_refused],
         [asobi, dgram, link_up],
         [asobi, dgram, link_closed],
         [asobi, dgram, link_error],
@@ -349,6 +351,22 @@ size, and the fix is configuration rather than code.
 -spec dgram_pose_saturated(non_neg_integer()) -> ok.
 dgram_pose_saturated(Count) ->
     telemetry:execute([asobi, dgram, pose_saturated], #{count => Count}, #{}).
+
+-doc """
+A `world.tick` the binary encoder refused, sent as text instead.
+
+Not a correctness failure on its own - a client that negotiated binary still
+handles text - but a sustained rate is one: an entity introduced by a text frame
+carries no slot, so it stays unbound on every binary client and its pose
+datagrams are dropped there (asobi#510). `reason` is `dict_too_large` for a frame
+past the 32 field names the dictionary can index, `unencodable_field` for a list
+or map where the wire carries scalars, `bad_field_name` for a field name that is
+neither an atom nor a binary, and `no_slot` for a slot map that has drifted from
+the baseline.
+""".
+-spec binary_wire_refused(atom()) -> ok.
+binary_wire_refused(Reason) ->
+    telemetry:execute([asobi, wire, binary_refused], #{count => 1}, #{reason => Reason}).
 
 -doc "An engine attached to the gateway's link and authenticated.".
 -spec dgram_link_up() -> ok.

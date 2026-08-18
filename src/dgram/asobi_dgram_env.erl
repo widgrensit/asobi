@@ -30,6 +30,9 @@ the path wrong must not come up quietly with no authentication on its link.
 -include_lib("kernel/include/logger.hrl").
 
 -export([apply/0]).
+-ifdef(TEST).
+-export([check_pose_carrier/0]).
+-endif.
 
 -doc "Reads the environment into the application env. Idempotent.".
 -spec apply() -> ok.
@@ -39,7 +42,9 @@ apply() ->
     set_link_secret(),
     set_engine_link(),
     set_endpoint(),
+    set_binary_wire(),
     set_pose(),
+    _ = check_pose_carrier(),
     ok.
 
 %% --- Internal ---
@@ -130,6 +135,43 @@ set_endpoint() ->
     case application:get_env(asobi, dgram_endpoint) of
         {ok, _} -> ok;
         undefined -> set_binary(dgram_endpoint, "ASOBI_DGRAM_ENDPOINT")
+    end.
+
+%% Not a datagram variable, and here anyway. The binary `world.tick` is what binds
+%% a slot to an entity (ADR 0013, decision 4) and a pose datagram carries a slot
+%% and nothing else, so the plane cannot work without it - and until this existed
+%% there was no way to turn it on from the published image at all, which made the
+%% whole plane unreachable for exactly the audience that configures asobi with
+%% environment variables.
+set_binary_wire() ->
+    case {application:get_env(asobi, binary_wire), os:getenv("ASOBI_BINARY_WIRE")} of
+        {undefined, Value} when Value =:= "1"; Value =:= "true" ->
+            application:set_env(asobi, binary_wire, true);
+        {undefined, Value} when Value =:= "0"; Value =:= "false" ->
+            application:set_env(asobi, binary_wire, false);
+        _ ->
+            ok
+    end.
+
+%% A pose manifest with the binary wire off is a plane that mints, sends and is
+%% discarded by every client: `asobi_ws_handler:negotiate_wire/1` answers `"json"`
+%% while `binary_wire` is off, so no client ever receives the `add` records the
+%% slots are bound by, and every pose names a slot the decoder cannot resolve
+%% (asobi#509). Reported here, once at boot, rather than left to be found from a
+%% game that looks like it has no other players.
+-spec check_pose_carrier() -> ok | {error, no_binary_wire}.
+check_pose_carrier() ->
+    case {application:get_env(asobi, dgram_pose), application:get_env(asobi, binary_wire, false)} of
+        {{ok, _Manifest}, true} ->
+            ok;
+        {{ok, _Manifest}, _Off} ->
+            ?LOG_ERROR(#{
+                msg => ~"dgram_pose_without_binary_wire",
+                detail => ~"the pose plane needs asobi.binary_wire (ASOBI_BINARY_WIRE=1)"
+            }),
+            {error, no_binary_wire};
+        _ ->
+            ok
     end.
 
 %% `x:100,y:100,vx:100,vy:100` - name and scale, in canonical order. Terse

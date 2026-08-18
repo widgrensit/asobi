@@ -88,6 +88,44 @@ too_many_distinct_field_names_is_refused_test() ->
         asobi_wire:encode(F#{records => [#{op => update, slot => 1, gen => 0, fields => Ok}]})
     ).
 
+%% asobi#509. A Luerl table hands the zone whichever key form the game script
+%% wrote, and an atom one reached `byte_size/1` and killed the zone gen_server
+%% mid-tick - taking every subscriber's session with it. Atoms are the form the
+%% text wire already renders as a plain JSON key, so the two wires agree.
+atom_field_names_encode_as_their_text_form_test() ->
+    Atoms = frame([#{op => update, slot => 1, gen => 0, fields => #{type => 7, ~"x" => 1.0}}]),
+    Binaries = frame([
+        #{op => update, slot => 1, gen => 0, fields => #{~"type" => 7, ~"x" => 1.0}}
+    ]),
+    ?assertEqual(asobi_wire:encode(Binaries), asobi_wire:encode(Atoms)),
+    {ok, Bin} = asobi_wire:encode(Atoms),
+    ?assertMatch({ok, #{records := [#{fields := #{~"type" := 7}}]}}, asobi_wire:decode(Bin)).
+
+%% A record with no `fields` at all is legal on both wires - an add for an entity
+%% with an empty state, and every remove. Normalising must leave those alone
+%% rather than treating the absent key as an empty one it then has to rebuild.
+records_without_fields_survive_normalisation_test() ->
+    Add = frame([#{op => add, slot => 1, gen => 0, id => ~"e1"}]),
+    ?assertEqual({ok, Add}, roundtrip(Add)),
+    Remove = frame([#{op => remove, slot => 1, gen => 0}]),
+    ?assertEqual({ok, Remove}, roundtrip(Remove)).
+
+%% Total on the field names, which is the whole point: the encoder runs inside the
+%% zone's tick, so anything it cannot express has to come back as a value rather
+%% than as an exception.
+non_textual_field_names_refuse_the_frame_test() ->
+    Numeric = frame([#{op => update, slot => 1, gen => 0, fields => #{1 => 1.0}}]),
+    ?assertEqual({error, bad_field_name}, asobi_wire:encode(Numeric)),
+    Tuple = frame([#{op => update, slot => 1, gen => 0, fields => #{{a, b} => 1.0}}]),
+    ?assertEqual({error, bad_field_name}, asobi_wire:encode(Tuple)).
+
+%% Keeping one of two keys that normalise to the same name would put a value on
+%% the binary wire that the text wire does not carry, which is the disagreement
+%% the whole-frame fallback exists to prevent.
+colliding_field_names_refuse_the_frame_test() ->
+    F = frame([#{op => update, slot => 1, gen => 0, fields => #{type => 1, ~"type" => 2}}]),
+    ?assertEqual({error, ambiguous_field_name}, asobi_wire:encode(F)).
+
 %% The leave-removal frame carries no position in the zone's stream - on the text
 %% wire that is said by omitting frame_seq, which a fixed-layout binary frame
 %% cannot do. If the kind byte did not survive, that frame would decode as

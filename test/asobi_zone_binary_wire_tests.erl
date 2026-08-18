@@ -21,7 +21,9 @@ binary_wire_test_() ->
         {"a slot survives across ticks so update records stay bound",
             fun slots_are_stable_across_ticks/0},
         {"a non-scalar field drops the whole zone to text rather than diverging",
-            fun non_scalar_field_falls_back_to_text/0}
+            fun non_scalar_field_falls_back_to_text/0},
+        {"an atom-keyed entity encodes rather than killing the zone",
+            fun atom_field_names_survive_the_tick/0}
     ]}.
 
 setup() ->
@@ -198,3 +200,21 @@ recv_matching(Pred) ->
                 false -> recv_matching(Pred)
             end
     end.
+
+%% asobi#509. Field names out of a Luerl `zone_tick` can be atoms, and the encoder
+%% called `byte_size/1` on them - a badarg inside the tick, so the zone
+%% gen_server died and every subscriber's WS handler followed it into a call on a
+%% dead pid. From the players' side that was a hung loading screen with nothing
+%% pointing at the wire.
+atom_field_names_survive_the_tick() ->
+    application:set_env(asobi, binary_wire, true),
+    Pid = start_zone(),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    _ = recv(),
+    asobi_zone:add_entity(Pid, ~"e1", #{type => ~"ship", ~"x" => 1.0}),
+    asobi_zone:tick(Pid, 1),
+    {zone_delta_raw, _Json, Bin} = recv_delta(),
+    {ok, #{records := [#{fields := Fields}]}} = asobi_wire:decode(Bin),
+    ?assertEqual(#{~"type" => ~"ship", ~"x" => 1.0}, Fields),
+    ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid).

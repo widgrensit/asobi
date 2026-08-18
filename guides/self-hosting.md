@@ -346,7 +346,16 @@ travelling on the WebSocket, in every state, whatever happens to the plane.
 **It is two containers from the same image.** The gateway binds a UDP port and
 parses packets from anyone on the internet, so it must not share a process tree
 with your Lua sandbox or your database credentials. In the `dgram_gw` role no
-zone, world, match, Lua VM or database pool is ever started.
+zone, world, match, Lua VM, database pool or HTTP listener is ever started.
+
+They **share a network namespace** - a sidecar in compose, two containers in one
+pod on Kubernetes. The engine dials the gateway over loopback, because the
+gateway binds its link port on `127.0.0.1`: the link carries mint credentials
+with no transport security of its own, so it must never touch a routable address.
+A gateway on its own compose network is therefore unreachable whatever you point
+`ASOBI_DGRAM_GATEWAY` at, and the plane silently degrades to WebSocket for every
+player (asobi#511). Sharing the namespace costs none of the isolation that
+matters: the gateway keeps its own environment, filesystem and process tree.
 
 ```bash
 openssl rand -hex 32 > dgram_secret.txt
@@ -360,7 +369,8 @@ printf 'dgram_secret.txt\n' >> .gitignore
     environment:
       # Where to dial the gateway. This is the engine's opt-in: without it
       # nothing is dialled and clients are told the plane is unavailable.
-      ASOBI_DGRAM_GATEWAY: "dgram:7778"
+      # Loopback, not a compose service name - see above.
+      ASOBI_DGRAM_GATEWAY: "127.0.0.1:7778"
       # What clients are told to send to. Your public address, not the
       # container's - and it is delivered in the mint reply, which is why the
       # plane needs no DNS and no SNI and why a non-standard port is free.
@@ -371,11 +381,23 @@ printf 'dgram_secret.txt\n' >> .gitignore
       # times larger. `100` gives two decimals and a range of about +/-327 world
       # units - a bigger world needs a smaller scale and coarser steps.
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
+      # The plane's precondition. A pose carries a slot and nothing else, and the
+      # only frame that binds a slot to an entity is an `add` on the binary
+      # `world.tick` - which no client is served while this is off, so every pose
+      # would be discarded client-side. asobi logs an error at boot and disables
+      # poses if the manifest is configured without it.
+      ASOBI_BINARY_WIRE: "1"
+    ports:
+      # The gateway's UDP port, published here: it is this container's namespace.
+      - "7777:7777/udp"
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
 
   dgram:
     image: ghcr.io/widgrensit/asobi:latest
+    network_mode: "service:asobi"
+    depends_on:
+      - asobi
     environment:
       ASOBI_ROLE: dgram_gw
       ASOBI_DGRAM_PORT: 7777
@@ -384,16 +406,17 @@ printf 'dgram_secret.txt\n' >> .gitignore
       # Same manifest as the engine. The gateway does not read it, but a future
       # version might, and two copies that can disagree is worse than one.
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
-    ports:
-      - "7777:7777/udp"
+      # A distinct Erlang node name. One network namespace means one EPMD, and
+      # two nodes registering the same name means the second one does not boot.
+      ASOBI_NODE_NAME: asobi_gw
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
     restart: unless-stopped
 ```
 
-Open **UDP** 7777 on your firewall. The link port is loopback-only inside the
-compose network and must never be published: it carries mint secrets and has no
-transport security of its own.
+Open **UDP** 7777 on your firewall. Never publish the link port: it carries mint
+secrets and has no transport security of its own, which is why it binds loopback
+and why the namespace is shared rather than the port exposed.
 
 Clients opt in per SDK - `realtime.request_datagram = true` in Godot, Defold and
 LOVE today; see [the datagram plane](datagram-plane.md) for the client side and
@@ -408,6 +431,18 @@ asobi.dgram.canary_missed    consecutive >= 2 means the receive loop is wedged
 asobi.dgram.dropped          gate=mac is the one to wake up for
 asobi.dgram.pose_saturated   your scale is wrong for your world size
 ```
+
+Two log lines say the plane is not working, and both name the cause:
+
+- `dgram link unreachable, datagram plane is down` - the engine cannot reach the
+  gateway. Almost always the topology: the link port binds loopback, so the two
+  roles have to share a network namespace. Every client is answered
+  `datagram_unavailable` until this clears.
+- `binary world.tick frame refused, falling back to text` - a zone's entities do
+  not fit the binary wire, so the entities that frame introduced get no poses.
+  The line carries the zone, the distinct field-name count (the cap is 32) and
+  the widest entity, and it is throttled to one per zone per minute with the
+  suppressed count attached.
 
 The gateway proves itself by sending itself a real datagram every five seconds
 and waiting for the reply, so a wedged receive loop fails readiness where a

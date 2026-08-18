@@ -16,10 +16,13 @@
     "ASOBI_DGRAM_GATEWAY",
     "ASOBI_DGRAM_ENDPOINT",
     "ASOBI_DGRAM_POSE_FIELDS",
-    "ASOBI_DGRAM_POSE_PERIOD"
+    "ASOBI_DGRAM_POSE_PERIOD",
+    "ASOBI_BINARY_WIRE"
 ]).
 
--define(KEYS, [role, dgram, dgram_link_secret, dgram_gateway, dgram_endpoint, dgram_pose]).
+-define(KEYS, [
+    role, dgram, dgram_link_secret, dgram_gateway, dgram_endpoint, dgram_pose, binary_wire
+]).
 
 env_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
@@ -32,7 +35,10 @@ env_test_() ->
         {"the pose manifest parses in canonical order", fun pose_parses/0},
         {"a malformed pose manifest is refused", fun pose_malformed/0},
         {"a secret file beats a secret variable", fun secret_file_wins/0},
-        {"an unreadable secret file leaves no secret", fun secret_file_unreadable/0}
+        {"an unreadable secret file leaves no secret", fun secret_file_unreadable/0},
+        {"the binary wire folds in, which is what carries the plane", fun binary_wire_folds_in/0},
+        {"a pose manifest without the binary wire is reported, not accepted",
+            fun pose_without_binary_wire_is_reported/0}
     ]}.
 
 setup() ->
@@ -169,3 +175,40 @@ tmp_file(Contents) ->
     ),
     ok = file:write_file(Path, Contents),
     Path.
+
+%% asobi#509. The plane cannot work without the binary wire - a pose names a slot
+%% and only an `add` on that wire binds one - and until this existed the wire
+%% could not be turned on from the published image at all, so the whole plane was
+%% unreachable for the audience it was built for.
+binary_wire_folds_in() ->
+    os:putenv("ASOBI_BINARY_WIRE", "1"),
+    asobi_dgram_env:apply(),
+    ?assertEqual({ok, true}, application:get_env(asobi, binary_wire)),
+
+    application:unset_env(asobi, binary_wire),
+    os:putenv("ASOBI_BINARY_WIRE", "false"),
+    asobi_dgram_env:apply(),
+    ?assertEqual({ok, false}, application:get_env(asobi, binary_wire)),
+
+    %% A configured sys.config wins, the same as every other key here.
+    application:set_env(asobi, binary_wire, true),
+    os:putenv("ASOBI_BINARY_WIRE", "0"),
+    asobi_dgram_env:apply(),
+    ?assertEqual({ok, true}, application:get_env(asobi, binary_wire)).
+
+%% asobi#509. Configuring the manifest and leaving the wire off looks like a
+%% working plane and is not one: every pose names a slot no client can resolve,
+%% because the frame that binds slots is the one the server refuses to send.
+pose_without_binary_wire_is_reported() ->
+    os:putenv("ASOBI_DGRAM_POSE_FIELDS", "x:100,y:100"),
+    asobi_dgram_env:apply(),
+    ?assertMatch({ok, #{fields := [_ | _]}}, application:get_env(asobi, dgram_pose)),
+    ?assertEqual({error, no_binary_wire}, asobi_dgram_env:check_pose_carrier()),
+
+    application:set_env(asobi, binary_wire, true),
+    ?assertEqual(ok, asobi_dgram_env:check_pose_carrier()),
+
+    %% No manifest is not a misconfiguration: the plane is simply off.
+    application:unset_env(asobi, dgram_pose),
+    application:unset_env(asobi, binary_wire),
+    ?assertEqual(ok, asobi_dgram_env:check_pose_carrier()).

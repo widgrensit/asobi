@@ -424,8 +424,26 @@ cheaper to decode - the numbers and the encoding are in
 {binary_wire, true}
 ```
 
+or, from a container:
+
+```
+ASOBI_BINARY_WIRE=1
+```
+
 A zone reads this once when it starts, so an already-running world keeps the
 setting it started with.
+
+**The [datagram plane](datagram-plane.md) requires it.** A pose datagram carries
+a slot and nothing else, and the only frame that binds a slot to an entity is an
+`add` on this wire - which `session.connect` refuses to hand any client while
+this is off. asobi logs `dgram_pose_without_binary_wire` at boot and disables
+poses rather than sending datagrams every client would discard.
+
+**A frame carries at most 32 distinct field names**, because the field header
+indexes the dictionary in five bits. Past that the frame is sent as text, which
+is correct but costs the entities in it their datagram fast path - see
+[the protocol guide](websocket-protocol.md#binary-worldtick) for what to watch
+for.
 
 What it costs while on: a zone can have subscribers on both wires, so it builds
 two buffers per broadcast instead of one. That is two encodes per zone per tick

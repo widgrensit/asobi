@@ -254,6 +254,20 @@ init(Config) ->
             %% wires consistent for every subscriber of that zone.
             binary_wire => application:get_env(asobi, binary_wire, false) =:= true,
             slots => asobi_wire_slots:new(),
+            %% Entity ids whose `add` record has actually gone out on a binary
+            %% frame, which is the only place a slot binding is established
+            %% (ADR 0013, decision 4). A frame the encoder refuses is sent as
+            %% text, and a text add carries no slot, so the entities in it stay
+            %% unbound on every binary client - and a pose datagram naming an
+            %% unbound slot is dropped by the client rather than applied
+            %% (asobi#510). The pose plane therefore carries only what this set
+            %% says the clients can resolve; everything else keeps moving on
+            %% `world.tick`, which is where it was already going.
+            announced => #{},
+            %% Throttle state for the refusal warning. A zone holding one
+            %% entity the encoder cannot take refuses every frame, which at 20
+            %% Hz is a warning five times a second for the life of the zone.
+            wire_log => #{logged_at => 0, suppressed => 0},
             subscribers => #{},
             zone_state => ZoneState,
             input_queue => [],
@@ -639,7 +653,7 @@ send_leave_removals(Pid, Coords, Entities, Slots) ->
     %% discard the one message that clears the ghosts.
     Msg =
         case encode_binary(ungated, Coords, 0, 0, false, Deltas, Slots) of
-            skip -> {zone_removals, Coords, Removals};
+            {skip, _Reason} -> {zone_removals, Coords, Removals};
             {ok, Bin} -> {zone_removals, Coords, Removals, Bin}
         end,
     Pid ! {asobi_message, Msg},
@@ -690,8 +704,30 @@ send_keyframe(PlayerPid, Coords, WireSeq, BroadcastEntities, Slots) ->
     Meta = frame_meta(Coords, WireSeq, true),
     Msg =
         case encode_binary(sequenced, Coords, WireSeq, 0, true, Adds, Slots) of
-            skip -> {zone_keyframe, Meta, Snapshot};
-            {ok, Bin} -> {zone_keyframe, Meta, Snapshot, Bin}
+            {skip, disabled} ->
+                {zone_keyframe, Meta, Snapshot};
+            {skip, Reason} ->
+                %% The one refusal worth a log per occurrence: a keyframe is
+                %% all-adds and is where a joining binary client gets its whole
+                %% slot mapping, so a refused one leaves that connection unable
+                %% to resolve any slot for as long as it stays in the zone. It
+                %% happens once per join rather than once per tick, so it is not
+                %% routed through the throttle.
+                ?LOG_WARNING(
+                    maps:merge(
+                        #{
+                            msg =>
+                                ~"binary keyframe refused, joining client has no slot bindings",
+                            coords => Coords,
+                            field_names => distinct_field_names(Adds),
+                            widest_entity => widest_entity(Adds)
+                        },
+                        refusal_detail(Reason)
+                    )
+                ),
+                {zone_keyframe, Meta, Snapshot};
+            {ok, Bin} ->
+                {zone_keyframe, Meta, Snapshot, Bin}
         end,
     PlayerPid ! {asobi_message, Msg},
     ok.
@@ -764,19 +800,29 @@ do_tick(
             0 ->
                 Deltas = compute_deltas(BroadcastEntities, Entities4),
                 {FrameSlots, Slots1} = advance_slots(
-                    maps:get(binary_wire, State) orelse pose_enabled(State),
+                    maps:get(binary_wire, State),
                     BroadcastEntities,
                     Entities4,
                     maps:get(slots, State)
                 ),
-                WireSeq1 = broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs, FrameSlots),
+                {WireSeq1, Refusal} = broadcast_deltas(
+                    Coords, TickN, WireSeq, Deltas, Subs, FrameSlots
+                ),
+                WireLog1 = log_wire_refusal(
+                    Refusal, Coords, TickN, Deltas, maps:get(wire_log, State)
+                ),
+                Announced1 = announce(Refusal, Deltas, maps:get(announced, State)),
                 broadcast_acks(TickN, PlayerAck1, Subs),
-                PoseSeq1 = broadcast_pose(Coords, TickN, State, Deltas, Entities4, Slots1, Subs),
+                PoseSeq1 = broadcast_pose(
+                    Coords, TickN, State, Deltas, Entities4, Slots1, Subs, Announced1
+                ),
                 State#{
                     broadcast_entities => Entities4,
                     wire_seq => WireSeq1,
                     slots => Slots1,
-                    pose_seq => PoseSeq1
+                    pose_seq => PoseSeq1,
+                    wire_log => WireLog1,
+                    announced => Announced1
                 };
             _ ->
                 State
@@ -914,9 +960,9 @@ compute_deltas(OldEntities, NewEntities) ->
     [term()],
     map(),
     asobi_wire_slots:slots() | undefined
-) -> non_neg_integer().
+) -> {non_neg_integer(), ok | {refused, refusal()}}.
 broadcast_deltas(_Coords, _TickN, WireSeq, [], _Subs, _FrameSlots) ->
-    WireSeq;
+    {WireSeq, ok};
 broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs, FrameSlots) ->
     Seq = WireSeq + 1,
     EncodedDeltas = encode_deltas(Deltas),
@@ -926,20 +972,35 @@ broadcast_deltas(Coords, TickN, WireSeq, Deltas, Subs, FrameSlots) ->
         ~"payload" => Meta#{~"tick" => TickN, ~"updates" => EncodedDeltas}
     },
     PreEncoded = iolist_to_binary(json:encode(Payload)),
-    RawMsg = delta_msg(
-        PreEncoded, encode_binary(sequenced, Coords, Seq, TickN, false, Deltas, FrameSlots)
-    ),
+    Encoded = encode_binary(sequenced, Coords, Seq, TickN, false, Deltas, FrameSlots),
+    RawMsg = delta_msg(PreEncoded, Encoded),
     maps:foreach(
         fun(_PlayerId, {Pid, _MonRef}) -> Pid ! RawMsg end,
         Subs
     ),
-    Seq.
+    {Seq, refusal(Encoded)}.
+
+%% The binary wire being off is not a refusal. Nothing was attempted, no client
+%% is on that wire, and reporting it would suppress the pose plane for every
+%% deployment that never turned the wire on.
+-spec refusal({ok, binary()} | {skip, disabled | refusal()}) -> ok | {refused, refusal()}.
+refusal({ok, _Bin}) -> ok;
+refusal({skip, disabled}) -> ok;
+refusal({skip, Reason}) -> {refused, Reason}.
 
 %% Slots are needed by the binary wire AND by the pose plane, and they are the
 %% same slots: two allocations for one zone would eventually disagree about which
 %% entity holds a slot, which is the class of defect ADR 0011 exists to close.
+%% The binary wire is a precondition, not an independent switch. A pose datagram
+%% names a slot and nothing else, and the only carrier that binds a slot to an
+%% entity is an `add` on the binary `world.tick` (ADR 0013, decision 4) - which
+%% `asobi_ws_handler:negotiate_wire/1` refuses to hand any client while
+%% `asobi.binary_wire` is off. Poses sent into that configuration are unresolvable
+%% by construction and were dropped by every client that received them, while the
+%% zone paid for the encode (asobi#509). `asobi_dgram_env` says so at boot; this
+%% is what makes it true at the tick.
 -spec pose_enabled(map()) -> boolean().
-pose_enabled(#{pose_manifest := {ok, _}}) -> true;
+pose_enabled(#{pose_manifest := {ok, _}, binary_wire := true}) -> true;
 pose_enabled(_State) -> false.
 
 %% The datagram plane's half of the tick. Returns the zone's new pose sequence.
@@ -954,23 +1015,58 @@ pose_enabled(_State) -> false.
     [term()],
     map(),
     asobi_wire_slots:slots(),
-    map()
+    map(),
+    #{binary() => true}
 ) -> non_neg_integer().
-broadcast_pose(Coords, TickN, State, Deltas, Entities, Slots, Subs) ->
+broadcast_pose(Coords, TickN, State, Deltas, Entities, Slots, Subs, Announced) ->
     PoseSeq = maps:get(pose_seq, State),
-    case maps:get(pose_manifest, State) of
-        disabled ->
-            PoseSeq;
-        {ok, Manifest} ->
+    case {pose_enabled(State), maps:get(pose_manifest, State)} of
+        {true, {ok, Manifest}} ->
             case pose_targets(Subs) of
                 [] ->
                     %% Nobody on the plane. Building a body for no one is the one
                     %% cost this whole path can trivially avoid.
                     PoseSeq;
                 ConnIds ->
-                    emit_pose(Coords, TickN, PoseSeq, Manifest, Deltas, Entities, Slots, ConnIds)
-            end
+                    emit_pose(
+                        Coords,
+                        TickN,
+                        PoseSeq,
+                        Manifest,
+                        Deltas,
+                        bound_entities(Entities, Announced),
+                        Slots,
+                        ConnIds
+                    )
+            end;
+        _ ->
+            PoseSeq
     end.
+
+%% Only entities a binary client can resolve. An entity whose `add` rode the text
+%% wire has no slot binding on any client, so a pose naming its slot is dropped
+%% there and the entity looks frozen (asobi#510); its transform keeps arriving on
+%% `world.tick` instead, which is the carrier that can name it.
+-spec bound_entities(map(), #{binary() => true}) -> map().
+bound_entities(Entities, Announced) ->
+    maps:filter(fun(Id, _State) -> is_map_key(Id, Announced) end, Entities).
+
+%% What the shared frame actually told the clients. An `add` counts only when the
+%% frame carrying it encoded, and a `remove` always drops the id: the text frame
+%% carries removals too, so the client is rid of the entity either way and keeping
+%% it here would grow the set for the life of the zone.
+-spec announce(ok | {refused, refusal()}, [term()], #{binary() => true}) ->
+    #{binary() => true}.
+announce(_Refusal, [], Announced) ->
+    Announced;
+announce(ok, [{added, Id, _State} | Rest], Announced) when is_binary(Id) ->
+    announce(ok, Rest, Announced#{Id => true});
+announce(Refusal, [{added, Id, _State} | Rest], Announced) ->
+    announce(Refusal, Rest, maps:remove(Id, Announced));
+announce(Refusal, [{removed, Id} | Rest], Announced) ->
+    announce(Refusal, Rest, maps:remove(Id, Announced));
+announce(Refusal, [_Delta | Rest], Announced) ->
+    announce(Refusal, Rest, Announced).
 
 emit_pose(Coords, TickN, PoseSeq, Manifest, Deltas, Entities, Slots, ConnIds) ->
     Changed = changed_fields(Deltas, #{}),
@@ -1016,7 +1112,7 @@ pose_targets(Subs) ->
 %% travel in ONE message. The connection picks; the zone does not need to know
 %% who negotiated what, so no per-subscriber state and no race between
 %% negotiation and subscription.
-delta_msg(Json, skip) -> {asobi_message, {zone_delta_raw, Json}};
+delta_msg(Json, {skip, _Reason}) -> {asobi_message, {zone_delta_raw, Json}};
 delta_msg(Json, {ok, Bin}) -> {asobi_message, {zone_delta_raw, Json, Bin}}.
 
 %% `undefined` when the binary wire is off, so the per-connection paths do the
@@ -1052,6 +1148,98 @@ advance_slots(true, Old, New, Slots) ->
             {undefined, Slots}
     end.
 
+%% Why a frame could not be encoded. Carried rather than logged at the point of
+%% failure so one throttled warning can name the zone, the reason AND the entity,
+%% which is what the report of this being un-diagnosable asked for (asobi#510).
+-type refusal() ::
+    dict_too_large
+    | bad_field_name
+    | ambiguous_field_name
+    | {no_slot, binary()}
+    | {unencodable_field, binary()}.
+
+%% At most one refusal warning per zone per minute. A zone holding one entity the
+%% encoder cannot take refuses every single frame, so an un-throttled warning is
+%% five lines a second per zone for the life of the zone - which is how a real
+%% signal ends up filtered out of a log pipeline. The suppressed count goes in the
+%% line, so the rate is still visible.
+-define(WIRE_LOG_INTERVAL_MS, 60_000).
+
+-spec log_wire_refusal(
+    ok | {refused, refusal()}, {integer(), integer()}, non_neg_integer(), [term()], map()
+) -> map().
+log_wire_refusal(ok, _Coords, _TickN, _Deltas, Log) ->
+    Log;
+log_wire_refusal({refused, Reason}, Coords, TickN, Deltas, #{logged_at := At} = Log) ->
+    Suppressed = maps:get(suppressed, Log, 0),
+    asobi_telemetry:binary_wire_refused(refusal_kind(Reason)),
+    Now = erlang:system_time(millisecond),
+    case Now - At >= ?WIRE_LOG_INTERVAL_MS of
+        false ->
+            Log#{suppressed => Suppressed + 1};
+        true ->
+            %% The two numbers that identify the cause of the common refusal:
+            %% the frame carries at most 32 distinct field names (asobi_wire),
+            %% and one entity is usually the reason.
+            ?LOG_WARNING(
+                maps:merge(
+                    #{
+                        msg => ~"binary world.tick frame refused, falling back to text",
+                        coords => Coords,
+                        tick => TickN,
+                        field_names => distinct_field_names(Deltas),
+                        widest_entity => widest_entity(Deltas),
+                        suppressed_since => Suppressed
+                    },
+                    refusal_detail(Reason)
+                )
+            ),
+            #{logged_at => Now, suppressed => 0}
+    end.
+
+-spec refusal_detail(refusal()) -> map().
+refusal_detail({no_slot, Id}) -> #{reason => ~"no_slot", entity => Id};
+refusal_detail({unencodable_field, Id}) -> #{reason => ~"unencodable_field", entity => Id};
+refusal_detail(Reason) -> #{reason => atom_to_binary(Reason, utf8)}.
+
+-spec refusal_kind(refusal()) -> atom().
+refusal_kind({Kind, _Id}) -> Kind;
+refusal_kind(Kind) -> Kind.
+
+%% How many distinct field names this frame would need in its dictionary, which
+%% is the number that has to stay within 32 and the one nothing reported before.
+-spec distinct_field_names([term()]) -> non_neg_integer().
+distinct_field_names(Deltas) ->
+    length(lists:usort([Name || Delta <- Deltas, Name := _V <- delta_fields(Delta)])).
+
+%% The entity most likely to be the reason, so the line names something a game
+%% developer can go and look at rather than a count.
+-spec widest_entity([term()]) -> map().
+widest_entity(Deltas) ->
+    widest_entity(Deltas, #{entity => undefined, fields => 0}).
+
+widest_entity([], Widest) ->
+    Widest;
+widest_entity([Delta | Rest], #{fields := Most} = Widest) ->
+    case map_size(delta_fields(Delta)) of
+        Count when Count > Most ->
+            widest_entity(Rest, #{entity => delta_id(Delta), fields => Count});
+        _ ->
+            widest_entity(Rest, Widest)
+    end.
+
+-spec delta_fields(term()) -> map().
+delta_fields({added, _Id, Fields}) when is_map(Fields) -> Fields;
+delta_fields({updated, _Id, Fields}) when is_map(Fields) -> Fields;
+delta_fields(_Delta) -> #{}.
+
+%% `term()` and not `binary()`: the delta list is untyped here, and this value only
+%% ever lands in a log report.
+-spec delta_id(term()) -> term().
+delta_id({added, Id, _Fields}) -> Id;
+delta_id({updated, Id, _Fields}) -> Id;
+delta_id({removed, Id}) -> Id.
+
 %% `skip` rather than an error: binary negotiation covers `world.tick` alone and
 %% every other frame is text regardless, so a client that asked for binary can
 %% always take a text frame. Falling back therefore costs bandwidth, not
@@ -1064,9 +1252,9 @@ advance_slots(true, Old, New, Slots) ->
     boolean(),
     [term()],
     asobi_wire_slots:slots() | undefined
-) -> {ok, binary()} | skip.
+) -> {ok, binary()} | {skip, disabled | refusal()}.
 encode_binary(_Kind, _Coords, _Seq, _TickN, _Kf, _Deltas, undefined) ->
-    skip;
+    {skip, disabled};
 encode_binary(Kind, {ZX, ZY}, Seq, TickN, Kf, Deltas, Slots) ->
     case wire_records(Deltas, Slots) of
         {ok, Records} ->
@@ -1079,17 +1267,11 @@ encode_binary(Kind, {ZX, ZY}, Seq, TickN, Kf, Deltas, Slots) ->
                 records => Records
             },
             case asobi_wire:encode(Frame) of
-                {ok, Bin} ->
-                    {ok, Bin};
-                {error, Reason} ->
-                    ?LOG_WARNING(#{
-                        msg => ~"binary world.tick frame refused, falling back to text",
-                        reason => Reason
-                    }),
-                    skip
+                {ok, Bin} -> {ok, Bin};
+                {error, Reason} -> {skip, Reason}
             end;
-        skip ->
-            skip
+        {skip, Reason} ->
+            {skip, Reason}
     end.
 
 %% Built from the delta TUPLES rather than from encode_deltas/1's JSON maps: the
@@ -1101,16 +1283,16 @@ encode_binary(Kind, {ZX, ZY}, Seq, TickN, Kf, Deltas, Slots) ->
 %% of records the encoder can be trusted with. Recursion depth is one frame's
 %% delta count, which a zone's entity count already bounds.
 -spec wire_records([term()], asobi_wire_slots:slots()) ->
-    {ok, [asobi_wire:delta()]} | skip.
+    {ok, [asobi_wire:delta()]} | {skip, refusal()}.
 wire_records([], _Slots) ->
     {ok, []};
 wire_records([Delta | Rest], Slots) ->
     case wire_record(Delta, Slots) of
-        skip ->
-            skip;
+        {skip, Reason} ->
+            {skip, Reason};
         {ok, Rec} ->
             case wire_records(Rest, Slots) of
-                skip -> skip;
+                {skip, Reason} -> {skip, Reason};
                 {ok, Recs} -> {ok, [Rec | Recs]}
             end
     end.
@@ -1128,6 +1310,10 @@ wire_record({removed, Id}, Slots) ->
         #{op => remove, slot => Slot, gen => Gen}
     end).
 
+%% Reports rather than logs: every refusal in this module funnels through one
+%% throttled warning in `log_wire_refusal/5`, because a zone holding one entity
+%% the encoder cannot take refuses every frame and would otherwise emit a warning
+%% per broadcast tick for the life of the zone (asobi#510).
 with_slot(Id, Slots, Fields, Build) ->
     case {asobi_wire_slots:slot_of(Id, Slots), wire_encodable(Fields)} of
         {{ok, {Slot, Gen}}, true} ->
@@ -1137,13 +1323,9 @@ with_slot(Id, Slots, Fields, Build) ->
             %% every id in the diff has a slot. Missing one means the two have
             %% drifted, and a frame encoded around the gap would bind the wrong
             %% entity on a client; drop to text and say so.
-            ?LOG_WARNING(#{msg => ~"entity has no wire slot, falling back to text", id => Id}),
-            skip;
+            {skip, {no_slot, Id}};
         {_, false} ->
-            ?LOG_WARNING(#{
-                msg => ~"entity field has no binary form, falling back to text", id => Id
-            }),
-            skip
+            {skip, {unencodable_field, Id}}
     end.
 
 %% asobi_wire carries six scalar value types. A game is free to put a list or a
