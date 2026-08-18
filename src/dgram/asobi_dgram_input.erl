@@ -30,7 +30,7 @@ apply(ConnId, Body) ->
             %% A conn_id the engine never minted, or one whose session has since
             %% died. Counted, because the gateway believing in a binding the
             %% engine has forgotten is worth seeing.
-            asobi_telemetry:dgram_input_unknown(ConnId);
+            asobi_dgram_telemetry:input_unknown(ConnId);
         {ok, #{player_id := PlayerId, session_pid := SessionPid}} ->
             deliver(PlayerId, SessionPid, Body)
     end.
@@ -43,7 +43,7 @@ apply(ConnId, Body) ->
 deliver(PlayerId, SessionPid, Body) ->
     case decode_input(Body) of
         error ->
-            asobi_telemetry:dgram_input_undecodable(PlayerId);
+            asobi_dgram_telemetry:input_undecodable(PlayerId);
         {ok, Input, Seq} ->
             try asobi_player_session:get_state(SessionPid) of
                 SState ->

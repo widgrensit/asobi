@@ -111,6 +111,6 @@ write(Socket, Handle, IoData) ->
             %% Counted and dropped. There is nothing to retry: the next pose
             %% supersedes this one, which is the property that made this plane
             %% worth having.
-            asobi_telemetry:dgram_send_failed(Reason),
+            asobi_dgram_telemetry:send_failed(Reason),
             ok
     end.

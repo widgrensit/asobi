@@ -6,8 +6,9 @@
 role_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         {"engine is the default, and it is the whole tree", fun engine_is_the_default/0},
-        {"the gateway role starts the gateway and nothing else",
-            fun gw_role_starts_only_the_gateway/0},
+        {"the gateway role starts none of the engine", fun gw_role_starts_no_engine/0},
+        {"the gateway application carries nothing that holds credentials",
+            fun gateway_application_is_minimal/0},
         {"shards default to the schedulers, capped", fun shard_default/0}
     ]}.
 
@@ -41,18 +42,35 @@ engine_is_the_default() ->
     ?assert(lists:member(asobi_lua_sup, Ids)),
     ?assertNot(lists:member(asobi_dgram_gw_sup, Ids)).
 
-%% The isolation that the whole two-role split exists for: the process tree that
-%% parses packets from the internet holds no Lua sandbox and no database pool.
-%% A regression here is not a feature loss, it is the security property gone.
-gw_role_starts_only_the_gateway() ->
+%% Half of the isolation the two-role split exists for: an engine booted into the
+%% gateway role starts no zone, no Lua VM and no match. The gateway's own tree is
+%% not here either - it belongs to `asobi_dgram_gw_app`, which is what lets it
+%% start in a release that has no `asobi` in it at all (asobi#513).
+gw_role_starts_no_engine() ->
     application:set_env(asobi, role, dgram_gw),
     ?assert(asobi_dgram_gw_sup:enabled()),
     {ok, {_Flags, Children}} = asobi_sup:init([]),
-    Ids = [maps:get(id, C) || C <- Children],
-    ?assertEqual([asobi_dgram_gw_sup], Ids),
-    ?assertNot(lists:member(asobi_lua_sup, Ids)),
-    ?assertNot(lists:member(asobi_world_sup, Ids)),
-    ?assertNot(lists:member(asobi_match_sup, Ids)).
+    ?assertEqual([], Children).
+
+%% The other half, and the one a role switch could never give: what the gateway
+%% release is ALLOWED to contain. A process that parses packets from the internet
+%% must not have a database driver in its image, let alone an open pool - and no
+%% amount of role checking inside `start/2` can achieve that, because OTP starts
+%% an application's dependencies before its start callback runs. This list is the
+%% boundary; a regression here is the security property gone, not a feature loss.
+gateway_application_is_minimal() ->
+    _ = application:load(asobi_dgram_gw),
+    {ok, Deps} = application:get_key(asobi_dgram_gw, applications),
+    ?assertEqual([], Deps -- [kernel, stdlib, crypto, telemetry, seki]),
+    [
+        ?assertNot(lists:member(Heavy, Deps))
+     || Heavy <- [nova, kura, kura_postgres, shigoto, luerl, nova_resilience]
+    ],
+    %% ...and the engine still depends on it, which is the direction that makes
+    %% the codec shared without making the gateway carry the engine.
+    _ = application:load(asobi),
+    {ok, AsobiDeps} = application:get_key(asobi, applications),
+    ?assert(lists:member(asobi_dgram_gw, AsobiDeps)).
 
 %% One receiver per scheduler is the shape SO_REUSEPORT is for. More sockets than
 %% schedulers buys nothing and multiplies the flows a restart breaks, because the

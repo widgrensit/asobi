@@ -14,12 +14,53 @@ RUN curl -fsSL https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 
 COPY rebar.config rebar.lock ./
 RUN rebar3 compile --deps_only
 
-# Build the release.
+# Build the releases. Two of them since asobi#513: the engine, and the datagram
+# gateway, whose release contains no nova, kura or shigoto at all. `-n` is now
+# required - relx refuses to guess when a project declares more than one.
 COPY config/ config/
 COPY include/ include/
 COPY src/ src/
+COPY apps/ apps/
 COPY priv/ priv/
-RUN rebar3 as prod release
+RUN rebar3 as prod release -n asobi && rebar3 as prod release -n asobi_gw
+
+# --- The datagram gateway image ---
+# `docker build --target gateway`. Its own image and not a role of the engine's,
+# which is the whole of asobi#513: OTP starts an application's dependencies
+# before its start callback runs, so a role checked in code could never stop the
+# engine image from opening a database pool in the container that parses packets
+# from the internet. This image has no driver to open one with.
+#
+# Deliberately before the engine stage so the default build target is unchanged.
+FROM debian:trixie-slim AS gateway
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libncurses6 libssl3 libtinfo6 ca-certificates tini && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r asobi && useradd -r -g asobi -d /app asobi
+
+WORKDIR /app
+COPY --from=builder /build/_build/prod/rel/asobi_gw/ ./
+RUN chown -R asobi:asobi /app
+
+USER asobi
+# UDP, and nothing else. No HTTP listener exists in this image.
+EXPOSE 7777/udp
+
+ENV ASOBI_ROLE=dgram_gw \
+    ASOBI_NODE_HOST=127.0.0.1 \
+    ASOBI_NODE_NAME=asobi_gw \
+    ASOBI_DGRAM_PORT=7777 \
+    ASOBI_DGRAM_LINK_PORT=7778
+
+# Same trap as the engine's, and sharper: this node shares a network namespace
+# with the engine, so a shared cookie is a path out of the process handling
+# hostile packets into the one running the game. Override it, per deploy.
+ENV ERLANG_COOKIE=asobi
+
+ENTRYPOINT ["tini", "--"]
+CMD ["bin/asobi_gw", "foreground"]
 
 # --- Runtime ---
 # Must match the builder's Debian release (erlang:28.4.2-slim is trixie-based)

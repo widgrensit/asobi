@@ -176,10 +176,10 @@ connect(State) ->
         {Host, Port} ->
             case dial(Host, Port) of
                 {ok, Socket} ->
-                    asobi_telemetry:dgram_link_up(),
+                    asobi_dgram_telemetry:link_up(),
                     State#{socket => Socket, dial_logged_at => undefined};
                 {error, Reason} ->
-                    asobi_telemetry:dgram_link_error(Reason),
+                    asobi_dgram_telemetry:link_error(Reason),
                     _ = erlang:send_after(?RECONNECT_MS, self(), connect),
                     log_dial_failure(Host, Port, Reason, State#{socket => undefined})
             end
@@ -241,7 +241,7 @@ recv_nonce(Socket) ->
 
 disconnected(#{socket := Socket} = State) ->
     _ = (Socket =/= undefined) andalso gen_tcp:close(Socket),
-    asobi_telemetry:dgram_link_closed(),
+    asobi_dgram_telemetry:link_closed(),
     _ = erlang:send_after(?RECONNECT_MS, self(), connect),
     State#{socket => undefined, buffer => <<>>}.
 
@@ -252,7 +252,7 @@ disconnected(#{socket := Socket} = State) ->
 consume(Buffer, #{socket := Socket} = State) ->
     case Buffer of
         <<Len:32/little, _/binary>> when Len > 65_535 ->
-            asobi_telemetry:dgram_link_error(frame_too_large),
+            asobi_dgram_telemetry:link_error(frame_too_large),
             disconnected(State#{socket => Socket});
         <<Len:32/little, Payload:Len/binary, Rest/binary>> ->
             _ = accept_from_gateway(asobi_dgram_link:decode(Payload)),
@@ -266,9 +266,9 @@ accept_from_gateway({ok, {input, ConnId, Body}}) ->
 accept_from_gateway({ok, _Other}) ->
     %% register and unregister travel engine-to-gateway only. Receiving one means
     %% the peer is confused or is not the gateway.
-    asobi_telemetry:dgram_link_error(unexpected_direction);
+    asobi_dgram_telemetry:link_error(unexpected_direction);
 accept_from_gateway({error, Reason}) ->
-    asobi_telemetry:dgram_link_error(Reason).
+    asobi_dgram_telemetry:link_error(Reason).
 
 %% `{Host, Port}` or nothing. Deliberately not defaulted to localhost: a plane
 %% nobody configured must not quietly start dialling.

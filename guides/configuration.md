@@ -304,21 +304,27 @@ A rejected request gets `403 client_gate_denied`, with the gate's own reason in
 runs after the rate limiter, so a flood is shed by the cheap in-memory check
 before it reaches an external verification service.
 
-## The datagram gateway role
+## The datagram gateway
 
-One image, two roles. `role` defaults to `engine` and gives you exactly what you
-have today; `dgram_gw` starts the datagram gateway **and nothing else**.
+Its own release and its own image, `ghcr.io/widgrensit/asobi-dgram`. It contains
+the gateway application and its three dependencies - kernel, stdlib, telemetry,
+plus the rate limiter - and that is all: no nova, no kura, no shigoto, no Lua.
 
 ```erlang
-{role, dgram_gw},
 {dgram, #{port => 7777, shards => 4}}
 ```
 
-Run them as two containers from the same image. That separation is the point
-rather than a deployment convenience: the gateway binds a UDP port and parses
-packets from anyone on the internet, and it must not share a process tree with
-the Lua sandbox or your database credentials. In the `dgram_gw` role no zone, no
-world, no match, no Lua VM and no database pool is ever started.
+The separation is the point rather than a deployment convenience: the gateway
+binds a UDP port and parses packets from anyone on the internet, and it must not
+share a process tree with the Lua sandbox or your database credentials.
+
+**`role` is the old way of asking for this and it no longer isolates anything on
+its own.** Setting `{role, dgram_gw}` on the engine image still starts the
+gateway and only the gateway - but OTP starts an application's dependencies
+before its start callback runs, so kura and shigoto have already opened a pool
+with your credentials and run migrations by the time the role is read
+(asobi#513). The key still works, for the deployments that already use it. The
+image is what makes it a boundary.
 
 `shards` is the number of `SO_REUSEPORT` receiver sockets and defaults to the
 scheduler count capped at 8. **It is fixed at boot.** Adding or removing a socket

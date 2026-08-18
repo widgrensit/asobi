@@ -303,6 +303,19 @@ game's entities rather than one frame, and the zone drops to the text wire for i
 life - decision 5's "whole-zone decision on purpose" extended from one frame to
 the zone's lifetime.
 
+**Amended 2026-08-18 (asobi#513): the gateway is a release, not a role.** The
+role switch this ADR shipped could not deliver decision 14's isolation, and the
+reason is structural rather than an oversight in the implementation: OTP starts
+an application's dependencies before its start callback runs, so by the time
+`asobi_app:start/2` read `ASOBI_ROLE`, `kura` had opened a pool with the tenant
+credentials and `shigoto` had run migrations and started job workers. No code
+inside `start/2` can undo that. The gateway is now its own OTP application with
+its own dependency list (kernel, stdlib, crypto, telemetry, seki), its own relx
+release, and its own image - `ghcr.io/widgrensit/asobi-dgram`, built from this
+repository with `docker build --target gateway`. The credentials are not in that
+container because the driver that would read them is not in it. `ASOBI_ROLE`
+still works for deployments already using it, and still carries the old flaw.
+
 **Deploying decision 14's two roles requires a shared network namespace.** The
 gateway binds its engine link on loopback, so two containers on a network cannot
 reach each other over it. The roles therefore run as a sidecar or a single pod,

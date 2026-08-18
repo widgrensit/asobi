@@ -214,5 +214,5 @@ hit(State) ->
 miss(Reason, #{misses := Misses} = State) ->
     Next = Misses + 1,
     Ready = Next =< ?MISSES_ALLOWED,
-    asobi_telemetry:dgram_canary_missed(Reason, Next),
+    asobi_dgram_telemetry:canary_missed(Reason, Next),
     State#{misses => Next, ready => Ready}.

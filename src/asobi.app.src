@@ -8,6 +8,10 @@
         kernel,
         stdlib,
         telemetry,
+        %% The gateway application, for the codec both roles share. It starts an
+        %% empty tree in the engine role; the reverse dependency does not exist,
+        %% which is what lets the gateway ship as a release without any of this.
+        asobi_dgram_gw,
         nova,
         kura,
         kura_postgres,

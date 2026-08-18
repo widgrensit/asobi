@@ -175,7 +175,7 @@ handle_info(sweep, #{table := T} = State) ->
     _ =
         case Dead of
             [] -> ok;
-            _ -> asobi_telemetry:dgram_bindings_expired(length(Dead))
+            _ -> asobi_dgram_telemetry:bindings_expired(length(Dead))
         end,
     {noreply, State#{table => T1}};
 handle_info(_Info, State) ->

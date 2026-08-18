@@ -40,8 +40,14 @@ role() ->
 %% `engine` is the default, so a deployment that has never heard of the gateway
 %% gets exactly what it had.
 -spec children(engine | dgram_gw) -> [supervisor:child_spec()].
+%% Nothing. The gateway's tree belongs to `asobi_dgram_gw_app`, which starts it
+%% from its own application - so it also starts in the gateway RELEASE, where this
+%% supervisor does not exist at all (asobi#513). Kept as a clause rather than
+%% folded into the engine one because a node running the old single-release
+%% two-role deployment still boots asobi here, and it must start no zone, no Lua
+%% and no pool.
 children(dgram_gw) ->
-    [dgram_gw_sup()];
+    [];
 children(_Engine) ->
     [
         rate_limit_spec(),
@@ -93,16 +99,6 @@ dgram_link_children() ->
                 }
             ]
     end.
-
-dgram_gw_sup() ->
-    #{
-        id => asobi_dgram_gw_sup,
-        start => {asobi_dgram_gw_sup, start_link, []},
-        restart => permanent,
-        shutdown => infinity,
-        type => supervisor,
-        modules => [asobi_dgram_gw_sup]
-    }.
 
 %% The asobi_lua merge: asobi_lua used to be its own OTP application, whose
 %% start callback loaded the Lua game config and then started asobi_lua_sup.

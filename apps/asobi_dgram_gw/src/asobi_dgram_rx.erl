@@ -192,7 +192,7 @@ dispatch(input, ConnId, CSeq, _Handle, Body, #{note_uplink := Note}) ->
 %% Counted, never answered. An error datagram would be an amplifier and would
 %% also tell a prober which of the gates it hit.
 reject(Gate, Reason) ->
-    asobi_telemetry:dgram_dropped(Gate, Reason),
+    asobi_dgram_telemetry:dropped(Gate, Reason),
     drop.
 
 is_uplink(hello) -> true;

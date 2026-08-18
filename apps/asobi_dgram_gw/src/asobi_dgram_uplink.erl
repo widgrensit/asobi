@@ -26,5 +26,5 @@ looks identical to a quiet plane from the outside.
 deliver(ConnId, Body) ->
     case asobi_dgram_link_server:send({input, ConnId, Body}) of
         ok -> ok;
-        {error, _Reason} -> asobi_telemetry:dgram_input_undelivered(ConnId, byte_size(Body))
+        {error, _Reason} -> asobi_dgram_telemetry:input_undelivered(ConnId, byte_size(Body))
     end.

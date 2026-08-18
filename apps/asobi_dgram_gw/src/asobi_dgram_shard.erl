@@ -69,7 +69,7 @@ handle_continue(recv, State) -> drain(State).
 handle_info({'$socket', Socket, select, _Ref}, #{socket := Socket} = State) ->
     drain(State);
 handle_info({'$socket', Socket, abort, {_Ref, Reason}}, #{socket := Socket} = State) ->
-    asobi_telemetry:dgram_recv_failed(Reason),
+    asobi_dgram_telemetry:recv_failed(Reason),
     {stop, {recv_aborted, Reason}, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -115,7 +115,7 @@ drain(#{socket := Socket} = State, Budget) ->
         {error, Reason} ->
             %% One bad read must not take the shard down: a restart rebinds the
             %% socket and the kernel reshuffles every flow that was landing here.
-            asobi_telemetry:dgram_recv_failed(Reason),
+            asobi_dgram_telemetry:recv_failed(Reason),
             {noreply, State}
     end.
 

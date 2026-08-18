@@ -10,7 +10,18 @@ was built for, which is the sort of gap that makes a feature technically present
 and practically absent.
 
 Applied at boot, **before** the supervisor reads `role`, because the role decides
-which tree starts at all.
+which tree starts at all. Both applications call it: the gateway from its own
+`start/2`, the engine from `asobi_app:start/2`, and it is idempotent.
+
+## The keys stay under the `asobi` application
+
+This module lives in the gateway application, and the values it writes are still
+`application:set_env(asobi, ...)`. That looks backwards and is deliberate: those
+keys are the documented configuration surface, every `sys.config` in existence
+spells them that way, and renaming them to buy tidiness would break every
+deployment that configures asobi in Erlang. Reading and writing another
+application's env does not require that application to be loaded, so the gateway
+release - which does not contain `asobi` at all - works the same way.
 
 ## The application env wins
 

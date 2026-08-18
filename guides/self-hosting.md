@@ -346,18 +346,23 @@ rather than stalling everything behind a TCP retransmit. Everything else -
 including entity creation, removal and every non-transform field - keeps
 travelling on the WebSocket, in every state, whatever happens to the plane.
 
-**It is two containers from the same image.** The gateway binds a UDP port and
-parses packets from anyone on the internet, so it must not run your game. In the
-`dgram_gw` role no zone, world, match, Lua VM, extension or HTTP listener is
-started, and no migration is run.
+**It is two containers, and two different images.** The gateway binds a UDP port
+and parses packets from anyone on the internet, so it must not run your game -
+and "must not" here is a property of what is in the image, not of a flag it is
+started with. `ghcr.io/widgrensit/asobi-dgram` is a release containing the
+gateway application and nothing else: no nova, no kura, no shigoto, no Lua. There
+is no HTTP listener in it, no migration to run, and no database driver to open a
+pool with.
 
-Be precise about what that is worth, because one image with a role switch is not
-a security boundary on its own. `kura` and `shigoto` are application
-dependencies, so they start **before** asobi reads its role: the gateway
-container does open a pool with your `ASOBI_DB_*` credentials. Treat those
-credentials as reachable from the gateway and give it a database user you are
-willing to see there, until [asobi#513](https://github.com/widgrensit/asobi/issues/513)
-splits the roles into separate releases.
+That distinction is worth stating plainly, because it used to be a role switch
+and a role switch cannot do this. OTP starts an application's dependencies before
+its start callback runs, so by the time the old `ASOBI_ROLE=dgram_gw` was read,
+the engine image had already opened a pool with your `ASOBI_DB_*` credentials and
+run migrations (asobi#513). Setting the role on the engine image still works and
+still has that flaw; use the gateway image.
+
+If you build your own images, the gateway is `docker build --target gateway`
+against this repository.
 
 They **share a network namespace** - a sidecar in compose, two containers in one
 pod on Kubernetes. The engine dials the gateway over loopback, because the
@@ -422,29 +427,25 @@ echo "DGRAM_COOKIE=$(openssl rand -hex 24)"     # gateway, in your .env
       - ./dgram_secret.txt:/run/secrets/dgram:ro
 
   dgram:
-    image: ghcr.io/widgrensit/asobi:latest
+    # Not the engine image with a role set - see above.
+    image: ghcr.io/widgrensit/asobi-dgram:latest
     network_mode: "service:asobi"
     depends_on:
       - asobi
     environment:
-      ASOBI_ROLE: dgram_gw
+      # ASOBI_ROLE and the ports are baked into this image; set here only where
+      # you want something other than the defaults.
       ASOBI_DGRAM_PORT: 7777
       ASOBI_DGRAM_LINK_PORT: 7778
       ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
       # Same manifest as the engine. The gateway does not read it, but a future
       # version might, and two copies that can disagree is worse than one.
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
-      # A distinct Erlang node name. One network namespace means one EPMD, and
-      # two nodes registering the same name means the second one does not boot.
-      ASOBI_NODE_NAME: asobi_gw
       # A DIFFERENT cookie from the engine's. One namespace means one loopback,
       # and a shared cookie makes distribution a path from the process parsing
-      # internet packets into the one running your game.
+      # internet packets into the one running your game. The node name is already
+      # distinct in this image, which the shared EPMD requires.
       ERLANG_COOKIE: ${DGRAM_COOKIE:?set DGRAM_COOKIE in .env}
-      # The gateway role starts no HTTP listener, so it does not contend for the
-      # engine's port. Set anyway: the variable is read while the release boots,
-      # before the role is known.
-      ASOBI_PORT: 8085
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
     restart: unless-stopped

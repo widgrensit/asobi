@@ -20,18 +20,6 @@
     ws_message_in/1,
     ws_message_out/1,
     ws_connect_rate_limited/1,
-    dgram_bindings_expired/1,
-    dgram_dropped/2,
-    dgram_send_failed/1,
-    dgram_recv_failed/1,
-    dgram_input_undelivered/2,
-    dgram_input_unknown/1,
-    dgram_input_undecodable/1,
-    dgram_canary_missed/2,
-    dgram_pose_saturated/1,
-    dgram_link_up/0,
-    dgram_link_closed/0,
-    dgram_link_error/1,
     join_rate_limited/1,
     rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
@@ -66,6 +54,9 @@ to `telemetry:execute/3` in this module, so the two cannot drift again.
 """.
 -spec events() -> [telemetry:event_name()].
 events() ->
+    %% The datagram plane's events are defined in the gateway application, which
+    %% is a release of its own and cannot call into this one. Folded in here so
+    %% an operator still has a single list to attach to.
     [
         [asobi, match, started],
         [asobi, match, finished],
@@ -91,19 +82,7 @@ events() ->
         [asobi, ws, disconnected],
         [asobi, ws, message_in],
         [asobi, ws, message_out],
-        [asobi, dgram, bindings_expired],
-        [asobi, dgram, dropped],
-        [asobi, dgram, send_failed],
-        [asobi, dgram, recv_failed],
-        [asobi, dgram, input_undelivered],
-        [asobi, dgram, input_unknown],
-        [asobi, dgram, input_undecodable],
-        [asobi, dgram, canary_missed],
-        [asobi, dgram, pose_saturated],
         [asobi, wire, binary_refused],
-        [asobi, dgram, link_up],
-        [asobi, dgram, link_closed],
-        [asobi, dgram, link_error],
         [asobi, ws, connect_rate_limited],
         [asobi, ws, idle_auth_timeout],
         [asobi, ws, origin_rejected],
@@ -121,7 +100,7 @@ events() ->
         [asobi, auth_cache, hit],
         [asobi, auth_cache, miss],
         [asobi, auth_cache, sweep]
-    ].
+    ] ++ asobi_dgram_telemetry:events().
 
 -spec setup() -> ok.
 setup() ->
@@ -330,29 +309,6 @@ join_rate_limited(PlayerId) ->
     ).
 
 -doc """
-A receiver socket returned an error other than a timeout or a close.
-
-The loop continues regardless: one bad read must not take a shard down, because
-a shard restarting rebinds its socket and the kernel reshuffles every flow that
-was landing on it.
-""".
--spec dgram_recv_failed(term()) -> ok.
-dgram_recv_failed(Reason) ->
-    telemetry:execute([asobi, dgram, recv_failed], #{count => 1}, #{reason => Reason}).
-
--doc """
-Transform values that did not fit their configured scale, per tick.
-
-Saturated to the edge of the range rather than wrapped, so an entity pinned at
-the boundary is what a player sees instead of one teleporting across the world.
-Any sustained rate means the scale in `dgram_pose` is wrong for this game's world
-size, and the fix is configuration rather than code.
-""".
--spec dgram_pose_saturated(non_neg_integer()) -> ok.
-dgram_pose_saturated(Count) ->
-    telemetry:execute([asobi, dgram, pose_saturated], #{count => Count}, #{}).
-
--doc """
 A `world.tick` the binary encoder refused, sent as text instead.
 
 Not a correctness failure on its own - a client that negotiated binary still
@@ -369,122 +325,6 @@ baseline.
 -spec binary_wire_refused(atom()) -> ok.
 binary_wire_refused(Reason) ->
     telemetry:execute([asobi, wire, binary_refused], #{count => 1}, #{reason => Reason}).
-
--doc "An engine attached to the gateway's link and authenticated.".
--spec dgram_link_up() -> ok.
-dgram_link_up() -> telemetry:execute([asobi, dgram, link_up], #{count => 1}, #{}).
-
--doc """
-The engine link went away.
-
-Not an outage on its own: bindings already in the table keep working, so players
-on the plane stay on it. What stops is new mints and revocations, and an
-undeliverable revocation is bounded by the mint's own expiry.
-""".
--spec dgram_link_closed() -> ok.
-dgram_link_closed() -> telemetry:execute([asobi, dgram, link_closed], #{count => 1}, #{}).
-
--doc """
-Something went wrong on the engine link.
-
-`bad_auth` is the one to alert on: the link is loopback-only, so a failed
-authentication is either a misconfigured secret or something local that should
-not be talking to it.
-""".
--spec dgram_link_error(term()) -> ok.
-dgram_link_error(Reason) ->
-    telemetry:execute([asobi, dgram, link_error], #{count => 1}, #{reason => Reason}).
-
--doc """
-The readiness canary did not get its own pong back.
-
-`consecutive` is the field that matters: one miss is a scheduler hiccup, two in a
-row means the receive loop is wedged and the node stops reporting ready. A miss
-here is the only signal that distinguishes a wedged loop from a quiet port, which
-look identical from outside.
-""".
--spec dgram_canary_missed(term(), non_neg_integer()) -> ok.
-dgram_canary_missed(Reason, Consecutive) ->
-    telemetry:execute(
-        [asobi, dgram, canary_missed],
-        #{count => 1, consecutive => Consecutive},
-        #{reason => Reason}
-    ).
-
--doc """
-The gateway delivered an input for a `conn_id` the engine has no mint for.
-
-Expected in small numbers around a session ending - the two ends revoke
-asynchronously - and worth investigating if sustained, because it means the
-gateway believes in a binding the engine has forgotten.
-""".
--spec dgram_input_unknown(non_neg_integer()) -> ok.
-dgram_input_unknown(ConnId) ->
-    telemetry:execute([asobi, dgram, input_unknown], #{count => 1}, #{conn_id => ConnId}).
-
--doc """
-An authenticated input's payload did not parse.
-
-The datagram was genuine - it passed the MAC - so this is a client-side encoding
-fault rather than an attack, and it points at one player's build rather than at
-the network.
-""".
--spec dgram_input_undecodable(binary()) -> ok.
-dgram_input_undecodable(PlayerId) ->
-    telemetry:execute([asobi, dgram, input_undecodable], #{count => 1}, #{player_id => PlayerId}).
-
--doc """
-A verified uplink input had nowhere to go.
-
-Fires once per input while the gateway-to-engine seam is unbuilt. Any non-zero
-rate here means clients are successfully using the datagram uplink and the engine
-is not receiving it, which is the one failure that would otherwise look exactly
-like a quiet plane.
-""".
--spec dgram_input_undelivered(non_neg_integer(), non_neg_integer()) -> ok.
-dgram_input_undelivered(ConnId, Bytes) ->
-    telemetry:execute(
-        [asobi, dgram, input_undelivered],
-        #{count => 1, bytes => Bytes},
-        #{conn_id => ConnId}
-    ).
-
--doc """
-A downlink datagram could not be handed to the kernel.
-
-Almost always local buffer pressure rather than anything about the network: a
-connectionless socket has no delivery to fail. Nothing is retried, because the
-next pose supersedes this one. Worth an alert only if it is sustained, which
-means the gateway is producing faster than the host can send.
-""".
--spec dgram_send_failed(term()) -> ok.
-dgram_send_failed(Reason) ->
-    telemetry:execute([asobi, dgram, send_failed], #{count => 1}, #{reason => Reason}).
-
--doc """
-A datagram was dropped, labelled by which gate rejected it.
-
-`gate` is the interesting dimension and the reason this is one event rather than
-seven. `parse` and `ingress_global` rising together is a flood; `mac` rising
-alone means someone has a live `conn_id` and not the key, which is the one shape
-worth waking up for. Nothing is ever sent back, so this counter is the only
-evidence a rejection happened at all.
-""".
--spec dgram_dropped(atom(), atom()) -> ok.
-dgram_dropped(Gate, Reason) ->
-    telemetry:execute([asobi, dgram, dropped], #{count => 1}, #{gate => Gate, reason => Reason}).
-
--doc """
-Datagram bindings swept for expiry, per sweep.
-
-A mint that is never followed by a `hello` holds a table slot until the session
-dies, so the sweep is what bounds a client that opens the plane and walks away.
-A rising count here means clients are minting and not connecting, which is a
-client-side fault rather than an attack: minting costs an authenticated WebSocket.
-""".
--spec dgram_bindings_expired(non_neg_integer()) -> ok.
-dgram_bindings_expired(Count) ->
-    telemetry:execute([asobi, dgram, bindings_expired], #{count => Count}, #{}).
 
 -spec ws_connect_rate_limited(binary()) -> ok.
 ws_connect_rate_limited(PeerIp) ->

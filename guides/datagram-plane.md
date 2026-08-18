@@ -63,16 +63,18 @@ Everything with authority travels only on the TLS WebSocket, in every state.
 
 ## Server setup
 
-Two containers from the same image. The gateway binds a UDP port and parses
-packets from anyone on the internet, so it must not run your game: in the
-`dgram_gw` role no zone, world, match, Lua VM, extension or HTTP listener is
-started, and no migration is run.
+Two containers, and two different images. The gateway binds a UDP port and
+parses packets from anyone on the internet, so it must not run your game -
+enforced by what is in the image rather than by a flag.
+`ghcr.io/widgrensit/asobi-dgram` is a release of the gateway application alone:
+no nova, no kura, no shigoto, no Lua, no HTTP listener, and no database driver to
+open a pool with.
 
-What that does **not** yet cover: `kura` and `shigoto` are application
-dependencies and start before asobi reads its role, so the gateway container does
-open a database pool with your credentials. See the note in
-[self-hosting](self-hosting.md#adding-the-datagram-plane) and
-[asobi#513](https://github.com/widgrensit/asobi/issues/513).
+It used to be one image and a role, and that could not work: OTP starts an
+application's dependencies before its start callback, so the pool was already
+open by the time the role was read (asobi#513). Setting `ASOBI_ROLE=dgram_gw` on
+the engine image still runs the gateway and still has that flaw. Build your own
+with `docker build --target gateway`.
 
 ```bash
 openssl rand -hex 32 > dgram_secret.txt
@@ -124,29 +126,25 @@ echo "DGRAM_COOKIE=$(openssl rand -hex 24)"     # gateway, in your .env
       - ./dgram_secret.txt:/run/secrets/dgram:ro
 
   dgram:
-    image: ghcr.io/widgrensit/asobi:latest
+    # Not the engine image with a role set - see above.
+    image: ghcr.io/widgrensit/asobi-dgram:latest
     # The engine's network namespace. On Kubernetes this is a second container in
     # the same pod, where it comes for free.
     network_mode: "service:asobi"
     depends_on:
       - asobi
     environment:
-      ASOBI_ROLE: dgram_gw
+      # ASOBI_ROLE and the ports are baked into this image; set here only where
+      # you want something other than the defaults.
       ASOBI_DGRAM_PORT: 7777
       ASOBI_DGRAM_LINK_PORT: 7778
       ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
       ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
-      # A distinct Erlang node name. One namespace means one EPMD, and two nodes
-      # registering the same name means the second one does not boot.
-      ASOBI_NODE_NAME: asobi_gw
       # A DIFFERENT cookie from the engine's. One namespace means one loopback,
       # and a shared cookie makes distribution a path from the process parsing
-      # internet packets into the one running your game.
+      # internet packets into the one running your game. The node name is already
+      # distinct in this image, which the shared EPMD requires.
       ERLANG_COOKIE: ${DGRAM_COOKIE:?set DGRAM_COOKIE in .env}
-      # The gateway role starts no HTTP listener, so it does not contend for the
-      # engine's port. Set anyway: the variable is read while the release boots,
-      # before the role is known.
-      ASOBI_PORT: 8085
     volumes:
       - ./dgram_secret.txt:/run/secrets/dgram:ro
     restart: unless-stopped
@@ -166,9 +164,10 @@ Open **UDP** 7777 on your firewall. Never publish the link port: it carries mint
 credentials and has no transport security of its own, which is why it binds
 loopback and why the namespace is shared rather than the port exposed.
 
-The gateway role starts no HTTP listener, so it does not compete for
+The gateway image has no HTTP listener in it, so it does not compete for
 `ASOBI_PORT` and there is no half-booted API answering requests from a node with
-no auth subsystem behind it.
+no auth subsystem behind it. Its logs are still one JSON object per line, from a
+formatter small enough to live in a release with no nova in it.
 
 The engine dials the gateway rather than the other way round, so the gateway
 needs no knowledge of where the engine is. The link is deliberately **not**

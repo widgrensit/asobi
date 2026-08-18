@@ -1139,7 +1139,7 @@ emit_pose(Coords, TickN, PoseSeq, Manifest, Deltas, Entities, Slots, ConnIds) ->
     _ =
         case Saturated of
             0 -> ok;
-            _ -> asobi_telemetry:dgram_pose_saturated(Saturated)
+            _ -> asobi_dgram_telemetry:pose_saturated(Saturated)
         end,
     case Records of
         [] ->

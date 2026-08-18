@@ -118,7 +118,7 @@ handle_call({send, Msg}, _From, #{peer := Peer} = State) ->
             {reply, ok, State};
         {error, Reason} ->
             _ = close(Peer),
-            asobi_telemetry:dgram_link_closed(),
+            asobi_dgram_telemetry:link_closed(),
             {reply, {error, Reason}, State#{peer => undefined, buffer => <<>>}}
     end;
 handle_call(_Request, _From, State) ->
@@ -139,7 +139,7 @@ handle_info(accept, #{listen := Listen} = State) when Listen =/= undefined ->
         {error, closed} ->
             {noreply, State};
         {error, Reason} ->
-            asobi_telemetry:dgram_link_error(Reason),
+            asobi_dgram_telemetry:link_error(Reason),
             self() ! accept,
             {noreply, State}
     end;
@@ -157,7 +157,7 @@ handle_info({tcp, Socket, Data}, #{pending := Pending} = State) when
 handle_info({tcp_closed, Peer}, #{peer := Peer} = State) when Peer =/= undefined ->
     %% Existing bindings survive: they are already in the table, so players on
     %% the plane stay on it while the engine restarts.
-    asobi_telemetry:dgram_link_closed(),
+    asobi_dgram_telemetry:link_closed(),
     {noreply, State#{peer => undefined, buffer => <<>>}};
 handle_info({tcp_closed, Socket}, #{pending := Pending} = State) ->
     {noreply, State#{pending => maps:remove(Socket, Pending)}};
@@ -166,7 +166,7 @@ handle_info({tcp_closed, Socket}, #{pending := Pending} = State) ->
 handle_info({auth_deadline, Socket}, #{pending := Pending} = State) when
     is_map_key(Socket, Pending)
 ->
-    asobi_telemetry:dgram_link_error(auth_timeout),
+    asobi_dgram_telemetry:link_error(auth_timeout),
     _ = close(Socket),
     {noreply, State#{pending => maps:remove(Socket, Pending)}};
 handle_info({auth_deadline, _Settled}, State) ->
@@ -184,7 +184,7 @@ terminate(_Reason, #{listen := Listen, peer := Peer, pending := Pending}) ->
 %% --- Internal ---
 
 greet(Socket, #{pending := Pending} = State) when map_size(Pending) >= ?MAX_PENDING ->
-    asobi_telemetry:dgram_link_error(too_many_pending),
+    asobi_dgram_telemetry:link_error(too_many_pending),
     _ = close(Socket),
     State;
 greet(Socket, #{pending := Pending} = State) ->
@@ -195,7 +195,7 @@ greet(Socket, #{pending := Pending} = State) ->
             _ = erlang:send_after(?AUTH_TIMEOUT_MS, self(), {auth_deadline, Socket}),
             State#{pending => Pending#{Socket => Nonce}};
         {error, Reason} ->
-            asobi_telemetry:dgram_link_error(Reason),
+            asobi_dgram_telemetry:link_error(Reason),
             _ = close(Socket),
             State
     end.
@@ -212,18 +212,18 @@ authenticate(Socket, Data, #{pending := Pending, peer := Old} = State) ->
                     %% Displaces whoever held the link, which is what makes an
                     %% engine restart behind a stale socket recover on its own.
                     _ = close(Old),
-                    asobi_telemetry:dgram_link_up(),
+                    asobi_dgram_telemetry:link_up(),
                     ok = inet:setopts(Socket, [{active, once}]),
                     consume(Rest, State#{
                         peer => Socket, buffer => <<>>, pending => maps:remove(Socket, Pending)
                     });
                 false ->
-                    asobi_telemetry:dgram_link_error(bad_auth),
+                    asobi_dgram_telemetry:link_error(bad_auth),
                     _ = close(Socket),
                     State#{pending => maps:remove(Socket, Pending)}
             end;
         _ ->
-            asobi_telemetry:dgram_link_error(short_auth),
+            asobi_dgram_telemetry:link_error(short_auth),
             _ = close(Socket),
             State#{pending => maps:remove(Socket, Pending)}
     end.
@@ -233,7 +233,7 @@ consume(Buffer, #{peer := Peer} = State) ->
         <<Len:32/little, _/binary>> when Len > 65_535 ->
             %% A frame larger than anything this protocol produces. Refused
             %% before allocation rather than after.
-            asobi_telemetry:dgram_link_error(frame_too_large),
+            asobi_dgram_telemetry:link_error(frame_too_large),
             _ = close(Peer),
             State#{peer => undefined, buffer => <<>>};
         <<Len:32/little, Payload:Len/binary, Rest/binary>> ->
@@ -262,9 +262,9 @@ apply_message({ok, {pose, SharedBody, ConnIds}}) ->
 apply_message({ok, {input, _ConnId, _Body}}) ->
     %% Wrong direction. The engine never sends input to the gateway, so this is a
     %% confused or hostile peer either way.
-    asobi_telemetry:dgram_link_error(unexpected_input);
+    asobi_dgram_telemetry:link_error(unexpected_input);
 apply_message({error, Reason}) ->
-    asobi_telemetry:dgram_link_error(Reason).
+    asobi_dgram_telemetry:link_error(Reason).
 
 %% Only connections that have completed a challenge get a datagram. One that has
 %% not is skipped in silence: it is mid-handshake, not broken, and the next pose
