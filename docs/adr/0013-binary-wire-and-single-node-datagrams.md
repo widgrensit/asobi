@@ -216,6 +216,24 @@ challenge binding, `conn_id` as the sole demux key, the no-fragmentation rule, t
 amplification invariant and the downlink-authenticity decision carry over as
 written.
 
+Two amendments, both recorded here rather than edited into the superseded
+document.
+
+*The datagram wire is little-endian, where ADR 0012 wrote `uint32be`.* The same
+six SDK decoders read this plane and the WebSocket binary wire, and that wire is
+little-endian because Godot's byte readers have no big-endian counterpart
+(decision 5). One carrier in each byte order is a trap nobody would thank us for,
+and network byte order buys nothing here: there is no intermediary that reads
+these bytes.
+
+*The amplification invariant is asserted over a reply table in code, not stated
+in prose.* ADR 0012 asked for exactly this and its own worked example did not
+hold - it paired a 36-byte `hello` with a 48-byte `hello_ok` and then patched it
+with padding. The table now lives in `asobi_dgram_tests`, every uplink opcode must
+appear in it, and adding an opcode without deciding what it answers fails the
+build. The sizes came out with room to spare: padded `hello` 64 against
+`hello_ok` 24, `ping` 48 against `pong` 32.
+
 ## Consequences
 
 **The prerequisite chain is real and unchanged.** The codec is 6-11 person-weeks
