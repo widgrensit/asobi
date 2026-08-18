@@ -109,7 +109,7 @@ both are the kind of thing that is otherwise noticed a day later.
 
 ## The events
 
-Forty, grouped by what they are about. Measurement and metadata keys
+Forty-one, grouped by what they are about. Measurement and metadata keys
 are in `m:asobi_telemetry`, which is also the list `asobi_telemetry:events/0`
 returns - attach to that rather than restating the names.
 
@@ -121,7 +121,15 @@ asobi.ws.connected               asobi.ws.disconnected
 asobi.ws.message_in              asobi.ws.message_out
 asobi.ws.connect_rate_limited    asobi.ws.idle_auth_timeout
 asobi.ws.origin_rejected         asobi.ws.legacy_input_unwrap
+asobi.dgram.bindings_expired
 ```
+
+`asobi.dgram.bindings_expired` fires only on a node in the
+[`dgram_gw` role](configuration.md#the-datagram-gateway-role), once per sweep,
+counting datagram credentials that were minted and never used. A rising count is
+a client-side fault rather than an attack - minting costs an authenticated
+WebSocket, so this is clients opening the plane and walking away, not anyone
+getting something for free.
 
 `asobi.ws.origin_rejected` and `asobi.ws.connect_rate_limited` are the two
 worth alerting on: a spike in either is either an attack or a client
