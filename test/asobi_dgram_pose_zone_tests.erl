@@ -11,6 +11,8 @@ zone_pose_test_() ->
         {"a zone with no manifest emits nothing", fun no_manifest_no_pose/0},
         {"a zone with the binary wire off emits nothing", fun no_binary_wire_no_pose/0},
         {"an entity whose add fell back to text gets no pose", fun unannounced_entity_no_pose/0},
+        {"one unencodable entity does not cost the others their plane",
+            fun bound_entities_keep_their_poses/0},
         {"a zone with no datagram subscribers emits nothing", fun no_subscribers_no_pose/0},
         {"a moving entity produces a decodable pose", fun moving_entity_produces_pose/0},
         {"pose and the binary wire share one slot map", fun one_slot_map/0},
@@ -100,6 +102,29 @@ unannounced_entity_no_pose() ->
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0, ~"path" => [1, 2]}),
     asobi_zone:tick(Pid, 1),
     ?assertEqual(no_pose, recv_pose()),
+    gen_server:stop(Pid).
+
+%% The other half of asobi#510: a refusal is a whole-frame decision, so without a
+%% record of what was actually announced the safe answer would be to stop the
+%% plane for the zone. An entity bound by an earlier frame keeps its poses; only
+%% the one that never made it onto the wire is held back.
+bound_entities_keep_their_poses() ->
+    Pid = start_zone(),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
+    asobi_zone:tick(Pid, 1),
+    {pose, _First, _} = recv_pose(),
+
+    %% e2 cannot ride the wire, so the frame carrying both is text and e2 is
+    %% never bound. e1 was bound by the frame before it and moves on.
+    asobi_zone:add_entity(Pid, ~"e2", #{~"x" => 5.0, ~"y" => 5.0, ~"path" => [1, 2]}),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 3.0, ~"y" => 2.0}),
+    asobi_zone:tick(Pid, 2),
+    {pose, Body, _} = recv_pose(),
+    <<_Tick:32/little, _Seq:32/little, _ZX:16/signed-little, _ZY:16/signed-little, _Mask:8, Count:8,
+        _Epoch:16/little, _Rest/binary>> = Body,
+    ?assertEqual(1, Count),
     gen_server:stop(Pid).
 
 %% Building a body for nobody is the one cost on this path that is trivially
