@@ -220,12 +220,28 @@ versioned(Payload, Caller) ->
         {false, _} -> {error, asobi_error:object(~"rpc.unknown_method")}
     end.
 
+%% Built-ins are checked FIRST and the `asobi.` prefix is reserved for them, so
+%% an extension cannot shadow a core method by declaring the same name. The
+%% datagram mint lives here rather than on a new frame type because `rpc.call`
+%% is already frozen and already implemented in every SDK, so the whole datagram
+%% plane adds zero frames to the JSON wire (ADR 0012, decision 5).
 lookup(Method, Params, Caller) ->
-    case maps:find(Method, asobi_extensions:rpc_methods()) of
-        {ok, {Module, Function, 2}} -> invoke(Module, Function, Method, Params, Caller);
-        {ok, Target} -> bad_arity(Method, Target);
-        error -> {error, asobi_error:object(~"rpc.unknown_method")}
+    case builtins() of
+        #{Method := {Module, Function}} ->
+            invoke(Module, Function, Method, Params, Caller);
+        _ ->
+            case maps:find(Method, asobi_extensions:rpc_methods()) of
+                {ok, {Module, Function, 2}} -> invoke(Module, Function, Method, Params, Caller);
+                {ok, Target} -> bad_arity(Method, Target);
+                error -> {error, asobi_error:object(~"rpc.unknown_method")}
+            end
     end.
+
+builtins() ->
+    #{
+        ~"asobi.datagram.open" => {asobi_dgram_rpc, open},
+        ~"asobi.datagram.close" => {asobi_dgram_rpc, close}
+    }.
 
 %% Backstop. `asobi_extensions` refuses a non-2 arity at `rebar3 asobi check`
 %% and again at boot, so reaching this means a manifest got past both gates;

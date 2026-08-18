@@ -7,11 +7,16 @@ and no player sessions - that is the point of the split - so a verified input ha
 to cross a process boundary to reach `asobi_zone:player_input/4`, which is the
 identical call the WebSocket handler makes.
 
-Left as an explicit indirection rather than a direct call so the transport
-between the two roles is a decision that can be made once, visibly, when the
-engine side is built. Today it logs and drops, which is honest: nothing is
-listening yet, and pretending otherwise by silently discarding would make the
-first end-to-end test mysterious rather than obvious.
+It travels the same link the engine used to register the binding, in the one
+direction the protocol allows the gateway to speak (`asobi_dgram_link`). The
+gateway names a `conn_id` and hands over opaque bytes; the engine resolves the
+player itself. So a compromised gateway can at most submit input as a player
+whose `conn_id` it already holds, which is exactly what that player could do with
+their own key.
+
+With no engine attached the input is counted and dropped. Counted rather than
+silently discarded, because a plane that works perfectly and delivers nothing
+looks identical to a quiet plane from the outside.
 """.
 
 -export([deliver/2]).
@@ -19,5 +24,7 @@ first end-to-end test mysterious rather than obvious.
 -doc "Hands a verified input payload to the engine. See the module doc.".
 -spec deliver(non_neg_integer(), binary()) -> ok.
 deliver(ConnId, Body) ->
-    asobi_telemetry:dgram_input_undelivered(ConnId, byte_size(Body)),
-    ok.
+    case asobi_dgram_link_server:send({input, ConnId, Body}) of
+        ok -> ok;
+        {error, _Reason} -> asobi_telemetry:dgram_input_undelivered(ConnId, byte_size(Body))
+    end.

@@ -25,6 +25,12 @@
     dgram_send_failed/1,
     dgram_recv_failed/1,
     dgram_input_undelivered/2,
+    dgram_input_unknown/1,
+    dgram_input_undecodable/1,
+    dgram_canary_missed/2,
+    dgram_link_up/0,
+    dgram_link_closed/0,
+    dgram_link_error/1,
     join_rate_limited/1,
     rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
@@ -88,6 +94,12 @@ events() ->
         [asobi, dgram, send_failed],
         [asobi, dgram, recv_failed],
         [asobi, dgram, input_undelivered],
+        [asobi, dgram, input_unknown],
+        [asobi, dgram, input_undecodable],
+        [asobi, dgram, canary_missed],
+        [asobi, dgram, link_up],
+        [asobi, dgram, link_closed],
+        [asobi, dgram, link_error],
         [asobi, ws, connect_rate_limited],
         [asobi, ws, idle_auth_timeout],
         [asobi, ws, origin_rejected],
@@ -324,6 +336,69 @@ was landing on it.
 dgram_recv_failed(Reason) ->
     telemetry:execute([asobi, dgram, recv_failed], #{count => 1}, #{reason => Reason}).
 
+-doc "An engine attached to the gateway's link and authenticated.".
+-spec dgram_link_up() -> ok.
+dgram_link_up() -> telemetry:execute([asobi, dgram, link_up], #{count => 1}, #{}).
+
+-doc """
+The engine link went away.
+
+Not an outage on its own: bindings already in the table keep working, so players
+on the plane stay on it. What stops is new mints and revocations, and an
+undeliverable revocation is bounded by the mint's own expiry.
+""".
+-spec dgram_link_closed() -> ok.
+dgram_link_closed() -> telemetry:execute([asobi, dgram, link_closed], #{count => 1}, #{}).
+
+-doc """
+Something went wrong on the engine link.
+
+`bad_auth` is the one to alert on: the link is loopback-only, so a failed
+authentication is either a misconfigured secret or something local that should
+not be talking to it.
+""".
+-spec dgram_link_error(term()) -> ok.
+dgram_link_error(Reason) ->
+    telemetry:execute([asobi, dgram, link_error], #{count => 1}, #{reason => Reason}).
+
+-doc """
+The readiness canary did not get its own pong back.
+
+`consecutive` is the field that matters: one miss is a scheduler hiccup, two in a
+row means the receive loop is wedged and the node stops reporting ready. A miss
+here is the only signal that distinguishes a wedged loop from a quiet port, which
+look identical from outside.
+""".
+-spec dgram_canary_missed(term(), non_neg_integer()) -> ok.
+dgram_canary_missed(Reason, Consecutive) ->
+    telemetry:execute(
+        [asobi, dgram, canary_missed],
+        #{count => 1, consecutive => Consecutive},
+        #{reason => Reason}
+    ).
+
+-doc """
+The gateway delivered an input for a `conn_id` the engine has no mint for.
+
+Expected in small numbers around a session ending - the two ends revoke
+asynchronously - and worth investigating if sustained, because it means the
+gateway believes in a binding the engine has forgotten.
+""".
+-spec dgram_input_unknown(non_neg_integer()) -> ok.
+dgram_input_unknown(ConnId) ->
+    telemetry:execute([asobi, dgram, input_unknown], #{count => 1}, #{conn_id => ConnId}).
+
+-doc """
+An authenticated input's payload did not parse.
+
+The datagram was genuine - it passed the MAC - so this is a client-side encoding
+fault rather than an attack, and it points at one player's build rather than at
+the network.
+""".
+-spec dgram_input_undecodable(binary()) -> ok.
+dgram_input_undecodable(PlayerId) ->
+    telemetry:execute([asobi, dgram, input_undecodable], #{count => 1}, #{player_id => PlayerId}).
+
 -doc """
 A verified uplink input had nowhere to go.
 
@@ -335,7 +410,9 @@ like a quiet plane.
 -spec dgram_input_undelivered(non_neg_integer(), non_neg_integer()) -> ok.
 dgram_input_undelivered(ConnId, Bytes) ->
     telemetry:execute(
-        [asobi, dgram, input_undelivered], #{count => 1, bytes => Bytes}, #{conn_id => ConnId}
+        [asobi, dgram, input_undelivered],
+        #{count => 1, bytes => Bytes},
+        #{conn_id => ConnId}
     ).
 
 -doc """

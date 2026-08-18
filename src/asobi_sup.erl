@@ -63,7 +63,36 @@ children(_Engine) ->
         lua_game_config_spec(),
         lua_sup(),
         extension_sup()
+        | dgram_link_children()
     ].
+
+%% Only when a gateway is configured. A deployment with no datagram plane starts
+%% nothing and pays nothing, which is what makes the plane genuinely optional
+%% rather than optional-if-you-remember-to-turn-it-off.
+dgram_link_children() ->
+    case asobi_dgram_link_client:enabled() of
+        false ->
+            [];
+        true ->
+            [
+                #{
+                    id => asobi_dgram_link_client,
+                    start => {asobi_dgram_link_client, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [asobi_dgram_link_client]
+                },
+                #{
+                    id => asobi_dgram_mint,
+                    start => {asobi_dgram_mint, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [asobi_dgram_mint]
+                }
+            ]
+    end.
 
 dgram_gw_sup() ->
     #{

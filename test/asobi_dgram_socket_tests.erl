@@ -26,7 +26,11 @@ socket_test_() ->
             end,
             fun(Ctx) ->
                 {"a malformed datagram is answered with silence", fun() -> garbage_silent(Ctx) end}
-            end
+            end,
+            fun(_Ctx) ->
+                {"the canary proves the gateway by talking to it", fun canary_probes/0}
+            end,
+            fun(_Ctx) -> {"a wedged receive loop fails readiness", fun canary_detects_wedge/0} end
         ]}}.
 
 setup() ->
@@ -107,6 +111,31 @@ garbage_silent(#{client := Client, port := Port}) ->
         end
      || N <- [0, 1, 16, 40, 64, 200]
     ].
+
+%% A port-bound check would pass while the receive loop was wedged. This proves
+%% the whole pipeline instead, by being an ordinary client with an ordinary
+%% binding: nothing is special-cased for the canary anywhere.
+canary_probes() ->
+    ?assertEqual(ok, asobi_dgram_canary:probe_now()),
+    ?assert(asobi_dgram_canary:ready()).
+
+%% The property that makes it worth having. Killing the receivers leaves the port
+%% bound from the outside's point of view for as long as the sockets are open, so
+%% only a real exchange notices - and two consecutive misses are what flips it,
+%% not one, so a single scheduler hiccup does not restart a healthy node.
+canary_detects_wedge() ->
+    ?assertEqual(ok, asobi_dgram_canary:probe_now()),
+    ?assert(asobi_dgram_canary:ready()),
+
+    %% Take the receive side away without touching the canary or the sender.
+    ok = supervisor:terminate_child(asobi_dgram_gw_sup, asobi_dgram_rx_sup),
+
+    ?assertMatch({error, _}, asobi_dgram_canary:probe_now()),
+    ?assert(asobi_dgram_canary:ready()),
+    ?assertMatch({error, _}, asobi_dgram_canary:probe_now()),
+    ?assert(asobi_dgram_canary:ready()),
+    ?assertMatch({error, _}, asobi_dgram_canary:probe_now()),
+    ?assertNot(asobi_dgram_canary:ready()).
 
 %% --- Helpers ---
 

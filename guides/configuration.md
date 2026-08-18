@@ -324,7 +324,50 @@ reshuffles the kernel's hash and breaks every flow already running through the
 gateway, so there is no reload path and changing it is a restart with a
 reconnect for every player on the plane.
 
-The plane itself is optional in every state: the WebSocket carries everything
+### The engine side
+
+The engine dials the gateway; the gateway never dials the engine. So the engine
+needs to know where it is, and both ends need the same secret:
+
+```erlang
+%% On the engine
+{dgram_gateway, #{host => {127, 0, 0, 1}, port => 7778}},
+{dgram_link_secret, <<"...">>},
+{dgram_endpoint, ~"udp.example.com:7777"},
+
+%% On the gateway
+{role, dgram_gw},
+{dgram, #{port => 7777, link_port => 7778, shards => 4}},
+{dgram_link_secret, <<"...">>}
+```
+
+`dgram_gateway` is the opt-in. Without it the engine dials nothing, mints nothing
+and answers `datagram_unavailable` to any client that asks - which is a normal
+answer, not an error.
+
+`dgram_endpoint` is what a client is told to send to, handed over in the mint
+response. Putting it there rather than having the client resolve it is what makes
+the plane independent of DNS and of SNI, and why a non-standard port costs the
+client nothing.
+
+**The link is loopback-only and is not encrypted.** It carries mint secrets, so
+it binds `127.0.0.1` and refuses to be told otherwise. Two containers sharing a
+network namespace is the shape it is built for; separate hosts need a tunnel, and
+that is an operator decision rather than something to default.
+
+Deliberately **not** distributed Erlang, which would have been the obvious answer
+and is the wrong one: dist is all-or-nothing, so a node that can reach another can
+call any function in it. Handing that to the process parsing packets from the
+internet gives back most of what the two-role split is for.
+
+### Clients ask for it over the WebSocket
+
+A client mints with `rpc.call` on the method `asobi.datagram.open`, which is a
+frame every SDK already implements, so the datagram plane adds **zero** frame
+types to the JSON wire. The reply carries `conn_id`, `kup`, `epoch`, `endpoint`
+and `expires_in`.
+
+The plane is optional in every state: the WebSocket carries everything
 throughout, and a client that never reaches the gateway is degraded rather than
 broken. See [ADR 0013](https://github.com/widgrensit/asobi/blob/main/docs/adr/0013-binary-wire-and-single-node-datagrams.md).
 

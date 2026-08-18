@@ -84,6 +84,9 @@ working and a new one reads one place: see `legacy/2`.
     %% Extension RPC. `rpc` is a core code domain, so no extension may own the
     %% `rpc` prefix and mint codes that look like the dispatcher's own.
     {~"rpc.unknown_method", 404, ~"No installed extension serves this RPC method."},
+    %% Not a failure. The WebSocket carries everything in every state, so a
+    %% client that cannot mint stays on TCP and loses latency, nothing else.
+    {~"datagram_unavailable", 503, ~"The datagram plane is not available. Stay on the WebSocket."},
     {~"rpc.invalid_cid", 400, ~"`cid` must be 1-64 printable ASCII characters."},
     {~"rpc.unsupported_protocol", 400, ~"This server does not speak that RPC protocol version."},
     {~"rpc.invalid_params", 400, ~"`params` must be a JSON object."},
