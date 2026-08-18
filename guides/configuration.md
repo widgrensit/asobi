@@ -416,7 +416,7 @@ does not work.
 ## Binary `world.tick`
 
 Off by default. Turning it on lets a client ask for `world.tick` as a binary
-frame at `session.connect`, roughly a fifth of the bytes and several times
+frame at `session.connect`, about a quarter of the bytes and several times
 cheaper to decode - the numbers and the encoding are in
 [the protocol guide](websocket-protocol.md#binary-worldtick).
 

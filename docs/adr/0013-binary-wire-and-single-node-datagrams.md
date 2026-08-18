@@ -78,7 +78,47 @@ structure both ways, with faithful 36-char UUIDv7 ids in the JSON:
 | Godot 4, GDScript, `PackedByteArray.decode_*` | 23.4-26.1 us | 55.8-63.5 us | binary **2.4x faster** |
 | Lua 5.4, `string.unpack` vs the SDK's own pure-Lua parser | 13.5-14.2 us | 438.8-490.4 us | binary **33x faster** |
 
-Bytes: 807 against 3856, so 4.8x smaller. Three runs each, stable.
+Bytes on the benchmark's own frame: 807 against 3856, so 4.8x smaller. Three
+runs each, stable.
+
+**That 4.8x is not the shipped ratio, and this is the correction rather than the
+number to quote.** The benchmark frame carried `x, y` per record; a real steady
+state carries `x, y, vx, vy`, which doubles the binary side and barely moves the
+JSON side. The wire has also since gained a `gen` byte per record for the
+datagram plane's merge rule (decision 6). Measured against shipped `main`, with
+36-char UUIDv7 ids in the JSON throughout:
+
+| Frame | JSON | binary | smaller by |
+|---|---|---|---|
+| 1 update | 192 | 64 | 3.0x |
+| 10 updates | 1019 | 289 | 3.5x |
+| **40 updates (the steady state)** | **3795** | **1039** | **3.7x** |
+| 400 updates | 37790 | 10039 | 3.8x |
+| 40 adds (a keyframe) | 3795 | 2519 | 1.5x |
+| 40 records as a `pose` datagram | 3795 | 512 | 7.4x |
+
+Three things that table says and the single figure did not.
+
+The ratio *settles* around 3.7x from roughly ten entities up. Below that the
+26-byte frame header dominates, so a one-entity frame is only 3.0x.
+
+**Keyframes get 1.5x and that is by design, not a shortfall.** An `add` carries
+the full 36-character id because that is where the slot binding is established;
+updates and removes carry two bytes of slot instead. Sending ids as text costs 20
+bytes per add and buys a client an id byte-identical to the one
+`session.connected` gave it. Keyframes are rare - join and resync - and updates
+are every tick, so the wire is optimised for the frequent case and pays on the
+rare one.
+
+**The `pose` datagram is where the bytes actually matter**, at 7.4x, because it
+drops everything a delta needs: no field names, no ids, no dictionary, just slot,
+generation, mask and four int16s at twelve bytes an entity. That is what puts 400
+entities inside one 1200-byte datagram (1100 bytes) where the same set as JSON is
+37 KB. Decision 3's whole case rests on that number and not on this one.
+
+**None of which is why the codec ships.** Bandwidth is the argument for the
+datagram plane, where fitting one MTU is pass or fail. The WebSocket codec is
+justified on the decode figures above and nothing else.
 
 The design's fear was true but irrelevant at this frame size: `decode_u16` and
 `decode_float` are themselves native calls, the loop is 40 iterations, and the

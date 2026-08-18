@@ -779,7 +779,7 @@ keyframe.
 
 A client that negotiated `"wire": "binary"` at
 [`session.connect`](#choosing-a-wire) receives `world.tick` as a **WebSocket
-binary frame** carrying the same information in about a fifth of the bytes, and
+binary frame** carrying the same information in about a quarter of the bytes, and
 materially cheaper to decode: measured against native JSON, 2.4x faster in
 Godot's GDScript and 33x faster than the pure-Lua parser Defold and LOVE ship.
 Every other message type still arrives as JSON text.

@@ -67,7 +67,10 @@ forty_update_delta_fits_a_datagram_test() ->
     F = frame([#{op => update, slot => I, gen => 0, fields => Fields} || I <- lists:seq(1, 40)]),
     {ok, Bin} = asobi_wire:encode(F),
     ?assert(byte_size(Bin) =< 1200),
-    %% And decisively smaller than the JSON it replaces.
+    %% And decisively smaller than the JSON it replaces. Measured at 3.7x on this
+    %% frame (3795 against 1039); the assertion is a 3x floor rather than the
+    %% real figure, so a regression fails without the test needing an edit every
+    %% time a byte moves.
     Json = iolist_to_binary(json:encode(json_shape(F))),
     ?assert(byte_size(Bin) * 3 < byte_size(Json)).
 

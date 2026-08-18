@@ -2,7 +2,8 @@
 -moduledoc """
 The binary encoding of `world.tick`, for clients that negotiate it.
 
-Same information as the JSON frame, ~5x fewer bytes and materially cheaper to
+Same information as the JSON frame in about a quarter of the bytes - 3.7x on a
+steady-state delta - and materially cheaper to
 decode on the client - measured at 2.4x faster than native JSON in Godot's
 GDScript and 33x faster than the pure-Lua parser Defold and LOVE ship
 (ADR 0013, decision 1). The server-side saving is negligible and is not the
