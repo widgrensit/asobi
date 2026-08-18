@@ -36,8 +36,12 @@ socket_test_() ->
 setup() ->
     _ = application:ensure_all_started(seki),
     Port = free_port(),
+    %% A free port for the engine link too, not just the datagram one. Leaving it
+    %% at the default made every fixture in this module bind the same fixed port
+    %% in turn, which passed locally and failed on CI with eaddrinuse - a fixed
+    %% port in a test is a race waiting for a slower machine.
     application:set_env(asobi, role, dgram_gw),
-    application:set_env(asobi, dgram, #{port => Port, shards => 3}),
+    application:set_env(asobi, dgram, #{port => Port, shards => 3, link_port => free_port()}),
     {ok, Sup} = asobi_dgram_gw_sup:start_link(),
     ok = asobi_dgram_table:register(binding(?CONN)),
     {ok, Client} = socket:open(inet, dgram, udp),
