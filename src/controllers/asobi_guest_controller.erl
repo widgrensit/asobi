@@ -11,7 +11,7 @@
 %% Opt-in: disabled unless `asobi_game_config:guest_auth/0` is true AND a
 %% `guest_verifier_pepper` is configured; both missing/false fail closed. The
 %% flag itself has two layers, the operator's `sys.config` key over the game's
-%% declaration (ADR 0011). Upgrade to a real account:
+%% declaration (ADR 0014). Upgrade to a real account:
 %% POST /auth/guest/upgrade (username+password, revokes the device verifier) or
 %% the existing /auth/link path (OAuth). Guardian + beam-security-reviewer gate.
 %%
@@ -20,7 +20,7 @@
 %% account is not a guest-shaped problem. A guest is just the case with no
 %% credential to re-confirm (asobi#419).
 
--export([authenticate/1, upgrade/1]).
+-export([authenticate/1, upgrade/1, enabled/0]).
 
 -ifdef(TEST).
 -export([make_verifier/1, verify/2, decode_secret/1, valid_device_id/1, create/2, cap_gate/2]).
@@ -453,22 +453,32 @@ insert_identity(PlayerId, DeviceId, SecretBin) ->
 
 %% --- Config (opt-in, fail closed and loud) ---
 
+-doc """
+Whether the guest routes will actually serve: the two-layer flag (ADR 0014) AND
+a usable pepper (ADR 0004). The one place that conjunction is written down.
+
+Silent, unlike `guest_enabled/0`, so `m:asobi_ops_features` can report it per
+request without writing a warning line each time an operator polls.
+""".
+-spec enabled() -> boolean().
+enabled() ->
+    asobi_game_config:guest_auth() andalso pepper(current_key_id()) =/= undefined.
+
+%% The request-path gate: `enabled/0` plus the diagnostic. A flag that is on
+%% while the gate is shut can only mean the pepper, and saying so is the
+%% difference between a five-minute fix and a support thread - the endpoint
+%% answers the same `guest.disabled` either way.
 -spec guest_enabled() -> boolean().
 guest_enabled() ->
-    case asobi_game_config:guest_auth() of
-        true ->
-            case pepper(current_key_id()) of
-                undefined ->
-                    ?LOG_WARNING(#{
-                        event => guest_auth_misconfigured,
-                        reason => missing_guest_verifier_pepper
-                    }),
-                    false;
-                _ ->
-                    true
-            end;
-        _ ->
-            false
+    case {enabled(), asobi_game_config:guest_auth()} of
+        {false, true} ->
+            ?LOG_WARNING(#{
+                event => guest_auth_misconfigured,
+                reason => missing_guest_verifier_pepper
+            }),
+            false;
+        {Enabled, _} ->
+            Enabled
     end.
 
 -spec current_key_id() -> binary().

@@ -36,8 +36,7 @@ all() ->
     ].
 
 %% Guest auth is set before the app starts, the way an operator's sys.config
-%% would have it - see `asobi_guest_SUITE` for why that ordering is the
-%% regression test for the boot-time clobber (ADR 0011).
+%% would have it (ADR 0014).
 %%
 %% `guest_reap_after` is deliberately NOT set. This is the on-demand half of
 %% retention, and it has to work on a deployment that never configured the
@@ -50,7 +49,11 @@ init_per_suite(Config0) ->
     application:unset_env(asobi, guest_reap_after),
     asobi_test_helpers:start(Config0).
 
+%% Nothing resets the operator layer any more, so the suite that set it clears
+%% it - see `asobi_guest_SUITE:end_per_suite/1`.
 end_per_suite(Config) ->
+    application:unset_env(asobi, guest_auth),
+    application:unset_env(asobi, guest_verifier_pepper),
     Config.
 
 %% --- Helpers ---

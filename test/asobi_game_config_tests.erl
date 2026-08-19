@@ -104,7 +104,7 @@ guest_auth_declared_replaces_the_script_layer() ->
 
     ?assertEqual(undefined, application:get_env(asobi, guest_auth)).
 
-%% The operator layer wins on key presence, not on truth (ADR 0011), the way
+%% The operator layer wins on key presence, not on truth (ADR 0014), the way
 %% asobi_registration:classify/0 has always layered the signup posture.
 operator_guest_auth_beats_script() ->
     application:set_env(asobi, guest_auth, false),

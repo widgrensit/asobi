@@ -41,24 +41,34 @@ all() ->
         a_failing_count_is_asked_once_per_ttl
     ].
 
-%% Set BEFORE the app starts, which is the deployment this suite represents: an
-%% operator with `{guest_auth, true}` in sys.config and no Lua bundle at all.
+%% The deployment this suite represents: an operator with `{guest_auth, true}`
+%% in sys.config and no Lua bundle at all (ADR 0014). The flag goes in before
+%% the start because that is where a sys.config value would be; the boot-time
+%% clobber it used to suffer is covered directly by
+%% `asobi_lua_config_tests:operator_guest_auth_survives_a_bundleless_boot/0`,
+%% which drives the loader rather than relying on suite ordering.
 %%
-%% That ordering is itself the regression test. Until ADR 0011 the flag was a
-%% single key: booting asobi runs `asobi_lua_config:maybe_load_game_config/0`,
-%% a node with no game bundle takes the `error` branch of `declared_config/1`,
-%% and the `{guest_auth, false}` it derives was written straight over whatever
-%% the operator had set. These three set_env calls had to run after the start to
-%% survive at all. The flag now has an operator layer over a script layer, the
-%% loader writes only the script layer, and if that ever regresses every case
-%% here fails with 403 `guest.disabled`.
+%% `guest_reap_after` goes in AFTER the start, and has to: `asobi_app:start/2`
+%% calls `asobi_guest_env:apply/0`, whose `off` branch unsets the key whenever
+%% `ASOBI_GUEST_REAP_AFTER` is absent from the environment, which it is here.
+%% Set before the start it is wiped during it and every reaper case sweeps
+%% nothing. Pinned by `asobi_guest_env_tests:reap_after_set_before_start_is_
+%% unset_by_apply_test/0`.
 init_per_suite(Config0) ->
     application:set_env(asobi, guest_auth, true),
     application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
+    Config = asobi_test_helpers:start(Config0),
     application:set_env(asobi, guest_reap_after, 1),
-    asobi_test_helpers:start(Config0).
+    Config.
 
+%% The operator layer is node-wide and nothing resets it any more: before the
+%% two-layer split a later config load wrote `guest_auth` back to `false`, and
+%% now every loader writes only the script layer. Leaving it set would hand the
+%% next suite in the run a posture it never asked for.
 end_per_suite(Config) ->
+    application:unset_env(asobi, guest_auth),
+    application:unset_env(asobi, guest_verifier_pepper),
+    application:unset_env(asobi, guest_reap_after),
     Config.
 
 %% --- Helpers ---

@@ -64,6 +64,11 @@ without touching auth posture at runtime.
 `guest_auth` is replaced rather than merged: it is the game's half of ADR
 0004's two-key AND, and the operator's half is the pepper, not the flag.
 
+**Amended by ADR 0014.** `guest_auth` is two layers in two keys as well, for
+the reason this ADR gives for the modes: a derived value and an operator's
+value cannot share a key. The loader writes `script_guest_auth`, and
+`asobi_game_config:guest_auth/0` composes it with the operator's `guest_auth`.
+
 ## Consequences
 
 - **A removed mode is actually removed.** The script layer is a replacement, so

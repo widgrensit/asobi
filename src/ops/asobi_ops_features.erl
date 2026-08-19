@@ -21,9 +21,12 @@ exists" does not answer that. Each entry is a name and a boolean only - never
 the configured value, which is usually a secret.
 
 A capability whose owning module already has the predicate calls it rather than
-re-deriving one here - `asobi_storage:enabled/0`, and `asobi_game_config:guest_auth/0`
-for the two-layer guest flag (ADR 0011), which `configured/1` cannot answer
-because it reports a key set to `false` as configured.
+re-deriving one here - `asobi_storage:enabled/0`, and
+`asobi_guest_controller:enabled/0` for guest auth. Neither half of that gate is
+the answer on its own: `configured/1` reports a key set to `false` as
+configured, and the flag without a pepper advertises a route that answers 403.
+`enabled/0` is the silent half of the request-path gate, so an ops poll does not
+write a warning per request.
 
 `lua` is the exception and is a module check, because since the runtime merged
 into asobi there is nothing to configure: it is present in every stock release.
@@ -111,7 +114,7 @@ capabilities() ->
         #{name => Name, enabled => Enabled}
      || {Name, Enabled} <- lists:sort([
             {~"clustering", configured(cluster)},
-            {~"guest_auth", asobi_game_config:guest_auth()},
+            {~"guest_auth", asobi_guest_controller:enabled()},
             {~"iap_apple", configured(apple_bundle_id)},
             {~"iap_google", configured(google_package_name)},
             {~"lua", module_available(asobi_lua_match)},

@@ -36,13 +36,17 @@ all() ->
     ].
 
 %% Operator-layer guest auth, set before the start the way a sys.config would
-%% have it - see asobi_guest_SUITE for why the ordering matters (ADR 0011).
+%% have it (ADR 0014).
 init_per_suite(Config0) ->
     application:set_env(asobi, guest_auth, true),
     application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
     asobi_test_helpers:start(Config0).
 
+%% Nothing resets the operator layer any more, so the suite that set it clears
+%% it - see `asobi_guest_SUITE:end_per_suite/1`.
 end_per_suite(Config) ->
+    application:unset_env(asobi, guest_auth),
+    application:unset_env(asobi, guest_verifier_pepper),
     Config.
 
 %% Erasure has its own tight bucket (3 per minute per IP, because the

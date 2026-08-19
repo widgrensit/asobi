@@ -26,16 +26,16 @@ reload can redefine or drop it. Every reader goes through `modes/0`.
 
 ## guest_auth is a second layer too
 
-`guest_auth` is the game's half of ADR 0004's two-key AND (the operator owns
-the pepper). A declared value replaces the script layer wholesale, in
-`script_guest_auth`, and never lands in `guest_auth` - the operator's key from
-`sys.config`. `guest_auth/0` composes the two the way `modes/0` does, except
-that the operator layer wins on key *presence* rather than on truth: an
-operator `false` pins guest auth off against a bundle that declares `true`, and
-an operator `true` survives a boot with no bundle at all. Before ADR 0011 there
-was no operator layer, and the loader's unconditional write meant a release
-embedding asobi with no Lua bundle had its `{guest_auth, true}` silently
-overwritten with `false` on every boot.
+A declared value replaces the script layer wholesale, in `script_guest_auth`,
+and never lands in `guest_auth` - the operator's key from `sys.config`.
+`guest_auth/0` composes them the way `m:asobi_registration` layers the signup
+posture (ADR 0014).
+
+The surprising part, and the reason this is not "the operator overrides a
+true": for a boolean, **unset and `false` are different**. `false` is an
+operator veto, absent is a deferral to the game. So an operator `false` pins
+guest auth off against a bundle declaring `true`, and an operator `true`
+survives a boot with no bundle at all.
 
 It is written before the modes so a reader waking on the mode change already
 sees the final auth posture.
@@ -72,12 +72,13 @@ auth posture at runtime.
 modes() ->
     maps:merge(env_modes(script_game_modes), env_modes(game_modes)).
 
--doc "The effective guest-auth flag: the operator's key when set, else the script's.".
+-doc "The effective guest-auth flag: the operator's key when set, else the game's.".
 -spec guest_auth() -> boolean().
 guest_auth() ->
     case application:get_env(asobi, guest_auth) of
-        undefined -> application:get_env(asobi, script_guest_auth, false) =:= true;
-        {ok, Value} -> Value =:= true
+        {ok, Value} when is_boolean(Value) -> Value;
+        {ok, _} -> false;
+        undefined -> application:get_env(asobi, script_guest_auth) =:= {ok, true}
     end.
 
 -doc "Apply a declared game config. The only supported writer of these keys.".

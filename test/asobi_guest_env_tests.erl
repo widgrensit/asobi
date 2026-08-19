@@ -22,7 +22,8 @@ retention_test_() ->
         fun a_non_integer_reaps_nothing/0,
         fun an_empty_value_reaps_nothing/0,
         fun surrounding_whitespace_is_tolerated/0,
-        fun turning_the_policy_off_clears_an_earlier_value/0
+        fun turning_the_policy_off_clears_an_earlier_value/0,
+        fun an_absent_variable_clears_a_value_set_before_the_start/0
     ]}.
 
 setup() ->
@@ -87,5 +88,17 @@ surrounding_whitespace_is_tolerated() ->
 turning_the_policy_off_clears_an_earlier_value() ->
     application:set_env(asobi, guest_reap_after, 604800),
     os:putenv(?VAR, "0"),
+    ok = asobi_guest_env:apply(),
+    ?assertEqual(undefined, application:get_env(asobi, guest_reap_after)).
+
+%% Why a CT `init_per_suite/1` cannot set `guest_reap_after` before
+%% `asobi_test_helpers:start/1`: `asobi_app:start/2` calls `apply/0`, and with
+%% no variable in the environment - which is every test run - the `off` branch
+%% unsets whatever was put there. A suite that sets it early sweeps nothing,
+%% and only when it runs first in the node, since `ensure_all_started/1` makes
+%% the second suite's start a no-op. That is invisible in a full `rebar3 ct`
+%% run and red on `--suite`, so pin it here instead.
+an_absent_variable_clears_a_value_set_before_the_start() ->
+    application:set_env(asobi, guest_reap_after, 1),
     ok = asobi_guest_env:apply(),
     ?assertEqual(undefined, application:get_env(asobi, guest_reap_after)).

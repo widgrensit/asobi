@@ -688,13 +688,12 @@ features_capability_reflects_configuration_test() ->
     end.
 
 %% guest_auth is a two-layer flag, so the capability goes through
-%% asobi_game_config:guest_auth/0 rather than "is the key set" - which reported
-%% `true` for a key set to `false`, and the boot-time config load set exactly
-%% that on every node without a Lua bundle (ADR 0011).
+%% asobi_guest_controller:enabled/0 rather than "is the key set" - which
+%% reported `true` for a key set to `false`, and the boot-time config load set
+%% exactly that on every node without a Lua bundle (ADR 0014).
 features_guest_auth_capability_reads_both_layers_test() ->
-    Saved = [{K, application:get_env(asobi, K)} || K <- [guest_auth, script_guest_auth]],
-    try
-        [application:unset_env(asobi, K) || K <- [guest_auth, script_guest_auth]],
+    with_guest_env(fun() ->
+        application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
         ?assertEqual(false, capability_enabled(~"guest_auth")),
 
         %% The game's own declaration is enough.
@@ -709,6 +708,34 @@ features_guest_auth_capability_reads_both_layers_test() ->
         application:unset_env(asobi, script_guest_auth),
         application:set_env(asobi, guest_auth, true),
         ?assertEqual(true, capability_enabled(~"guest_auth"))
+    end).
+
+%% The other half of the endpoint's gate. A console that renders the capability
+%% list is deciding whether to offer anonymous play at all, so a `true` here
+%% against a deployment whose every guest request answers 403 is worse than no
+%% answer - the flag alone used to report exactly that (ADR 0004).
+features_guest_auth_capability_needs_a_pepper_test() ->
+    with_guest_env(fun() ->
+        application:set_env(asobi, guest_auth, true),
+        ?assertEqual(false, capability_enabled(~"guest_auth")),
+
+        %% Under the 32-byte floor is unconfigured, the way the controller
+        %% reads it - a short pepper is not a weak deployment, it is an off one.
+        application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(31)),
+        ?assertEqual(false, capability_enabled(~"guest_auth")),
+
+        application:set_env(asobi, guest_verifier_pepper, crypto:strong_rand_bytes(32)),
+        ?assertEqual(true, capability_enabled(~"guest_auth"))
+    end).
+
+%% Saves and restores every key the guest gate reads, since eunit runs each
+%% module in one node and a leaked posture decides someone else's assertion.
+with_guest_env(Body) ->
+    Keys = [guest_auth, script_guest_auth, guest_verifier_pepper],
+    Saved = [{K, application:get_env(asobi, K)} || K <- Keys],
+    try
+        [application:unset_env(asobi, K) || K <- Keys],
+        Body()
     after
         [
             case V of

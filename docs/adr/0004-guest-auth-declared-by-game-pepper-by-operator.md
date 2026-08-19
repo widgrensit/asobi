@@ -41,6 +41,9 @@ Split the toggle from the secret.
   must not be committed to a bundle.
 - **The `ASOBI_GUEST_AUTH` env var is removed.** Operator control collapses into
   "is a pepper present?", so a separate flag is redundant.
+  **Amended by ADR 0014**, which gives the operator a `guest_auth` key in
+  `sys.config` that outranks the game's declaration in both directions. A
+  deployment with no game script had no way to turn guest auth on.
 - `guest_enabled/0` is unchanged: **guest auth is on iff the game declared
   `guest_auth` AND the operator supplied a valid pepper.**
 
@@ -56,7 +59,9 @@ Split the toggle from the secret.
 - **Per-env control via pepper presence.** The same bundle deploys to dev and
   prod; dev has no pepper (off), prod/demo has one (on). Per-environment
   behaviour without the toggle being per-env.
-- **One operator lever.** The operator's only control is whether a valid pepper is
+- **One operator lever.** (Superseded by ADR 0014: there are now two, and the
+  flag is the non-destructive one - withdrawing a pepper invalidates every
+  existing guest.) The operator's only control is whether a valid pepper is
   present for a deployment; there is no separate flag to coordinate. How the pepper
   is supplied - an env var a self-hoster sets, or automated provisioning on a
   managed host - is outside this decision and out of scope for this library.

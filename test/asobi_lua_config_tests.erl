@@ -151,7 +151,7 @@ single_mode_minimal() ->
 %% These assert through asobi_game_config:guest_auth/0 rather than the raw app
 %% env, the way the registration cases below assert through
 %% asobi_registration:mode/0: what a script declares is the script layer, and
-%% the effective flag is that layer composed with the operator's (ADR 0011).
+%% the effective flag is that layer composed with the operator's (ADR 0014).
 guest_auth_global_enables() ->
     reset_guest_auth(),
     TmpDir = make_temp_dir(),

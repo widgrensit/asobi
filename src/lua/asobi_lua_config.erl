@@ -64,7 +64,7 @@ intent; guest auth is on iff the operator also supplies a >= 32-byte pepper
 (ADR 0004). Like `registration`, it lands in a script layer that
 `asobi_game_config:guest_auth/0` reads only when the operator's `sys.config`
 leaves `guest_auth` unset, so an operator can turn anonymous play on for a
-release that ships no Lua at all, and off for one that does (ADR 0011).
+release that ships no Lua at all, and off for one that does (ADR 0014).
 `registration` declares a signup posture for a deployment that
 states none: it lands in the script layer `asobi_registration` reads only when
 the operator's `sys.config` leaves `registration` unset, and an unrecognised
@@ -150,7 +150,7 @@ game_dir() ->
 %% agree (ADR 0004). Best-effort: any error just leaves the flag at its `false`
 %% default. The write lands in the script layer, so an operator that sets
 %% `guest_auth` in sys.config overrides whatever the bundle declares, in both
-%% directions (ADR 0011). Shared with asobi_engine's bundle loader so managed
+%% directions (ADR 0014). Shared with asobi_engine's bundle loader so managed
 %% cloud behaves the same.
 -spec apply_guest_auth(string() | binary()) -> ok.
 apply_guest_auth(GameDir) ->
@@ -171,7 +171,7 @@ apply_registration_mode(GameDir) ->
 %% The whole config term the game's script declares. `guest_auth` is always
 %% present because a stale `true` from a previous bundle has to be reset - that
 %% write lands in the script layer (`script_guest_auth`), so it resets what the
-%% previous bundle said and can never touch the operator's own key (ADR 0011).
+%% previous bundle said and can never touch the operator's own key (ADR 0014).
 %% `registration` is present only when the script declares a recognised value,
 %% since an absent key is what leaves the operator's layer alone (ADR 0006).
 -spec declared_config(string() | binary()) -> asobi_game_config:config().

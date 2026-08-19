@@ -69,7 +69,7 @@ sweep_runs_on_a_script_declared_flag() ->
     ?assertEqual(1, meck:num_calls(asobi_repo, all, '_')).
 
 %% And an operator that pinned guest auth off gets no sweep, whatever the
-%% bundle declared (ADR 0011).
+%% bundle declared (ADR 0014).
 operator_false_stops_the_sweep() ->
     {ok, _} = asobi_guest_reaper:start_link(),
     application:set_env(asobi, script_guest_auth, true),

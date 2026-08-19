@@ -93,7 +93,7 @@ ENV ASOBI_PORT=8084 \
 
 # Anonymous guest auth (POST /api/v1/auth/guest) is off by default. The game
 # opts in with `guest_auth = true` in its Lua, or the operator does it in a
-# mounted sys.config, which wins when set (ADR 0011); the operator always
+# mounted sys.config, which wins when set (ADR 0014); the operator always
 # supplies the secret pepper (ADR 0004). Guest auth is on iff both are set. Use a base64/hex
 # pepper from >= 32 random bytes (NOT raw /dev/urandom bytes, whose quotes/
 # newlines would break the rendered config):  openssl rand -base64 48

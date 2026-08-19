@@ -111,7 +111,7 @@ dgram_link_children() ->
 %% the mode registry in its own init/1 (via scan/0), so the load has to precede
 %% asobi_lua_sup. Nothing reads the auth posture at boot any more -
 %% asobi_guest_reaper reads it when a sweep runs (asobi#327), the guest
-%% controller per request - and since ADR 0011 the load cannot overwrite an
+%% controller per request - and since ADR 0014 the load cannot overwrite an
 %% operator's `guest_auth` at all, because it writes the script layer. Moving
 %% the load earlier is still a real behaviour change and belongs in its own PR.
 lua_game_config_spec() ->
