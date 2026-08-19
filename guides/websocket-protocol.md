@@ -838,9 +838,12 @@ So the server repairs it rather than leaving it to you. The frame after a refuse
 one is a **keyframe** - `kf: true`, all adds - which re-establishes every binding.
 Nothing is required of a client that already applies keyframes the way this guide
 describes. If that keyframe is refused too, the cause is the shape of the game's
-entities rather than one frame, and the zone gives the binary wire up for its
-life: every client on it falls back to text, which carries everything, and the
-datagram plane switches off with it.
+entities rather than one frame, and the zone gives the binary wire up: every
+client on it falls back to text, which carries everything, and the datagram
+plane switches off with it. The zone asks again later on a doubling backoff -
+a minute, then two, up to an hour - so an entity that was briefly unencodable
+costs a pause rather than the rest of the zone's life. A successful retry is
+itself a keyframe, so every client is rebound by it.
 
 Both outcomes are visible server-side, and neither is silent on the client's
 behalf. If a game seems to be missing the datagram plane, count the fields on its

@@ -27,7 +27,9 @@ binary_wire_test_() ->
         {"a passing refusal is repaired by a keyframe on the next frame",
             fun refusal_is_repaired_by_a_keyframe/0},
         {"a structural refusal latches the zone to text rather than stranding slots",
-            fun structural_refusal_latches_to_text/0}
+            fun structural_refusal_latches_to_text/0},
+        {"a latched zone tries the binary wire again once the entity is gone",
+            fun latch_retries_and_recovers/0}
     ]}.
 
 setup() ->
@@ -38,8 +40,12 @@ setup() ->
     Prev = application:get_env(asobi, binary_wire),
     Prev.
 
-cleanup(undefined) -> application:unset_env(asobi, binary_wire);
-cleanup({ok, V}) -> application:set_env(asobi, binary_wire, V).
+cleanup(Prev) ->
+    application:unset_env(asobi, binary_wire_retry_ms),
+    case Prev of
+        undefined -> application:unset_env(asobi, binary_wire);
+        {ok, V} -> application:set_env(asobi, binary_wire, V)
+    end.
 
 %% --- Tests ---
 
@@ -280,4 +286,43 @@ structural_refusal_latches_to_text() ->
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 4.0}),
     asobi_zone:tick(Pid, 4),
     ?assertMatch({zone_delta_raw, _}, recv_delta()),
+    gen_server:stop(Pid).
+
+%% Latching for the zone's life is correct and, in a persistent world, expensive:
+%% one entity carrying a debug field for ten seconds would cost every player the
+%% datagram plane until the zone restarted. So the zone asks again on a doubling
+%% backoff, and the retry frame is a keyframe - a successful one rebinds every
+%% client rather than stranding the slots it just allocated.
+latch_retries_and_recovers() ->
+    application:set_env(asobi, binary_wire, true),
+    %% Ask again on the next broadcast rather than in a minute, which is the
+    %% knob's purpose. Zero rather than a small number because these ticks run
+    %% microseconds apart and any real delay would not have elapsed.
+    application:set_env(asobi, binary_wire_retry_ms, 0),
+    Pid = start_zone(),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    _ = recv(),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0}),
+    asobi_zone:add_entity(Pid, ~"e2", #{~"x" => 2.0, ~"path" => [1, 2]}),
+    asobi_zone:tick(Pid, 1),
+    ?assertMatch({zone_delta_raw, _}, recv_delta()),
+
+    %% The rebind keyframe refuses too, so the zone latches to text.
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 3.0}),
+    asobi_zone:tick(Pid, 2),
+    ?assertMatch({zone_delta_raw, _}, recv_delta()),
+
+    %% The offending entity leaves. The retry window has passed, so the next
+    %% broadcast re-arms the wire and sends a keyframe rather than a delta.
+    asobi_zone:remove_entity(Pid, ~"e2"),
+    asobi_zone:tick(Pid, 3),
+    {zone_delta_raw, _Json, Bin} = recv_delta(),
+    {ok, #{kf := Kf, records := Records}} = asobi_wire:decode(Bin),
+    ?assert(Kf),
+    ?assertEqual([{add, ~"e1"}], [{Op, Id} || #{op := Op, id := Id} <- Records]),
+
+    %% ...and it stays on the binary wire afterwards.
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 5.0}),
+    asobi_zone:tick(Pid, 4),
+    ?assertMatch({zone_delta_raw, _, _}, recv_delta()),
     gen_server:stop(Pid).

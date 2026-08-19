@@ -453,6 +453,18 @@ is correct but costs the entities in it their datagram fast path - see
 [the protocol guide](websocket-protocol.md#binary-worldtick) for what to watch
 for.
 
+A zone that cannot encode its entities at all drops to the text wire and then
+retries on a doubling backoff, starting at a minute and stopping at an hour:
+
+```erlang
+{binary_wire_retry_ms, 60000}
+```
+
+Lower it if your game legitimately produces short-lived unencodable entities and
+you would rather it recovered sooner; the cost of a retry is one refused encode
+on one broadcast tick. `0` retries on every broadcast, which is what the tests
+use and not a setting a deployment needs.
+
 What it costs while on: a zone can have subscribers on both wires, so it builds
 two buffers per broadcast instead of one. That is two encodes per zone per tick
 rather than one per subscriber, and it is paid whether or not anyone has

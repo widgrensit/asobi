@@ -34,6 +34,12 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 %% the manager is saturated - in which case the NPC waits in this zone for a
 %% later tick rather than the zone stalling behind a 5s gen_server default.
 -define(ENSURE_ZONE_TIMEOUT, 1_000).
+%% How long a zone stays on the text wire before trying the binary one again, and
+%% the ceiling the doubling stops at. Read from the environment at zone start so a
+%% deployment whose games legitimately produce short-lived unencodable entities can
+%% ask sooner, and a test can ask immediately.
+-define(WIRE_RETRY_MS, 60_000).
+-define(WIRE_RETRY_MAX_MS, 3_600_000).
 
 %% --- Public API ---
 
@@ -272,6 +278,12 @@ init(Config) ->
             %% contiguous `frame_seq` that gives the client no reason to resync
             %% (asobi#510).
             wire_rebind => false,
+            %% `at` is when to try the binary wire again, or `undefined` for "not
+            %% latched". The backoff doubles on each failed retry (latch_to_text/5).
+            wire_retry => #{
+                at => undefined,
+                backoff => application:get_env(asobi, binary_wire_retry_ms, ?WIRE_RETRY_MS)
+            },
             %% Throttle state for the refusal warning. A zone holding one
             %% entity the encoder cannot take refuses every frame, which at 20
             %% Hz is a warning five times a second for the life of the zone.
@@ -832,17 +844,18 @@ do_tick(
         case TickN rem BroadcastInterval of
             0 ->
                 Deltas = compute_deltas(BroadcastEntities, Entities4),
+                State0 = maybe_retry_binary_wire(State),
                 {FrameSlots, Slots1} = advance_slots(
-                    maps:get(binary_wire, State),
+                    maps:get(binary_wire, State0),
                     BroadcastEntities,
                     Entities4,
-                    maps:get(slots, State)
+                    maps:get(slots, State0)
                 ),
-                Rebind = maps:get(wire_rebind, State),
+                Rebind = maps:get(wire_rebind, State0),
                 {WireSeq1, Refusal} = broadcast_deltas(
                     Coords, TickN, WireSeq, Deltas, Subs, FrameSlots, Rebind, Entities4
                 ),
-                State2 = apply_refusal(Refusal, Rebind, Coords, TickN, Deltas, State),
+                State2 = apply_refusal(Refusal, Rebind, Coords, TickN, Deltas, State0),
                 broadcast_acks(TickN, PlayerAck1, Subs),
                 PoseSeq1 = broadcast_pose(
                     Coords, TickN, State2, Deltas, Entities4, Slots1, Subs
@@ -1072,6 +1085,7 @@ apply_refusal({refused, Reason}, true, Coords, TickN, Deltas, State) ->
 -spec latch_to_text(refusal(), {integer(), integer()}, non_neg_integer(), [term()], map()) ->
     map().
 latch_to_text(Reason, Coords, TickN, Deltas, State) ->
+    #{backoff := Backoff} = Retry = maps:get(wire_retry, State),
     ?LOG_WARNING(
         maps:merge(
             #{
@@ -1079,13 +1093,51 @@ latch_to_text(Reason, Coords, TickN, Deltas, State) ->
                 coords => Coords,
                 tick => TickN,
                 field_names => distinct_field_names(Deltas),
-                widest_entity => widest_entity(Deltas)
+                widest_entity => widest_entity(Deltas),
+                retry_in_ms => Backoff
             },
             refusal_detail(Reason)
         )
     ),
     asobi_telemetry:binary_wire_refused(refusal_kind(Reason)),
-    State#{binary_wire => false, wire_rebind => false, slots => asobi_wire_slots:new()}.
+    State#{
+        binary_wire => false,
+        wire_rebind => false,
+        slots => asobi_wire_slots:new(),
+        wire_retry => Retry#{
+            at => erlang:monotonic_time(millisecond) + Backoff,
+            backoff => min(Backoff * 2, ?WIRE_RETRY_MAX_MS)
+        }
+    }.
+
+%% A latched zone tries the binary wire again, on a doubling backoff.
+%%
+%% The alternative was to latch for the zone's life, which is correct and, for a
+%% persistent world, means one entity carrying a debug field for ten seconds costs
+%% every player the datagram plane until the zone is restarted. Every refusal
+%% cause is a property of entity shape, so most latches ARE permanent - but "most"
+%% is not "all", and the zone cannot tell which it has without asking.
+%%
+%% Asking is cheap and self-limiting: one refused encode and one text frame, which
+%% is what the tick was already paying while latched. The backoff doubles to an
+%% hour so a genuinely unencodable zone settles into asking twice a day rather
+%% than flapping, and `wire_rebind` makes the retry frame a keyframe, so a
+%% successful one rebinds every client rather than stranding the slots it just
+%% allocated.
+-spec maybe_retry_binary_wire(map()) -> map().
+maybe_retry_binary_wire(#{wire_retry := #{at := At} = Retry} = State) when is_integer(At) ->
+    case erlang:monotonic_time(millisecond) >= At of
+        false ->
+            State;
+        true ->
+            State#{
+                binary_wire => true,
+                wire_rebind => true,
+                wire_retry => Retry#{at => undefined}
+            }
+    end;
+maybe_retry_binary_wire(State) ->
+    State.
 
 %% Slots are needed by the binary wire AND by the pose plane, and they are the
 %% same slots: two allocations for one zone would eventually disagree about which
