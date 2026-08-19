@@ -29,7 +29,7 @@ metric labels.
 
 -behaviour(gen_server).
 
--export([start_link/0, open/2, close/1, player_of/1, conn_of/1]).
+-export([start_link/0, open/3, close/1, player_of/1, pose_conn_of/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 %% How long a mint is good for if the client never opens the plane. Long enough
@@ -53,7 +53,7 @@ metric labels.
 }.
 
 -type request() ::
-    {open, binary(), pid()}
+    {open, binary(), pid(), binary()}
     | {player_of, non_neg_integer()}.
 
 -type state() :: #{by_conn := #{non_neg_integer() => mint()}, epoch := 0..65535}.
@@ -70,9 +70,9 @@ turns into "no datagram plane for this session" rather than into a failure: the
 WebSocket carries everything regardless, so an absent gateway is a degraded plane
 and not a broken session.
 """.
--spec open(binary(), pid()) -> {ok, map()} | {error, term()}.
-open(PlayerId, SessionPid) ->
-    case gen_server:call(?MODULE, {open, PlayerId, SessionPid}, 5000) of
+-spec open(binary(), pid(), binary()) -> {ok, map()} | {error, term()}.
+open(PlayerId, SessionPid, Wire) ->
+    case gen_server:call(?MODULE, {open, PlayerId, SessionPid, Wire}, 5000) of
         {ok, Credential} when is_map(Credential) -> {ok, Credential};
         {error, Reason} -> {error, Reason}
     end.
@@ -82,16 +82,27 @@ open(PlayerId, SessionPid) ->
 close(ConnId) -> gen_server:cast(?MODULE, {close, ConnId}).
 
 -doc """
-This player's `conn_id`, or `error`.
+This player's `conn_id`, if poses can reach them, or `error`.
+
+**Not simply "this player's conn_id".** A pose record names a slot and nothing
+else, and the only frame that binds a slot to an entity is an `add` on the binary
+`world.tick`. A client that connected on the JSON wire never receives one, so
+every pose sent to it names a slot it cannot resolve and is dropped there - the
+entity looks frozen, with nothing in either log to say why (asobi#510, again, one
+layer out). Minting is still allowed for such a client: the plane's other half
+carries `world.input` UPSTREAM, which resolves a player by `conn_id` and needs no
+slots at all, so UDP input works on either wire.
 
 Reads the mirror directly, with no message to this process at all: a zone calls
 it once per subscriber per broadcast tick, and a gen_server call there would put
-one process in the path of every zone's tick.
+one process in the path of every zone's tick. Answering the question the caller
+actually has - "may I send this player a pose?" - keeps the wire out of the zone,
+which ADR 0013 decision 4 declined to track per subscriber.
 """.
--spec conn_of(binary()) -> {ok, non_neg_integer()} | error.
-conn_of(PlayerId) ->
+-spec pose_conn_of(binary()) -> {ok, non_neg_integer()} | error.
+pose_conn_of(PlayerId) ->
     try ets:lookup(?MIRROR, PlayerId) of
-        [{_, ConnId}] when is_integer(ConnId) -> {ok, ConnId};
+        [{_, ConnId, true}] when is_integer(ConnId) -> {ok, ConnId};
         _ -> error
     catch
         %% No mirror: the plane is not configured on this node.
@@ -130,7 +141,9 @@ init([]) ->
     {ok, #{by_conn => #{}, epoch => rand_epoch()}}.
 
 -spec handle_call(request(), gen_server:from(), state()) -> {reply, term(), state()}.
-handle_call({open, PlayerId, SessionPid}, _From, #{by_conn := ByConn, epoch := Epoch} = State) ->
+handle_call(
+    {open, PlayerId, SessionPid, Wire}, _From, #{by_conn := ByConn, epoch := Epoch} = State
+) ->
     ConnId = binary:decode_unsigned(crypto:strong_rand_bytes(4)),
     KUp = crypto:strong_rand_bytes(32),
     ExpiresAt = erlang:system_time(millisecond) + ?TTL_MS,
@@ -163,7 +176,11 @@ handle_call({open, PlayerId, SessionPid}, _From, #{by_conn := ByConn, epoch := E
                 },
                 pose_manifest()
             ),
-            true = ets:insert(?MIRROR, {PlayerId, ConnId}),
+            %% The third element is the pose question, decided here because this
+            %% is where the connection is known. `world.tick` is the carrier that
+            %% binds slots, so only a client that negotiated the binary one can
+            %% resolve a pose.
+            true = ets:insert(?MIRROR, {PlayerId, ConnId, Wire =:= ~"binary"}),
             {reply, {ok, Reply}, State#{by_conn => ByConn#{ConnId => Mint}}};
         {error, Reason} ->
             {reply, {error, Reason}, State}
@@ -239,7 +256,7 @@ forget(ConnId, ByConn) ->
     case ByConn of
         #{ConnId := #{player_id := PlayerId}} ->
             case ets:lookup(?MIRROR, PlayerId) of
-                [{_, ConnId}] -> ets:delete(?MIRROR, PlayerId);
+                [{_, ConnId, _Poses}] -> ets:delete(?MIRROR, PlayerId);
                 _ -> true
             end;
         _ ->

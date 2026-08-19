@@ -1155,10 +1155,18 @@ handle_message(#{~"type" := _Type} = Msg, State) ->
 handle_message(_Msg, State) ->
     {ok, State}.
 
-rpc_caller(#{session := SessionPid, player_id := PlayerId}) when
+rpc_caller(#{session := SessionPid, player_id := PlayerId} = State) when
     is_pid(SessionPid), is_binary(PlayerId)
 ->
-    #{player_id => PlayerId, session => SessionPid, transport => ws};
+    %% `wire` travels with the caller because the datagram mint needs it: a pose
+    %% names a slot, and only the binary `world.tick` binds one, so a connection
+    %% on the JSON wire can send UDP input but can never resolve a pose.
+    #{
+        player_id => PlayerId,
+        session => SessionPid,
+        transport => ws,
+        wire => maps:get(wire, State, ~"json")
+    };
 rpc_caller(_State) ->
     unauthenticated.
 

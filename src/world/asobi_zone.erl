@@ -1170,7 +1170,7 @@ changed_fields([_Removed | Rest], Acc) ->
 %% rather than by asking it, because this runs once per subscriber per broadcast
 %% tick and a gen_server call there would put one process in every zone's path.
 pose_targets(Subs) ->
-    [C || PlayerId := _ <- Subs, {ok, C} <- [asobi_dgram_mint:conn_of(PlayerId)]].
+    [C || PlayerId := _ <- Subs, {ok, C} <- [asobi_dgram_mint:pose_conn_of(PlayerId)]].
 
 %% One shared buffer per wire in use, never one per subscriber - that is the
 %% whole point of ADR 0001's encode-once fan-out and the reason both buffers

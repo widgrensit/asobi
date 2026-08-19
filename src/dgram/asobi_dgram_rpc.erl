@@ -29,12 +29,17 @@ session.
 
 -doc "Mints a credential for the calling session.".
 -spec open(map(), map()) -> {ok, map()} | {error, binary()}.
-open(_Params, #{player_id := PlayerId, session := SessionPid}) ->
+open(_Params, #{player_id := PlayerId, session := SessionPid} = Caller) ->
     case asobi_dgram_link_client:enabled() of
         false ->
             {error, ~"datagram_unavailable"};
         true ->
-            case asobi_dgram_mint:open(PlayerId, SessionPid) of
+            %% The wire this connection negotiated, which decides whether poses
+            %% can reach it. Minting is allowed either way - UDP input needs no
+            %% slots - so this is recorded rather than refused. An HTTP caller has
+            %% no WebSocket and therefore no wire, which is the same answer.
+            Wire = maps:get(wire, Caller, ~"json"),
+            case asobi_dgram_mint:open(PlayerId, SessionPid, Wire) of
                 {ok, Credential} ->
                     {ok, Credential};
                 {error, _Reason} ->

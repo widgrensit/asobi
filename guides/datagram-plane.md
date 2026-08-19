@@ -263,6 +263,7 @@ on before you have tested every player's network.
 | Situation | What happens |
 |---|---|
 | Server has no gateway | The mint answers `datagram_unavailable`. The client stays on the WebSocket. |
+| The client did not ask for the binary wire | It mints, and its **input** still travels over UDP. It is not sent poses, because it has no slot table to resolve them against - positions keep coming on `world.tick`. See below. |
 | A firewall drops UDP | Three probes over three seconds, then the client gives up to `off`. |
 | The path goes quiet for 2s | `degraded`: positions come from `world.tick` again while the client re-probes in the background. |
 | The WebSocket reconnects | Back to `off`, and a fresh mint. A credential is bound to a session. |
@@ -270,6 +271,24 @@ on before you have tested every player's network.
 
 **The WebSocket carries everything in every state.** There is no state in which
 correctness depends on this plane.
+
+### Poses need the binary wire; input does not
+
+A pose record carries a slot and nothing else, and the only frame that binds a
+slot to an entity is an `add` on the [binary
+`world.tick`](websocket-protocol.md#binary-worldtick). So a client that connected
+without `"wire": "binary"` cannot resolve a pose, and the server does not send it
+any - it would be dropped client-side and the entity would look frozen with
+nothing in either log to say why.
+
+The plane's other half is unaffected: `world.input` travelling upstream over UDP
+resolves a player by `conn_id`, needs no slots, and works on either wire. So
+minting is allowed either way, and a client that wants only the latency win on
+its own input can have it.
+
+Every SDK that supports the plane asks for both, so this is not something you
+configure - it matters if you are writing a client by hand, or debugging why a
+plane that reports `on` never moves anything.
 
 The client keepalive is not optional and cannot be moved to the server: with a
 NAT anywhere in the path a quiet client loses its mapping and the downlink is

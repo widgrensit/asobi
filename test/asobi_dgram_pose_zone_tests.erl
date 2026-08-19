@@ -15,6 +15,8 @@ zone_pose_test_() ->
         {"a passing refusal costs one tick of poses, not the plane",
             fun passing_refusal_recovers/0},
         {"a zone with no datagram subscribers emits nothing", fun no_subscribers_no_pose/0},
+        {"a client on the JSON wire is not sent poses it cannot resolve",
+            fun json_wire_client_gets_no_pose/0},
         {"a moving entity produces a decodable pose", fun moving_entity_produces_pose/0},
         {"pose and the binary wire share one slot map", fun one_slot_map/0},
         {"the pose sequence is independent of frame_seq", fun independent_sequences/0}
@@ -67,7 +69,7 @@ cleanup(Prev) ->
 no_manifest_no_pose() ->
     application:unset_env(asobi, dgram_pose),
     Pid = start_zone(),
-    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, true}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
     asobi_zone:tick(Pid, 1),
@@ -79,7 +81,7 @@ no_manifest_no_pose() ->
 no_binary_wire_no_pose() ->
     application:set_env(asobi, binary_wire, false),
     Pid = start_zone(),
-    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, true}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
     asobi_zone:tick(Pid, 1),
@@ -93,7 +95,7 @@ no_binary_wire_no_pose() ->
 %% `world.tick`, which is the carrier that can name them.
 unencodable_entity_stops_the_plane() ->
     Pid = start_zone(),
-    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, true}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     %% A list is not one of the six scalar types the wire carries, so the frame
     %% announcing this entity is refused and sent as text.
@@ -107,7 +109,7 @@ unencodable_entity_stops_the_plane() ->
 %% and the poses resume - the plane pauses for one tick rather than latching off.
 passing_refusal_recovers() ->
     Pid = start_zone(),
-    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, true}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
     asobi_zone:tick(Pid, 1),
@@ -141,7 +143,7 @@ no_subscribers_no_pose() ->
 %% a position.
 moving_entity_produces_pose() ->
     Pid = start_zone(),
-    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, true}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 12.5, ~"y" => -3.25}),
     asobi_zone:tick(Pid, 1),
@@ -165,7 +167,7 @@ moving_entity_produces_pose() ->
 %% comparing the two wires' own bytes.
 one_slot_map() ->
     Pid = start_zone(),
-    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, true}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
     asobi_zone:tick(Pid, 1),
@@ -183,7 +185,7 @@ one_slot_map() ->
 %% each look like it had gaps the other caused. A client gap-detects them apart.
 independent_sequences() ->
     Pid = start_zone(),
-    ets:insert(asobi_dgram_conns, {~"p1", 4242}),
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, true}),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
     asobi_zone:tick(Pid, 1),
@@ -244,3 +246,20 @@ recv_delta() ->
         {asobi_message, _Other} -> recv_delta()
     after 500 -> no_delta
     end.
+
+%% asobi#510, one layer out from the zone. `asobi.datagram.open` mints for any
+%% session with a gateway configured - deliberately, because the plane's other
+%% half carries `world.input` upstream and that needs no slots, so UDP input
+%% works on either wire. What it must not do is put a JSON-wire client on the
+%% receiving end: it never gets an `add` record, so every pose names a slot it
+%% cannot resolve and drops it, and the entity looks frozen with nothing logged
+%% anywhere. The mint records the answer; the zone asks for it.
+json_wire_client_gets_no_pose() ->
+    Pid = start_zone(),
+    %% Minted, and on the text wire - the flag the mint writes for it.
+    ets:insert(asobi_dgram_conns, {~"p1", 4242, false}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    asobi_zone:add_entity(Pid, ~"e1", #{~"x" => 1.0, ~"y" => 2.0}),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(no_pose, recv_pose()),
+    gen_server:stop(Pid).
