@@ -22,7 +22,7 @@ COPY include/ include/
 COPY src/ src/
 COPY apps/ apps/
 COPY priv/ priv/
-RUN rebar3 as prod release -n asobi && rebar3 as prod release -n asobi_gw
+RUN rebar3 as prod release -n asobi && rebar3 as prod release -n asobi_dgram
 
 # --- The datagram gateway image ---
 # `docker build --target gateway`. Its own image and not a role of the engine's,
@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -r asobi && useradd -r -g asobi -d /app asobi
 
 WORKDIR /app
-COPY --from=builder /build/_build/prod/rel/asobi_gw/ ./
+COPY --from=builder /build/_build/prod/rel/asobi_dgram/ ./
 RUN chown -R asobi:asobi /app
 
 USER asobi
@@ -50,7 +50,7 @@ EXPOSE 7777/udp
 
 ENV ASOBI_ROLE=dgram_gw \
     ASOBI_NODE_HOST=127.0.0.1 \
-    ASOBI_NODE_NAME=asobi_gw \
+    ASOBI_NODE_NAME=asobi_dgram \
     ASOBI_DGRAM_PORT=7777 \
     ASOBI_DGRAM_LINK_PORT=7778
 
@@ -60,7 +60,7 @@ ENV ASOBI_ROLE=dgram_gw \
 ENV ERLANG_COOKIE=asobi
 
 ENTRYPOINT ["tini", "--"]
-CMD ["bin/asobi_gw", "foreground"]
+CMD ["bin/asobi_dgram", "foreground"]
 
 # --- Runtime ---
 # Must match the builder's Debian release (erlang:28.4.2-slim is trixie-based)

@@ -1,6 +1,11 @@
 name: Docker publish (gateway)
 
-# Publishes ghcr.io/widgrensit/asobi-dgram - the datagram gateway, and only that.
+# Publishes ghcr.io/widgrensit/asobi_dgram - the datagram gateway, and only that.
+#
+# Underscore, matching ghcr.io/widgrensit/asobi_engine and the Erlang naming
+# everything else here uses. It was briefly published as
+# `asobi-dgram`; that package is orphaned and should be deleted rather than
+# left to look like a second image someone could pull.
 #
 # The engine image is NOT built here. It comes from the asobi_bundle
 # meta-package, because it has to carry the full closure of first-party
@@ -48,7 +53,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository }}-dgram
+          images: ghcr.io/${{ github.repository }}_dgram
           tags: |
             type=ref,event=branch
             type=sha,format=long
@@ -68,14 +73,14 @@ jobs:
           target: gateway
           load: true
           push: false
-          tags: asobi-dgram:guard
+          tags: asobi_dgram:guard
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
 
       - name: The image carries nothing that holds credentials
         run: |
-          libs="$(docker run --rm --entrypoint sh asobi-dgram:guard -c 'ls /app/lib' | sed 's/-[0-9].*//' | sort -u)"
+          libs="$(docker run --rm --entrypoint sh asobi_dgram:guard -c 'ls /app/lib' | sed 's/-[0-9].*//' | sort -u)"
           echo "$libs"
           for heavy in nova kura kura_postgres shigoto luerl nova_auth nova_resilience cowboy ranch; do
             if printf '%s\n' "$libs" | grep -qx "$heavy"; then

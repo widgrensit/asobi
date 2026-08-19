@@ -66,7 +66,7 @@ Everything with authority travels only on the TLS WebSocket, in every state.
 Two containers, and two different images. The gateway binds a UDP port and
 parses packets from anyone on the internet, so it must not run your game -
 enforced by what is in the image rather than by a flag.
-`ghcr.io/widgrensit/asobi-dgram` is a release of the gateway application alone:
+`ghcr.io/widgrensit/asobi_dgram` is a release of the gateway application alone:
 no nova, no kura, no shigoto, no Lua, no HTTP listener, and no database driver to
 open a pool with.
 
@@ -127,7 +127,7 @@ echo "DGRAM_COOKIE=$(openssl rand -hex 24)"     # gateway, in your .env
 
   dgram:
     # Not the engine image with a role set - see above.
-    image: ghcr.io/widgrensit/asobi-dgram:latest
+    image: ghcr.io/widgrensit/asobi_dgram:latest
     # The engine's network namespace. On Kubernetes this is a second container in
     # the same pod, where it comes for free.
     network_mode: "service:asobi"

@@ -311,7 +311,7 @@ an application's dependencies before its start callback runs, so by the time
 credentials and `shigoto` had run migrations and started job workers. No code
 inside `start/2` can undo that. The gateway is now its own OTP application with
 its own dependency list (kernel, stdlib, crypto, telemetry, seki), its own relx
-release, and its own image - `ghcr.io/widgrensit/asobi-dgram`, built from this
+release, and its own image - `ghcr.io/widgrensit/asobi_dgram`, built from this
 repository with `docker build --target gateway`. The credentials are not in that
 container because the driver that would read them is not in it. `ASOBI_ROLE`
 still works for deployments already using it, and still carries the old flaw.

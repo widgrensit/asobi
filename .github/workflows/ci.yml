@@ -145,11 +145,11 @@ jobs:
       - name: Assemble both releases
         run: |
           rebar3 as prod release -n asobi
-          rebar3 as prod release -n asobi_gw
+          rebar3 as prod release -n asobi_dgram
 
       - name: The gateway release carries nothing that holds credentials
         run: |
-          libs="$(ls _build/prod/rel/asobi_gw/lib | sed 's/-[0-9].*//' | sort -u)"
+          libs="$(ls _build/prod/rel/asobi_dgram/lib | sed 's/-[0-9].*//' | sort -u)"
           echo "$libs"
           for heavy in nova kura kura_postgres shigoto luerl nova_auth nova_resilience cowboy ranch; do
             if printf '%s\n' "$libs" | grep -qx "$heavy"; then
@@ -163,4 +163,4 @@ jobs:
               exit 1
             }
           done
-          test -x _build/prod/rel/asobi_gw/bin/asobi_gw
+          test -x _build/prod/rel/asobi_dgram/bin/asobi_dgram

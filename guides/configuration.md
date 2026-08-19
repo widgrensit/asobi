@@ -306,7 +306,7 @@ before it reaches an external verification service.
 
 ## The datagram gateway
 
-Its own release and its own image, `ghcr.io/widgrensit/asobi-dgram`. It contains
+Its own release and its own image, `ghcr.io/widgrensit/asobi_dgram`. It contains
 the gateway application and its three dependencies - kernel, stdlib, telemetry,
 plus the rate limiter - and that is all: no nova, no kura, no shigoto, no Lua.
 

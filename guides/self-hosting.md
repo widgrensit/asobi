@@ -181,7 +181,7 @@ and everything you do with it are unchanged. If you build your own release
 instead of using this image, depend on `asobi_bundle` (not bare `asobi`) to get
 the same set.
 
-`ghcr.io/widgrensit/asobi-dgram`, the [datagram gateway](#adding-the-datagram-plane),
+`ghcr.io/widgrensit/asobi_dgram`, the [datagram gateway](#adding-the-datagram-plane),
 is built from the asobi repository instead, and for the opposite reason: the
 bundle exists so an extension cannot silently vanish from the engine image, and
 the gateway must contain no extensions at all - no nova, no kura, no Lua. Its
@@ -356,7 +356,7 @@ travelling on the WebSocket, in every state, whatever happens to the plane.
 **It is two containers, and two different images.** The gateway binds a UDP port
 and parses packets from anyone on the internet, so it must not run your game -
 and "must not" here is a property of what is in the image, not of a flag it is
-started with. `ghcr.io/widgrensit/asobi-dgram` is a release containing the
+started with. `ghcr.io/widgrensit/asobi_dgram` is a release containing the
 gateway application and nothing else: no nova, no kura, no shigoto, no Lua. There
 is no HTTP listener in it, no migration to run, and no database driver to open a
 pool with.
@@ -435,7 +435,7 @@ echo "DGRAM_COOKIE=$(openssl rand -hex 24)"     # gateway, in your .env
 
   dgram:
     # Not the engine image with a role set - see above.
-    image: ghcr.io/widgrensit/asobi-dgram:latest
+    image: ghcr.io/widgrensit/asobi_dgram:latest
     network_mode: "service:asobi"
     depends_on:
       - asobi
