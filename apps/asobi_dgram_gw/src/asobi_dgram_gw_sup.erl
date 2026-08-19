@@ -18,8 +18,9 @@ this gets exactly what it had.
     asobi_dgram_gw_sup  (one_for_one)
       asobi_dgram_limits    the rate-limit tiers, registered once
       asobi_dgram_table     the binding table's owner
-      asobi_dgram_sender    owns the send socket
-      asobi_dgram_rx_sup    one receiver per SO_REUSEPORT shard
+      asobi_dgram_sender    serialises the fan-out
+      asobi_dgram_rx_sup    one receiver per SO_REUSEPORT shard, and the only
+                            sockets bound to the public port
       asobi_dgram_canary    readiness, by real loopback exchange
       asobi_dgram_link_server  the engine's attachment point
 
@@ -97,7 +98,9 @@ init([]) ->
     %% a set: limiters before anything can be received, the table before a
     %% datagram can name a conn_id, and the sender before a receiver can need to
     %% answer one. The receivers come last because they are the only child that
-    %% can be handed work by someone outside the node.
+    %% can be handed work by someone outside the node - which is also why the
+    %% sender resolves its socket on first use rather than at init: it starts
+    %% before the sockets it borrows from exist.
     {ok,
         {SupFlags, [
             limits_spec(),

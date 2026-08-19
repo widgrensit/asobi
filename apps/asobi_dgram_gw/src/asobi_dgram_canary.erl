@@ -7,7 +7,9 @@ failure this exists to catch: the socket stays bound as long as the process is
 alive, so "is the port open" answers a question nobody is asking. This sends a
 genuine `ping` to the gateway's own port over loopback and waits for the `pong`,
 which only comes back if the guard, the limiters, the binding table, the MAC
-check, the dispatcher and the sender are all working.
+check, the dispatcher and the sender are all working - and it checks that the
+pong came back **from the public port**, which is the one property loopback will
+otherwise hide (asobi#515).
 
 ## It uses a real binding, because a fake one would prove less
 
@@ -189,13 +191,18 @@ probe(#{socket := Socket, conn_id := ConnId, kup := KUp, cseq := CSeq} = State) 
     State1 = State#{cseq => Next},
     Target = #{family => inet, addr => loopback, port => Port},
     case socket:sendto(Socket, Ping, Target) of
-        ok -> await_pong(Socket, ConnId, State1);
+        ok -> await_pong(Socket, ConnId, Port, State1);
         {error, Reason} -> {{error, Reason}, miss(Reason, State1)}
     end.
 
-await_pong(Socket, ConnId, State) ->
+await_pong(Socket, ConnId, Port, State) ->
     case socket:recvfrom(Socket, 0, [], ?TIMEOUT_MS) of
-        {ok, {_From, Data}} ->
+        %% The source port is checked, not just the payload. Over loopback a
+        %% reply from anywhere arrives regardless, so a canary that ignored it
+        %% stayed green while every real player behind NAT was dropped
+        %% (asobi#515). This is the only place the gateway can catch that
+        %% without a second host.
+        {ok, {#{port := Port}, Data}} ->
             case asobi_dgram:decode_downlink(Data) of
                 {ok, #{opcode := pong, conn_id := ConnId}} ->
                     {ok, hit(State)};
@@ -204,6 +211,8 @@ await_pong(Socket, ConnId, State) ->
                     %% this socket, so it counts as a miss rather than a retry.
                     {{error, unexpected_reply}, miss(unexpected_reply, State)}
             end;
+        {ok, {_Elsewhere, _Data}} ->
+            {{error, wrong_source_port}, miss(wrong_source_port, State)};
         {error, Reason} ->
             {{error, Reason}, miss(Reason, State)}
     end.
