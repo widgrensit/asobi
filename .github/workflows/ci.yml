@@ -121,3 +121,46 @@ jobs:
       # creeping towards the scaled timeout before they start cancelling groups.
       eunit-args: '--verbose'
     secrets: inherit
+
+  # asobi#513. The gateway ships as a release of its own, and what makes that an
+  # isolation boundary rather than a claim is the closure it is built with. That
+  # cannot be checked by the reusable workflow (it builds no releases) and it
+  # cannot be checked by a unit test either, since the property belongs to relx's
+  # output rather than to any module. So it is checked here, on every PR, against
+  # the artefact a self-hoster actually runs.
+  #
+  # `-n` is required because this project declares two releases; assembling the
+  # engine one as well keeps that spec honest at the same cost.
+  gateway-release:
+    name: Gateway release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: '.tool-versions'
+          version-type: strict
+
+      - name: Assemble both releases
+        run: |
+          rebar3 as prod release -n asobi
+          rebar3 as prod release -n asobi_gw
+
+      - name: The gateway release carries nothing that holds credentials
+        run: |
+          libs="$(ls _build/prod/rel/asobi_gw/lib | sed 's/-[0-9].*//' | sort -u)"
+          echo "$libs"
+          for heavy in nova kura kura_postgres shigoto luerl nova_auth nova_resilience cowboy ranch; do
+            if printf '%s\n' "$libs" | grep -qx "$heavy"; then
+              echo "::error::$heavy is in the gateway release; the split has regressed (asobi#513)"
+              exit 1
+            fi
+          done
+          for required in asobi_dgram_gw kernel stdlib telemetry; do
+            printf '%s\n' "$libs" | grep -qx "$required" || {
+              echo "::error::$required is missing from the gateway release"
+              exit 1
+            }
+          done
+          test -x _build/prod/rel/asobi_gw/bin/asobi_gw

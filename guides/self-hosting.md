@@ -177,9 +177,16 @@ but they will not get fixes - so change your compose file.
 `ghcr.io/widgrensit/asobi` is now built from the
 [`asobi_bundle`](https://github.com/widgrensit/asobi_bundle) meta-package, so it
 contains asobi plus every first-party extension (quests, seasons, ...). The name
-and everything you do with it are unchanged; the asobi repo itself no longer
-publishes an image. If you build your own release instead of using this image,
-depend on `asobi_bundle` (not bare `asobi`) to get the same set.
+and everything you do with it are unchanged. If you build your own release
+instead of using this image, depend on `asobi_bundle` (not bare `asobi`) to get
+the same set.
+
+`ghcr.io/widgrensit/asobi-dgram`, the [datagram gateway](#adding-the-datagram-plane),
+is built from the asobi repository instead, and for the opposite reason: the
+bundle exists so an extension cannot silently vanish from the engine image, and
+the gateway must contain no extensions at all - no nova, no kura, no Lua. Its
+closure is checked on every build, and the image is not pushed if anything that
+holds credentials appears in it.
 
 ```yaml
 services:
