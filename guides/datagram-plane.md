@@ -272,6 +272,25 @@ on before you have tested every player's network.
 **The WebSocket carries everything in every state.** There is no state in which
 correctness depends on this plane.
 
+### If it never leaves probing
+
+A blocked firewall and a reply that never arrives look identical from the client,
+and both end as three probes and a fall back to the WebSocket. Server-side
+telemetry cannot tell them apart either: nothing is dropped, so
+`asobi.dgram.dropped` stays at zero in both cases.
+
+Capture on the gateway and compare the ports:
+
+```
+tcpdump -ni any udp port 7777
+```
+
+Every reply must leave from the port the client sent to. A reply from any other
+source port is dropped by NAT on the way back, and filtered by SDKs that
+`connect()` their socket even when it does arrive. Gateways up to and including
+v0.92.3 sent from an ephemeral port and hit exactly this; upgrade rather than
+reconfigure.
+
 ### Poses need the binary wire; input does not
 
 A pose record carries a slot and nothing else, and the only frame that binds a

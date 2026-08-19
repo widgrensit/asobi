@@ -27,7 +27,7 @@ the cap is what turns "responsive unless attacked" into "responsive".
 
 -behaviour(gen_server).
 
--export([start_link/2]).
+-export([start_link/2, lend_to/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
 
 %% Datagrams per drain pass. Big enough that the common case costs one select
@@ -40,6 +40,23 @@ the cap is what turns "responsive unless attacked" into "responsive".
 -spec start_link(non_neg_integer(), inet:port_number()) -> gen_server:start_ret().
 start_link(Index, Port) ->
     gen_server:start_link(?MODULE, {Index, Port}, []).
+
+-doc """
+Asks this shard to lend its socket to `To`, which is always the sender.
+
+Lending rather than letting the sender open its own socket is what keeps replies
+egressing from the public port without adding a socket to the `SO_REUSEPORT`
+group that nobody reads (asobi#515). Only this process reads it; only the sender
+writes to it, and the two directions do not contend.
+
+The socket is **pushed**, never fetched. A `gen_server:call` returns `term()`, so
+a socket pulled across the boundary arrives untyped and the spec claiming
+otherwise would be checked by nothing; pushed into a callback whose spec names
+the type, it stays a `socket:socket()` the whole way.
+""".
+-spec lend_to(pid(), pid()) -> ok.
+lend_to(Shard, To) ->
+    gen_server:cast(Shard, {lend_to, To}).
 
 -spec init({non_neg_integer(), inet:port_number()}) ->
     {ok, state(), {continue, recv}} | {stop, term()}.
@@ -56,11 +73,21 @@ init({Index, Port}) ->
 handle_call(_Request, _From, State) -> {reply, {error, unknown_call}, State}.
 
 -spec handle_cast(term(), state()) -> {noreply, state()}.
-handle_cast(drain, State) -> drain(State);
-handle_cast(_Msg, State) -> {noreply, State}.
+handle_cast(drain, State) ->
+    drain(State);
+handle_cast({lend_to, To}, #{socket := Socket} = State) when is_pid(To) ->
+    asobi_dgram_sender:lend(To, Socket),
+    {noreply, State};
+handle_cast(_Msg, State) ->
+    {noreply, State}.
 
 -spec handle_continue(recv, state()) -> {noreply, state()} | {stop, term(), state()}.
-handle_continue(recv, State) -> drain(State).
+handle_continue(recv, #{socket := Socket} = State) ->
+    %% Offered before the first datagram can need answering, so the reply path is
+    %% ready without the sender having to ask. The sender keeps the first offer
+    %% it gets and ignores the rest.
+    asobi_dgram_sender:lend(Socket),
+    drain(State).
 
 -spec handle_info(term(), state()) -> {noreply, state()} | {stop, term(), state()}.
 %% The socket is ready again. Nothing in the message is needed beyond the fact

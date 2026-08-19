@@ -42,8 +42,8 @@ fills its own queue from its own view. See [Clustering](clustering.md).
 ## Placing a bot from a match script
 
 ```lua
-game.bots.add("Spark")        -- bot_Spark joins this match
-game.bots.remove("bot_Spark") -- and leaves
+game.bots.add("Spark")    -- bot_Spark_a3f91c joins this match
+game.bots.remove("Spark") -- and leaves
 ```
 
 This is the route to take when the *game* decides, not the queue: a co-op
@@ -51,8 +51,11 @@ mission that needs an escort, a boss that fights alongside the players, a
 practice mode with no queue at all, a slot backfilled the moment a human
 drops. It works in `waiting` and in `running`, so a bot can arrive mid-match.
 
-`name` is bare and gets the `bot_` prefix here, so the roster shows
-`bot_Spark`; `remove` takes either form. Names are 1-32 characters of
+`name` is bare. The roster id is built from it here, as the `bot_` prefix
+every bot id carries, the name, and a short random discriminator: `Spark`
+becomes something of the shape `bot_Spark_a3f91c`. `remove` takes the bare
+name or the full id, so a script never has to hold on to the discriminator.
+Names are 1-32 characters of
 `[A-Za-z0-9_-]`. The bot runs the mode's `bots.script` if the mode has one and
 the built-in AI otherwise, so a mode can leave `bots.enabled` off - that flag
 governs queue fill only - and still configure a script.
@@ -98,11 +101,15 @@ bot-only match.
 Set it to `false` to keep the table (to declare `min_players`, say) with fill
 turned off.
 
-Bot ids are `bot_` plus a name from the list, taken in order: `bot_Spark`,
-`bot_Blitz`. Past the end of the list they fall back to their position in the
-fill, so the sixth bot of a batch with five names is `bot_6` and the seventh
-is `bot_7`. Give the list at least as many names as the largest fill you
-expect.
+Bot ids are `bot_`, a name from the list taken in order, and a discriminator:
+`bot_Spark_a3f91c`, `bot_Blitz_7c2104`. Past the end of the list the name
+falls back to the bot's position in the fill, so the sixth bot of a batch with
+five names is `bot_6_<discriminator>`. Give the list at least as many names as
+the largest fill you expect.
+
+The discriminator is what keeps two matches running the same mode from both
+holding a `bot_Spark`. Ids reaching a client are addresses, not display names:
+read the name back with the id's middle section if you want to show it.
 
 With no `names` global, or none the platform can read, the defaults are
 `Spark`, `Blitz`, `Volt`, `Neon` and `Pulse`.
@@ -299,14 +306,20 @@ vote id and the options the bot picks from. A `state.phase` of `"voting"` or
 
 ## Bot ids
 
-Bot player ids are `bot_` followed by the display name, so game logic can test
-for them:
+A bot player id is `bot_`, the name, and a random discriminator:
+`bot_Spark_a3f91c`. Test for the prefix, never for the whole id:
 
 ```lua
 function is_bot(player_id)
     return string.sub(player_id, 1, 4) == "bot_"
 end
 ```
+
+The discriminator makes the id identify one bot in one match. Everything a
+bot is reachable through is keyed on the id alone, so without it two matches
+running the same mode would share a `bot_Spark` and each other's traffic.
+Treat the id as opaque past the prefix: it is an address, and the part your
+script chose is the middle section, not the whole thing.
 
 Clients receive bots in the normal game state. Whether to mark them in the UI
 is up to the client.

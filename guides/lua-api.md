@@ -140,9 +140,11 @@ game.bots.remove(bot_id)                 -- take one out
 ```
 
 Match only - a world or zone script gets `{ error = "..." }` back. `name` is
-bare and gets the `bot_` prefix every bot id carries, so
-`game.bots.add("Spark")` puts `bot_Spark` in the roster; `remove` accepts either
-form. Names are 1-32 characters of `[A-Za-z0-9_-]`.
+bare and the roster id is built from it: the `bot_` prefix every bot id
+carries, the name, and a short random discriminator, so
+`game.bots.add("Spark")` puts something of the shape `bot_Spark_a3f91c` in the
+roster. `remove` accepts the bare name or the full id. Names are 1-32
+characters of `[A-Za-z0-9_-]`.
 
 This is the script-driven route in. The other one is queue fill - `bots.enabled`
 on a game mode, which tops the *matchmaker queue* up before a match exists (see

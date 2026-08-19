@@ -1,6 +1,45 @@
 -module(asobi_dgram_sender).
 -moduledoc """
-Owns the send socket and does the fan-out.
+Serialises the fan-out, and writes it through a receiver's socket.
+
+## Replies must leave from the public port
+
+A datagram sent from a socket the kernel gave an ephemeral port to never reaches
+the client (asobi#515). The client's flow is `client -> gw:7777`, so a reply
+from `gw:51426` is a different 4-tuple: conntrack will not reverse-map it, which
+breaks docker port-publishing and every player behind a home router, and any SDK
+that `connect()`s its UDP socket to the minted endpoint filters it on arrival
+anyway. The failure is silent on both ends - nothing is dropped server-side, so
+it reads exactly like a blocked firewall.
+
+Only a socket bound to that port egresses from it. But binding a second socket
+there means `SO_REUSEPORT`, and a socket in that group receives a share of the
+inbound traffic whether or not anyone reads it. The kernel hashes per 4-tuple,
+not per packet, so what a send-only socket swallows is not a fraction of every
+client's datagrams - it is every datagram of the clients that hashed onto it.
+One in `shards + 1` players would simply never complete a handshake.
+
+So this process owns no socket. Each receiver offers its own as it starts - one
+already bound to the public port and already drained - and the first offer is
+kept until a write says it is gone. A sender that restarted after the receivers
+did missed the offers, so it asks; that is the only reason `lend_to/1` exists.
+
+The socket is pushed rather than fetched because that is the only direction the
+type survives: `gen_server:call` is typed `term()` and a socket is opaque, so a
+socket pulled back through a reply cannot be narrowed to one again without an
+assertion nothing checks.
+
+The superseded rationale is worth naming because it reads plausibly: a separate
+socket was said to stop the reply's source port varying with the shard. It never
+could. Every shard is bound to the *same* port by `SO_REUSEPORT`, so the source
+port is the public port whichever one writes.
+
+## One process, though
+
+What the single owner buys is ordering, not addressing: two `send/3` calls are
+written in the order they arrived, which is what keeps `bseq` arriving in the
+order it was assigned. That is a property of the process and survives the socket
+being borrowed.
 
 ## The two-element iovec is the whole point
 
@@ -32,10 +71,15 @@ transport chosen for having none.
 
 -behaviour(gen_server).
 
--export([start_link/0, send/3, send_one/3]).
+-export([start_link/0, send/3, send_one/3, lend/1, lend/2]).
 -export([init/1, handle_call/3, handle_cast/2, terminate/2]).
 
 -type target() :: {non_neg_integer(), non_neg_integer(), asobi_dgram_binding:handle()}.
+
+-type cast() ::
+    {fanout, asobi_dgram:opcode(), binary(), [target()]}
+    | {send_one, binary(), asobi_dgram_binding:handle()}
+    | {lend, socket:socket()}.
 
 -type state() :: #{socket := socket:socket() | undefined}.
 
@@ -59,40 +103,71 @@ send(Opcode, SharedBody, Targets) ->
 send_one(Datagram, Handle, Server) ->
     gen_server:cast(Server, {send_one, Datagram, Handle}).
 
+-doc "Offers a receiver's socket to write replies through. See the module doc.".
+-spec lend(socket:socket()) -> ok.
+lend(Socket) ->
+    lend(?MODULE, Socket).
+
+-doc "As `lend/1`, to a sender named explicitly - a restarted one asking again.".
+-spec lend(pid() | atom(), socket:socket()) -> ok.
+lend(Sender, Socket) ->
+    gen_server:cast(Sender, {lend, Socket}).
+
 %% --- gen_server ---
 
--spec init([]) -> {ok, state()} | {stop, term()}.
+-spec init([]) -> {ok, state()}.
 init([]) ->
-    %% A separate socket from the receivers'. The receivers are bound with
-    %% SO_REUSEPORT and the kernel picks one per incoming flow; replies must not
-    %% depend on which of them happens to be chosen, and a shard writing to its
-    %% own socket would make the source port of a reply vary with the shard.
-    case socket:open(inet, dgram, udp) of
-        {ok, Socket} -> {ok, #{socket => Socket}};
-        {error, Reason} -> {stop, {socket_open_failed, Reason}}
-    end.
+    %% Nothing is opened here, and nothing may be asked for here either: the
+    %% receivers start after this process, so there is nobody to ask yet. They
+    %% offer as they start, and a sender that restarted asks on its first send.
+    {ok, #{socket => undefined}}.
 
 -spec handle_call(term(), gen_server:from(), state()) -> {reply, term(), state()}.
 handle_call(_Request, _From, State) -> {reply, {error, unknown_call}, State}.
 
--spec handle_cast(term(), state()) -> {noreply, state()}.
-handle_cast({fanout, Opcode, SharedBody, Targets}, #{socket := Socket} = State) ->
-    fanout(Socket, Opcode, SharedBody, Targets),
-    {noreply, State};
-handle_cast({send_one, Datagram, Handle}, #{socket := Socket} = State) ->
-    write(Socket, Handle, [Datagram]),
-    {noreply, State};
-handle_cast(_Msg, State) ->
+%% The argument is narrowed to `cast()` rather than left as `term()` on purpose:
+%% it is what makes the lent socket arrive as a `socket:socket()` instead of a
+%% `term()` nothing has checked. A socket cannot be narrowed back out of a
+%% `gen_server:call` reply, so pushing it in is the only typed direction.
+-spec handle_cast(cast(), state()) -> {noreply, state()}.
+handle_cast({fanout, Opcode, SharedBody, Targets}, State) ->
+    {noreply,
+        through_socket(State, fun(Socket) -> fanout(Socket, Opcode, SharedBody, Targets) end)};
+handle_cast({send_one, Datagram, Handle}, State) ->
+    {noreply, through_socket(State, fun(Socket) -> write(Socket, Handle, [Datagram]) end)};
+%% First offer wins. Every shard offers at boot and they are all bound to the
+%% same port, so taking the first keeps one consistent source socket without
+%% caring which shard it came from.
+handle_cast({lend, Socket}, #{socket := undefined} = State) ->
+    {noreply, State#{socket => Socket}};
+handle_cast({lend, _Socket}, State) ->
     {noreply, State}.
 
 -spec terminate(term(), state()) -> ok.
-terminate(_Reason, #{socket := undefined}) ->
-    ok;
-terminate(_Reason, #{socket := Socket}) ->
-    _ = socket:close(Socket),
+terminate(_Reason, _State) ->
+    %% The socket belongs to a receiver, which closes it with itself. Closing a
+    %% borrowed socket here would take that receiver's flows down with a process
+    %% that is merely stopping.
     ok.
 
 %% --- Internal ---
+
+%% Runs the write, and forgets the socket if the write reported it gone - a
+%% lender that restarted, or a tree on its way down. With nothing lent yet there
+%% is nothing to write through: ask, count the drop, and let the next datagram
+%% carry it. On this plane the next one always comes.
+through_socket(#{socket := undefined} = State, _Write) ->
+    ok = asobi_dgram_rx_sup:lend_to(self()),
+    asobi_dgram_telemetry:send_failed(no_socket),
+    State;
+through_socket(#{socket := Socket} = State, Write) ->
+    case Write(Socket) of
+        ok ->
+            State;
+        stale ->
+            ok = asobi_dgram_rx_sup:lend_to(self()),
+            State#{socket => undefined}
+    end.
 
 fanout(_Socket, _Opcode, _SharedBody, []) ->
     ok;
@@ -100,8 +175,12 @@ fanout(Socket, Opcode, SharedBody, [{ConnId, PathTag, Handle} | Rest]) ->
     Prefix = asobi_dgram:prefix(#{opcode => Opcode, conn_id => ConnId, path_tag => PathTag}),
     %% Two elements, never one concatenated binary: the body is referenced here,
     %% and joining them would copy it once per subscriber.
-    write(Socket, Handle, [Prefix, SharedBody]),
-    fanout(Socket, Opcode, SharedBody, Rest).
+    case write(Socket, Handle, [Prefix, SharedBody]) of
+        ok -> fanout(Socket, Opcode, SharedBody, Rest);
+        %% The socket is gone, not this subscriber. Carrying on would emit one
+        %% telemetry event per remaining subscriber for a single fault.
+        stale -> stale
+    end.
 
 write(Socket, Handle, IoData) ->
     case socket:sendto(Socket, iolist_to_binary(IoData), Handle) of
@@ -112,5 +191,12 @@ write(Socket, Handle, IoData) ->
             %% supersedes this one, which is the property that made this plane
             %% worth having.
             asobi_dgram_telemetry:send_failed(Reason),
-            ok
+            lender_gone(Reason)
     end.
+
+%% Only the errors that mean the borrowed socket itself is finished. Everything
+%% else - a full buffer, an unreachable peer - is about this one datagram, and
+%% dropping the socket over it would re-resolve on every send under load.
+lender_gone(closed) -> stale;
+lender_gone(ebadf) -> stale;
+lender_gone(_Reason) -> ok.
