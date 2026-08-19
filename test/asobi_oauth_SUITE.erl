@@ -15,6 +15,7 @@
     unlink_success/1,
     identity_db_roundtrip/1,
     login_existing_identity/1,
+    provider_metadata_refreshed_on_login/1,
     create_player_retries_on_username_collision/1,
     create_player_no_retry_on_non_unique_username_error/1,
     create_player_deletes_orphan_on_identity_race_loss/1,
@@ -38,7 +39,7 @@ groups() ->
             unlink_success
         ]},
         {identity_db, [sequence], [
-            identity_db_roundtrip, login_existing_identity
+            identity_db_roundtrip, login_existing_identity, provider_metadata_refreshed_on_login
         ]},
         {create_player, [], [
             create_player_retries_on_username_collision,
@@ -233,6 +234,39 @@ login_existing_identity(Config) ->
     ),
     {ok, [Identity]} = asobi_repo:all(Q),
     ?assertEqual(PlayerId, maps:get(player_id, Identity)),
+    Config.
+
+%% A provider's claims change after signup, and Steam's VAC verdict is the one
+%% that matters: written only at insert it would be a snapshot of the day the
+%% account was created, and a stale `false` reads as "clean" rather than "nobody
+%% has looked" (asobi#520). Re-login must overwrite it.
+provider_metadata_refreshed_on_login(Config) ->
+    {player1_id, PlayerId} = lists:keyfind(player1_id, 1, Config),
+    ProviderUid = asobi_test_helpers:unique_id(~"steam_uid"),
+    {ok, Identity} = asobi_repo:insert(
+        asobi_player_identity:changeset(#{}, #{
+            player_id => PlayerId,
+            provider => ~"steam",
+            provider_uid => ProviderUid,
+            provider_metadata => #{~"owner_steamid" => ProviderUid, ~"vac_banned" => false}
+        })
+    ),
+
+    Fresh = #{~"owner_steamid" => ProviderUid, ~"vac_banned" => true},
+    Refreshed = asobi_oauth_controller:refresh_provider_metadata(Identity, #{
+        provider_metadata => Fresh
+    }),
+    ?assertEqual(Fresh, maps:get(provider_metadata, Refreshed)),
+
+    %% ...and it is on the row, not only in the returned term.
+    {ok, Reloaded} = asobi_repo:get(asobi_player_identity, maps:get(id, Identity)),
+    ?assertEqual(Fresh, maps:get(provider_metadata, Reloaded)),
+
+    %% A provider that says nothing must not blank what another login stored.
+    Untouched = asobi_oauth_controller:refresh_provider_metadata(Reloaded, #{}),
+    ?assertEqual(Fresh, maps:get(provider_metadata, Untouched)),
+
+    {ok, _} = asobi_repo:delete(asobi_player_identity, Reloaded),
     Config.
 
 %% --- Username Collision Retry ---

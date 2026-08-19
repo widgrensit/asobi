@@ -33,7 +33,10 @@ fill_mode_test_() ->
         {"fill walks past bot ids that are still queued from the last cycle",
             fun fill_skips_already_queued_bots/0},
         {"fill gives up rather than spinning when every id comes back already queued",
-            fun fill_gives_up_when_all_ids_taken/0}
+            fun fill_gives_up_when_all_ids_taken/0},
+        {"fill names walk past the end of the names list", fun fill_names_walk_past_the_list/0},
+        {"a non-binary names entry falls back to the fill position",
+            fun fill_names_tolerate_a_non_binary_entry/0}
     ]}.
 
 %% Script-driven bots: a match script placing one itself rather than the
@@ -47,11 +50,84 @@ add_bot_test_() ->
         {"the bot ceiling bounds a script that keeps adding", fun add_bot_stops_at_ceiling/0},
         {"a match that ended between call and cast is not an error",
             fun add_bot_tolerates_dead_match/0},
+        {"a bot already in the match is not added twice under a legacy id",
+            fun add_bot_skips_duplicate_legacy_id/0},
         {"remove stops the bot process", fun remove_bot_stops_process/0},
         {"remove accepts the prefixed id from the roster", fun remove_bot_accepts_prefixed/0},
         {"removing a bot with no live process still leaves the match",
-            fun remove_bot_without_process_leaves/0}
+            fun remove_bot_without_process_leaves/0},
+        {"remove leaves an identically named bot in another match alone",
+            fun remove_bot_spares_another_match/0},
+        {"remove ignores an id that is not on this match's roster",
+            fun remove_bot_ignores_id_not_on_this_roster/0},
+        {"a bot in a second concurrent match still gets an AI", fun second_match_bot_gets_an_ai/0}
     ]}.
+
+%% #442/#443. Two matches run the same mode, so both draw the name `Spark`
+%% from the same list. bots_needing_ai/1 asks the pg group behind bot_pids/1
+%% whether an id already has a process, and that group is keyed on the id
+%% alone: while the ids collided, match A's live Spark answered for match B
+%% and match B's roster entry never got an AI at all. It sat there, holding a
+%% slot, for the life of the match - scan_groups/2 visits a match once.
+%%
+%% Assert on the invariant that makes the lookup sound rather than on the
+%% lookup: distinct ids for the same name, and a live bot under one of them
+%% leaving the other alone.
+bot_id_test_() ->
+    [
+        {"the same name mints a different id every time", fun bot_ids_are_distinct/0},
+        {"a name round-trips through the id", fun name_round_trips/0},
+        {"a name containing _ round-trips", fun underscore_name_round_trips/0},
+        {"an id minted before discriminators still yields its name", fun legacy_id_yields_name/0},
+        {"a legacy name ending in a non-hex run of the same width is left whole",
+            fun legacy_name_shaped_like_a_discriminator/0},
+        {"the ceiling refuses the 65th bot and not the 64th", fun ceiling_boundary/0}
+    ].
+
+bot_ids_are_distinct() ->
+    Ids = [asobi_bot_spawner:bot_id(~"Spark") || _ <- lists:seq(1, 50)],
+    ?assertEqual(50, length(lists:usort(Ids))),
+    ?assert(lists:all(fun(Id) -> asobi_bot_spawner:name_part(Id) =:= ~"Spark" end, Ids)).
+
+name_round_trips() ->
+    ?assertEqual(~"Spark", asobi_bot_spawner:name_part(asobi_bot_spawner:bot_id(~"Spark"))).
+
+underscore_name_round_trips() ->
+    ?assertEqual(
+        ~"big_red_1", asobi_bot_spawner:name_part(asobi_bot_spawner:bot_id(~"big_red_1"))
+    ).
+
+legacy_id_yields_name() ->
+    ?assertEqual(~"Spark", asobi_bot_spawner:name_part(~"bot_Spark")).
+
+%% `_zzzzzz` is the width of a discriminator and none of it is hex, so it is
+%% part of the name. Taking it off by width alone would eat it.
+legacy_name_shaped_like_a_discriminator() ->
+    ?assertEqual(~"red_zzzzzz", asobi_bot_spawner:name_part(~"bot_red_zzzzzz")),
+    ?assertEqual(~"red", asobi_bot_spawner:name_part(~"bot_red_abcdef")).
+
+ceiling_boundary() ->
+    Bots = [asobi_bot_spawner:bot_id(integer_to_binary(N)) || N <- lists:seq(1, ?MAX_BOT_FILL)],
+    ?assertEqual(
+        {refused, bot_ceiling_reached},
+        asobi_bot_spawner:add_bot_refusal(~"OneTooMany", Bots, 1000)
+    ),
+    ?assertEqual(
+        ok,
+        asobi_bot_spawner:add_bot_refusal(~"TheLastOne", tl(Bots), 1000)
+    ).
+
+second_match_bot_gets_an_ai() ->
+    A = asobi_bot_spawner:bot_id(~"Spark"),
+    B = asobi_bot_spawner:bot_id(~"Spark"),
+    ?assertNotEqual(A, B),
+    meck:expect(asobi_presence, bot_pids, fun
+        (I) when I =:= A -> [self()];
+        (_) -> []
+    end),
+    ?assertEqual([], asobi_bot_spawner:bots_needing_ai([A])),
+    ?assertEqual([B], asobi_bot_spawner:bots_needing_ai([B])),
+    ?assertEqual([B], asobi_bot_spawner:bots_needing_ai([~"p1", A, B])).
 
 name_test_() ->
     [
@@ -93,7 +169,7 @@ expect_match(Players, Mode, Max) ->
 add_bot_prefixes_and_starts() ->
     expect_match([~"p1"], ~"arena", 4),
     asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
-    ?assert(meck:called(asobi_bot_sup, start_bot, [self(), ~"bot_Spark", '_'])).
+    ?assertEqual(~"Spark", asobi_bot_spawner:name_part(started_bot_id())).
 
 add_bot_uses_mode_script() ->
     application:set_env(asobi, game_modes, #{
@@ -102,10 +178,20 @@ add_bot_uses_mode_script() ->
     expect_match([~"p1"], ~"arena", 4),
     asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
     ?assert(
-        meck:called(asobi_bot_sup, start_bot, [self(), ~"bot_Spark", ~"priv/lua/bot.lua"])
+        meck:called(asobi_bot_sup, start_bot, [self(), '_', ~"priv/lua/bot.lua"])
     ).
 
+%% The roster holds an id with a discriminator, and the script asks again by
+%% the bare name it chose. Matching the whole id would never say "already
+%% here", so a per-tick add would seat a new bot every tick.
 add_bot_skips_duplicate() ->
+    expect_match([~"p1", asobi_bot_spawner:bot_id(~"Spark")], ~"arena", 4),
+    asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
+    ?assertEqual(0, meck:num_calls(asobi_bot_sup, start_bot, '_')).
+
+%% An id minted before the discriminator existed (a match recovered from a
+%% backup written by an older node) still resolves to its name.
+add_bot_skips_duplicate_legacy_id() ->
     expect_match([~"p1", ~"bot_Spark"], ~"arena", 4),
     asobi_bot_spawner:do_add_bot(self(), ~"Spark"),
     ?assertEqual(0, meck:num_calls(asobi_bot_sup, start_bot, '_')).
@@ -128,22 +214,63 @@ add_bot_tolerates_dead_match() ->
 
 remove_bot_stops_process() ->
     Bot = spawn_bot(),
-    meck:expect(asobi_presence, bot_pids, fun(~"bot_Spark") -> [Bot] end),
-    expect_match([~"bot_Spark"], ~"arena", 4),
+    Id = asobi_bot_spawner:bot_id(~"Spark"),
+    meck:expect(asobi_presence, bot_pids, fun(I) when I =:= Id -> [Bot] end),
+    expect_match([Id], ~"arena", 4),
     asobi_bot_spawner:do_remove_bot(self(), ~"Spark"),
     ?assertNot(is_process_alive(Bot)).
 
 remove_bot_accepts_prefixed() ->
     Bot = spawn_bot(),
-    meck:expect(asobi_presence, bot_pids, fun(~"bot_Spark") -> [Bot] end),
-    expect_match([~"bot_Spark"], ~"arena", 4),
-    asobi_bot_spawner:do_remove_bot(self(), ~"bot_Spark"),
+    Id = asobi_bot_spawner:bot_id(~"Spark"),
+    meck:expect(asobi_presence, bot_pids, fun(I) when I =:= Id -> [Bot] end),
+    expect_match([Id], ~"arena", 4),
+    asobi_bot_spawner:do_remove_bot(self(), Id),
     ?assertNot(is_process_alive(Bot)).
 
 remove_bot_without_process_leaves() ->
-    expect_match([~"bot_Ghost"], ~"arena", 4),
+    Id = asobi_bot_spawner:bot_id(~"Ghost"),
+    expect_match([Id], ~"arena", 4),
     asobi_bot_spawner:do_remove_bot(self(), ~"Ghost"),
-    ?assert(meck:called(asobi_match_server, leave, [self(), ~"bot_Ghost"])).
+    ?assert(meck:called(asobi_match_server, leave, [self(), Id])).
+
+%% #442: the roster is the authority, not the bot id namespace. Another
+%% match's Spark shares the name and nothing else, and must survive a
+%% removal this match asked for.
+remove_bot_spares_another_match() ->
+    Ours = asobi_bot_spawner:bot_id(~"Spark"),
+    Theirs = asobi_bot_spawner:bot_id(~"Spark"),
+    OurBot = spawn_bot(),
+    TheirBot = spawn_bot(),
+    meck:expect(asobi_presence, bot_pids, fun
+        (I) when I =:= Ours -> [OurBot];
+        (I) when I =:= Theirs -> [TheirBot];
+        (_) -> []
+    end),
+    expect_match([Ours], ~"arena", 4),
+    asobi_bot_spawner:do_remove_bot(self(), ~"Spark"),
+    ?assertNot(is_process_alive(OurBot)),
+    ?assert(is_process_alive(TheirBot)).
+
+%% A bot the script never placed here cannot be removed from here, however it
+%% is spelled.
+remove_bot_ignores_id_not_on_this_roster() ->
+    Theirs = asobi_bot_spawner:bot_id(~"Spark"),
+    TheirBot = spawn_bot(),
+    meck:expect(asobi_presence, bot_pids, fun
+        (I) when I =:= Theirs -> [TheirBot];
+        (_) -> []
+    end),
+    expect_match([~"p1"], ~"arena", 4),
+    asobi_bot_spawner:do_remove_bot(self(), Theirs),
+    ?assert(is_process_alive(TheirBot)),
+    ?assertEqual(0, meck:num_calls(asobi_match_server, leave, '_')).
+
+%% The id the spawner handed asobi_bot_sup, whatever discriminator it drew.
+started_bot_id() ->
+    [{_Pid, {_M, _F, [_MatchPid, BotId, _Script]}, _Ret} | _] =
+        meck:history(asobi_bot_sup),
+    BotId.
 
 %% A stand-in for asobi_bot: gen_server:stop/3 is how removal works, so the
 %% double has to be a real gen_server.
@@ -185,6 +312,45 @@ fill_reaches_min_players_under_cap() ->
     }),
     asobi_bot_spawner:fill_mode(~"arena", 1),
     ?assertEqual(3, meck:num_calls(asobi_matchmaker, add, '_')).
+
+%% Names come from the list in order, and past its end fall back to the
+%% position in the fill. Every one of them is minted through bot_id/1, so a
+%% fill never offers the matchmaker the same id twice.
+fill_names_walk_past_the_list() ->
+    application:set_env(asobi, game_modes, #{
+        ~"arena" => #{
+            match_size => 4,
+            max_players => 10,
+            bots => #{enabled => true, min_players => 4, names => [~"Solo"]}
+        }
+    }),
+    asobi_bot_spawner:fill_mode(~"arena", 1),
+    Ids = offered_bot_ids(),
+    ?assertEqual(
+        [~"Solo", ~"2", ~"3"], [asobi_bot_spawner:name_part(Id) || Id <- Ids]
+    ),
+    ?assertEqual(3, length(lists:usort(Ids))).
+
+%% A sys.config-declared mode hands its `names` straight through, unlike the
+%% script path which filters to binaries, so an entry that is not one falls
+%% back to the position in the fill exactly as a missing entry does.
+fill_names_tolerate_a_non_binary_entry() ->
+    application:set_env(asobi, game_modes, #{
+        ~"arena" => #{
+            match_size => 4,
+            max_players => 10,
+            bots => #{enabled => true, min_players => 4, names => [~"Solo", 42, ~"Trio"]}
+        }
+    }),
+    asobi_bot_spawner:fill_mode(~"arena", 1),
+    ?assertEqual(
+        [~"Solo", ~"2", ~"Trio"],
+        [asobi_bot_spawner:name_part(Id) || Id <- offered_bot_ids()]
+    ).
+
+%% Every id the fill handed the matchmaker, in order.
+offered_bot_ids() ->
+    [BotId || {_, {_, add, [BotId, _]}, _} <- meck:history(asobi_matchmaker)].
 
 no_bots_when_already_at_cap() ->
     application:set_env(asobi, game_modes, #{
@@ -254,9 +420,15 @@ fill_stops_on_queue_full_immediately() ->
 %% (player, mode), so those re-offers hand back the existing ticket and nobody
 %% joins. Counting them as progress left the queue permanently short.
 %%
-%% Three queued (one human, bot_Spark, bot_Blitz) against a target of 4 is the
+%% Three queued (one human, a Spark, a Blitz) against a target of 4 is the
 %% case that bounding the walk on `Needed' alone gets wrong: it probes the two
 %% taken ids and gives up before reaching a free one, adding nobody, forever.
+%%
+%% Since #442 an id carries a discriminator, so a re-offer can no longer be
+%% the *same* id and the matchmaker's per-(player, mode) idempotency no longer
+%% fires on it. The walk-past branch stays live for whatever else makes the
+%% matchmaker answer `already_queued', so the double keys on the name the
+%% index drew rather than on the whole id.
 fill_skips_already_queued_bots() ->
     application:set_env(asobi, game_modes, #{
         ~"arena" => #{
@@ -266,7 +438,7 @@ fill_skips_already_queued_bots() ->
         }
     }),
     meck:expect(asobi_matchmaker, add, fun(BotId, _Opts) ->
-        Taken = lists:member(BotId, [~"bot_Spark", ~"bot_Blitz"]),
+        Taken = lists:member(asobi_bot_spawner:name_part(BotId), [~"Spark", ~"Blitz"]),
         {ok, ~"ticket", #{already_queued => Taken}}
     end),
     asobi_bot_spawner:fill_mode(~"arena", 3),

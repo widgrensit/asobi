@@ -27,6 +27,21 @@ socket_test_() ->
             fun(Ctx) ->
                 {"a malformed datagram is answered with silence", fun() -> garbage_silent(Ctx) end}
             end,
+            fun(Ctx) ->
+                {"every reply leaves from the public port", fun() ->
+                    replies_from_public_port(Ctx)
+                end}
+            end,
+            fun(Ctx) ->
+                {"the gateway binds no socket a receiver is not draining", fun() ->
+                    no_undrained_socket(Ctx)
+                end}
+            end,
+            fun(Ctx) ->
+                {"a sender that restarted after the receivers still answers", fun() ->
+                    sender_recovers_after_restart(Ctx)
+                end}
+            end,
             fun(_Ctx) ->
                 {"the canary proves the gateway by talking to it", fun canary_probes/0}
             end,
@@ -73,9 +88,93 @@ shards_share(_Ctx) ->
     ?assertEqual(3, length(Children)),
     ?assert(lists:all(fun({_, Pid, _, _}) -> is_pid(Pid) end, Children)).
 
+%% A reply that does not leave from the public port never reaches a real client:
+%% conntrack will not reverse-map a different 4-tuple, and an SDK that connect()s
+%% its socket filters it on arrival. This suite could not see that, because
+%% `recv/1` discarded the source (asobi#515).
+%%
+%% Connected, deliberately - that is what the Godot SDK does, so a reply from the
+%% wrong port is not merely wrong here, it never arrives at all. The assertion is
+%% a timeout, which is exactly what the player saw.
+replies_from_public_port(#{port := Port}) ->
+    {ok, Client} = socket:open(inet, dgram, udp),
+    ok = socket:connect(Client, #{family => inet, addr => loopback, port => Port}),
+    try
+        ok = socket:send(Client, uplink(hello, 1, <<>>)),
+        {ok, #{opcode := hello_ok, body := Challenge}} = decode(connected_recv(Client), hello_ok),
+
+        ok = socket:send(Client, uplink(hello_confirm, 2, Challenge)),
+        wait_until(fun() -> asobi_dgram_table:sendable(?CONN) =/= error end),
+
+        ok = socket:send(Client, uplink(ping, 3, <<7:64>>)),
+        {ok, #{opcode := pong}} = decode(connected_recv(Client), pong)
+    after
+        _ = socket:close(Client)
+    end.
+
+%% The fix that looks obvious and is wrong: bind a second, send-only socket to
+%% the public port with SO_REUSEPORT. It joins the receive group, and the kernel
+%% hashes per 4-tuple rather than per packet - so what it swallows is not a share
+%% of everyone's datagrams but every datagram of the clients that hashed onto it.
+%% One player in `shards + 1` would never complete a handshake.
+%%
+%% Distinct source ports are the only thing that catches this. A single client
+%% hashes to one socket and passes or fails by luck; twenty-four make the odds of
+%% missing an undrained socket among three shards about one in a thousand.
+no_undrained_socket(#{port := Port}) ->
+    [
+        begin
+            ConnId = 700_000 + N,
+            ok = asobi_dgram_table:register(binding(ConnId)),
+            {ok, C} = socket:open(inet, dgram, udp),
+            ok = socket:bind(C, #{family => inet, addr => loopback, port => 0}),
+            ok = send(C, Port, uplink(ConnId, hello, 1, <<>>)),
+            case recv(C) of
+                {ok, From, _Data} -> ?assertEqual(Port, maps:get(port, From));
+                timeout -> erlang:error({flow_never_answered, N, ConnId})
+            end,
+            _ = socket:close(C)
+        end
+     || N <- lists:seq(1, 24)
+    ].
+
+%% The receivers offer their sockets as they start, which covers a normal boot
+%% because they start after the sender. A sender that crashed and came back later
+%% missed every offer, so it has to ask - and if it does not, the gateway is mute
+%% from then on with nothing server-side to say so.
+sender_recovers_after_restart(#{client := Client, port := Port}) ->
+    Pid = sender_pid(),
+    Ref = monitor(process, Pid),
+    exit(Pid, kill),
+    receive
+        {'DOWN', Ref, process, Pid, _} -> ok
+    after 5000 -> error(sender_did_not_die)
+    end,
+    wait_until(fun() ->
+        case whereis(asobi_dgram_sender) of
+            New when is_pid(New) -> New =/= Pid;
+            _NotYet -> false
+        end
+    end),
+
+    %% Retried the way a client's probe ladder would: the datagram that finds no
+    %% socket is the one that asks for it, so the answer arrives for the next.
+    ok = send(Client, Port, uplink(hello, 1, <<>>)),
+    From =
+        case recv(Client) of
+            {ok, First, _} ->
+                First;
+            timeout ->
+                ok = send(Client, Port, uplink(hello, 2, <<>>)),
+                {ok, Second, _} = recv(Client),
+                Second
+        end,
+    ?assertEqual(Port, maps:get(port, From)).
+
 handshake(#{client := Client, port := Port}) ->
     ok = send(Client, Port, uplink(hello, 1, <<>>)),
-    {ok, Reply} = recv(Client),
+    {ok, HelloFrom, Reply} = recv(Client),
+    ?assertEqual(Port, maps:get(port, HelloFrom)),
     {ok, #{opcode := hello_ok, conn_id := ?CONN, body := Challenge}} =
         asobi_dgram:decode_downlink(Reply),
 
@@ -94,7 +193,8 @@ handshake(#{client := Client, port := Port}) ->
     %% ping answers, and the answer is not larger than the question.
     Ping = uplink(ping, 3, <<42:64>>),
     ok = send(Client, Port, Ping),
-    {ok, Pong} = recv(Client),
+    {ok, PongFrom, Pong} = recv(Client),
+    ?assertEqual(Port, maps:get(port, PongFrom)),
     ?assert(byte_size(Pong) =< byte_size(Ping)),
     ?assertMatch({ok, #{opcode := pong}}, asobi_dgram:decode_downlink(Pong)).
 
@@ -131,7 +231,9 @@ canary_detects_wedge() ->
     ?assertEqual(ok, asobi_dgram_canary:probe_now()),
     ?assert(asobi_dgram_canary:ready()),
 
-    %% Take the receive side away without touching the canary or the sender.
+    %% Take the receive side away. Since the sender writes through a receiver's
+    %% socket, this now silences the reply path too - which is the honest result:
+    %% there is no socket left that could answer while nothing is being read.
     ok = supervisor:terminate_child(asobi_dgram_gw_sup, asobi_dgram_rx_sup),
 
     ?assertMatch({error, _}, asobi_dgram_canary:probe_now()),
@@ -146,11 +248,29 @@ canary_detects_wedge() ->
 send(Client, Port, Data) ->
     socket:sendto(Client, Data, #{family => inet, addr => loopback, port => Port}).
 
+%% The source is returned, not discarded. Throwing it away is what let a reply
+%% from an ephemeral port pass every assertion in this file (asobi#515).
 recv(Client) ->
     case socket:recvfrom(Client, 0, [], 500) of
-        {ok, {_From, Data}} -> {ok, Data};
+        {ok, {From, Data}} -> {ok, From, Data};
         {error, timeout} -> timeout
     end.
+
+connected_recv(Client) ->
+    socket:recv(Client, 0, 500).
+
+sender_pid() ->
+    case whereis(asobi_dgram_sender) of
+        Pid when is_pid(Pid) -> Pid;
+        _ -> error(sender_not_running)
+    end.
+
+decode({ok, Data}, _Expected) ->
+    asobi_dgram:decode_downlink(Data);
+decode({error, timeout}, Expected) ->
+    %% The shape of the bug: the gateway generated the reply and the kernel
+    %% refused to hand it over, because its source was not the endpoint.
+    erlang:error({no_reply_reached_a_connected_client, Expected}).
 
 wait_until(Pred) -> wait_until(Pred, 50).
 
@@ -173,13 +293,16 @@ free_port() ->
     Port.
 
 uplink(Opcode, CSeq, Body) ->
+    uplink(?CONN, Opcode, CSeq, Body).
+
+uplink(ConnId, Opcode, CSeq, Body) ->
     Pad =
         case Opcode of
             hello -> asobi_dgram:min_hello();
             _ -> 0
         end,
     asobi_dgram:encode_uplink(
-        #{opcode => Opcode, conn_id => ?CONN, cseq => CSeq, body => Body}, ?KUP, Pad
+        #{opcode => Opcode, conn_id => ConnId, cseq => CSeq, body => Body}, ?KUP, Pad
     ).
 
 binding(ConnId) ->

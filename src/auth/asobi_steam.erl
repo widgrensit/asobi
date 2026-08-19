@@ -109,8 +109,15 @@ maybe_fetch_profile(SteamId, Params) ->
         provider_uid => SteamId,
         provider_email => undefined,
         provider_display_name => undefined,
-        owner_steamid => maps:get(~"ownersteamid", Params, SteamId),
-        vac_banned => maps:get(~"vacbanned", Params, false)
+        %% Under `provider_metadata` rather than loose at the top level, because
+        %% that is the field the identity row already has for provider-specific
+        %% claims and it is what makes these survive the write (asobi#520).
+        %% Binary keys: it lands in jsonb, and the guest provider's verifier
+        %% metadata already established that shape.
+        provider_metadata => #{
+            ~"owner_steamid" => maps:get(~"ownersteamid", Params, SteamId),
+            ~"vac_banned" => maps:get(~"vacbanned", Params, false)
+        }
     },
     case fetch_player_summary(SteamId) of
         {ok, Summary} ->

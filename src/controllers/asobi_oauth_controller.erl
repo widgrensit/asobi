@@ -6,7 +6,7 @@
 -export([authenticate/1, link/1, unlink/1]).
 
 -ifdef(TEST).
--export([create_player_with_identity/2, validate_oidc_token/2]).
+-export([create_player_with_identity/2, validate_oidc_token/2, refresh_provider_metadata/2]).
 -endif.
 
 -define(MAX_USERNAME_ATTEMPTS, 3).
@@ -27,7 +27,7 @@ authenticate(#{json := #{~"provider" := Provider, ~"token" := Token}} = _Req) wh
             ProviderUid = maps:get(provider_uid, Claims),
             case find_identity(Provider, ProviderUid) of
                 {ok, Identity} ->
-                    login_existing_player(Identity);
+                    login_existing_player(refresh_provider_metadata(Identity, Claims));
                 {error, not_found} ->
                     case asobi_registration:check(oauth) of
                         {deny, Reason} -> asobi_auth_error:registration_denied(Reason);
@@ -185,6 +185,45 @@ find_player_identity(PlayerId, Provider) ->
         _ -> {error, not_found}
     end.
 
+%% A provider's claims about a player are not constant. Steam's `vac_banned` is
+%% the case that matters: written once at signup it would be a snapshot of the
+%% day the account was created, and a stale `false` reads as "this player is
+%% clean" rather than "nobody has looked since". So the identity is refreshed on
+%% every login, from the claims the provider just returned.
+%%
+%% Best-effort on purpose. A failed refresh must not fail a login that the
+%% provider has already accepted - the same call the guest controller makes about
+%% its own metadata write. The caller gets the row it will actually use either
+%% way, refreshed if the write landed and unchanged if it did not.
+-spec refresh_provider_metadata(map(), map()) -> map().
+refresh_provider_metadata(Identity, Claims) ->
+    case maps:get(provider_metadata, Claims, #{}) of
+        Fresh when is_map(Fresh), map_size(Fresh) > 0 ->
+            case maps:get(provider_metadata, Identity, #{}) of
+                Fresh ->
+                    Identity;
+                _Stale ->
+                    write_provider_metadata(Identity, Fresh)
+            end;
+        _NothingToSay ->
+            Identity
+    end.
+
+-spec write_provider_metadata(map(), map()) -> map().
+write_provider_metadata(Identity, Fresh) ->
+    CS = asobi_player_identity:changeset(Identity, #{provider_metadata => Fresh}),
+    case asobi_repo:update(CS) of
+        {ok, Updated} ->
+            Updated;
+        {error, Reason} ->
+            ?LOG_WARNING(#{
+                event => provider_metadata_refresh_failed,
+                provider => maps:get(provider, Identity, undefined),
+                reason => Reason
+            }),
+            Identity
+    end.
+
 -spec login_existing_player(map()) -> response().
 login_existing_player(Identity) ->
     PlayerId = maps:get(player_id, Identity),
@@ -298,7 +337,11 @@ insert_identity(PlayerId, Provider, Claims) ->
         provider => Provider,
         provider_uid => maps:get(provider_uid, Claims),
         provider_email => maps:get(provider_email, Claims, undefined),
-        provider_display_name => maps:get(provider_display_name, Claims, undefined)
+        provider_display_name => maps:get(provider_display_name, Claims, undefined),
+        %% Whatever the provider considers its own. Steam puts the VAC verdict
+        %% and the Family Sharing owner here; a provider that supplies nothing
+        %% gets the column default and nothing changes for it (asobi#520).
+        provider_metadata => maps:get(provider_metadata, Claims, #{})
     },
     CS = asobi_player_identity:changeset(#{}, Params),
     asobi_repo:insert(CS).
