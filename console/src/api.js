@@ -84,6 +84,33 @@ export function ops(path, params) {
   return request(opsUrl(path, params));
 }
 
+// The write half of the ops plane. Core owns three non-read routes and this
+// console reaches two of them, so there is no generic verb here: a caller
+// names the path it means and passes the body that route documents.
+function opsWrite(path, body) {
+  return request(opsUrl(path), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+// The username echo is not a client-side nicety. The route checks it against
+// the row, so a page that posts without one is answered `confirmation_required`
+// - which is what makes a clickjacked POST insufficient.
+export function erasePlayer(id, username) {
+  return opsWrite(`/players/${encodeURIComponent(id)}/erase`, { username });
+}
+
+// `inactive_for_seconds` has no default server-side and none is invented here.
+// `confirm_count` is omitted for a preview and required for the real call, so
+// the two shapes are the two the route accepts and nothing in between.
+export function purgeGuests({ inactiveForSeconds, confirmCount }) {
+  const body = { inactive_for_seconds: inactiveForSeconds };
+  if (confirmCount === undefined) return opsWrite('/players/guests/purge', { ...body, dry_run: true });
+  return opsWrite('/players/guests/purge', { ...body, confirm_count: confirmCount });
+}
+
 // The installed feature set. One console bundle serves deployments that differ
 // in which extensions they have, so what renders is decided by what this node
 // answers here rather than by what the bundle was built with.

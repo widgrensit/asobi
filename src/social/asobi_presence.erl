@@ -58,13 +58,17 @@ clauses against the same named type rather than an ad-hoc guess.
     | {world_joined, pid(), pid() | undefined}
     | {world_zone_changed, pid()}
     | {world_event, event_name(), map()}
-    | {zone_delta, non_neg_integer(), [map()]}
+    | {zone_keyframe, map(), [map()]}
+    | {zone_removals, {integer(), integer()}, [map()]}
     | {zone_delta_raw, binary()}
     | {terrain_chunk, {integer(), integer()}, binary()}
     | {dm_message, map()}
     | {notification, map()}
     | {game_message, term()}
-    | {script_error, map()}.
+    | {game_message, atom(), term()}
+    | {script_error, map()}
+    | {script_error, atom(), map()}
+    | {extension_event, atom(), binary(), map()}.
 
 -export_type([event_name/0, message/0]).
 

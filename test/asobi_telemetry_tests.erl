@@ -25,16 +25,25 @@ setup_attaches_a_handler_to_every_event_test() ->
         telemetry:detach(~"asobi-metrics-logger")
     end.
 
-%% Every event name passed as a literal to telemetry:execute/3 anywhere in
-%% asobi_telemetry. Reading the compiled abstract code rather than grepping
-%% means a new emitter is picked up the moment it compiles.
+%% Every event name passed as a literal to telemetry:execute/3 anywhere in the
+%% two modules that own emitters. Reading the compiled abstract code rather than
+%% grepping means a new emitter is picked up the moment it compiles.
 %% get_object_code/1 rather than which/1: under cover the latter answers
 %% `cover_compiled`, and the instrumented forms are not the ones we want to
 %% read anyway.
+%%
+%% Two modules and not one since asobi#513: the datagram plane's events belong to
+%% the gateway application, which ships as a release without this one. They are
+%% still in `asobi_telemetry:events/0`, so an operator attaches to one list.
 emitted_events() ->
-    {asobi_telemetry, Beam, _} = code:get_object_code(asobi_telemetry),
+    lists:usort(
+        lists:append([emitted_events(M) || M <- [asobi_telemetry, asobi_dgram_telemetry]])
+    ).
+
+emitted_events(Module) ->
+    {Module, Beam, _} = code:get_object_code(Module),
     {ok, {_, [{abstract_code, {_, Forms}}]}} = beam_lib:chunks(Beam, [abstract_code]),
-    lists:usort(collect_execute_calls(Forms, [])).
+    collect_execute_calls(Forms, []).
 
 collect_execute_calls(
     {call, _, {remote, _, {atom, _, telemetry}, {atom, _, execute}}, [EventArg | _]} = Node,

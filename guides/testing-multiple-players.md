@@ -87,12 +87,17 @@ func _ready() -> void:
 ```
 <!-- /tabs -->
 
-Every run leaves another guest account on the node. That is harmless locally,
-and `guest_reap_after` clears unclaimed guests on a self-hosted deployment. On
-cloud that key is not yours to set, so a test client pointed at a cloud
-environment should call `POST /api/v1/players/me/erase`
-([REST API](rest-api.md#erasing-your-own-account)) when it shuts down. A crash
-still leaks one, so for anything you run repeatedly against cloud prefer
+Every run leaves another guest account on the node. That is harmless, and
+`guest_reap_after` clears unclaimed guests for you - self-hosted it is a
+config key, on cloud it is the **Guests** picker on the environment row. Set it
+on whatever environment you point test clients at and the debris cleans itself
+up.
+
+Do not try to erase the account on shutdown instead. It is the obvious move and
+it does not work: several engines bind an HTTP response callback to the object
+that made the call, so a request issued from a quit or a teardown has its reply
+dropped and often never lands at all. A crash leaks one regardless. For
+anything you run repeatedly prefer
 [stable test players](#stable-test-players-across-runs) below, which reuse one
 account per instance instead of minting a new one each launch. Ship
 `guest_device` in the build players actually install.

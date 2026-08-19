@@ -4,11 +4,18 @@
 -export([init/1, websocket_init/1, websocket_handle/2, websocket_info/2, terminate/3]).
 %% Exported for tests (pure allowlist predicate), mirroring deployable/1.
 -export([origin_allowed/1]).
+
+-ifdef(TEST).
+-export([world_input_data/1, match_input_data/1]).
+-endif.
 %% Exported so asobi_protocol_coverage_tests can assert every emitted
 %% match./world. event stays inside the reserved namespace (#303), and so
 %% asobi_lua_api can reject a bad game.broadcast name against these same
 %% rules at the script's call site instead of re-stating them.
--export([reserved_event_names/0, event_name_binary/1]).
+%% `is_event_name_char/1` is the charset predicate itself, reused by
+%% `asobi_extensions:emit/4` to validate a `module.event` name's bytes against
+%% the same allowlist rather than forking a second charset notion.
+-export([reserved_event_names/0, event_name_binary/1, is_event_name_char/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -57,6 +64,7 @@
 -define(RESERVED_EVENT_NAMES, [
     ~"state",
     ~"tick",
+    ~"ack",
     ~"terrain",
     ~"list",
     ~"left",
@@ -136,6 +144,97 @@ origin_allowed(Origin) when is_binary(Origin) ->
             misconfigured_origins(Other)
     end.
 
+%% asobi#478: the payload IS the input map, which is what
+%% guides/websocket-protocol.md promises.
+%%
+%% `legacy_unwrap` is a DEPRECATED compatibility shape: a payload whose sole key
+%% is `data`, mapped to an object. asobi-unreal still sends input that way. It is
+%% reported to telemetry so the removal can be scheduled once no SDK relies on
+%% it; remove this clause at the next protocol break.
+%%
+%% Everything else that is a map goes through verbatim. A payload that is not a
+%% map at all is `invalid` rather than an empty map: handing the game `#{}` is
+%% indistinguishable from a legitimate empty input, and the client - which sent a
+%% frame the protocol does not allow - would be told nothing.
+-spec world_input_data(term()) -> {ok, map()} | {legacy_unwrap, map()} | invalid.
+world_input_data(#{~"data" := Inner} = Payload) when is_map(Inner), map_size(Payload) =:= 1 ->
+    {legacy_unwrap, Inner};
+world_input_data(Payload) when is_map(Payload) ->
+    {ok, Payload};
+world_input_data(_) ->
+    invalid.
+
+%% `zone` comes off the wire as the same [X, Y] pair asobi puts on world.tick and
+%% world.terrain, so a client echoes back exactly the value it was given rather
+%% than constructing one. Bounded to a plain integer pair: the coords index a
+%% zone grid, so anything else - a float, a bignum, a third element - names no
+%% zone and is refused before it reaches a gen_statem cast.
+-spec resync_coords(term()) -> {integer(), integer()} | invalid.
+resync_coords(#{~"zone" := [X, Y]}) when
+    is_integer(X), is_integer(Y), abs(X) =< 16#FFFFFFFF, abs(Y) =< 16#FFFFFFFF
+->
+    {X, Y};
+resync_coords(_) ->
+    invalid.
+
+%% Both buckets, per player and fleet-wide, and the per-player one is checked
+%% first so a single looping client is refused without consuming global budget
+%% that honest clients share.
+-spec resync_allowed(binary()) -> boolean().
+resync_allowed(PlayerId) ->
+    case seki:check(asobi_world_resync_limiter, PlayerId) of
+        {allow, _} ->
+            case seki:check(asobi_world_resync_global_limiter, ~"global") of
+                {allow, _} -> true;
+                {deny, _} -> false
+            end;
+        {deny, _} ->
+            false
+    end.
+
+%% match.input carries the same shapes plus one of its own: a sole `data` holding
+%% a JSON *string*, which predates world.input and is what asobi-unity's
+%% SendMatchInput sends. The decode is total - `json:decode/1` RAISES on malformed
+%% input, and an authenticated client can send 60 frames a second, so letting it
+%% reach safe_handle_message/2's catch-all hands one connection a warning-log
+%% amplifier that can exhaust the node's logger burst budget and blind every other
+%% log line. See asobi#465 for the same class closed on badmap.
+-spec match_input_data(term()) -> {ok, map()} | {legacy_unwrap, map()} | invalid.
+match_input_data(#{~"data" := Bin} = Payload) when is_binary(Bin), map_size(Payload) =:= 1 ->
+    try json:decode(Bin) of
+        Decoded when is_map(Decoded) -> {legacy_unwrap, Decoded};
+        _ -> invalid
+    catch
+        _:_ -> invalid
+    end;
+match_input_data(Payload) ->
+    world_input_data(Payload).
+
+%% Unwrap the extraction result, reporting the deprecated compat shape so its
+%% removal can be scheduled against real traffic rather than guesswork.
+-spec input_data({ok, map()} | {legacy_unwrap, map()}) -> map().
+input_data({ok, Input}) ->
+    Input;
+input_data({legacy_unwrap, Input}) ->
+    asobi_telemetry:ws_legacy_input_unwrap(),
+    Input.
+
+-spec match_input_route(map(), binary(), map(), map()) -> {ok, map()} | {reply, term(), map()}.
+match_input_route(SState, PlayerId, InputData, State) ->
+    case maps:get(match_pid, SState, undefined) of
+        undefined ->
+            case maps:get(zone_pid, SState, undefined) of
+                undefined ->
+                    not_in_match_hint(State);
+                ZonePid ->
+                    asobi_zone:player_input(ZonePid, PlayerId, InputData),
+                    {ok, State}
+            end;
+        MatchPid ->
+            asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
+            {ok, State}
+    end.
+
 -spec misconfigured_origins(term()) -> false.
 misconfigured_origins(Value) ->
     logger:error(#{
@@ -161,6 +260,28 @@ idle_auth_timeout_ms() ->
         {ok, Ms} when is_integer(Ms), Ms > 0 -> Ms;
         _ -> ?DEFAULT_IDLE_AUTH_TIMEOUT_MS
     end.
+
+%% The wire a client asked for, granted only if the server can actually serve it
+%% (ADR 0013, decision 2). The reply always states what it got rather than
+%% acknowledging what it asked for: a client that requests binary against a
+%% server with the binary wire off must be able to tell, and silently leaving it
+%% to infer the answer from the first frame's opcode is the kind of guessing
+%% game that produces two incompatible SDK behaviours.
+%%
+%% Only `world.tick` is affected either way. world.ack, match.*, world.terrain
+%% and every error stay JSON text on both wires, so a binary client is a client
+%% that handles both frame types, not one that stops handling text.
+-spec negotiate_wire(map()) -> binary().
+negotiate_wire(#{~"wire" := ~"binary"}) ->
+    case application:get_env(asobi, binary_wire, false) of
+        true -> ~"binary";
+        _ -> ~"json"
+    end;
+negotiate_wire(_Payload) ->
+    ~"json".
+
+-spec binary_wire(map()) -> boolean().
+binary_wire(State) -> maps:get(wire, State, ~"json") =:= ~"binary".
 
 -spec websocket_handle({text | binary, binary()}, map()) ->
     {ok, map()} | {reply, {text, binary()}, map()}.
@@ -189,12 +310,29 @@ websocket_handle({text, Raw}, State) ->
                     {reply, {text, Reply}, State1}
             end
     end;
+%% The uplink is text-only. Binary frames used to fall through the catch-all
+%% below and vanish without a word, which is the silent dev-facing failure an SDK
+%% author then spends an afternoon on; say no out loud instead.
+%%
+%% Rate-limited on the same budget as text, and answered one-for-one, so an
+%% attacker spraying binary frames gets no amplification and no cheaper path than
+%% the text one they already had.
+websocket_handle({binary, _Data}, State) ->
+    case check_ws_rate_limit(State) of
+        {ok, State1} ->
+            Reply = encode_error(undefined, ~"binary_uplink_unsupported"),
+            {reply, {text, Reply}, State1};
+        {rate_limited, State1} ->
+            Reply = encode_error(undefined, ~"rate_limited"),
+            {reply, {text, Reply}, State1}
+    end;
 websocket_handle(_Frame, State) ->
     {ok, State}.
 
 -spec websocket_info(term(), map()) ->
     {ok, map()}
     | {reply, {text, binary()}, map()}
+    | {reply, {binary, binary()}, map()}
     | {reply, [{text, binary()}], map()}
     | {reply, {close, non_neg_integer(), binary()}, map()}
     | {stop, map()}.
@@ -227,8 +365,48 @@ websocket_info({asobi_message, {match_event, Event, Payload}}, State) when
     end;
 websocket_info({asobi_message, {zone_delta_raw, PreEncoded}}, State) when is_binary(PreEncoded) ->
     {reply, {text, PreEncoded}, State};
-websocket_info({asobi_message, {zone_delta, TickN, Deltas}}, State) ->
-    Reply = encode_reply(undefined, ~"world.tick", #{tick => TickN, updates => Deltas}),
+%% Both wires arrive in one message, already encoded once for the whole zone
+%% (ADR 0001 as amended by ADR 0013, decision 4). The connection picks; nothing
+%% is encoded here, per connection, ever.
+websocket_info({asobi_message, {zone_delta_raw, PreEncoded, Bin}}, State) when
+    is_binary(PreEncoded), is_binary(Bin)
+->
+    case binary_wire(State) of
+        true -> {reply, {binary, Bin}, State};
+        false -> {reply, {text, PreEncoded}, State}
+    end;
+websocket_info({asobi_message, {zone_keyframe, Meta, Deltas, Bin}}, State) when
+    is_map(Meta), is_binary(Bin)
+->
+    case binary_wire(State) of
+        true -> {reply, {binary, Bin}, State};
+        false -> websocket_info({asobi_message, {zone_keyframe, Meta, Deltas}}, State)
+    end;
+websocket_info({asobi_message, {zone_removals, Coords, Deltas, Bin}}, State) when is_binary(Bin) ->
+    case binary_wire(State) of
+        true -> {reply, {binary, Bin}, State};
+        false -> websocket_info({asobi_message, {zone_removals, Coords, Deltas}}, State)
+    end;
+websocket_info({asobi_message, {zone_keyframe, Meta, Deltas}}, State) when is_map(Meta) ->
+    %% A per-connection baseline. Carries the zone's CURRENT frame_seq and
+    %% `kf: true`, so a client adopts it unconditionally and resets its
+    %% high-water mark to that value - which is what makes a zone restart
+    %% recoverable, since the restart resets the sequence while the zone
+    %% identity is unchanged and a monotonic guard would otherwise reject the
+    %% one frame that repairs it.
+    Reply = encode_reply(undefined, ~"world.tick", Meta#{~"tick" => 0, ~"updates" => Deltas}),
+    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {zone_removals, {ZX, ZY}, Deltas}}, State) ->
+    %% The leave mirror. Carries `zone` so the client knows which table to empty,
+    %% and deliberately no frame_seq: it is not a position in the zone's stream
+    %% and is applied ungated.
+    Reply = encode_reply(undefined, ~"world.tick", #{
+        ~"zone" => [ZX, ZY], ~"tick" => 0, ~"updates" => Deltas
+    }),
+    {reply, {text, Reply}, State};
+websocket_info({asobi_message, {world_ack, TickN, Seq}}, State) ->
+    %% asobi#474: per-connection input ack, sent beside the shared world.tick.
+    Reply = encode_reply(undefined, ~"world.ack", #{tick => TickN, seq => Seq}),
     {reply, {text, Reply}, State};
 websocket_info({asobi_message, {terrain_chunk, {CX, CY}, Data}}, State) when is_binary(Data) ->
     Reply = encode_reply(undefined, ~"world.terrain", #{
@@ -283,6 +461,27 @@ websocket_info({asobi_message, {game_message, Extension, Payload}}, State) when
     %% breaking change.
     Body = #{~"module" => atom_to_binary(Extension), ~"message" => Payload},
     {reply, extension_frames(~"module.message", ~"game.message", Body), State};
+websocket_info({asobi_message, {extension_event, Extension, Event, Data}}, State) when
+    is_atom(Extension), is_binary(Event), is_map(Data)
+->
+    %% A named, routable server->client event an extension pushes from its own
+    %% Erlang code via asobi_extensions:emit/4. Distinct from module.message
+    %% (unnamed dev messages) and module.error (dev-mode only): the producer is
+    %% in `module`, the `<domain>.<name>` event in `event`, and `data` is always
+    %% an object. Emitted as a single frame - unlike module.message it has no
+    %% pre-S6 legacy alias, so it never routes through extension_frames/3.
+    %% emit/4 has already proven Data JSON-encodable, but the encode is still
+    %% wrapped like the script_error clause: a bad term reaching here must
+    %% degrade to an error frame, never crash this player's connection process
+    %% (send/2 fans out to every session pid, so a crash drops them all).
+    Payload = #{~"module" => atom_to_binary(Extension), ~"event" => Event, ~"data" => Data},
+    Reply =
+        try
+            encode_reply(undefined, ~"module.event", Payload)
+        catch
+            _:_ -> encode_error(undefined, ~"internal")
+        end,
+    {reply, {text, Reply}, State};
 websocket_info({asobi_message, {script_error, Payload}}, State) when is_map(Payload) ->
     websocket_info({asobi_message, {script_error, ?DEFAULT_EXTENSION, Payload}}, State);
 websocket_info({asobi_message, {script_error, Extension, Payload}}, State) when
@@ -353,12 +552,37 @@ plain_tag(_) ->
     unknown.
 
 -spec terminate(term(), term(), map()) -> ok.
-terminate(_Reason, _Req, #{session := undefined}) ->
-    asobi_telemetry:ws_disconnected(),
+%% Decrements the connection gauge ONLY if this process incremented it, which is
+%% not every process that reaches here.
+%%
+%% `ws_connected` fires in start_authenticated_session/1 alone, so a connect
+%% refused by the per-IP limiter or the Origin check never increments - but it
+%% still spawns a ws process, still replies `{close, 1008, _}`, and therefore
+%% still runs terminate/3. Emitting unconditionally decremented a counter that
+%% was never incremented, and `connections` (connected minus disconnected in
+%% asobi_engine_metrics) drifted permanently negative under any connect flood or
+%% a client stuck on a disallowed Origin. It never recovered: nothing
+%% reconciles the gauge against a real socket count, and it is one of the nine
+%% fields the control plane stores and shows tenants.
+%%
+%% `connected_at` is the marker rather than a new flag, because it is set in the
+%% same expression that emits the counter - so the two cannot drift apart in a
+%% later edit the way a separate boolean could.
+%%
+%% One clause rather than two: the session must be stopped whether or not this
+%% process was counted, and a version that pattern-matched both conditions
+%% together could skip the stop for a state shape nobody anticipated.
+terminate(_Reason, _Req, State) when is_map(State) ->
+    case maps:is_key(connected_at, State) of
+        true -> asobi_telemetry:ws_disconnected();
+        false -> ok
+    end,
+    case maps:get(session, State, undefined) of
+        undefined -> ok;
+        SessionPid -> asobi_player_session:stop(SessionPid)
+    end,
     ok;
-terminate(_Reason, _Req, #{session := SessionPid}) ->
-    asobi_telemetry:ws_disconnected(),
-    asobi_player_session:stop(SessionPid),
+terminate(_Reason, _Req, _State) ->
     ok.
 
 %% --- Message Routing ---
@@ -378,9 +602,14 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
                 _ ->
                     ok
             end,
-            Reply = encode_reply(Cid, ~"session.connected", #{player_id => PlayerId}),
+            Wire = negotiate_wire(Payload),
+            Reply = encode_reply(Cid, ~"session.connected", #{
+                player_id => PlayerId, wire => Wire
+            }),
             State1 = cancel_idle_auth_timer(State),
-            {reply, {text, Reply}, State1#{session => SessionPid, player_id => PlayerId}};
+            {reply, {text, Reply}, State1#{
+                session => SessionPid, player_id => PlayerId, wire => Wire
+            }};
         {error, Reason} ->
             Reply = encode_error(Cid, Reason),
             {reply, {text, Reply}, State}
@@ -390,36 +619,20 @@ handle_message(#{~"type" := ~"session.heartbeat"} = Msg, State) ->
     Reply = encode_reply(Cid, ~"session.heartbeat", #{ts => erlang:system_time(millisecond)}),
     {reply, {text, Reply}, State};
 handle_message(
-    #{~"type" := ~"match.input", ~"payload" := Payload}, #{session := SessionPid} = State
+    #{~"type" := ~"match.input", ~"payload" := Payload} = Msg,
+    #{session := SessionPid} = State
 ) when
     SessionPid =/= undefined
 ->
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
-            InputData =
-                case maps:get(~"data", Payload, undefined) of
-                    undefined when is_map(Payload) -> Payload;
-                    Bin when is_binary(Bin) ->
-                        case json:decode(Bin) of
-                            M when is_map(M) -> M;
-                            _ -> #{}
-                        end;
-                    Other when is_map(Other) -> Other;
-                    _ ->
-                        #{}
-                end,
-            case maps:get(match_pid, SState, undefined) of
-                undefined ->
-                    case maps:get(zone_pid, SState, undefined) of
-                        undefined ->
-                            not_in_match_hint(State);
-                        ZonePid ->
-                            asobi_zone:player_input(ZonePid, PlayerId, InputData),
-                            {ok, State}
-                    end;
-                MatchPid ->
-                    asobi_match_server:handle_input(MatchPid, PlayerId, InputData),
-                    {ok, State}
+            case match_input_data(Payload) of
+                invalid ->
+                    Cid = maps:get(~"cid", Msg, undefined),
+                    {reply, {text, encode_error(Cid, ~"invalid_payload")}, State};
+                Extracted ->
+                    InputData = input_data(Extracted),
+                    match_input_route(SState, PlayerId, InputData, State)
             end
     catch
         exit:{noproc, _} ->
@@ -558,6 +771,38 @@ handle_message(
     Reply = encode_reply(Cid, ~"presence.updated", #{status => Status}),
     {reply, {text, Reply}, State};
 handle_message(
+    #{~"type" := ~"match.find_or_create", ~"payload" := #{~"mode" := Mode}} = Msg,
+    #{player_id := PlayerId} = State
+) ->
+    %% asobi#482: the match twin of world.find_or_create. The matchmaker groups
+    %% co-queued tickets and never joins a player into a running match, so
+    %% before this the only route into a live match was match.list then
+    %% match.join - a browse-then-join carrying the TOCTOU that
+    %% asobi_world_lobby_server exists to close.
+    %%
+    %% The reply is match.joined, not a new match.created leaf: under the 1.0
+    %% freeze (ADR 0010) a new OUTBOUND match./world. leaf has to enter
+    %% ?RESERVED_EVENT_NAMES, which would retroactively ban it for any shipped
+    %% game already broadcasting that name through game.broadcast. Additive
+    %% inbound frames carry no such hazard.
+    Cid = maps:get(~"cid", Msg, undefined),
+    case check_join_rate(PlayerId) of
+        denied ->
+            {reply, {text, encode_error(Cid, ~"join_rate_limited")}, State};
+        allowed ->
+            case asobi_join_ctx:parse(maps:get(~"payload", Msg, #{})) of
+                {error, CtxErr} ->
+                    {reply, {text, encode_error(Cid, CtxErr)}, State};
+                {ok, Ctx} ->
+                    case asobi_match_lobby:find_or_create(Mode, PlayerId) of
+                        {ok, MatchPid, _Info} ->
+                            join_match_and_reply(Cid, MatchPid, PlayerId, Ctx, State);
+                        {error, Reason} ->
+                            {reply, {text, encode_error(Cid, Reason)}, State}
+                    end
+            end
+    end;
+handle_message(
     #{~"type" := ~"match.join", ~"payload" := #{~"match_id" := MatchId}} = Msg,
     #{player_id := PlayerId} = State
 ) ->
@@ -602,14 +847,44 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
+            %% #447: a vote lives on the fabric the player is actually in. A
+            %% match player casts against their match_server; a world player
+            %% casts against their world_server, which owns the world's votes.
+            %% Resolving from the authenticated session's own state (never from
+            %% the payload) is what stops a player voting in a fabric they are
+            %% not in. Mirrors the match.input fallback shape.
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    Reply = encode_error(Cid, ~"not_in_match"),
-                    {reply, {text, Reply}, State};
+                    case maps:get(world_pid, SState, undefined) of
+                        undefined ->
+                            Reply = encode_error(Cid, ~"not_in_match"),
+                            {reply, {text, Reply}, State};
+                        WorldPid ->
+                            VoteId = maps:get(~"vote_id", Payload),
+                            OptionId = maps:get(~"option_id", Payload),
+                            case
+                                vote_call(fun() ->
+                                    asobi_world_server:cast_vote(
+                                        WorldPid, PlayerId, VoteId, OptionId
+                                    )
+                                end)
+                            of
+                                ok ->
+                                    Reply = encode_reply(Cid, ~"vote.cast_ok", #{success => true}),
+                                    {reply, {text, Reply}, State};
+                                {error, Reason} ->
+                                    Reply = encode_error(Cid, Reason),
+                                    {reply, {text, Reply}, State}
+                            end
+                    end;
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
                     OptionId = maps:get(~"option_id", Payload),
-                    case asobi_match_server:cast_vote(MatchPid, PlayerId, VoteId, OptionId) of
+                    case
+                        vote_call(fun() ->
+                            asobi_match_server:cast_vote(MatchPid, PlayerId, VoteId, OptionId)
+                        end)
+                    of
                         ok ->
                             Reply = encode_reply(Cid, ~"vote.cast_ok", #{success => true}),
                             {reply, {text, Reply}, State};
@@ -629,13 +904,37 @@ handle_message(
     Cid = maps:get(~"cid", Msg, undefined),
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
+            %% #447: same fabric-aware routing as vote.cast - a world player's
+            %% veto reaches their world_server, a match player's their
+            %% match_server.
             case maps:get(match_pid, SState, undefined) of
                 undefined ->
-                    Reply = encode_error(Cid, ~"not_in_match"),
-                    {reply, {text, Reply}, State};
+                    case maps:get(world_pid, SState, undefined) of
+                        undefined ->
+                            Reply = encode_error(Cid, ~"not_in_match"),
+                            {reply, {text, Reply}, State};
+                        WorldPid ->
+                            VoteId = maps:get(~"vote_id", Payload),
+                            case
+                                vote_call(fun() ->
+                                    asobi_world_server:use_veto(WorldPid, PlayerId, VoteId)
+                                end)
+                            of
+                                ok ->
+                                    Reply = encode_reply(Cid, ~"vote.veto_ok", #{success => true}),
+                                    {reply, {text, Reply}, State};
+                                {error, Reason} ->
+                                    Reply = encode_error(Cid, Reason),
+                                    {reply, {text, Reply}, State}
+                            end
+                    end;
                 MatchPid ->
                     VoteId = maps:get(~"vote_id", Payload),
-                    case asobi_match_server:use_veto(MatchPid, PlayerId, VoteId) of
+                    case
+                        vote_call(fun() ->
+                            asobi_match_server:use_veto(MatchPid, PlayerId, VoteId)
+                        end)
+                    of
                         ok ->
                             Reply = encode_reply(Cid, ~"vote.veto_ok", #{success => true}),
                             {reply, {text, Reply}, State};
@@ -686,24 +985,42 @@ handle_message(
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    case asobi_world_lobby:create_world(Mode, PlayerId) of
-        {ok, WorldPid, _Info} ->
-            join_and_reply(Cid, WorldPid, PlayerId, State);
-        {error, Reason} ->
-            Reply = encode_error(Cid, Reason),
-            {reply, {text, Reply}, State}
+    %% asobi#480: both create frames spawn or resolve an instance and were the
+    %% only entry points not behind the join limiter, even though world.join
+    %% and match.join are. The pg caps bound how many worlds one player can
+    %% OWN, not how often they may ask.
+    case check_join_rate(PlayerId) of
+        denied ->
+            {reply, {text, encode_error(Cid, ~"join_rate_limited")}, State};
+        allowed ->
+            case asobi_world_lobby:create_world(Mode, PlayerId) of
+                {ok, WorldPid, _Info} ->
+                    join_and_reply(Cid, WorldPid, PlayerId, State);
+                {error, Reason} ->
+                    Reply = encode_error(Cid, Reason),
+                    {reply, {text, Reply}, State}
+            end
     end;
 handle_message(
     #{~"type" := ~"world.find_or_create", ~"payload" := #{~"mode" := Mode}} = Msg,
     #{player_id := PlayerId} = State
 ) ->
     Cid = maps:get(~"cid", Msg, undefined),
-    case asobi_world_lobby:find_or_create(Mode, PlayerId) of
-        {ok, WorldPid, _Info} ->
-            join_and_reply(Cid, WorldPid, PlayerId, State);
-        {error, Reason} ->
-            Reply = encode_error(Cid, Reason),
-            {reply, {text, Reply}, State}
+    %% asobi#480: the find branch consumes no pg cap at all - it returns an
+    %% existing world - so before this nothing bounded how often one connection
+    %% could drive a gen_server:call into the single lobby server, each one
+    %% fanning an uncached get_info out to every live world.
+    case check_join_rate(PlayerId) of
+        denied ->
+            {reply, {text, encode_error(Cid, ~"join_rate_limited")}, State};
+        allowed ->
+            case asobi_world_lobby:find_or_create(Mode, PlayerId) of
+                {ok, WorldPid, _Info} ->
+                    join_and_reply(Cid, WorldPid, PlayerId, State);
+                {error, Reason} ->
+                    Reply = encode_error(Cid, Reason),
+                    {reply, {text, Reply}, State}
+            end
     end;
 handle_message(
     #{~"type" := ~"world.join", ~"payload" := #{~"world_id" := WorldId}} = Msg,
@@ -744,27 +1061,76 @@ handle_message(
             {reply, {text, Reply}, State}
     end;
 handle_message(
-    #{~"type" := ~"world.input", ~"payload" := Payload},
+    #{~"type" := ~"world.input", ~"payload" := Payload} = Msg,
     #{session := SessionPid} = State
 ) when SessionPid =/= undefined ->
+    %% asobi#474: an optional client input sequence number, a sibling of payload
+    %% (so "the payload IS the input map" stays true). Bounded to a non-negative
+    %% JS-safe integer: the value is echoed back on every broadcast tick, so an
+    %% unbounded bignum here would be a per-tick json:encode amplifier. Anything
+    %% out of range degrades to no-ack rather than crashing the handler.
+    Seq =
+        case maps:get(~"seq", Msg, undefined) of
+            N when is_integer(N), N >= 0, N =< 16#1FFFFFFFFFFFFF -> N;
+            _ -> undefined
+        end,
     try asobi_player_session:get_state(SessionPid) of
         #{player_id := PlayerId} = SState ->
             case maps:get(zone_pid, SState, undefined) of
                 undefined ->
                     {ok, State};
                 ZonePid ->
-                    InputData =
-                        case maps:get(~"data", Payload, undefined) of
-                            undefined when is_map(Payload) -> Payload;
-                            Other when is_map(Other) -> Other;
-                            _ -> #{}
-                        end,
-                    asobi_zone:player_input(ZonePid, PlayerId, InputData),
-                    {ok, State}
+                    case world_input_data(Payload) of
+                        invalid ->
+                            Cid = maps:get(~"cid", Msg, undefined),
+                            {reply, {text, encode_error(Cid, ~"invalid_payload")}, State};
+                        Extracted ->
+                            InputData = input_data(Extracted),
+                            asobi_zone:player_input(ZonePid, PlayerId, InputData, Seq),
+                            {ok, State}
+                    end
             end
     catch
         exit:{noproc, _} ->
             {ok, State#{session => undefined}}
+    end;
+%% The repair half of `frame_seq`: a client that sees a gap in a zone's frame
+%% sequence asks for a fresh baseline for THAT zone. One zone per request, named
+%% by its coords, because frame_seq is per zone and a client that detects a gap
+%% knows which zone gapped - and because the interest ring is nine zones at the
+%% default view_radius, so a ring-shaped resync would multiply one small request
+%% into nine keyframes.
+%%
+%% Rate limited on two buckets before any work happens, because this is the one
+%% inbound frame whose response is hundreds of times larger than the request.
+%% Refused quietly rather than with an error frame: a gap is the client's problem
+%% to back off from, and an error reply on a repair path is one more thing for a
+%% broken client to loop on.
+handle_message(
+    #{~"type" := ~"world.resync", ~"payload" := Payload},
+    #{session := SessionPid} = State
+) when SessionPid =/= undefined ->
+    case resync_coords(Payload) of
+        invalid ->
+            {ok, State};
+        Coords ->
+            try asobi_player_session:get_state(SessionPid) of
+                #{player_id := PlayerId} = SState ->
+                    case maps:get(world_pid, SState, undefined) of
+                        undefined ->
+                            {ok, State};
+                        WorldPid ->
+                            _ =
+                                case resync_allowed(PlayerId) of
+                                    true -> asobi_world_server:resync(WorldPid, PlayerId, Coords);
+                                    false -> ok
+                                end,
+                            {ok, State}
+                    end
+            catch
+                exit:{noproc, _} ->
+                    {ok, State#{session => undefined}}
+            end
     end;
 %% The extension wire (Wave 2b). Everything about the call - `cid` validation,
 %% readiness, the method table, the error object - belongs to asobi_rpc; this
@@ -789,21 +1155,30 @@ handle_message(#{~"type" := _Type} = Msg, State) ->
 handle_message(_Msg, State) ->
     {ok, State}.
 
-rpc_caller(#{session := SessionPid, player_id := PlayerId}) when
+rpc_caller(#{session := SessionPid, player_id := PlayerId} = State) when
     is_pid(SessionPid), is_binary(PlayerId)
 ->
-    #{player_id => PlayerId, session => SessionPid};
+    %% `wire` travels with the caller because the datagram mint needs it: a pose
+    %% names a slot, and only the binary `world.tick` binds one, so a connection
+    %% on the JSON wire can send UDP input but can never resolve a pose.
+    #{
+        player_id => PlayerId,
+        session => SessionPid,
+        transport => ws,
+        wire => maps:get(wire, State, ~"json")
+    };
 rpc_caller(_State) ->
     unauthenticated.
 
 %% `rpc.error` carries the error object alone. The `reason` half of the older
 %% `error` frame is not repeated here: nothing has ever shipped against this
 %% frame, so there is no client to keep working, and one dialect on a new
-%% surface is the point of the object.
-encode_rpc(Cid, {ok, Result}) ->
-    encode_reply(Cid, ~"rpc.ok", #{~"result" => Result});
-encode_rpc(Cid, {error, Object}) ->
-    encode_reply(Cid, ~"rpc.error", Object).
+%% surface is the point of the object. The `{type, payload}` pair comes from
+%% `asobi_rpc:envelope/1`, the one place it is built, so the HTTP transport
+%% (`m:asobi_rpc_controller`) puts the same payload on the wire.
+encode_rpc(Cid, Outcome) ->
+    {Type, Payload} = asobi_rpc:envelope(Outcome),
+    encode_reply(Cid, Type, Payload).
 
 %% --- Safe Message Dispatch ---
 
@@ -818,6 +1193,11 @@ safe_handle_message(Msg, State) ->
         error:function_clause:_Stack ->
             reply_error(Msg, ~"invalid_payload", State);
         error:{case_clause, _}:_Stack ->
+            reply_error(Msg, ~"invalid_payload", State);
+        %% asobi#465: a non-map payload reaches maps:get/2 and raises badmap.
+        %% Treat it as a client payload error, not an internal_error with a
+        %% warning-log line an authenticated player could spam.
+        error:{badmap, _}:_Stack ->
             reply_error(Msg, ~"invalid_payload", State);
         Class:Reason:Stack ->
             logger:warning(#{
@@ -912,6 +1292,29 @@ current_player_world(PlayerId) ->
     end.
 
 %% --- Internal ---
+
+%% asobi#462: a vote whose fabric is gone reaches asobi_vote_server via a
+%% gen_statem:call that exits. safe_handle_message/2 already catches any handler
+%% exit and returns an error frame, so this is never a crash-preventer - but
+%% that generic path logs a warning and answers internal_error, blaming asobi
+%% for a race the client cannot avoid. Catch only the process-gone exit shapes
+%% here and upgrade them to the clean, registered not_in_match: a finished
+%% fabric stops with normal (and a call that lost the race to its cleanup sees
+%% that stop), a dead one is noproc, and supervised teardown can surface
+%% shutdown or killed. Any other exit reason is a genuine vote-handler crash and
+%% falls through to safe_handle_message -> logged internal_error, which is
+%% intended - masking a real crash as not_in_match would hide it. The normal
+%% ok/{error, Reason} replies are untouched.
+-spec vote_call(fun(() -> ok | {error, term()})) -> ok | {error, term()}.
+vote_call(Call) ->
+    try
+        Call()
+    catch
+        exit:{noproc, _} -> {error, not_in_match};
+        exit:{normal, _} -> {error, not_in_match};
+        exit:{shutdown, _} -> {error, not_in_match};
+        exit:killed -> {error, not_in_match}
+    end.
 
 cancel_idle_auth_timer(#{idle_auth_timer := Ref} = State) when is_reference(Ref) ->
     _ = erlang:cancel_timer(Ref, [{async, true}, {info, false}]),
@@ -1043,7 +1446,10 @@ event_name_binary(Event) when is_binary(Event) ->
     end.
 
 %% Deliberately excludes `.` — a script must not be able to mint a deeper
-%% `world.foo.bar` sub-namespace.
+%% `world.foo.bar` sub-namespace. Spec'd over `term()`, not `byte()`: it is a
+%% `lists:all/2` predicate and must stay `fun((term()) -> boolean())` for
+%% eqwalizer, which its `_ -> false` total clause honours for any term.
+-spec is_event_name_char(term()) -> boolean().
 is_event_name_char(C) when C >= $a, C =< $z -> true;
 is_event_name_char(C) when C >= $A, C =< $Z -> true;
 is_event_name_char(C) when C >= $0, C =< $9 -> true;

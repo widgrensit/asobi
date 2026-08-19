@@ -79,17 +79,30 @@ select_limiter(Req) ->
     %% before the handler. register runs the password KDF and gets its own
     %% tighter bucket (asobi#157); it must match before the /auth/ prefix.
     case binary:split(cowboy_req:path(Req), ~"/", [global, trim_all]) of
-        [~"api", ~"v1", ~"auth", ~"register"] -> asobi_register_limiter;
+        [~"api", ~"v1", ~"auth", ~"register"] ->
+            asobi_register_limiter;
         %% Account erasure runs the KDF too, on a path nothing else serves.
-        [~"api", ~"v1", ~"players", ~"me", ~"erase"] -> asobi_erase_limiter;
-        [~"api", ~"v1", ~"auth" | _] -> asobi_auth_limiter;
-        [~"api", ~"v1", ~"iap" | _] -> asobi_iap_limiter;
+        [~"api", ~"v1", ~"players", ~"me", ~"erase"] ->
+            asobi_erase_limiter;
+        [~"api", ~"v1", ~"auth" | _] ->
+            asobi_auth_limiter;
+        [~"api", ~"v1", ~"iap" | _] ->
+            asobi_iap_limiter;
         %% The console login trades a shared secret for a session, so it is
         %% the one place in the deployment where guessing pays. It shares the
         %% auth bucket rather than getting its own: same threat, same shape,
         %% one fewer knob to leave unset.
-        [~"console", ~"session"] -> asobi_auth_limiter;
-        _ -> asobi_api_limiter
+        [~"console", ~"session"] ->
+            asobi_auth_limiter;
+        %% An extension route mounted `security => webhook` does signature
+        %% crypto per request instead of a token check, so tokenless traffic
+        %% there must not ride the 300/s api bucket. Reads the memoised
+        %% webhook path set - never triggers discovery on a request path.
+        Segments ->
+            case asobi_extensions:is_webhook_path(Segments) of
+                true -> asobi_webhook_limiter;
+                false -> asobi_api_limiter
+            end
     end.
 
 -ifdef(TEST).
@@ -143,6 +156,35 @@ select_limiter_test_() ->
             asobi_register_limiter, select_limiter(fake_req(#{path => ~"//api/v1/auth/register"}))
         )
     ].
+
+%% The webhook bucket only exists for mounted extension webhook routes, so
+%% this resolves a real fixture rather than faking the path table.
+webhook_limiter_test_() ->
+    {setup, fun install_webhook_fixture/0, fun uninstall_webhook_fixture/1, [
+        ?_assertEqual(
+            asobi_webhook_limiter, select_limiter(fake_req(#{path => ~"/api/v1/quests/webhook"}))
+        ),
+        %% The same extension's player route stays in the api bucket.
+        ?_assertEqual(
+            asobi_api_limiter, select_limiter(fake_req(#{path => ~"/api/v1/quests/board"}))
+        ),
+        %% Slash variants normalise onto the webhook bucket, like register's.
+        ?_assertEqual(
+            asobi_webhook_limiter,
+            select_limiter(fake_req(#{path => ~"/api/v1//quests/webhook/"}))
+        )
+    ]}.
+
+install_webhook_fixture() ->
+    asobi_extensions:reset(),
+    ok = asobi_fixture_app:install(asobi_fixture_quests, asobi_fixture_quests_extension, []),
+    _ = asobi_extensions:resolve(),
+    ok.
+
+uninstall_webhook_fixture(_) ->
+    asobi_fixture_app:uninstall(asobi_fixture_quests),
+    asobi_extensions:reset(),
+    ok.
 
 -define(PEER_IP, ~"198.51.100.7").
 

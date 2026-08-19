@@ -29,7 +29,11 @@ erase_test_() ->
             fun failed_lookup_is_not_not_found/0},
         {"a failed lookup at the last step rolls back", fun failed_final_lookup_rolls_back/0},
         {"the auth cache is revoked after the commit", fun revokes_after_commit/0},
-        {"live leaderboards drop the player after the commit", fun evicts_leaderboards/0}
+        {"live leaderboards drop the player after the commit", fun evicts_leaderboards/0},
+        {"a raising subsystem hook is logged, swallowed, and does not fail the erase",
+            fun a_raising_hook_is_swallowed/0},
+        {"a raising step does not stop the steps after it", fun a_raising_step_isolates/0},
+        {"the post-commit steps run in a deterministic order", fun post_commit_order_is_fixed/0}
     ]}.
 
 setup() ->
@@ -249,6 +253,102 @@ failed_final_lookup_rolls_back() ->
     %% is the outcome this test exists to forbid.
     ?assertEqual(0, meck:num_calls(asobi_repo, delete, [asobi_player, '_'])).
 
+%% --- orphan_blocker/1: pure classification, no database ---
+%%
+%% The 409 "reinstall the package" answer is only ever right for a foreign key
+%% core does not own. These pin that only a 23503 naming a table outside the
+%% swept set classifies; a core-table, no-table, or non-FK failure stays
+%% `not_orphaned` and escalates as a 500.
+
+orphan_blocker_test_() ->
+    [
+        {"an extension table on a badmatch-wrapped 23503 is named",
+            fun orphan_names_extension_table/0},
+        {"a 23503 with only a constraint, no table, does not classify",
+            fun orphan_no_table_is_not_orphaned/0},
+        {"a 23503 naming a core-swept table does not classify",
+            fun orphan_core_table_is_not_orphaned/0},
+        {"a non-23503 pgsql error does not classify", fun orphan_non_fk_is_not_orphaned/0},
+        {"a plain {error,{pgsql_error,_}} without the badmatch layer still classifies",
+            fun orphan_plain_error_unwraps/0},
+        {"an unrelated reason does not classify", fun orphan_unrelated_is_not_orphaned/0},
+        {"steps/1 touches no relation missing from core_relations/0",
+            fun steps_touch_only_core_relations/0}
+    ].
+
+orphan_names_extension_table() ->
+    Reason =
+        {badmatch,
+            {error,
+                {pgsql_error, #{
+                    code => ~"23503",
+                    table => ~"orphan_ext_saves",
+                    constraint => ~"orphan_ext_saves_player_id_fkey"
+                }}}},
+    ?assertEqual(
+        {orphaned_extension_rows, ~"orphan_ext_saves"}, asobi_player_erase:orphan_blocker(Reason)
+    ).
+
+orphan_no_table_is_not_orphaned() ->
+    Reason = {badmatch, {error, {pgsql_error, #{code => ~"23503", constraint => ~"some_fkey"}}}},
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(Reason)).
+
+orphan_core_table_is_not_orphaned() ->
+    CoreTable = asobi_wallet:table(),
+    Reason = {badmatch, {error, {pgsql_error, #{code => ~"23503", table => CoreTable}}}},
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(Reason)).
+
+orphan_non_fk_is_not_orphaned() ->
+    Reason = {badmatch, {error, {pgsql_error, #{code => ~"23505", table => ~"orphan_ext_saves"}}}},
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(Reason)).
+
+orphan_plain_error_unwraps() ->
+    Reason = {error, {pgsql_error, #{code => ~"23503", table => ~"orphan_ext_saves"}}},
+    ?assertEqual(
+        {orphaned_extension_rows, ~"orphan_ext_saves"}, asobi_player_erase:orphan_blocker(Reason)
+    ).
+
+orphan_unrelated_is_not_orphaned() ->
+    ?assertEqual(
+        not_orphaned, asobi_player_erase:orphan_blocker({lookup_failed, statement_timeout})
+    ),
+    ?assertEqual(not_orphaned, asobi_player_erase:orphan_blocker(not_found)).
+
+%% The anti-drift guard for FIX 1: every kura schema the erase logic references
+%% must have its real table name in core_relations/0. Add a table to steps/1
+%% without adding its schema to swept_schemas/0 and this fails - so a new core
+%% child can never silently start reading as extension residue.
+steps_touch_only_core_relations() ->
+    Core = asobi_player_erase:core_relations(),
+    Missing = [S || S <- erase_logic_schemas(), not lists:member(S:table(), Core)],
+    ?assertEqual([], Missing).
+
+%% The kura schema modules referenced anywhere in the erase logic, read from the
+%% compiled abstract code. swept_schemas/0 and core_relations/0 are excluded:
+%% they are the declaration under test, not part of the sweep.
+erase_logic_schemas() ->
+    Logic = [
+        F
+     || {function, _, Name, _Arity, _Clauses} = F <- forms(asobi_player_erase),
+        not lists:member(Name, [swept_schemas, core_relations])
+    ],
+    lists:usort([A || A <- atoms(Logic), is_kura_schema(A)]).
+
+atoms(Term) when is_tuple(Term) -> lists:append([atoms(E) || E <- tuple_to_list(Term)]);
+atoms(List) when is_list(List) -> lists:append([atoms(E) || E <- List]);
+atoms(A) when is_atom(A) -> [A];
+atoms(_Other) -> [].
+
+is_kura_schema(A) ->
+    _ = code:ensure_loaded(A),
+    erlang:function_exported(A, table, 0).
+
+forms(Module) ->
+    {Module, Beam, _Path} = code:get_object_code(Module),
+    {ok, {Module, [{abstract_code, {raw_abstract_v1, Forms}}]}} =
+        beam_lib:chunks(Beam, [abstract_code]),
+    Forms.
+
 %% asobi#215's revocation SLA: without this a deleted player's access token
 %% keeps resolving from the cache for up to auth_cache_ttl_ms against a row
 %% that no longer exists.
@@ -277,4 +377,90 @@ evicts_leaderboards() ->
         )
     after
         meck:unload(asobi_leaderboard_server)
+    end.
+
+%% --- The post-erase hook seam ---
+%%
+%% The leaderboard eviction is no longer a hardcoded call in `after_commit/1`;
+%% it is the one entry in `post_erase_hooks/0`, invoked best-effort in isolation
+%% next to the kernel teardown. These pin the three properties the seam keeps: a
+%% raising hook is swallowed and does not fail the erase, a raising step does
+%% not stop the ones after it, and the order is deterministic.
+
+%% The rows are already committed away, so a wedged board must be logged and
+%% dropped, never turned into a failure. The kernel teardown that shares
+%% `after_commit/1` is untouched by it.
+a_raising_hook_is_swallowed() ->
+    meck:new(asobi_presence, [no_link]),
+    meck:expect(asobi_presence, disconnect, fun(_PlayerId, _Reason) -> ok end),
+    meck:new(asobi_leaderboard_server, [no_link, passthrough]),
+    meck:expect(asobi_leaderboard_server, evict_player, fun(_PlayerId) -> error(board_is_wedged) end),
+    try
+        ?assertMatch({ok, _}, asobi_player_erase:run(?PLAYER)),
+        ?assertEqual(1, meck:num_calls(asobi_leaderboard_server, evict_player, [?PLAYER])),
+        ?assertEqual(1, meck:num_calls(asobi_auth_cache, revoke_player, [?PLAYER]))
+    after
+        meck:unload(asobi_leaderboard_server),
+        meck:unload(asobi_presence)
+    end.
+
+%% Isolation, proved from the front: the first step `after_commit/1` runs -
+%% revoking the auth cache - is made to raise, and the session teardown and the
+%% leaderboard hook after it must still run, with the erase still {ok, _}. One
+%% subsystem's failure blocking another's cleanup is exactly what the per-step
+%% guard exists to forbid.
+a_raising_step_isolates() ->
+    meck:expect(asobi_auth_cache, revoke_player, fun(_PlayerId) -> error(cache_is_down) end),
+    meck:new(asobi_presence, [no_link]),
+    meck:expect(asobi_presence, disconnect, fun(_PlayerId, _Reason) -> ok end),
+    meck:new(asobi_leaderboard_server, [no_link, passthrough]),
+    meck:expect(asobi_leaderboard_server, evict_player, fun(_PlayerId) -> ok end),
+    try
+        ?assertMatch({ok, _}, asobi_player_erase:run(?PLAYER)),
+        ?assertEqual(1, meck:num_calls(asobi_presence, disconnect, [?PLAYER, ~"erased"])),
+        ?assertEqual(1, meck:num_calls(asobi_leaderboard_server, evict_player, [?PLAYER]))
+    after
+        meck:unload(asobi_leaderboard_server),
+        meck:unload(asobi_presence)
+    end.
+
+%% Kernel teardown (auth cache, then session), then the subsystem hooks in
+%% `post_erase_hooks/0` order. A collector records each call as it happens, so
+%% the sequence itself is asserted, not just the registry's contents.
+post_commit_order_is_fixed() ->
+    Tester = self(),
+    meck:expect(asobi_auth_cache, revoke_player, fun(_PlayerId) ->
+        Tester ! {step, {asobi_auth_cache, revoke_player}},
+        ok
+    end),
+    meck:new(asobi_presence, [no_link]),
+    meck:expect(asobi_presence, disconnect, fun(_PlayerId, _Reason) ->
+        Tester ! {step, {asobi_presence, disconnect}},
+        ok
+    end),
+    meck:new(asobi_leaderboard_server, [no_link, passthrough]),
+    meck:expect(asobi_leaderboard_server, evict_player, fun(_PlayerId) ->
+        Tester ! {step, {asobi_leaderboard_server, evict_player}},
+        ok
+    end),
+    try
+        ?assertMatch({ok, _}, asobi_player_erase:run(?PLAYER)),
+        ?assertEqual(
+            [
+                {asobi_auth_cache, revoke_player},
+                {asobi_presence, disconnect},
+                {asobi_leaderboard_server, evict_player}
+            ],
+            drain_steps()
+        )
+    after
+        meck:unload(asobi_leaderboard_server),
+        meck:unload(asobi_presence)
+    end.
+
+drain_steps() ->
+    receive
+        {step, Step} -> [Step | drain_steps()]
+    after 0 ->
+        []
     end.

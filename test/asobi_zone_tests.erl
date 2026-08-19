@@ -39,12 +39,29 @@ zone_test_() ->
             fun unsubscribe_sends_removals_for_entities/0},
         {"unsubscribe of an unknown player sends nothing",
             fun unsubscribe_unknown_player_is_noop/0},
+        {"resync re-sends a keyframe to a subscriber", fun resync_sends_keyframe/0},
+        {"resync for a player who is not subscribed sends nothing",
+            fun resync_unsubscribed_sends_nothing/0},
         {"resubscribing the same pid is idempotent", fun resubscribe_same_pid_is_idempotent/0},
         {"resubscribing a new pid replaces and demonitors the old one",
             fun resubscribe_new_pid_replaces_and_demonitors_old/0},
         {"tick processes inputs and broadcasts deltas", fun tick_broadcasts/0},
         {"tick with no changes sends no deltas", fun tick_no_changes/0},
         {"tick acks to ticker", fun tick_acks/0},
+        {"world.input seq comes back as a world.ack (#474)", fun world_ack_returns_seq/0},
+        {"a rejected input still advances the world.ack (#474)",
+            fun world_ack_advances_on_reject/0},
+        {"world.input without a seq produces no world.ack (#474)",
+            fun world_ack_absent_without_seq/0},
+        {"world.ack keeps the highest seq (#474)", fun world_ack_keeps_highest_seq/0},
+        {"world.ack is per-connection - p1's ack never reaches p2 (#474)",
+            fun world_ack_is_per_connection/0},
+        {"a straggler input re-arms the zone's ack after the entity left (#477)",
+            fun world_ack_rearms_in_the_zone_left_behind/0},
+        {"a negative seq is ignored - no ack (#474 hardening)",
+            fun world_ack_ignores_negative_seq/0},
+        {"a non-integer seq via player_input/4 does not crash the zone (#474 hardening)",
+            fun world_ack_survives_non_integer_seq/0},
         {"queued inputs apply in arrival order", fun inputs_apply_in_arrival_order/0},
         {"subscriber DOWN cleans up", fun subscriber_down_cleanup/0},
         {"tick touches zone_manager when subscribers present", fun tick_touches_zone_manager/0},
@@ -198,24 +215,208 @@ subscribe_unsubscribe() ->
     ?assertEqual(0, asobi_zone:get_subscriber_count(Pid)),
     gen_server:stop(Pid).
 
+%% asobi#474: a world.input carrying a client seq comes back to that connection
+%% as a world.ack, so the client can reconcile its prediction.
+world_ack_returns_seq() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    asobi_zone:add_entity(Pid, ~"p1", #{x => 0, y => 0, type => ~"player"}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"move", ~"x" => 5, ~"y" => 5}, 412),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(412, recv_ack()),
+    gen_server:stop(Pid).
+
+%% A rejected input still advances the ack: the server consumed the seq, it just
+%% declined the effect. With no p1 entity the move is rejected (not_found).
+world_ack_advances_on_reject() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"move", ~"x" => 1, ~"y" => 1}, 7),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(7, recv_ack()),
+    gen_server:stop(Pid).
+
+%% A client that never stamps a seq (did not opt in) gets no ack frames.
+world_ack_absent_without_seq() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    asobi_zone:add_entity(Pid, ~"p1", #{x => 0, y => 0, type => ~"player"}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"move", ~"x" => 3, ~"y" => 3}),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(no_ack, recv_ack()),
+    gen_server:stop(Pid).
+
+%% Out-of-order or duplicate seqs never regress the ack: the highest wins.
+world_ack_keeps_highest_seq() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{}, 5),
+    asobi_zone:player_input(Pid, ~"p1", #{}, 3),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(5, recv_ack()),
+    gen_server:stop(Pid).
+
+%% asobi#474: the ack is per-connection - p1's seq reaches p1 only, never p2's
+%% connection. That isolation is the whole point of the frame over the shared
+%% entity-field ack.
+world_ack_is_per_connection() ->
+    Parent = self(),
+    Pid = start_zone(#{broadcast_interval => 1}),
+    P2 = spawn(fun() -> p2_ack_forwarder(Parent) end),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    asobi_zone:subscribe(Pid, {~"p2", P2}),
+    asobi_zone:add_entity(Pid, ~"p1", #{x => 0, y => 0, type => ~"player"}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"move", ~"x" => 2, ~"y" => 2}, 99),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(99, recv_ack()),
+    receive
+        {p2_saw_ack, S} ->
+            ?assert(false, "p2 received a world.ack for p1's seq: " ++ integer_to_list(S))
+    after 100 -> ok
+    end,
+    gen_server:stop(Pid).
+
+p2_ack_forwarder(Parent) ->
+    receive
+        {asobi_message, {world_ack, _T, S}} -> Parent ! {p2_saw_ack, S};
+        _ -> p2_ack_forwarder(Parent)
+    end.
+
+%% asobi#477: this pins the zone-side behaviour the session-side filter exists to
+%% correct. A crossing player stays subscribed to the zone they left whenever it
+%% remains in their interest ring, and input still routed there during the
+%% crossing re-arms the ack, so the zone goes on emitting a mark that the zone
+%% they moved into has already passed. The zone cannot know that on its own -
+%% only the connection sees both streams - which is why asobi_player_session
+%% drops any ack that does not advance. If this test ever starts reporting
+%% no_ack, the zone has grown a guard and the session filter may be redundant.
+world_ack_rearms_in_the_zone_left_behind() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    asobi_zone:add_entity(Pid, ~"p1", #{x => 0, y => 0, type => ~"player"}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"move", ~"x" => 5, ~"y" => 5}, 412),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(412, recv_ack()),
+    %% The straggler: cast before the crossing lands, drained on the next tick.
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"move", ~"x" => 6, ~"y" => 6}, 413),
+    asobi_zone:remove_entity(Pid, ~"p1"),
+    flush_messages(),
+    asobi_zone:tick(Pid, 2),
+    ?assertEqual(413, recv_ack()),
+    asobi_zone:tick(Pid, 3),
+    ?assertEqual(413, recv_ack()),
+    gen_server:stop(Pid).
+
+%% asobi#474 hardening: record_ack is total and rejects negatives, so a
+%% spec-violating seq reaching the exported player_input/4 neither acks nor
+%% crashes the shared zone process (which would DoS every player in it).
+world_ack_ignores_negative_seq() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{}, -5),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(no_ack, recv_ack()),
+    ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid).
+
+world_ack_survives_non_integer_seq() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{}, ~"not-a-seq"),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(no_ack, recv_ack()),
+    ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid).
+
+recv_ack() ->
+    receive
+        {asobi_message, {world_ack, _Tick, Seq}} -> Seq
+    after 300 -> no_ack
+    end.
+
 %% widgrensit/asobi#293: leaving a zone's interest ring must mirror joining
 %% it - subscribe_new/3 sends an `a` for every entity, so unsubscribe must
 %% send an `r` for every entity still held, or the departing client's copy
 %% of this zone freezes at its last known state forever (the zone never
 %% sends it another update once the subscription is gone).
+%% The repair half of frame_seq. A client that saw a gap asks for a baseline and
+%% gets one carrying the zone's CURRENT frame_seq with kf: true, which is what it
+%% resets its high-water mark to.
+resync_sends_keyframe() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    %% One broadcast so the zone has a non-zero frame_seq and a real baseline,
+    %% which is what makes the assertion below distinguishable from the join
+    %% keyframe's frame_seq of 0.
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
+    flush_messages(),
+
+    asobi_zone:resync(Pid, ~"p1"),
+    receive
+        {asobi_message, {zone_keyframe, Meta, Snapshot}} ->
+            ?assertEqual(true, maps:get(~"kf", Meta)),
+            ?assertEqual([0, 0], maps:get(~"zone", Meta)),
+            ?assertEqual(1, maps:get(~"frame_seq", Meta)),
+            ?assertEqual([~"e1"], [Id || #{~"id" := Id} <- Snapshot])
+    after 500 ->
+        ?assert(false)
+    end,
+    gen_server:stop(Pid).
+
+%% A resync naming a zone the requester is not subscribed to is dropped, not
+%% answered. Answering would make the frame a way to read any zone in the world,
+%% and there is nothing to repair for a client that was never told anything.
+resync_unsubscribed_sends_nothing() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
+    timer:sleep(10),
+    flush_messages(),
+
+    asobi_zone:resync(Pid, ~"never_subscribed"),
+    receive
+        {asobi_message, {zone_keyframe, _, _}} -> ?assert(false)
+    after 200 -> ok
+    end,
+    gen_server:stop(Pid).
+
 unsubscribe_sends_removals_for_entities() ->
-    Pid = start_zone(),
+    %% broadcast_interval 1 so one tick is one broadcast: the leave frame removes
+    %% what the client was TOLD about (broadcast_entities), not what the zone
+    %% happens to hold, so the entities have to reach the client first.
+    Pid = start_zone(#{broadcast_interval => 1}),
     asobi_zone:add_entity(Pid, ~"e1", #{x => 1, y => 1, type => ~"player"}),
     asobi_zone:add_entity(Pid, ~"e2", #{x => 2, y => 2, type => ~"npc"}),
     timer:sleep(10),
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     timer:sleep(10),
+    asobi_zone:tick(Pid, 1),
+    timer:sleep(20),
     flush_messages(),
 
     asobi_zone:unsubscribe(Pid, ~"p1"),
     Removals =
         receive
-            {asobi_message, {zone_delta, 0, Deltas}} -> Deltas
+            {asobi_message, {zone_removals, {0, 0}, Deltas}} -> Deltas
         after 200 -> []
         end,
     ?assertEqual(
@@ -298,11 +499,14 @@ resubscribe_new_pid_replaces_and_demonitors_old() ->
     #{subscribers := #{~"p1" := {NewPid, NewRef}}} = sys:get_state(Pid),
     ?assertEqual(self(), NewPid),
     ?assertNotEqual(OldRef, NewRef),
+    %% The re-subscribe keyframe is built from the shared broadcast baseline, so
+    %% before any broadcast tick it is legitimately empty. What matters here is
+    %% that a keyframe arrives at all, and that it is marked as one.
     ?assertMatch(
-        [_ | _],
+        {#{~"kf" := true, ~"zone" := [0, 0]}, _},
         receive
-            {asobi_message, {zone_delta, 0, Snapshot}} -> Snapshot
-        after 200 -> []
+            {asobi_message, {zone_keyframe, Meta, Snapshot}} -> {Meta, Snapshot}
+        after 200 -> timeout
         end
     ),
 
@@ -317,13 +521,16 @@ tick_broadcasts() ->
     timer:sleep(10),
     asobi_zone:subscribe(Pid, {<<"p1">>, self()}),
     timer:sleep(10),
-    %% Subscribe sends immediate snapshot
+    %% Subscribe sends a keyframe built from the shared broadcast baseline. e1 was
+    %% added but never broadcast, so it is NOT in the keyframe - it arrives as an
+    %% op:"a" in the first delta instead. Snapshotting `entities` here is what
+    %% used to send it twice, once in the snapshot and again in that first delta.
     receive
-        {asobi_message, {zone_delta, 0, Snapshot}} ->
-            ?assertEqual(1, length(Snapshot)),
-            [S] = Snapshot,
-            ?assertEqual(~"a", maps:get(~"op", S)),
-            ?assertEqual(<<"e1">>, maps:get(~"id", S))
+        {asobi_message, {zone_keyframe, Meta, Snapshot}} ->
+            ?assertEqual(true, maps:get(~"kf", Meta)),
+            ?assertEqual(0, maps:get(~"frame_seq", Meta)),
+            ?assertEqual([0, 0], maps:get(~"zone", Meta)),
+            ?assertEqual([], Snapshot)
     after 1000 ->
         ?assert(false)
     end,

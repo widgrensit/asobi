@@ -308,15 +308,23 @@ applies when you decide to move.
 
 ## Things asobi does not do
 
-- **No UDP transport.** WebSocket over TCP only. A twitch FPS, fighting game or
-  racer that needs sub-3ms physics should pair asobi with a UDP relay and use
-  asobi for auth, matchmaking, economy, leaderboards and social.
+- **No UDP transport.** WebSocket over TCP only. The cost is the retransmission
+  tail on a lossy path, not the median RTT: TCP will not deliver the next state
+  frame until it has redelivered the lost one. A twitch FPS, fighting game or
+  racer should run the simulation over its own UDP netcode and use asobi for
+  auth, matchmaking, economy, leaderboards and social.
 - **Guest auth is opt-in and off by default.** It exists and it is device-backed
   rather than a throwaway username, but it stays off until the game declares
   `guest_auth` and the operator supplies a pepper of at least 32 bytes.
 - **No server-to-server token introspection route.** See Option A above.
 - **No automatic multi-region.** One container per region, deployed by you.
-- **No client-side prediction or rollback netcode primitives.**
+- **No rollback netcode or lag compensation.** No server-side replay, no hitbox
+  rewind; over TCP (above) asobi is not for twitch shooters. But the server half
+  of *client-side prediction* is a first-class primitive: the client stamps each
+  `world.input` with an increasing `seq`, and the server returns the highest one
+  it has consumed as a `world.ack` on that connection for the client to
+  reconcile against. See
+  [Client-side prediction](websocket-protocol.md#client-side-prediction).
 - **Pre-1.0 API.** Minor breaking changes are possible until 1.0.
 
 ## Do this today

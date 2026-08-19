@@ -40,7 +40,7 @@ register_player(Username, Password, Params) ->
         )
     of
         {ok, Player} ->
-            init_player_stats(maps:get(id, Player)),
+            asobi_player_stats:init(maps:get(id, Player)),
             asobi_auth_tokens:issue(Player, 200, #{username => maps:get(username, Player)});
         {error, #kura_changeset{} = CS} ->
             registration_error(kura_changeset:traverse_errors(CS, fun(_F, M) -> M end))
@@ -91,23 +91,3 @@ logout(#{json := #{~"refresh_token" := RefreshToken}} = Req) when is_binary(Refr
 logout(Req) ->
     ok = asobi_auth_tokens:revoke_access(Req),
     {json, 200, #{}, #{success => true}}.
-
-%% --- Internal ---
-
--spec init_player_stats(binary()) -> ok.
-init_player_stats(PlayerId) ->
-    CS = kura_changeset:cast(asobi_player_stats, #{}, #{player_id => PlayerId}, [player_id]),
-    %% F-25: previously errors were swallowed silently which left players
-    %% registered without a stats row. Log so we notice the regression
-    %% without blocking the registration flow.
-    case asobi_repo:insert(CS) of
-        {ok, _} ->
-            ok;
-        {error, Reason} ->
-            logger:warning(#{
-                msg => ~"player_stats_init_failed",
-                player_id => PlayerId,
-                reason => Reason
-            }),
-            ok
-    end.

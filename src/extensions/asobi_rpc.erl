@@ -53,8 +53,16 @@ and would put object construction in every extension. It is also the dialect
 core's own controllers already speak (`{asobi_error, Code, Details}`), so
 there is one shape to learn rather than two.
 
-`Ctx` is `#{player_id, session, method}` and may gain keys. Match the ones
-you need with `:=`; never match it exhaustively.
+`Ctx` is `#{player_id, session, method, transport}` and may gain keys. Match
+the ones you need with `:=`; never match it exhaustively.
+
+`Ctx.session` is a process, but which process depends on `Ctx.transport`. Over
+`ws` it is the durable player-session pid. Over `http`
+(`POST /api/v1/rpc/<method>`, `m:asobi_rpc_controller`) it is the request
+process, alive only for the one call. A handler that must reach the player
+after it returns checks `transport =:= ws` before touching `session`, and
+otherwise keys on `player_id` through presence (the `module.event` path) -
+never the session pid, which over HTTP is dead the moment the reply is sent.
 
 An extension error surfaces as **its own code**, provided the extension
 declared it in `codes/0`. A handler that raises, returns outside the contract,
@@ -83,11 +91,32 @@ every caller this dispatcher has - another declaration nothing can reach.
 The reachable home for an operator-only extension method is the ops plane,
 which is read-only today by assertion, so opening it is a decision about that
 plane rather than about this manifest.
+
+## Transports
+
+Two transports reach this dispatcher and share `dispatch/2` and `envelope/1`,
+so the reply envelope is byte-identical between them. What they do NOT share is
+everything in front of the dispatcher, and these divergences are frozen:
+
+- **The dispatcher enforces no auth, no rate limit and no size cap.** Each
+  transport enforces its own, separately, before calling in. A `ws` frame is
+  gated by socket auth, a per-connection 60/s message cap and a 64 KiB frame
+  cap; an `http` `POST` is gated by `asobi_auth_plugin` (401), the api rate
+  limiter (300/s per client IP) and the 1 MiB `asobi_body_cap_plugin`. A third
+  transport must supply its own; it must not assume the dispatcher does.
+- **The request-size caps differ and do not converge** - 64 KiB over `ws`,
+  1 MiB over `http`. The accepted request size is a property of the transport;
+  only the reply envelope is shared.
+- **Protocol versioning differs.** The `ws` payload carries a `protocol`
+  field, so a foreign version answers `rpc.unsupported_protocol`. The HTTP
+  controller injects `protocol` server-side and versions through the URL
+  (`/api/v1/...`) instead, so `rpc.unsupported_protocol` cannot fire over
+  `http` by design.
 """.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([handle/3, protocol/0]).
+-export([handle/3, dispatch/2, envelope/1, protocol/0]).
 
 -define(PROTOCOL, 1).
 -define(MAX_CID_BYTES, 64).
@@ -96,7 +125,9 @@ plane rather than about this manifest.
 -type params() :: #{binary() => term()}.
 
 -doc "What a handler is told about its caller. Additive; never match it exhaustively.".
--type ctx() :: #{player_id := binary(), session := pid(), method := binary()}.
+-type ctx() :: #{
+    player_id := binary(), session := pid(), method := binary(), transport := ws | http
+}.
 
 -doc "What a handler returns.".
 -type reply() ::
@@ -104,8 +135,15 @@ plane rather than about this manifest.
     | {error, asobi_error:code()}
     | {error, asobi_error:code(), asobi_error:details()}.
 
--doc "The authenticated player behind the socket, or `unauthenticated`.".
--type caller() :: #{player_id := binary(), session := pid()} | unauthenticated.
+-doc """
+The authenticated player behind the transport, or `unauthenticated`.
+
+`transport` marks which one so a handler can branch on `Ctx.transport`; it is
+optional here and defaults to `ws` in `invoke/5`, so a caller built without it
+stays safe.
+""".
+-type caller() ::
+    #{player_id := binary(), session := pid(), transport => ws | http} | unauthenticated.
 
 -export_type([params/0, ctx/0, reply/0, caller/0]).
 
@@ -124,21 +162,46 @@ rejected - and the outcome to encode.
     {binary() | undefined, {ok, map()} | {error, asobi_error:object()}}.
 handle(Cid, Payload, Caller) ->
     case cid(Cid) of
-        {ok, Valid} -> {Valid, outcome(Payload, Caller)};
+        {ok, Valid} -> {Valid, dispatch(Payload, Caller)};
         error -> {undefined, {error, asobi_error:object(~"rpc.invalid_cid")}}
     end.
 
-%%====================================================================
-%% Internal
-%%====================================================================
+-doc """
+Dispatch one call, without a transport.
 
-outcome(_Payload, unauthenticated) ->
+`handle/3` is this behind the socket's `cid` validation;
+`m:asobi_rpc_controller` is this behind HTTP request parsing. Both hand the
+same `#{"protocol", "method", "params"}` payload and the same `caller()`, and
+both encode the outcome through `envelope/1`, so a given call answers
+byte-identically on either transport below the transport itself.
+""".
+-spec dispatch(term(), caller()) -> {ok, map()} | {error, asobi_error:object()}.
+dispatch(_Payload, unauthenticated) ->
     {error, asobi_error:object(~"unauthenticated")};
-outcome(Payload, Caller) ->
+dispatch(Payload, Caller) ->
     case asobi_readiness:guard() of
         ok -> ready(Payload, Caller);
         {error, Object} -> {error, Object}
     end.
+
+-doc """
+The `rpc.ok` / `rpc.error` wire payload for a dispatch outcome.
+
+The single source of truth for the pair, shared by the socket encoder
+(`asobi_ws_handler:encode_rpc/2`) and the HTTP controller so a frozen payload
+cannot drift between them: `{ok, Result}` becomes
+`{~"rpc.ok", #{~"result" => Result}}`, and `{error, Object}` becomes
+`{~"rpc.error", Object}` - the error object alone, never wrapped again.
+""".
+-spec envelope({ok, map()} | {error, asobi_error:object()}) -> {binary(), map()}.
+envelope({ok, Result}) ->
+    {~"rpc.ok", #{~"result" => Result}};
+envelope({error, Object}) ->
+    {~"rpc.error", Object}.
+
+%%====================================================================
+%% Internal
+%%====================================================================
 
 ready(Payload, _Caller) when not is_map(Payload) ->
     {error, asobi_error:object(~"invalid_payload")};
@@ -157,12 +220,28 @@ versioned(Payload, Caller) ->
         {false, _} -> {error, asobi_error:object(~"rpc.unknown_method")}
     end.
 
+%% Built-ins are checked FIRST and the `asobi.` prefix is reserved for them, so
+%% an extension cannot shadow a core method by declaring the same name. The
+%% datagram mint lives here rather than on a new frame type because `rpc.call`
+%% is already frozen and already implemented in every SDK, so the whole datagram
+%% plane adds zero frames to the JSON wire (ADR 0012, decision 5).
 lookup(Method, Params, Caller) ->
-    case maps:find(Method, asobi_extensions:rpc_methods()) of
-        {ok, {Module, Function, 2}} -> invoke(Module, Function, Method, Params, Caller);
-        {ok, Target} -> bad_arity(Method, Target);
-        error -> {error, asobi_error:object(~"rpc.unknown_method")}
+    case builtins() of
+        #{Method := {Module, Function}} ->
+            invoke(Module, Function, Method, Params, Caller);
+        _ ->
+            case maps:find(Method, asobi_extensions:rpc_methods()) of
+                {ok, {Module, Function, 2}} -> invoke(Module, Function, Method, Params, Caller);
+                {ok, Target} -> bad_arity(Method, Target);
+                error -> {error, asobi_error:object(~"rpc.unknown_method")}
+            end
     end.
+
+builtins() ->
+    #{
+        ~"asobi.datagram.open" => {asobi_dgram_rpc, open},
+        ~"asobi.datagram.close" => {asobi_dgram_rpc, close}
+    }.
 
 %% Backstop. `asobi_extensions` refuses a non-2 arity at `rebar3 asobi check`
 %% and again at boot, so reaching this means a manifest got past both gates;
@@ -176,8 +255,13 @@ bad_arity(Method, Target) ->
     }),
     {error, asobi_error:object(~"internal")}.
 
-invoke(Module, Function, Method, Params, #{player_id := PlayerId, session := Session}) ->
-    Ctx = #{player_id => PlayerId, session => Session, method => Method},
+invoke(Module, Function, Method, Params, #{player_id := PlayerId, session := Session} = Caller) ->
+    Ctx = #{
+        player_id => PlayerId,
+        session => Session,
+        method => Method,
+        transport => maps:get(transport, Caller, ws)
+    },
     try Module:Function(Params, Ctx) of
         Reply -> reply(Reply, Method)
     catch
@@ -218,7 +302,7 @@ reply(Other, Method) ->
 failure(Code, Details, Method) ->
     case asobi_error:defined(Code) of
         true ->
-            {error, asobi_error:object(Code, Details)};
+            encodable_error(asobi_error:object(Code, Details), Method);
         false ->
             ?LOG_ERROR(#{event => undefined_error_code, code => Code, method => Method}),
             {error, asobi_error:object(~"internal")}
@@ -236,6 +320,28 @@ encodable(Result, Method) ->
         Class:Reason ->
             ?LOG_ERROR(#{
                 event => rpc_result_not_encodable,
+                method => Method,
+                class => Class,
+                reason => Reason
+            }),
+            {error, asobi_error:object(~"internal")}
+    end.
+
+%% Symmetric with encodable/2 on the ok path: a handler's `Details` is a runtime
+%% term and may hold a pid, ref or tuple that no reply encoder can serialise.
+%% Both transports encode this object, so an unencodable one would raise in the
+%% encoder - uncaught on the socket, uncaught in the controller. Encoding it
+%% here, where the method is known, degrades that to `internal` rather than a
+%% crash. `params` is always JSON-decoded, so this is an author footgun, not an
+%% attacker one.
+encodable_error(Object, Method) ->
+    try
+        _ = json:encode(Object),
+        {error, Object}
+    catch
+        Class:Reason ->
+            ?LOG_ERROR(#{
+                event => rpc_error_not_encodable,
                 method => Method,
                 class => Class,
                 reason => Reason

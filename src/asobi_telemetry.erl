@@ -23,7 +23,9 @@
     join_rate_limited/1,
     rehome_rate_limited/1,
     ws_idle_auth_timeout/0,
-    ws_origin_rejected/0
+    ws_origin_rejected/0,
+    ws_legacy_input_unwrap/0,
+    binary_wire_refused/1
 ]).
 -export([anticheat_violation/3]).
 -export([game_error/1, game_error/2]).
@@ -52,6 +54,9 @@ to `telemetry:execute/3` in this module, so the two cannot drift again.
 """.
 -spec events() -> [telemetry:event_name()].
 events() ->
+    %% The datagram plane's events are defined in the gateway application, which
+    %% is a release of its own and cannot call into this one. Folded in here so
+    %% an operator still has a single list to attach to.
     [
         [asobi, match, started],
         [asobi, match, finished],
@@ -77,9 +82,11 @@ events() ->
         [asobi, ws, disconnected],
         [asobi, ws, message_in],
         [asobi, ws, message_out],
+        [asobi, wire, binary_refused],
         [asobi, ws, connect_rate_limited],
         [asobi, ws, idle_auth_timeout],
         [asobi, ws, origin_rejected],
+        [asobi, ws, legacy_input_unwrap],
         [asobi, join, rate_limited],
         [asobi, rehome, rate_limited],
         [asobi, anticheat, violation],
@@ -93,7 +100,7 @@ events() ->
         [asobi, auth_cache, hit],
         [asobi, auth_cache, miss],
         [asobi, auth_cache, sweep]
-    ].
+    ] ++ asobi_dgram_telemetry:events().
 
 -spec setup() -> ok.
 setup() ->
@@ -301,6 +308,24 @@ join_rate_limited(PlayerId) ->
         [asobi, join, rate_limited], #{count => 1}, #{player_id => PlayerId}
     ).
 
+-doc """
+A `world.tick` the binary encoder refused, sent as text instead.
+
+Not a correctness failure on its own - a client that negotiated binary still
+handles text - but a sustained rate is one: an entity introduced by a text frame
+carries no slot, so it stays unbound on every binary client and its pose
+datagrams are dropped there (asobi#510). `reason` is `dict_too_large` for a frame
+past the 32 field names the dictionary can index, `unencodable_field` for a list
+or map where the wire carries scalars, `bad_field_name` and `bad_entity_id` for a
+name or id that is not text or is past 255 bytes, `ambiguous_field_name` for two
+names that collide once atoms are rendered as text, `value_too_large` for a string
+past 65535 bytes, and `no_slot` for a slot map that has drifted from the
+baseline.
+""".
+-spec binary_wire_refused(atom()) -> ok.
+binary_wire_refused(Reason) ->
+    telemetry:execute([asobi, wire, binary_refused], #{count => 1}, #{reason => Reason}).
+
 -spec ws_connect_rate_limited(binary()) -> ok.
 ws_connect_rate_limited(PeerIp) ->
     telemetry:execute(
@@ -329,6 +354,13 @@ ws_idle_auth_timeout() ->
 -spec ws_origin_rejected() -> ok.
 ws_origin_rejected() ->
     telemetry:execute([asobi, ws, origin_rejected], #{count => 1}, #{}).
+
+%% asobi#478: a client sent input wrapped as a sole `data` key, the deprecated
+%% compat shape. Counted so the carve-out's removal can be scheduled against real
+%% traffic instead of guesswork.
+-spec ws_legacy_input_unwrap() -> ok.
+ws_legacy_input_unwrap() ->
+    telemetry:execute([asobi, ws, legacy_input_unwrap], #{count => 1}, #{}).
 
 -spec anticheat_violation(binary(), atom(), map()) -> ok.
 anticheat_violation(PlayerId, Type, Details) ->

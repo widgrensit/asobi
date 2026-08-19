@@ -9,6 +9,8 @@
 -spec define(map(), asobi_ops_extension:ctx()) -> asobi_rpc:reply().
 define(#{~"key" := ~"taken"}, _Ctx) ->
     {error, ~"quests.not_found"};
+define(#{~"key" := ~"conflict"}, _Ctx) ->
+    {error, ~"quests.already_claimed", #{~"existing" => ~"daily"}};
 define(Params, #{actor := #{id := ActorId}} = Ctx) ->
     record({define, Params, Ctx}),
     {ok, #{~"defined" => maps:get(~"key", Params, ~""), ~"by" => ActorId}}.

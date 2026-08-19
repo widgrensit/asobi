@@ -28,6 +28,7 @@ transient matches use `asobi_match_server` instead.
 -export([spawn_at/3, spawn_at/4]).
 -export([zone_created/3]).
 -export([reconnect/2]).
+-export([resync/3]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
 -export([whereis/1]).
 -export([pos_to_zone/3]).
@@ -57,6 +58,29 @@ transient matches use `asobi_match_server` instead.
 -spec start_link(map()) -> gen_statem:start_ret().
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
+
+-doc """
+Ask one zone of this world to re-send `PlayerId` a keyframe.
+
+The server half of `world.resync`. Deliberately ONE zone per request, named by
+its coords, rather than the player's whole interest ring: the ring is
+`(2*view_radius+1)^2` zones, nine at the default `view_radius` of 1, so a ring
+resync turns a ~120-byte request into nine keyframes and the amplification ratio
+goes with it. It is also the wrong shape on the merits, because `frame_seq` is
+per zone and a client that detects a gap knows exactly which zone gapped.
+
+Resolves through `asobi_zone_manager:get_zone/2`, which does NOT create a zone
+that is not loaded. A client must never be able to spin up world state by asking
+for it.
+
+Authorisation is the zone's own subscriber map, checked in `asobi_zone`, not an
+interest lookup here: the subscriber map is the ground truth for "did this
+client ever receive frames from this zone", which is exactly the question a
+repair request asks.
+""".
+-spec resync(pid(), binary(), {integer(), integer()}) -> ok.
+resync(Pid, PlayerId, Coords) ->
+    gen_statem:cast(Pid, {resync, PlayerId, Coords}).
 
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
@@ -285,6 +309,10 @@ loading({call, _From}, {join, _PlayerId}, _State) ->
     %% Postpone join until we transition to running. Otherwise the call
     %% would crash with function_clause and the caller would time out.
     {keep_state_and_data, [postpone]};
+%% asobi#466: any other call during loading must reply, not function_clause -
+%% an unanswered {call, From} crashes the world and hangs the caller's call.
+loading({call, From}, _Request, _State) ->
+    {keep_state_and_data, [{reply, From, {error, world_not_ready}}]};
 %% A zone's post-tick crossing check (asobi_zone:resolve_zone_crossings/1)
 %% can fire on a pre-warmed zone recovered from a snapshot before the world
 %% has finished loading. Without this, that cast is a function_clause and
@@ -326,6 +354,25 @@ running(cast, {move_player, PlayerId, NewPos, Entity}, State) ->
     handle_move(PlayerId, NewPos, Entity, State);
 running(cast, {zone_created, Coords, ZonePid}, #{player_zones := PlayerZones}) ->
     backfill_zone_subscribers(Coords, ZonePid, undefined, PlayerZones),
+    keep_state_and_data;
+%% Guards narrow both cast arguments rather than trusting the sender. The ws
+%% handler validates the frame before it gets here, so this is defence in depth,
+%% and it is also what lets the call sites below be typed: a gen_statem cast
+%% payload is `term()`, and `is_pid` on the manager is the honest narrowing that
+%% `=/= undefined` only looks like.
+running(cast, {resync, PlayerId, {ZX, ZY} = Coords}, #{zone_manager_pid := ZMPid}) when
+    is_binary(PlayerId), is_integer(ZX), is_integer(ZY), is_pid(ZMPid)
+->
+    %% get_zone, never ensure_zone: a resync request must not be able to load a
+    %% zone. An unloaded zone has nothing to repair, so the request is dropped.
+    case asobi_zone_manager:get_zone(ZMPid, Coords) of
+        {ok, ZonePid} -> asobi_zone:resync(ZonePid, PlayerId);
+        _ -> ok
+    end,
+    keep_state_and_data;
+%% A resync before the zone manager is up, or with a payload that did not survive
+%% the guards, is dropped. There is nothing to repair and nothing to answer.
+running(cast, {resync, _PlayerId, _Coords}, _State) ->
     keep_state_and_data;
 running(
     cast,
@@ -372,10 +419,24 @@ running({call, From}, {get_info, listing}, State) ->
     {keep_state_and_data, [{reply, From, world_info(running, State, false)}]};
 running({call, From}, {start_vote, VoteConfig}, State) ->
     handle_start_vote(From, VoteConfig, State);
-running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) ->
+running({call, From}, {cast_vote, PlayerId, VoteId, OptionId}, State) when
+    is_binary(PlayerId), (is_binary(OptionId) orelse is_list(OptionId))
+->
     handle_cast_vote(From, PlayerId, VoteId, OptionId, State);
-running({call, From}, {use_veto, PlayerId, VoteId}, State) ->
+%% asobi#462: this path was guard-free and forwarded an unvalidated option
+%% straight to asobi_vote_server. A valid option_id is a binary
+%% (plurality/weighted) or a list of binaries (approval/ranked - see
+%% asobi_vote_server:validate_option/2); anything else (a JSON number, bool,
+%% null or object) hits this fallback and degrades to the invalid_option
+%% asobi_vote_server already reports for a bad option, never forwarding the
+%% junk. A list that carries a non-binary passes the guard and is rejected
+%% downstream by validate_option, also as invalid_option, with no crash.
+running({call, From}, {cast_vote, _PlayerId, _VoteId, _OptionId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, invalid_option}}]};
+running({call, From}, {use_veto, PlayerId, VoteId}, State) when is_binary(PlayerId) ->
     handle_use_veto(From, PlayerId, VoteId, State);
+running({call, From}, {use_veto, _PlayerId, _VoteId}, _State) ->
+    {keep_state_and_data, [{reply, From, {error, invalid_option}}]};
 running(
     cast,
     {spawn_at, TemplateId, {X, Y} = Pos, Overrides},
@@ -545,6 +606,16 @@ finished({call, From}, get_info, State) ->
     {keep_state_and_data, [{reply, From, world_info(finished, State)}]};
 finished({call, From}, {get_info, listing}, State) ->
     {keep_state_and_data, [{reply, From, world_info(finished, State, false)}]};
+%% asobi#469: any other call reaching a finished world during its 5s cleanup
+%% window (a late vote.cast/vote.veto while the session still holds world_pid,
+%% or any call added later) must reply - an unanswered {call, From} hangs the
+%% caller (asobi_ws_handler, an infinity gen_statem:call) until this server
+%% stops at its cleanup timeout. Replying not_in_match returns immediately with
+%% the same registered 409 the dead/finished-fabric path in vote_call/1 uses,
+%% so "the world is over" is one code a client can branch on. Only non-call
+%% events reach the swallow catch-all below now.
+finished({call, From}, _Request, _State) ->
+    {keep_state_and_data, [{reply, From, {error, not_in_match}}]};
 finished(_EventType, _Event, _State) ->
     keep_state_and_data.
 
@@ -583,6 +654,10 @@ configure_zone_manager(
         spawn_templates => Templates,
         persistence => Persistence,
         snapshot_interval => maps:get(snapshot_interval, Config, 600),
+        %% Default 3, so at the 50ms tick_rate deltas go out every 150ms even
+        %% though the sim runs at tick_rate; a mode sets `broadcast_interval` to
+        %% 1 for a delta every tick (tightest correction latency for prediction).
+        broadcast_interval => maps:get(broadcast_interval, Config, 3),
         zone_manager_pid => ZoneManagerPid,
         terrain_store_pid => TerrainStorePid,
         %% So a zone can decide crossings with the same clamped math - see

@@ -1,0 +1,18 @@
+{application, asobi_dgram_gw, [
+    {description, "asobi datagram gateway: the internet-facing UDP role"},
+    {vsn, git},
+    {registered, []},
+    {mod, {asobi_dgram_gw_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        telemetry,
+        %% The rate limiter in front of the receive loop. The one dependency the
+        %% gateway carries beyond OTP and telemetry, and it holds no credentials.
+        seki
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/widgrensit/asobi"}]}
+]}.

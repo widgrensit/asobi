@@ -25,32 +25,58 @@ A waiting match is the cheaper shape, but the row above that decides it is
 A match starts in the `waiting` state and transitions to `running` when
 `min_players` is reached. That waiting period is the lobby.
 
-**No client-facing call brings a waiting match into existence.**
-`asobi_match_sup:start_match/1` is the only thing that creates a match, and its
-only caller in the release is the matchmaker - which spawns a match with
-`min_players` already equal to the group it just formed, so the waiting state
-lasts as long as the join fan-out and no longer. There is no `match.create`
-frame and no `POST /api/v1/matches`.
+**`match.find_or_create` is the client-facing route into a live match.** Send a
+mode; the server returns the first listed match of that mode with room that is
+still accepting players, and spawns one if there is none. The reply is
+`match.joined`, the same frame `match.join` answers with.
 
-So the waiting-match lobby is an **Erlang-only** route: it needs a module in
-your release that calls `asobi_match_sup:start_match/1` with a `min_players`
-higher than the number of players it seeds, and `listed => true` so clients can
-find it.
-
-```erlang
-{ok, Pid} = asobi_match_sup:start_match(#{
-    mode         => ~"arena",
-    game_module  => my_arena,
-    game_config  => #{},
-    min_players  => 4,
-    max_players  => 4,
-    listed       => true
-}).
+```json
+{"type": "match.find_or_create", "cid": "1", "payload": {"mode": "arena"}}
 ```
 
-**If you are writing Lua, use a world instead.** A world is the only session a
-client can create, so it is the only lobby a Lua-only game can build. Skip to
-[Persistent world as a hub](#persistent-world-as-a-hub).
+Opt in with `quick_play = true`. It defaults to `false` for match modes, so a
+ranked mode the matchmaker owns is refused with `quick_play_disabled` until you
+say otherwise - and a mode written before this frame existed is safe on upgrade
+without touching it.
+
+`quick_play` and `listed` are independent: `listed` decides whether a match
+appears in `match.list`, `quick_play` decides whether a player may be dropped
+into an existing one. Hidden but auto-filled is a legitimate combination.
+
+Prefer it over `match.list` then `match.join`. Browsing and then joining is two
+round trips with a race in the middle: two clients that both read an empty list
+both create, and you get two half-empty matches that may each fail to reach
+`min_players`. `find_or_create` resolves server-side, serialized, so
+simultaneous callers land in the same match.
+
+There is still no bare `match.create`, and no `POST /api/v1/matches`. Creating a
+match without reusing one is what the matchmaker is for.
+
+But the waiting state is reachable from mode config. Declare a `min_players`
+higher than `match_size` and the matchmaker spawns on the group it formed while
+the match sits in `waiting` until backfill brings it up to the threshold:
+
+```lua
+match_size  = 2   -- the matchmaker forms and spawns on two
+min_players = 4   -- the loop does not start until four are in
+max_players = 8
+quick_play  = true   -- so match.find_or_create can bring the other two in
+listed      = true   -- so match.list can find it too
+```
+
+It gives up at `?WAITING_TIMEOUT` (60s) if the fourth never arrives.
+
+Before asobi v0.85.0 the matchmaker overwrote `min_players` with `match_size`,
+so declaring it was silently ignored and a waiting lobby needed an Erlang module
+in your release calling `asobi_match_sup:start_match/1`. That function still
+exists for an operator shipping their own module, but nothing about a lobby
+needs it any more.
+
+**A match is a client-creatable session too.** That was not true before
+`match.find_or_create`, and this page used to send Lua readers to a world for
+that reason. A world is still the better hub when you want somewhere persistent
+that survives empty - see [Persistent world as a hub](#persistent-world-as-a-hub)
+- but it is a choice now, not the only option.
 
 ### Letting players find it
 
@@ -140,8 +166,8 @@ Worlds are subject to `world_max_per_player` (5) and `world_max` (1000) - see
 
 ### Private lobbies
 
-Because only a world can be created by a client, a code-gated private lobby is a
-world too. Share a code out of band and check it on the way in. The join context
+A code-gated private lobby can be a match as well as a world: `match.find_or_create`
+forwards the join context, so a `join` callback can refuse on a bad code. Share a code out of band and check it on the way in. The join context
 is whatever the client put in the join payload; asobi never reads it.
 
 ```lua

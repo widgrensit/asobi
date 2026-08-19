@@ -44,7 +44,8 @@ surfaces with Nova's crash context rather than a legible asobi error.
 -include_lib("kernel/include/logger.hrl").
 
 -export([resolve/0, check/0, validate/1, describe/1, sup_specs/1, error_codes/0]).
--export([rpc_methods/0, lua_bindings/0, ops_action/2]).
+-export([rpc_methods/0, lua_bindings/0, ops_action/2, is_webhook_path/1]).
+-export([emit/4]).
 -ifdef(TEST).
 -export([reset/0]).
 -endif.
@@ -54,6 +55,12 @@ surfaces with Nova's crash context rather than a legible asobi error.
 -define(RPC_KEY, {?MODULE, rpc_methods}).
 -define(LUA_KEY, {?MODULE, lua_bindings}).
 -define(OPS_KEY, {?MODULE, ops_actions}).
+-define(WEBHOOK_KEY, {?MODULE, webhook_paths}).
+-define(MAX_EVENT_NAME_BYTES, 64).
+%% A `module.event` payload cap sized to the WS frame limit
+%% (asobi_ws_handler's ?WS_MAX_PAYLOAD_BYTES) so emit/4 refuses at the trust
+%% boundary what the socket would otherwise reject after the encode.
+-define(MAX_EVENT_DATA_BYTES, 65536).
 
 -doc "One resolved extension. `sup/0` is deliberately absent; see `sup_specs/1`.".
 -type extension() :: #{
@@ -61,11 +68,13 @@ surfaces with Nova's crash context rather than a legible asobi error.
     module := module(),
     name := asobi_extension:name(),
     extension_version := pos_integer(),
+    requires := [asobi_extension:name()],
     rpc := asobi_extension:rpc(),
     ops := asobi_extension:ops(),
     lua := asobi_extension:lua(),
     owns := asobi_extension:owns(),
-    codes := asobi_extension:codes()
+    codes := asobi_extension:codes(),
+    routes := [asobi_extension:route()]
 }.
 
 -type problem() ::
@@ -73,7 +82,13 @@ surfaces with Nova's crash context rather than a legible asobi error.
     | {duplicate_name, asobi_extension:name(), atom(), atom()}
     | {namespace_conflict, asobi_extension_reserved:kind(), asobi_extension:token(), atom(), atom()}
     | {reserved_namespace, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}
-    | {undeclared_claim, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}.
+    | {undeclared_claim, asobi_extension_reserved:kind(), asobi_extension:token(), atom()}
+    | {route_conflict, {asobi_extension:token(), atom()}, {asobi_extension:token(), atom()}}
+    | {reserved_route, asobi_extension:token(), asobi_extension:token(), atom()}
+    | {reserved_prefix, asobi_extension:token(), asobi_extension:token(), atom()}
+    | {unsatisfied_requirement, atom(), asobi_extension:name()}
+    | {requirement_out_of_order, atom(), asobi_extension:name()}
+    | {self_requirement, atom(), asobi_extension:name()}.
 
 -doc "One `lua/0` binding with the namespace and function name it was declared under.".
 -type binding() :: #{
@@ -103,6 +118,7 @@ resolve() ->
             persistent_term:put(?RPC_KEY, rpc_table(Extensions)),
             persistent_term:put(?LUA_KEY, lua_table(Extensions)),
             persistent_term:put(?OPS_KEY, ops_table(Extensions)),
+            persistent_term:put(?WEBHOOK_KEY, webhook_table(Extensions)),
             persistent_term:put(?KEY, Extensions),
             Extensions;
         Extensions ->
@@ -161,6 +177,137 @@ because they are one outcome: nothing to route to, and nothing to authorise.
 ops_action(Extension, Action) ->
     maps:get({Extension, Action}, persistent_term:get(?OPS_KEY, #{}), undefined).
 
+-doc """
+Whether a request path (as normalised segments, `trim_all`) is served by a
+mounted `security => webhook` route.
+
+Read by `m:asobi_rate_limit_plugin` to pick the webhook bucket, so like
+`rpc_methods/0` it reads the memoised table and never triggers discovery.
+Before `resolve/0` has run there are no webhook routes and no traffic.
+""".
+-spec is_webhook_path([binary()]) -> boolean().
+is_webhook_path(Segments) ->
+    case persistent_term:get(?WEBHOOK_KEY, []) of
+        Patterns when is_list(Patterns) ->
+            lists:any(fun(Pattern) -> pattern_matches(Pattern, Segments) end, Patterns);
+        _ ->
+            false
+    end.
+
+pattern_matches([], []) ->
+    true;
+pattern_matches([Pattern | PatternRest], [Segment | SegmentRest]) ->
+    (Pattern =:= Segment orelse is_binding_segment(Pattern)) andalso
+        pattern_matches(PatternRest, SegmentRest);
+pattern_matches(_Pattern, _Segments) ->
+    false.
+
+-doc """
+Push a named event to a player from an extension's own Erlang code.
+
+`Event` is `<domain>.<name>`: each half is `[A-Za-z0-9_-]` (the exact charset
+`asobi_ws_handler:is_event_name_char/1` allows, so an event name and a
+game.broadcast name are validated one way), a single dot separates them, and
+the whole is at most 64 bytes. `domain` must be an RPC prefix `Extension` owns -
+derived exactly as an error code's domain is (see `m:asobi_extension`). `Data`
+is always a JSON object; a non-map is a caller bug and fails the guard.
+
+The ownership check is namespace hygiene, not an authorization boundary: it
+stops an extension minting events in a namespace it does not own, the same
+anti-collision rule its error codes obey. Any first-party extension could call
+`asobi_presence:send/2` directly, so nothing downstream should treat a
+successful `emit/4` as proof of a privilege.
+
+On success the event reaches the player's live sessions as a `module.event`
+wire frame (`m:asobi_ws_handler`). This is an Erlang-only seam: only an
+extension's own code calls it, and it has no Lua binding.
+
+Returns `{error, asobi_error:object()}`, never a crash, for: an event name
+outside the charset/shape or over 64 bytes (`event.invalid_name`); a domain
+`Extension` does not own (`event.unowned_domain`); `Data` that is not
+JSON-encodable (`event.invalid_data`); or encoded `Data` at or over 64 KiB
+(`event.payload_too_large`). Validating encodability here - one extra encode off
+the per-tick hot path - is what keeps a bad term from reaching the socket and
+dropping every one of the player's sessions.
+""".
+-spec emit(atom(), binary(), binary(), map()) -> ok | {error, asobi_error:object()}.
+emit(Extension, PlayerId, Event, Data) when is_atom(Extension), is_binary(Event), is_map(Data) ->
+    case emit_problem(Extension, Event, Data) of
+        ok ->
+            asobi_presence:send(PlayerId, {extension_event, Extension, Event, Data}),
+            ok;
+        {error, _Object} = Error ->
+            Error
+    end.
+
+%% Each error code is a literal at its `asobi_error:object/2` call site: the
+%% shared-object contract test (`asobi_error_contract_tests`) refuses a code
+%% built from a variable, which is what stops a script- or client-supplied
+%% string ever becoming a code. Only the details map is factored out.
+emit_problem(Extension, Event, Data) ->
+    case event_domain(Event) of
+        {ok, Domain} ->
+            case emitter_owns_rpc_prefix(Extension, Domain) of
+                true ->
+                    data_problem(Data, Extension, Event);
+                false ->
+                    {error, asobi_error:object(~"event.unowned_domain", details(Extension, Event))}
+            end;
+        error ->
+            {error, asobi_error:object(~"event.invalid_name", details(Extension, Event))}
+    end.
+
+%% Prove Data encodable and within the frame cap here, at the trust boundary, so
+%% the author gets a synchronous error rather than a silent degrade on someone
+%% else's socket. The ws clause re-encodes the wrapper, so this encode is spent
+%% on validation alone - acceptable off the per-tick path for a frozen wire.
+data_problem(Data, Extension, Event) ->
+    try json:encode(Data) of
+        Encoded ->
+            case iolist_size(Encoded) >= ?MAX_EVENT_DATA_BYTES of
+                true ->
+                    {error,
+                        asobi_error:object(~"event.payload_too_large", details(Extension, Event))};
+                false ->
+                    ok
+            end
+    catch
+        _:_ -> {error, asobi_error:object(~"event.invalid_data", details(Extension, Event))}
+    end.
+
+details(Extension, Event) ->
+    #{module => atom_to_binary(Extension, utf8), event => Event}.
+
+%% `<domain>.<name>`, each half in the same charset the ws handler holds a
+%% game.broadcast name to (`asobi_ws_handler:is_event_name_char/1`), one dot,
+%% at most 64 bytes. The charset excludes `.`, so an all-charset domain and name
+%% also guarantee exactly one separator and reject non-ASCII / invalid-UTF-8
+%% bytes that would otherwise crash json:encode/1 in every subscriber's socket.
+event_domain(Event) ->
+    case is_dotted(Event) andalso byte_size(Event) =< ?MAX_EVENT_NAME_BYTES of
+        true ->
+            case binary:split(Event, ~".") of
+                [Domain, Name] ->
+                    case charset(Domain) andalso charset(Name) of
+                        true -> {ok, Domain};
+                        false -> error
+                    end;
+                _ ->
+                    error
+            end;
+        false ->
+            error
+    end.
+
+charset(Bin) ->
+    lists:all(fun asobi_ws_handler:is_event_name_char/1, binary_to_list(Bin)).
+
+emitter_owns_rpc_prefix(Extension, Domain) ->
+    case lists:search(fun(#{name := Name}) -> Name =:= Extension end, resolve()) of
+        {value, Resolved} -> lists:member(Domain, claims(Resolved, rpc));
+        false -> false
+    end.
+
 %% The codes term is written before the resolved term, so a concurrent second
 %% caller that sees ?KEY populated also sees the codes it implies.
 error_code_table(Extensions) ->
@@ -187,6 +334,15 @@ lua_table(Extensions) ->
         Function := Binding <- Functions
     ].
 
+%% Pre-split with trim_all, the same normalisation the limiter applies to a
+%% request path, so the two can never disagree about slash variants.
+webhook_table(Extensions) ->
+    [
+        binary:split(Path, ~"/", [global, trim_all])
+     || #{routes := Routes} <- Extensions,
+        #{security := webhook, path := Path} <- Routes
+    ].
+
 %% Two concurrent first callers both compute and both write. The computation
 %% is a pure function of the loaded application set, so they write the same
 %% term and the race has no observable effect.
@@ -206,7 +362,13 @@ resolve_now() ->
 Discover, read and validate without memoising.
 
 The build-time gate (`rebar3 asobi check`) and the boot backstop run exactly
-this, so the two can never disagree.
+this, so the two can never disagree on anything derived from the loaded
+application set. The one env-dependent input is the co-mounted `http` reserved
+set, which reads `nova_apps`: the `m:rebar3_asobi_check` plugin sets it from
+the host's release sys_config before calling this, so the gate matches boot,
+and falls back to reserving nothing extra only when that config cannot be
+read - in which case boot, which does load sys.config, remains the backstop
+that refuses.
 """.
 -spec check() -> {ok, [extension()]} | {error, [problem(), ...]}.
 check() ->
@@ -243,6 +405,7 @@ reset() ->
     _ = persistent_term:erase(?CODES_KEY),
     _ = persistent_term:erase(?RPC_KEY),
     _ = persistent_term:erase(?LUA_KEY),
+    _ = persistent_term:erase(?WEBHOOK_KEY),
     ok.
 -endif.
 
@@ -332,11 +495,13 @@ read_one(App, Module) ->
 read_manifest(App, Module) ->
     Reads = [
         {info, call(Module, info, undefined)},
+        {requires, call(Module, requires, [])},
         {rpc, call(Module, rpc, #{})},
         {lua, call(Module, lua, #{})},
         {owns, call(Module, owns, #{})},
         {codes, call(Module, codes, #{})},
         {ops, call(Module, ops, #{})},
+        {routes, call(Module, routes, [])},
         {sup, call(Module, sup, [])}
     ],
     case [{Key, Detail} || {Key, {error, Detail}} <- Reads] of
@@ -362,14 +527,16 @@ call(Module, Function, Default) ->
 build(App, Module, Values) ->
     #{
         info := Info,
+        requires := Requires,
         rpc := Rpc,
         lua := Lua,
         owns := Owns,
         codes := Codes,
         ops := Ops,
+        routes := Routes,
         sup := Sup
     } = Values,
-    case shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Sup) of
+    case shape_problems(Info, Requires, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) of
         [] ->
             #{name := Name, extension_version := Version} = Info,
             {ok, #{
@@ -377,23 +544,27 @@ build(App, Module, Values) ->
                 module => Module,
                 name => Name,
                 extension_version => Version,
+                requires => Requires,
                 rpc => Rpc,
                 lua => Lua,
                 owns => Owns,
                 codes => Codes,
-                ops => Ops
+                ops => Ops,
+                routes => Routes
             }};
         Details ->
             {error, [{bad_manifest, App, Module, Detail} || Detail <- Details]}
     end.
 
-shape_problems(Info, Rpc, Lua, Owns, Codes, Ops, Sup) ->
+shape_problems(Info, Requires, Rpc, Lua, Owns, Codes, Ops, Routes, Sup) ->
     info_problems(Info) ++
+        requires_problems(Requires) ++
         rpc_problems(Rpc) ++
         lua_problems(Lua) ++
         owns_problems(Owns) ++
         codes_problems(Codes) ++
         ops_problems(Ops) ++
+        routes_problems(Routes) ++
         sup_problems(Sup).
 
 info_problems(#{name := Name, extension_version := Version}) when
@@ -413,6 +584,14 @@ name_problems(Name) ->
         match -> [];
         nomatch -> [{info, ~"name must match ^[a-z][a-z0-9_]*$", Name}]
     end.
+
+%% Shape only. Whether each name resolves to something installed, and orders
+%% before the requirer, is a cross-set question `validate/1` answers - the
+%% same split rpc/lua/http claims make between their own shape and collision.
+requires_problems(Requires) when is_list(Requires) ->
+    [{requires, ~"must be a list of atoms", Name} || Name <- Requires, not is_atom(Name)];
+requires_problems(Requires) ->
+    [{requires, ~"must be a list of atoms", Requires}].
 
 rpc_problems(Rpc) when is_map(Rpc) ->
     [
@@ -435,7 +614,13 @@ ops_problems(Ops) when is_map(Ops) ->
     [
         {ops, ~"action must map to #{method, mfa => {Module, Function, 2}, class}", Action}
      || Action := Entry <- Ops, not is_ops_entry(Action, Entry)
-    ];
+    ] ++
+        [
+            {ops, ~"mfa does not name an exported function", Action}
+         || Action := #{mfa := {M, F, 2}} = Entry <- Ops,
+            is_ops_entry(Action, Entry),
+            not is_exported_handler(M, F, 2)
+        ];
 ops_problems(Ops) ->
     [{ops, ~"must be a map", Ops}].
 
@@ -456,6 +641,147 @@ is_segment(Action) when is_binary(Action), Action =/= ~"" ->
     binary:match(Action, [~"/", ~".", ~"?", ~"#", ~"%"]) =:= nomatch;
 is_segment(_Action) ->
     false.
+
+%% Cross-entry checks only run over a well-formed list: an entry that failed
+%% its own shape has nothing meaningful to compare against.
+routes_problems(Routes) when is_list(Routes) ->
+    case [Entry || Entry <- Routes, not is_route_entry(Entry)] of
+        [] -> route_handler_problems(Routes) ++ route_set_problems(Routes);
+        Malformed -> [{routes, route_problem(Entry), route_offender(Entry)} || Entry <- Malformed]
+    end;
+routes_problems(Routes) ->
+    [{routes, ~"must be a list of route entries", Routes}].
+
+%% Arity 1, not the seams' usual 2: a route handler is a Nova controller and
+%% is applied as `Module:Function(Req)` by nova_handler, never by core.
+is_route_entry(#{path := Path, method := Method, mfa := {M, F, 1}, security := Security}) when
+    is_atom(M), is_atom(F)
+->
+    is_route_path(Path) andalso
+        lists:member(Method, [get, post, put, delete]) andalso
+        lists:member(Security, [player, webhook]);
+is_route_entry(_Entry) ->
+    false.
+
+is_route_path(<<"/", Rest/binary>>) when Rest =/= ~"" ->
+    lists:all(fun is_route_segment/1, binary:split(Rest, ~"/", [global]));
+is_route_path(_Path) ->
+    false.
+
+%% dollar_endonly on both: a bare `$` also matches before a final newline, so
+%% without it `:id\n` is a valid binding. Literals are RFC 3986 unreserved
+%% minus the dot (routing_tree does no dot-segment normalisation), so a
+%% segment no client can send never mounts.
+is_route_segment(<<":", Name/binary>>) ->
+    re:run(Name, ~"^[a-z][a-z0-9_]*$", [{capture, none}, dollar_endonly]) =:= match;
+is_route_segment(Segment) ->
+    re:run(Segment, ~"^[A-Za-z0-9_~-]+$", [{capture, none}, dollar_endonly]) =:= match.
+
+route_problem(#{path := Path} = Entry) when is_binary(Path) ->
+    case is_route_path(Path) of
+        false ->
+            ~"path must be /-rooted with non-empty literal or :binding segments";
+        true ->
+            route_entry_problem(Entry)
+    end;
+route_problem(_Entry) ->
+    ~"entry must be #{path, method, mfa => {Module, Function, 1}, security => player | webhook}".
+
+route_entry_problem(#{mfa := {M, F, A}}) when is_atom(M), is_atom(F), A =/= 1 ->
+    ~"a route handler is a Nova controller: mfa must be {Module, Function, 1}";
+route_entry_problem(_Entry) ->
+    ~"entry must be #{path, method, mfa => {Module, Function, 1}, security => player | webhook}".
+
+route_offender(#{path := Path}) when is_binary(Path) -> Path;
+route_offender(Entry) -> Entry.
+
+%% A handler that is not exported is a 500 on the first request; refusing it
+%% here makes it a build failure naming the path instead.
+route_handler_problems(Routes) ->
+    [
+        {routes, ~"mfa does not name an exported function", Path}
+     || #{path := Path, mfa := {M, F, 1}} <- Routes,
+        not is_exported_handler(M, F, 1)
+    ].
+
+is_exported_handler(M, F, A) ->
+    code:ensure_loaded(M) =:= {module, M} andalso erlang:function_exported(M, F, A).
+
+%% Within one manifest the same path may carry several methods - core's own
+%% table does - but the same path and method twice would be resolved by
+%% insertion order, two colliding patterns would shadow one another the same
+%% way, and one path under two security classes would route OPTIONS by
+%% declaration order. Refusing all three is what makes order irrelevant.
+route_set_problems(Routes) ->
+    Indexed = lists:enumerate([
+        {Path, Method, Security}
+     || #{path := Path, method := Method, security := Security} <- Routes
+    ]),
+    [
+        {routes, ~"two entries serve the same path and method", PathA}
+     || {I, {PathA, Method, _}} <- Indexed,
+        {J, {PathB, MethodB, _}} <- Indexed,
+        I < J,
+        PathA =:= PathB,
+        Method =:= MethodB
+    ] ++
+        [
+            {routes, ~"one path must carry exactly one security class", PathA}
+         || {I, {PathA, Method, SecurityA}} <- Indexed,
+            {J, {PathB, MethodB, SecurityB}} <- Indexed,
+            I < J,
+            PathA =:= PathB,
+            Method =/= MethodB,
+            SecurityA =/= SecurityB
+        ] ++
+        [
+            {routes, ~"two entries declare paths that collide in the route table", {PathA, PathB}}
+         || {I, {PathA, _, _}} <- Indexed,
+            {J, {PathB, _, _}} <- Indexed,
+            I < J,
+            PathA =/= PathB,
+            paths_collide(PathA, PathB)
+        ].
+
+%% Two patterns collide when the routing tree cannot serve both: either some
+%% concrete request path matches both (same segment count, every position a
+%% matching literal or a binding on either side - `/saves/:slot` and
+%% `/saves/:id` are one claim), or they interfere below a diverging binding.
+%% routing_tree keys nodes by segment text and lookup commits to the first
+%% matching sibling without backtracking, so `/players/:someone/detail`
+%% swallows lookups meant for `/players/:id` and `/players/me/erase` at any
+%% depth - equal-length comparison alone misses every such shape. Diverging
+%% at two distinct literals is safe; a shared segment (including a binding
+%% reused by its exact name) descends into the same node and is safe too.
+paths_collide(PathA, PathB) ->
+    paths_overlap(PathA, PathB) orelse
+        interfere(path_segments(PathA), path_segments(PathB)).
+
+paths_overlap(PathA, PathB) ->
+    SegmentsA = path_segments(PathA),
+    SegmentsB = path_segments(PathB),
+    length(SegmentsA) =:= length(SegmentsB) andalso
+        lists:all(fun segments_compatible/1, lists:zip(SegmentsA, SegmentsB)).
+
+interfere([Segment | RestA], [Segment | RestB]) ->
+    interfere(RestA, RestB);
+interfere([], _Segments) ->
+    false;
+interfere(_Segments, []) ->
+    false;
+interfere([SegmentA | _], [SegmentB | _]) ->
+    is_binding_segment(SegmentA) orelse is_binding_segment(SegmentB).
+
+path_segments(Path) ->
+    binary:split(Path, ~"/", [global]).
+
+is_binding_segment(<<":", _/binary>>) -> true;
+is_binding_segment(_Segment) -> false.
+
+segments_compatible({<<":", _/binary>>, _Segment}) -> true;
+segments_compatible({_Segment, <<":", _/binary>>}) -> true;
+segments_compatible({Segment, Segment}) -> true;
+segments_compatible({_SegmentA, _SegmentB}) -> false.
 
 is_dotted(Method) when is_binary(Method) ->
     case binary:split(Method, ~".") of
@@ -520,6 +846,15 @@ owns_problems(Owns) when is_map(Owns) ->
         [
             {owns, ~"tokens must be a list of non-empty binaries", Kind}
          || Kind := Tokens <- Owns, lists:member(Kind, Kinds), not is_token_list(Tokens)
+        ] ++
+        %% A bare token in owns().http reserves nothing: claims compare as
+        %% paths, and a token that is not one can never collide with one.
+        [
+            {owns, ~"http tokens must be /-rooted route paths", Token}
+         || Tokens <- [maps:get(http, Owns, [])],
+            is_token_list(Tokens),
+            Token <- Tokens,
+            not is_route_path(Token)
         ];
 owns_problems(Owns) ->
     [{owns, ~"must be a map", Owns}].
@@ -576,12 +911,24 @@ already implies, and every kind derives:
 | `lua` | the namespaces in `lua/0` |
 | `tables` | `table/0` on the extension's `kura_schema` modules |
 | `queues` | `queue/0` on the extension's `shigoto_worker` modules |
+| `http` | the paths in `routes/0` |
 
 So two extensions installing the same `game.quests`, or the same job queue,
 collide before either has bothered with `owns/0`.
 
-The last two derive through `asobi_extension_reserved`, the same rule that
-finds core's own tables and queues, so a name core reserves and a name an
+The `http` kind alone compares structurally rather than by token equality:
+two paths collide when the routing tree cannot serve both - some request
+matches both patterns, or the patterns diverge at a binding at any depth, in
+which case routing_tree's commit-to-first-sibling lookup lets one swallow
+requests meant for the other (see `paths_collide/2`). Its reserved set is
+every co-mounted app's route table - core's own via
+`asobi_router:core_routes/0`, plus nova's and every app in `nova_apps`, which
+is what keeps `/health` and its siblings unclaimable - and a claim under a
+privileged plane prefix (`asobi_extension_reserved:route_prefixes/0`) is
+refused outright, whatever it would resolve to.
+
+Tables and queues derive through `asobi_extension_reserved`, the same rule
+that finds core's own tables and queues, so a name core reserves and a name an
 extension claims can never be found two different ways.
 
 That leaves `owns/0` doing one job, and it is worth stating because it is no
@@ -590,6 +937,12 @@ derived. Naming a kind at all says "this is the complete set", and anything
 derived outside it is `undeclared_claim` - which is what turns a typo in
 `owns.queues` from an invisible no-op into a build failure. Nothing in
 `owns/0` is load-bearing for collision detection any more.
+
+`requires/0` is checked here too, against the union of core's subsystem names
+(`asobi_extension_reserved:core_capabilities/0`) and the installed extensions'
+own names. It reads `Extensions` in the order given, which is the resolver's
+dependency order, so the extension-ordering rule is a position check rather
+than a second sort.
 """.
 -spec validate([extension()]) -> ok | {error, [problem(), ...]}.
 validate([]) ->
@@ -601,7 +954,8 @@ validate(Extensions) ->
             lists:append([
                 kind_problems(Kind, Extensions, maps:get(Kind, Reserved, []))
              || Kind <- asobi_extension_reserved:kinds()
-            ]),
+            ]) ++
+            requirement_problems(Extensions),
     case Problems of
         [] -> ok;
         [_ | _] -> {error, Problems}
@@ -613,6 +967,68 @@ duplicate_names(Extensions) ->
      || {Name, A, B} <- pairs([{Name, App} || #{name := Name, app := App} <- Extensions])
     ].
 
+%% `requires/0` resolves against the union of core's subsystem names and the
+%% installed extensions' own names. Each name is checked in a fixed order.
+%% Naming your own info-name is a `self_requirement` manifest bug, caught first
+%% so it is never mistaken for an ordering problem an application dependency
+%% could fix. Otherwise a name that hits an installed extension carries an
+%% order: the walk is front to back over the resolver's dependency order,
+%% carrying the names already resolved, so a required extension not yet resolved
+%% is one that resolves at or after the requirer - its `requires` is not backed
+%% by an OTP application dependency, and boot would start the two out of order
+%% against `c:asobi_extension:sup/0`'s guarantee. A core subsystem is always
+%% present and boots first, so it imposes no order. The installed case is tried
+%% before the capability case, so a name that is both - a core subsystem an
+%% installed extension has taken over - resolves to the extension and keeps its
+%% ordering, which is the transparency an extraction needs. The result is
+%% `usort`ed, so a name repeated in one `requires/0` reports once.
+requirement_problems(Extensions) ->
+    Installed = [Name || #{name := Name} <- Extensions],
+    Capabilities = asobi_extension_reserved:core_capabilities(),
+    lists:usort(requirement_problems(Extensions, Installed, Capabilities, [])).
+
+requirement_problems([], _Installed, _Capabilities, _Resolved) ->
+    [];
+requirement_problems([Extension | Rest], Installed, Capabilities, Resolved) ->
+    #{app := App, name := Name, requires := Requires} = Extension,
+    lists:append([requirement(App, Name, R, Installed, Resolved, Capabilities) || R <- Requires]) ++
+        requirement_problems(Rest, Installed, Capabilities, [Name | Resolved]).
+
+requirement(App, Owner, Owner, _Installed, _Resolved, _Capabilities) ->
+    [{self_requirement, App, Owner}];
+requirement(App, _Owner, Required, Installed, Resolved, Capabilities) ->
+    case lists:member(Required, Resolved) of
+        true ->
+            [];
+        false ->
+            case lists:member(Required, Installed) of
+                true -> [{requirement_out_of_order, App, Required}];
+                false -> capability_requirement(App, Required, Capabilities)
+            end
+    end.
+
+capability_requirement(App, Required, Capabilities) ->
+    case lists:member(Required, Capabilities) of
+        true -> [];
+        false -> [{unsatisfied_requirement, App, Required}]
+    end.
+
+kind_problems(http, Extensions, ReservedPaths) ->
+    Claims = lists:usort([{Path, App} || #{app := App} = E <- Extensions, Path <- claims(E, http)]),
+    route_conflicts(Claims) ++
+        [
+            {reserved_route, Path, CorePath, App}
+         || {Path, App} <- Claims,
+            CorePath <- ReservedPaths,
+            paths_collide(Path, CorePath)
+        ] ++
+        [
+            {reserved_prefix, Path, Prefix, App}
+         || {Path, App} <- Claims,
+            Prefix <- asobi_extension_reserved:route_prefixes(),
+            under_prefix(Path, Prefix)
+        ] ++
+        undeclared(http, Extensions);
 kind_problems(Kind, Extensions, ReservedTokens) ->
     Claims = [{Token, App} || #{app := App} = E <- Extensions, Token <- claims(E, Kind)],
     [{namespace_conflict, Kind, Token, A, B} || {Token, A, B} <- pairs(Claims)] ++
@@ -621,6 +1037,34 @@ kind_problems(Kind, Extensions, ReservedTokens) ->
          || {Token, App} <- lists:usort(Claims), lists:member(Token, ReservedTokens)
         ] ++
         undeclared(Kind, Extensions).
+
+%% Structural, so `pairs/1` cannot serve: two different tokens can still be
+%% one claim. Same-app pairs are skipped - a manifest's own set was already
+%% checked for internal collision, and a reservation in `owns/0` next to the
+%% route it reserves is the well-formed case, not a conflict.
+route_conflicts(Claims) ->
+    Indexed = lists:enumerate(Claims),
+    [
+        {route_conflict, {PathA, AppA}, {PathB, AppB}}
+     || {I, {PathA, AppA}} <- Indexed,
+        {J, {PathB, AppB}} <- Indexed,
+        I < J,
+        AppA =/= AppB,
+        paths_collide(PathA, PathB)
+    ].
+
+%% Binding-aware: `/api/:v/ops/x` sits under `/api/v1/ops` because the
+%% binding matches the prefix's literal on a real request.
+under_prefix(Path, Prefix) ->
+    prefixed(path_segments(Path), path_segments(Prefix)).
+
+prefixed(_Segments, []) ->
+    true;
+prefixed([], [_ | _]) ->
+    false;
+prefixed([Segment | Rest], [PrefixSegment | PrefixRest]) ->
+    (Segment =:= PrefixSegment orelse is_binding_segment(Segment)) andalso
+        prefixed(Rest, PrefixRest).
 
 %% `owns/0` is the closed statement of what an extension claims. Once it names
 %% a kind at all, anything the manifest derives for that kind and the owned set
@@ -650,6 +1094,8 @@ derived(#{rpc := Rpc, codes := Codes}, rpc) ->
     );
 derived(#{lua := Lua}, lua) ->
     lists:usort(maps:keys(Lua));
+derived(#{routes := Routes}, http) ->
+    lists:usort([Path || #{path := Path} <- Routes]);
 %% A shigoto queue is only ever what the worker's own `queue/0` returns -
 %% nothing reads `owns.queues` at runtime - so deriving it here is what makes
 %% the claim enforceable at all. Same for a table and its schema.
@@ -705,6 +1151,42 @@ describe_one({undeclared_claim, Kind, Token, App}) ->
     line(
         "~s uses the ~s \"~s\" but does not list it in owns().~s.",
         [App, singular(Kind), Token, Kind]
+    );
+describe_one({route_conflict, {Path, A}, {Path, B}}) ->
+    line("~s and ~s both declare the route \"~s\". Routes are exclusive; move one.", [A, B, Path]);
+describe_one({route_conflict, {PathA, A}, {PathB, B}}) ->
+    line(
+        "~s declares the route \"~s\" and ~s declares \"~s\"; the two collide in the route table.",
+        [A, PathA, B, PathB]
+    );
+describe_one({reserved_route, Path, Path, App}) ->
+    line("~s declares the route \"~s\", which asobi's own table serves.", [App, Path]);
+describe_one({reserved_route, Path, CorePath, App}) ->
+    line(
+        "~s declares the route \"~s\", which would break asobi's own \"~s\".",
+        [App, Path, CorePath]
+    );
+describe_one({reserved_prefix, Path, Prefix, App}) ->
+    line(
+        "~s declares the route \"~s\" under \"~s\", which asobi reserves for its own plane.",
+        [App, Path, Prefix]
+    );
+describe_one({unsatisfied_requirement, App, Name}) ->
+    line(
+        "~s requires \"~s\", which resolves to nothing: it is neither a core "
+        "subsystem nor an installed extension.",
+        [App, Name]
+    );
+describe_one({requirement_out_of_order, App, Name}) ->
+    line(
+        "~s requires the extension \"~s\", but \"~s\" resolves after it. Make ~s's "
+        "application depend on it so boot starts the provider first.",
+        [App, Name, Name, App]
+    );
+describe_one({self_requirement, App, Name}) ->
+    line(
+        "~s lists itself (\"~s\") in requires/0; an extension cannot depend on itself.",
+        [App, Name]
     ).
 
 line(Format, Args) ->
@@ -713,4 +1195,5 @@ line(Format, Args) ->
 singular(tables) -> ~"table";
 singular(rpc) -> ~"RPC prefix";
 singular(lua) -> ~"Lua namespace";
-singular(queues) -> ~"queue".
+singular(queues) -> ~"queue";
+singular(http) -> ~"route".

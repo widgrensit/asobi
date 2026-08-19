@@ -19,16 +19,46 @@
 %% other value made the row self-DoS unreachable. Whitelist + reject.
 -define(VALID_PERMS, [~"public", ~"owner"]).
 
+-type response() ::
+    {json, map()}
+    | {json, integer(), map(), map()}
+    | {asobi_error, asobi_error:code()}
+    | {asobi_error, asobi_error:code(), asobi_error:details()}.
+
+%% Storage can be switched off for the whole release (asobi_storage:enabled/0).
+%% When it is, each route short-circuits ahead of its DB and handler work and
+%% answers the 404 it would give for a genuine miss - save.not_found on the
+%% slot-keyed /saves routes, storage.not_found on the /storage routes - so the
+%% off-state cannot be told apart from an enabled but empty deployment. Auth is
+%% an upstream Nova plugin that has already run by the time a handler is
+%% reached, so the guard precedes the DB work, not the authentication. One
+%% guard serves all seven routes, given the family's miss-response - kept a
+%% literal at each call site so the error-code contract scanner sees it.
+-spec guarded(response(), fun(() -> response())) -> response().
+guarded(Disabled, Handler) ->
+    case asobi_storage:enabled() of
+        true -> Handler();
+        false -> Disabled
+    end.
+
 %% --- Cloud Saves ---
 
--spec list_saves(cowboy_req:req()) -> {json, map()}.
-list_saves(#{auth_data := #{player_id := PlayerId}} = _Req) ->
+-spec list_saves(cowboy_req:req()) -> response().
+list_saves(Req) ->
+    guarded({asobi_error, ~"save.not_found"}, fun() -> do_list_saves(Req) end).
+
+-spec do_list_saves(cowboy_req:req()) -> {json, map()}.
+do_list_saves(#{auth_data := #{player_id := PlayerId}} = _Req) ->
     Q = kura_query:where(kura_query:from(asobi_cloud_save), {player_id, PlayerId}),
     {ok, Saves} = asobi_repo:all(Q),
     {json, #{saves => [maps:with([slot, version, updated_at], S) || S <- Saves]}}.
 
--spec get_save(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
-get_save(#{bindings := #{~"slot" := Slot}, auth_data := #{player_id := PlayerId}} = _Req) ->
+-spec get_save(cowboy_req:req()) -> response().
+get_save(Req) ->
+    guarded({asobi_error, ~"save.not_found"}, fun() -> do_get_save(Req) end).
+
+-spec do_get_save(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
+do_get_save(#{bindings := #{~"slot" := Slot}, auth_data := #{player_id := PlayerId}} = _Req) ->
     Q = kura_query:where(
         kura_query:where(kura_query:from(asobi_cloud_save), {player_id, PlayerId}),
         {slot, Slot}
@@ -38,12 +68,16 @@ get_save(#{bindings := #{~"slot" := Slot}, auth_data := #{player_id := PlayerId}
         {ok, []} -> {asobi_error, ~"save.not_found"}
     end.
 
--spec put_save(cowboy_req:req()) ->
+-spec put_save(cowboy_req:req()) -> response().
+put_save(Req) ->
+    guarded({asobi_error, ~"save.not_found"}, fun() -> do_put_save(Req) end).
+
+-spec do_put_save(cowboy_req:req()) ->
     {json, map()}
     | {json, integer(), map(), map()}
     | {asobi_error, asobi_error:code()}
     | {asobi_error, asobi_error:code(), asobi_error:details()}.
-put_save(
+do_put_save(
     #{bindings := #{~"slot" := Slot}, json := Params, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_map(Params), is_binary(PlayerId) ->
     Data = maps:get(~"data", Params, #{}),
@@ -105,8 +139,12 @@ put_save(
 %% row these ACL-based case clauses assume.
 -define(PLAYER_SCOPE, {player_id, is_not_nil}).
 
--spec get_storage(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
-get_storage(
+-spec get_storage(cowboy_req:req()) -> response().
+get_storage(Req) ->
+    guarded({asobi_error, ~"storage.not_found"}, fun() -> do_get_storage(Req) end).
+
+-spec do_get_storage(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
+do_get_storage(
     #{bindings := #{~"collection" := Col, ~"key" := Key}, auth_data := #{player_id := PlayerId}} =
         _Req
 ) ->
@@ -134,9 +172,13 @@ get_storage(
             {asobi_error, ~"storage.query_failed"}
     end.
 
--spec put_storage(cowboy_req:req()) ->
+-spec put_storage(cowboy_req:req()) -> response().
+put_storage(Req) ->
+    guarded({asobi_error, ~"storage.not_found"}, fun() -> do_put_storage(Req) end).
+
+-spec do_put_storage(cowboy_req:req()) ->
     {json, map()} | {json, integer(), map(), map()} | {asobi_error, asobi_error:code()}.
-put_storage(
+do_put_storage(
     #{
         bindings := #{~"collection" := Col, ~"key" := Key},
         json := Params,
@@ -157,7 +199,7 @@ put_storage(
         true ->
             put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm)
     end;
-put_storage(_Req) ->
+do_put_storage(_Req) ->
     {asobi_error, ~"storage.invalid_request"}.
 
 -spec put_storage_checked(
@@ -227,8 +269,12 @@ put_storage_checked(Col, Key, PlayerId, Value, ReadPerm, WritePerm) ->
             end
     end.
 
--spec delete_storage(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
-delete_storage(
+-spec delete_storage(cowboy_req:req()) -> response().
+delete_storage(Req) ->
+    guarded({asobi_error, ~"storage.not_found"}, fun() -> do_delete_storage(Req) end).
+
+-spec do_delete_storage(cowboy_req:req()) -> {json, map()} | {asobi_error, asobi_error:code()}.
+do_delete_storage(
     #{bindings := #{~"collection" := Col, ~"key" := Key}, auth_data := #{player_id := PlayerId}} =
         _Req
 ) ->
@@ -258,8 +304,12 @@ delete_storage(
             {asobi_error, ~"storage.query_failed"}
     end.
 
--spec list_storage(cowboy_req:req()) -> {json, map()}.
-list_storage(
+-spec list_storage(cowboy_req:req()) -> response().
+list_storage(Req) ->
+    guarded({asobi_error, ~"storage.not_found"}, fun() -> do_list_storage(Req) end).
+
+-spec do_list_storage(cowboy_req:req()) -> {json, map()}.
+do_list_storage(
     #{bindings := #{~"collection" := Col}, qs := Qs, auth_data := #{player_id := PlayerId}} = _Req
 ) when is_binary(Qs), is_binary(PlayerId) ->
     Params = cow_qs:parse_qs(Qs),

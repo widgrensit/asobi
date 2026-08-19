@@ -33,6 +33,8 @@
     a_minted_session_carries_only_the_token_s_caps/1,
     a_minted_session_does_not_outlive_its_token/1,
     a_bad_minted_token_is_refused_like_a_bad_secret/1,
+    a_minted_token_opens_only_one_session/1,
+    cors_never_allows_credentials/1,
     a_form_post_redirects_into_the_console/1
 ]).
 
@@ -58,6 +60,8 @@ groups() ->
             a_minted_session_carries_only_the_token_s_caps,
             a_minted_session_does_not_outlive_its_token,
             a_bad_minted_token_is_refused_like_a_bad_secret,
+            a_minted_token_opens_only_one_session,
+            cors_never_allows_credentials,
             a_form_post_redirects_into_the_console,
             session_cookie_opens_the_ops_plane,
             cookie_without_csrf_is_refused,
@@ -87,6 +91,11 @@ init_per_group(_Group, Config) ->
     Config.
 
 %% A token the way asobi_saas mints one.
+%% Carries a `jti` because the control plane does: `iat` is only
+%% second-granular, so without a nonce two mints for the same person, env and
+%% caps inside one second are byte-identical - and a token that is spent once
+%% would refuse its own twin. Uniqueness is the minter's job; single-use here
+%% only holds if the minter does it.
 minted(Caps) ->
     Now = erlang:system_time(second),
     asobi_ops_token:sign(?SIGNING_SECRET, #{
@@ -94,7 +103,8 @@ minted(Caps) ->
         sub => ~"user-7",
         caps => Caps,
         iat => Now,
-        exp => Now + asobi_ops_token:max_ttl()
+        exp => Now + asobi_ops_token:max_ttl(),
+        jti => base64:encode(crypto:strong_rand_bytes(9), #{mode => urlsafe, padding => false})
     }).
 
 end_per_group(_Group, Config) ->
@@ -252,6 +262,22 @@ a_minted_token_opens_a_session(Config) ->
     ?assertMatch(#{~"data" := #{~"display" := ~"user-7"}}, nova_test:json(Resp)),
     Config.
 
+%% Exchanging a token spends it. It used to stay live for the rest of its
+%% fifteen minutes, usable here again or as a bearer header on the ops plane,
+%% so anyone who read it in transit or off a shared machine held a working
+%% credential for as long as its owner did. It is also what made this endpoint
+%% a session-fixation primitive: `SameSite` governs which requests carry a
+%% cookie, not which may set one.
+a_minted_token_opens_only_one_session(Config) ->
+    Token = minted([read]),
+    {ok, First} = nova_test:post("/console/session", #{json => #{~"token" => Token}}, Config),
+    ?assertStatus(200, First),
+    {ok, Second} = nova_test:post("/console/session", #{json => #{~"token" => Token}}, Config),
+    %% Refused exactly like an invalid token, so presenting a spent one teaches
+    %% nothing about whether it was ever real.
+    ?assertStatus(403, Second),
+    Config.
+
 %% The whole point of mapping roles to classes at mint time would be undone if
 %% the exchange widened them back out.
 a_minted_session_carries_only_the_token_s_caps(Config) ->
@@ -382,3 +408,29 @@ nonce(Resp) ->
     [_, Rest] = binary:split(Policy, ~"script-src 'nonce-"),
     [Nonce | _] = binary:split(Rest, ~"'"),
     Nonce.
+
+%% The engine serves the ops plane and the game API on one port, with
+%% `ASOBI_CORS_ORIGINS` defaulting to `*` on the grounds that the API is bearer
+%% authenticated and carries no ambient credentials. That stopped being the
+%% whole truth when `/console` shipped HttpOnly cookie sessions on the same
+%% origin.
+%%
+%% What keeps the wildcard harmless is that nothing emits
+%% `Access-Control-Allow-Credentials`, so a browser refuses to send a
+%% credentialed cross-origin request at all. That is a dependency's omission
+%% rather than a decision of ours, and if a Nova upgrade or an ingress ever
+%% added the header, `Access-Control-Allow-Origin: *` plus
+%% `Access-Control-Allow-Headers: *` would turn into a cross-origin CSRF on
+%% `POST /api/v1/ops/players/:id/erase` - the wildcard covers `x-csrf-token`,
+%% and a `Lax` cookie rides a top-level POST.
+%%
+%% So the property gets a test rather than a comment.
+cors_never_allows_credentials(Config) ->
+    {ok, Resp} = nova_test:request(options, "/api/v1/ops/players", #{}, Config),
+    Headers = [string:lowercase(K) || {K, _V} <- nova_test:headers(Resp)],
+    ?assertNot(lists:member("access-control-allow-credentials", Headers)),
+    %% And the wildcard this is protecting is really there, so the test fails
+    %% loudly if the CORS posture changes shape rather than silently passing
+    %% against a response that has no CORS headers at all.
+    ?assert(lists:member("access-control-allow-origin", Headers)),
+    Config.

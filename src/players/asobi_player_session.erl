@@ -41,6 +41,7 @@ init(#{player_id := PlayerId, ws_pid := WsPid}) ->
         player_id => PlayerId,
         ws_pid => WsPid,
         match_pid => undefined,
+        last_ack_seq => -1,
         channels => [],
         presence => #{status => ~"online"},
         connected_at => erlang:system_time(millisecond)
@@ -98,6 +99,28 @@ handle_info({asobi_message, {world_joined, WorldPid, ZonePid}}, State) ->
     {noreply, State#{world_pid => WorldPid, zone_pid => ZonePid}};
 handle_info({asobi_message, {world_zone_changed, ZonePid}}, State) ->
     {noreply, State#{zone_pid => ZonePid}};
+%% asobi#477: make world.ack monotonic per connection.
+%%
+%% The seq is the client's own counter, but the high-water mark is recorded per
+%% zone, and a player is subscribed to their whole interest ring - at the default
+%% view_radius of 1 a one-step crossing leaves them subscribed to the zone behind
+%% them. That zone keeps acking its own mark, and input still routed to it during
+%% the crossing re-arms the entry, so the client would see seq go backwards and a
+%% prune-and-replay reconciler would re-apply input the server had consumed.
+%%
+%% The session is per WebSocket and dies with it, so last_ack_seq resets exactly
+%% when the client's counter does. Dropping any ack that does not advance the mark
+%% makes the guarantee hold whichever zone emits the frame, and independently of
+%% cast ordering during a crossing.
+handle_info({asobi_message, {world_ack, _Tick, Seq}}, #{last_ack_seq := Last} = State) when
+    is_integer(Seq), Seq =< Last
+->
+    {noreply, State};
+handle_info(
+    {asobi_message, {world_ack, _Tick, Seq}} = Msg, #{ws_pid := WsPid} = State
+) when is_integer(Seq) ->
+    WsPid ! Msg,
+    {noreply, State#{last_ack_seq => Seq}};
 handle_info({asobi_message, _} = Msg, #{ws_pid := WsPid} = State) ->
     WsPid ! Msg,
     {noreply, State};

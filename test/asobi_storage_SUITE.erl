@@ -2,8 +2,10 @@
 
 -include_lib("nova_test/include/nova_test.hrl").
 
--export([all/0, groups/0, init_per_suite/1, end_per_suite/1]).
+-export([all/0, groups/0, init_per_suite/1, end_per_suite/1, end_per_testcase/2]).
 -export([
+    %% Config off switch
+    disabled_routes_answer_404/1,
     %% Cloud saves
     list_saves_empty/1,
     create_save/1,
@@ -22,7 +24,7 @@
     global_and_player_row_coexist_at_same_key/1
 ]).
 
-all() -> [{group, cloud_saves}, {group, generic_storage}].
+all() -> [{group, cloud_saves}, {group, generic_storage}, disabled_routes_answer_404].
 
 groups() ->
     [
@@ -68,6 +70,40 @@ init_per_suite(Config) ->
     ].
 
 end_per_suite(Config) ->
+    Config.
+
+%% The storage off switch (asobi_storage:enabled/0) proven through the real
+%% Nova HTTP stack, not just the controller fn: with `storage` set false the
+%% routes are still wired, but each family answers its own genuine-miss 404 -
+%% save.not_found on /saves, storage.not_found on /storage.
+disabled_routes_answer_404(Config) ->
+    ok = application:set_env(asobi, storage, false),
+    {ok, SaveResp} = nova_test:get(
+        "/api/v1/saves",
+        #{headers => auth(Config, player1)},
+        Config
+    ),
+    ?assertStatus(404, SaveResp),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"save.not_found", ~"details" := #{}}},
+        nova_test:json(SaveResp)
+    ),
+    {ok, StorageResp} = nova_test:get(
+        "/api/v1/storage/settings/theme",
+        #{headers => auth(Config, player1)},
+        Config
+    ),
+    ?assertStatus(404, StorageResp),
+    ?assertMatch(
+        #{~"error" := #{~"code" := ~"storage.not_found", ~"details" := #{}}},
+        nova_test:json(StorageResp)
+    ),
+    Config.
+
+end_per_testcase(disabled_routes_answer_404, Config) ->
+    application:set_env(asobi, storage, true),
+    Config;
+end_per_testcase(_Case, Config) ->
     Config.
 
 auth(Config, Player) ->

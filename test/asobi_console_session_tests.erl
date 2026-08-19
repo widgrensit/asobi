@@ -40,7 +40,10 @@ session_test_() ->
             {"the ttl is clamped", fun ttl/0},
             {"a browser session cannot erase by default", fun no_erasure_by_default/0},
             {"one config key opts the console in", fun erasure_opt_in/0},
-            {"a minted token's caps are inherited whole", fun minted_caps_are_untouched/0}
+            {"a minted token's caps are inherited whole", fun minted_caps_are_untouched/0},
+            {"a token opens one session and no more", fun token_is_single_use/0},
+            {"two distinct tokens both open one", fun distinct_tokens_both_spend/0},
+            {"a spent token stays spent until it expires", fun spent_survives_a_sweep/0}
         ]
     end).
 
@@ -184,3 +187,28 @@ restart_ends_every_session_test() ->
     after
         cleanup(Pid2)
     end.
+
+%% Verifying a token proves it authentic, never that it is unspent. Before
+%% this, exchanging one left it live for the rest of its fifteen minutes -
+%% usable again here, or as a bearer header on the ops plane - so anyone who
+%% read it in transit or off a shared machine held a working credential for as
+%% long as the person it was minted for.
+token_is_single_use() ->
+    NotAfter = erlang:system_time(second) + 900,
+    ?assertEqual(ok, asobi_console_session:consume_token(~"mac-1", NotAfter)),
+    ?assertEqual({error, replayed}, asobi_console_session:consume_token(~"mac-1", NotAfter)),
+    ?assertEqual({error, replayed}, asobi_console_session:consume_token(~"mac-1", NotAfter)).
+
+distinct_tokens_both_spend() ->
+    NotAfter = erlang:system_time(second) + 900,
+    ?assertEqual(ok, asobi_console_session:consume_token(~"mac-a", NotAfter)),
+    ?assertEqual(ok, asobi_console_session:consume_token(~"mac-b", NotAfter)).
+
+%% The sweep must not hand a token back. It drops rows past their own expiry,
+%% and a token that far gone can no longer be presented anyway - but a sweep
+%% that cleared live rows would silently restore replay.
+spent_survives_a_sweep() ->
+    NotAfter = erlang:system_time(second) + 900,
+    ?assertEqual(ok, asobi_console_session:consume_token(~"mac-sweep", NotAfter)),
+    ok = asobi_console_session:sweep(),
+    ?assertEqual({error, replayed}, asobi_console_session:consume_token(~"mac-sweep", NotAfter)).

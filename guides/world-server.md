@@ -365,6 +365,7 @@ Register your world mode in `sys.config`:
 | `grid_size` | 10 | Zones per axis; total zones = `grid_size^2` |
 | `zone_size` | 200 | Units per zone side; world size = `grid_size * zone_size` |
 | `tick_rate` | 50 | Milliseconds between ticks (50 = 20 Hz) |
+| `broadcast_interval` | 3 | Simulation ticks per wire delta; deltas go out every `tick_rate * broadcast_interval` ms. Set to 1 for a delta every tick, which client-side prediction wants |
 | `view_radius` | 1 | Zones visible in each direction from the player's zone |
 | `max_players` | 500 | Concurrent players per world |
 | `persistent` | `false` | Keep the world alive with no players in it |
@@ -597,7 +598,7 @@ World messages use the `world.*` namespace. See
 | `world.join` | `{"world_id": "..."}` | Join a specific world |
 | `world.list` | `{"mode": "...", "has_capacity": true}` | Browse listed worlds |
 | `world.leave` | `{}` | Leave the current world |
-| `world.input` | `{"action": "move", "x": 100, "y": 200}` | Send input to your zone |
+| `world.input` | `{"action": "move", "x": 100, "y": 200}`, optional top-level `seq` | Send input to your zone; a `seq` opts into `world.ack` |
 
 ### Server to client
 
@@ -606,6 +607,7 @@ World messages use the `world.*` namespace. See
 | `world.joined` | `{world_id, status, player_count, grid_size, ...}` | Join confirmed |
 | `world.left` | `{success: true}` | Leave confirmed |
 | `world.tick` | `{tick, updates: [{op, id, ...}]}` | Zone delta broadcast |
+| `world.ack` | `{tick, seq}` | Per-connection input ack for prediction; see [Client-side prediction](websocket-protocol.md#client-side-prediction) |
 | `world.phase_changed` | the phase info block | See [Phases](phases.md) |
 | `world.terrain` | `{coords, data}` | See [Large worlds](large-worlds.md) |
 | `world.finished` | `{world_id, result}` | World ended |

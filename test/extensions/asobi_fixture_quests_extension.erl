@@ -2,11 +2,30 @@
 -moduledoc "A complete extension manifest, shaped exactly like the design's worked example.".
 -behaviour(asobi_extension).
 
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1]).
+-export([
+    info/0,
+    requires/0,
+    rpc/0,
+    lua/0,
+    sup/0,
+    owns/0,
+    codes/0,
+    ops/0,
+    routes/0,
+    erase_player/1,
+    export_player/1
+]).
 
 -spec info() -> asobi_extension:info().
 info() ->
     #{name => quests, extension_version => 1}.
+
+%% Models quests' real asobi_economy:grant/4 call: it depends on economy, which
+%% is a core subsystem today and an extracted extension from Wave 2 on. Either
+%% way this stays satisfied, because the resolution set is their union.
+-spec requires() -> [asobi_extension:name()].
+requires() ->
+    [economy].
 
 -spec rpc() -> asobi_extension:rpc().
 rpc() ->
@@ -58,7 +77,8 @@ owns() ->
         tables => [~"quests", ~"quest_progress"],
         rpc => [~"quests"],
         lua => [~"quests"],
-        queues => [~"quests"]
+        queues => [~"quests"],
+        http => [~"/api/v1/quests/board", ~"/api/v1/quests/webhook"]
     }.
 
 -spec ops() -> asobi_extension:ops().
@@ -76,6 +96,27 @@ ops() ->
         }
     }.
 
+-spec routes() -> [asobi_extension:route()].
+routes() ->
+    [
+        #{
+            path => ~"/api/v1/quests/board",
+            method => get,
+            mfa => {asobi_fixture_quests_controller, board, 1},
+            security => player
+        },
+        #{
+            path => ~"/api/v1/quests/webhook",
+            method => post,
+            mfa => {asobi_fixture_quests_controller, webhook, 1},
+            security => webhook
+        }
+    ].
+
 -spec erase_player(binary()) -> ok | {error, term()}.
 erase_player(PlayerId) ->
     asobi_fixture_erase:run(quests, PlayerId).
+
+-spec export_player(binary()) -> {ok, #{binary() => term()}} | {error, term()}.
+export_player(PlayerId) ->
+    asobi_fixture_export:run(quests, PlayerId).

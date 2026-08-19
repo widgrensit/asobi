@@ -20,24 +20,29 @@
 -export([
     erases_a_player_with_a_row_in_every_child_table/1,
     severs_rather_than_deletes_the_purchase_record/1,
-    leaves_a_group_standing_when_its_creator_is_erased/1
+    leaves_a_group_standing_when_its_creator_is_erased/1,
+    names_the_orphaned_table_and_rolls_back_when_a_removed_extension_blocks_erase/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 -include_lib("kura/include/kura.hrl").
 
+-define(ORPHAN_TABLE, ~"orphan_ext_saves").
+
 all() ->
     [
         erases_a_player_with_a_row_in_every_child_table,
         severs_rather_than_deletes_the_purchase_record,
-        leaves_a_group_standing_when_its_creator_is_erased
+        leaves_a_group_standing_when_its_creator_is_erased,
+        names_the_orphaned_table_and_rolls_back_when_a_removed_extension_blocks_erase
     ].
 
 init_per_suite(Config) ->
     asobi_test_helpers:start(Config).
 
 end_per_suite(_Config) ->
+    drop_orphan_table(),
     ok.
 
 %%--------------------------------------------------------------------
@@ -94,6 +99,34 @@ leaves_a_group_standing_when_its_creator_is_erased(_Config) ->
 
     {ok, Standing} = asobi_repo:get(asobi_group, GroupId),
     ?assertEqual(undefined, maps:get(creator_id, Standing, undefined)),
+    ok.
+
+%% A table extracted out of core and then removed with its package keeps its
+%% rows and its `ON DELETE NO ACTION` foreign key into `players.id`, and nothing
+%% sweeps them. The parent delete then raises. Erase must name the blocking
+%% table rather than surface a bare constraint error, and roll the whole
+%% sequence back so nothing is half-deleted.
+names_the_orphaned_table_and_rolls_back_when_a_removed_extension_blocks_erase(_Config) ->
+    PlayerId = a_player(),
+    %% Core child rows that steps/1 deletes before the parent: they prove the
+    %% rollback covered the deletes already issued when the FK raised.
+    {ok, _} = insert(asobi_player_stats, #{player_id => PlayerId, matches_played => 1}),
+    {ok, _} = insert(asobi_wallet, #{player_id => PlayerId, currency => ~"coins", balance => 5}),
+
+    ok = create_orphan_table(),
+    ok = orphan_row(PlayerId),
+
+    Result = asobi_player_erase:run(PlayerId),
+    ?assertMatch({error, {orphaned_extension_rows, _}}, Result),
+    {error, {orphaned_extension_rows, Blocker}} = Result,
+    ct:pal("orphaned_extension_rows blocker = ~p", [Blocker]),
+    ?assertEqual(?ORPHAN_TABLE, Blocker),
+
+    %% The player survives ...
+    ?assertMatch({ok, _}, asobi_repo:get(asobi_player, PlayerId)),
+    %% ... and so does every core child row: the transaction rolled back whole.
+    ?assertMatch({ok, [_]}, asobi_repo:all(by(asobi_player_stats, player_id, PlayerId))),
+    ?assertMatch({ok, [_]}, asobi_repo:all(by(asobi_wallet, player_id, PlayerId))),
     ok.
 
 %%--------------------------------------------------------------------
@@ -173,6 +206,28 @@ a_row_in_every_child_table(PlayerId) ->
         player_id => PlayerId,
         score => 1
     }),
+    ok.
+
+%% A stand-in for an extracted table whose package has been removed: raw DDL,
+%% never a real migration in src/, so nothing teaches core to sweep it. The
+%% foreign key is `ON DELETE NO ACTION`, matching every core key into players.
+create_orphan_table() ->
+    drop_orphan_table(),
+    #{} = kura_db:query(
+        asobi_repo,
+        ~"CREATE TABLE orphan_ext_saves (id bigserial PRIMARY KEY, player_id uuid NOT NULL REFERENCES players(id) ON DELETE NO ACTION)",
+        []
+    ),
+    ok.
+
+orphan_row(PlayerId) ->
+    #{} = kura_db:query(
+        asobi_repo, ~"INSERT INTO orphan_ext_saves (player_id) VALUES ($1::uuid)", [PlayerId]
+    ),
+    ok.
+
+drop_orphan_table() ->
+    _ = kura_db:query(asobi_repo, ~"DROP TABLE IF EXISTS orphan_ext_saves", []),
     ok.
 
 %% The repo takes a changeset, not a bare struct - `kura_changeset:cast/4` is

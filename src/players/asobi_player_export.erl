@@ -12,7 +12,9 @@ Every row goes through a `maps:with/2` projection, modelled on
 `asobi_ops_players:project/1`. `players` carries `hashed_password`, so a
 subtractive filter is one schema field away from exporting a credential;
 `player_tokens` carries live bearer tokens, so the export reports that a
-session existed and when, never the token itself.
+session existed and when, never the token itself. A guest identity's
+`provider_metadata` is the device-secret verifier, so only its `revoked` flag
+is exported.
 
 ## The two tables with no foreign key
 
@@ -32,15 +34,24 @@ bury one inside entity state, and there is no projection core could apply to it
 that would not either miss the data or export another player's. A game that
 puts personal data there owns exporting it, the same way it owns erasing it.
 
-## No extension callback
+## Extensions
 
-There is deliberately no `export_player/1` for extensions in this change.
-`c:asobi_extension:erase_player/1` earns its keep because the foreign key
-physically forces an author to answer it; an export callback has no forcing
-function, so an extension that skipped it would produce a silently incomplete
-export and nothing would fail. That is a worse contract than no contract. If
-one ever ships, the payload must name which installed extensions contributed
-and which did not.
+The payload's `extensions` key names **every** installed extension: the ones
+whose `c:asobi_extension:export_player/1` contributed data, and the ones
+without the callback under a `skipped` marker. The callback could only ship
+under that condition. `c:asobi_extension:erase_player/1` earns its keep
+because the foreign key physically forces an author to answer it; an export
+callback has no such forcing function, so the artefact itself is the forcing
+function - a skipped extension is a visible marker in the export a data
+subject or auditor reads, not an absence nobody can detect.
+
+A failing `export_player/1` fails the whole export -
+`{error, {extension_export, Name, Reason}}`, no artefact - because an
+extension that promised data and could not deliver it is exactly the silently
+incomplete export the marker exists to prevent. `m:asobi_extension_export` is
+the walker, and its reads run in the same untransacted pass as core's own
+sections: core's export takes no transaction, so wrapping only the extension
+walk in one would buy consistency with nothing.
 """.
 
 -include_lib("kura/include/kura.hrl").
@@ -48,19 +59,31 @@ and which did not.
 -export([run/1]).
 
 -doc """
-Every core row that names `PlayerId`, projected.
+Every core row that names `PlayerId`, projected, plus every installed
+extension's own sections.
 
 `{error, not_found}` when no such player exists - an empty export and a
 missing account are different answers to a data-subject request.
+`{error, {extension_export, Name, Reason}}` when an installed extension
+failed to export: no partial artefact is produced.
 """.
--spec run(binary()) -> {ok, map()} | {error, not_found}.
+-spec run(binary()) ->
+    {ok, map()} | {error, not_found | {extension_export, asobi_extension:name(), term()}}.
 run(PlayerId) when is_binary(PlayerId) ->
     case asobi_repo:get(asobi_player, PlayerId) of
-        {ok, Player} -> {ok, payload(PlayerId, Player)};
+        {ok, Player} -> with_extensions(PlayerId, payload(PlayerId, Player));
         {error, _Reason} -> {error, not_found}
     end.
 
 %% --- Internal ---
+
+-spec with_extensions(binary(), map()) ->
+    {ok, map()} | {error, {extension_export, asobi_extension:name(), term()}}.
+with_extensions(PlayerId, Payload) ->
+    case asobi_extension_export:run(PlayerId) of
+        {ok, Extensions} -> {ok, Payload#{extensions => Extensions}};
+        {error, {Name, Reason}} -> {error, {extension_export, Name, Reason}}
+    end.
 
 -spec payload(binary(), map()) -> map().
 payload(PlayerId, Player) ->
@@ -107,21 +130,33 @@ player(Row) ->
         Row
     ).
 
+%% A guest identity's `provider_metadata` is the credential verifier itself -
+%% salt, key id, HMAC verifier, written by the guest controller - so only its
+%% `revoked` flag survives. Other providers' metadata is descriptive profile
+%% data and passes through.
 -spec identity(map()) -> map().
 identity(Row) ->
-    maps:with(
+    Projected = maps:with(
         [
             id,
             provider,
             provider_uid,
             provider_email,
             provider_display_name,
-            provider_metadata,
             inserted_at,
             updated_at
         ],
         Row
-    ).
+    ),
+    Metadata = identity_metadata(
+        maps:get(provider, Row, undefined), maps:get(provider_metadata, Row, #{})
+    ),
+    Projected#{provider_metadata => Metadata}.
+
+-spec identity_metadata(term(), term()) -> map().
+identity_metadata(~"guest", Metadata) when is_map(Metadata) -> maps:with([~"revoked"], Metadata);
+identity_metadata(_Provider, Metadata) when is_map(Metadata) -> Metadata;
+identity_metadata(_Provider, _Metadata) -> #{}.
 
 -spec stats(map()) -> map().
 stats(Row) ->

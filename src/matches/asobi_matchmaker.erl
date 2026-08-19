@@ -495,13 +495,20 @@ spawn_matches([Group | Rest], Failed) ->
 spawn_match(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
     MatchSize = maps:get(match_size, ModeConfig, length(PlayerIds)),
     MaxPlayers = maps:get(max_players, ModeConfig, MatchSize),
+    %% asobi#481: min_players was hardcoded to MatchSize here, so the field
+    %% asobi_match_server already reads and honours was reachable only by an
+    %% Erlang caller of asobi_match_sup:start_match/1 - a mode declaring it got
+    %% silence. Defaulting to MatchSize keeps every existing mode identical;
+    %% declaring it higher spawns a match that genuinely waits for backfill and
+    %% gives up at ?WAITING_TIMEOUT.
+    MinPlayers = maps:get(min_players, ModeConfig, MatchSize),
     case asobi_game_modes:resolve_game_module(Mode) of
         {ok, GameMod, ExtraConfig} ->
             Config = #{
                 mode => Mode,
                 game_module => GameMod,
                 game_config => ExtraConfig,
-                min_players => MatchSize,
+                min_players => MinPlayers,
                 max_players => MaxPlayers,
                 listed => maps:get(listed, ModeConfig, false)
             },

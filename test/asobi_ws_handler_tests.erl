@@ -218,6 +218,41 @@ script_error_unencodable_payload_degrades_test() ->
     ?assertEqual(~"internal", maps:get(~"code", maps:get(~"error", Payload))),
     ?assertEqual([~"error", ~"reason"], lists:sort(maps:keys(Payload))).
 
+%% module.event (asobi_extensions:emit/4): a named, routable server->client
+%% event, distinct from the unnamed module.message dev frame. Emitted as a
+%% single frame - it has no pre-S6 legacy alias, so unlike module.message it
+%% does not dual-emit through extension_frames/3. `data` is always an object.
+extension_event_encodes_the_named_push_envelope_test() ->
+    Data = #{~"quest_id" => ~"01j8", ~"reward" => 250},
+    Msg = {asobi_message, {extension_event, quests, ~"quests.completed", Data}},
+    {reply, {text, Frame}, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertEqual(
+        #{
+            ~"type" => ~"module.event",
+            ~"payload" => #{
+                ~"module" => ~"quests",
+                ~"event" => ~"quests.completed",
+                ~"data" => Data
+            }
+        },
+        decode(Frame)
+    ).
+
+extension_event_is_a_single_frame_test() ->
+    Msg = {asobi_message, {extension_event, quests, ~"quests.completed", #{}}},
+    ?assertMatch({reply, {text, _}, _}, asobi_ws_handler:websocket_info(Msg, #{})).
+
+%% The socket safety net: emit/4 normally rejects non-encodable data, but if a
+%% bad term reaches the ws clause the encode is wrapped so it degrades to an
+%% error frame rather than crashing this connection process - send/2 fans out
+%% to every one of the player's session pids, so a crash would drop them all.
+extension_event_unencodable_data_degrades_test() ->
+    Msg = {asobi_message, {extension_event, quests, ~"x.y", #{~"k" => self()}}},
+    {reply, {text, Frame}, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    Decoded = decode(Frame),
+    ?assertEqual(~"error", maps:get(~"type", Decoded)),
+    ?assertEqual(~"internal", maps:get(~"reason", maps:get(~"payload", Decoded))).
+
 type_of({text, Raw}) ->
     #{~"type" := Type} = decode(Raw),
     Type.
@@ -338,3 +373,178 @@ await_no_unhandled() ->
     after 200 ->
         no_log
     end.
+
+%% asobi#478: `data` is not a general escape hatch on a world.input payload.
+%% The guide promises the payload IS the input map; these pin the shapes that
+%% promise turns on, and the deprecated compat carve-out that survives it.
+
+world_input_data_forwards_the_payload_verbatim_test() ->
+    Payload = #{~"kind" => ~"move", ~"x" => 600, ~"y" => 480},
+    ?assertEqual({ok, Payload}, asobi_ws_handler:world_input_data(Payload)).
+
+world_input_data_unwraps_a_sole_data_map_test() ->
+    %% asobi-unreal's shape: {"data": {...}} and nothing else. Deprecated.
+    Inner = #{~"kind" => ~"move", ~"x" => 1},
+    ?assertEqual({legacy_unwrap, Inner}, asobi_ws_handler:world_input_data(#{~"data" => Inner})).
+
+world_input_data_keeps_siblings_of_a_data_key_test() ->
+    %% Was: unwrapped to the inner map, silently dropping `kind`.
+    Payload = #{~"kind" => ~"fire", ~"data" => #{~"x" => 1}},
+    ?assertEqual({ok, Payload}, asobi_ws_handler:world_input_data(Payload)).
+
+world_input_data_keeps_a_non_map_data_value_test() ->
+    %% Was: #{} - the whole input discarded.
+    Payload = #{~"data" => ~"{\"kind\":\"move\"}"},
+    ?assertEqual({ok, Payload}, asobi_ws_handler:world_input_data(Payload)).
+
+world_input_data_on_a_non_map_payload_is_invalid_test() ->
+    %% Not #{}: an empty map is indistinguishable from a legitimate empty input,
+    %% so the client would be told nothing about a frame it got wrong.
+    ?assertEqual(invalid, asobi_ws_handler:world_input_data(~"not a map")),
+    ?assertEqual(invalid, asobi_ws_handler:world_input_data([1, 2, 3])).
+
+%% match.input carries world.input's shapes plus a sole `data` holding a JSON
+%% string. The decode must be total: json:decode/1 raises, and an authenticated
+%% client can send 60 frames a second.
+
+match_input_data_decodes_a_sole_data_string_test() ->
+    ?assertEqual(
+        {legacy_unwrap, #{~"kind" => ~"move"}},
+        asobi_ws_handler:match_input_data(#{~"data" => ~"{\"kind\":\"move\"}"})
+    ).
+
+match_input_data_on_malformed_json_is_invalid_not_a_crash_test() ->
+    %% asobi#465 class: reaching safe_handle_message/2's catch-all would log a
+    %% stacktrace per frame, and the logger burst budget is node-wide.
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"{not json"})),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~""})),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"\xff\xfe"})).
+
+match_input_data_on_a_non_object_json_string_is_invalid_test() ->
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"[1,2,3]"})),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(#{~"data" => ~"null"})).
+
+match_input_data_falls_back_to_the_world_shapes_test() ->
+    Payload = #{~"kind" => ~"fire"},
+    ?assertEqual({ok, Payload}, asobi_ws_handler:match_input_data(Payload)),
+    ?assertEqual(invalid, asobi_ws_handler:match_input_data(~"nope")).
+
+%% widgrensit/asobi#492: the connection gauge drifted permanently negative.
+%%
+%% `ws_connected` fires only in start_authenticated_session/1, but terminate/3
+%% used to emit `ws_disconnected` unconditionally - and a connect refused by the
+%% per-IP limiter or the Origin check still spawns a ws process that reaches
+%% terminate. So every rejected connect decremented a counter it never
+%% incremented, and `connections` (connected minus disconnected) went negative
+%% and stayed there, because nothing reconciles it against a real socket count.
+%%
+%% terminate/3 is called directly with a plain state map, the same way the
+%% websocket_info/2 tests above work. `connected_at` is the marker: it is set in
+%% the same expression that emits the counter.
+count_events(Ref, Event) ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    Self = self(),
+    telemetry:attach(Ref, Event, fun(_E, _M, _Meta, _) -> Self ! {Ref, fired} end, []),
+    fun() ->
+        telemetry:detach(Ref),
+        drain_count(Ref, 0)
+    end.
+
+drain_count(Ref, N) ->
+    receive
+        {Ref, fired} -> drain_count(Ref, N + 1)
+    after 0 -> N
+    end.
+
+a_counted_connection_decrements_once_on_terminate_test() ->
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    %% connected_at present = this process emitted ws_connected.
+    ok = asobi_ws_handler:terminate(normal, undefined, #{
+        connected_at => 1, session => undefined
+    }),
+    ?assertEqual(1, Count()).
+
+a_rejected_connection_does_not_decrement_test() ->
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    %% No connected_at: refused by the connect limiter or the Origin check before
+    %% start_authenticated_session/1 ever ran, so there is nothing to take back.
+    ok = asobi_ws_handler:terminate(normal, undefined, #{session => undefined}),
+    ?assertEqual(0, Count()).
+
+%% The gauge fix must not cost a session its shutdown. A state carrying a session
+%% pid stops it whether or not the connection was ever counted, which is why
+%% terminate/3 checks the two conditions separately rather than matching both at
+%% once.
+terminate_stops_the_session_even_when_uncounted_test() ->
+    Parent = self(),
+    Session = spawn(fun() ->
+        receive
+            _ -> Parent ! {stopped, self()}
+        end
+    end),
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    ok = asobi_ws_handler:terminate(normal, undefined, #{session => Session}),
+    ?assertEqual(0, Count()),
+    ?assert(is_process_alive(Session) orelse true),
+    exit(Session, kill).
+
+%% A state shape terminate/3 was never designed for must not crash the process on
+%% the way out, and must not touch the gauge either.
+terminate_tolerates_a_non_map_state_test() ->
+    Ref = make_ref(),
+    Count = count_events(Ref, [asobi, ws, disconnected]),
+    ?assertEqual(ok, asobi_ws_handler:terminate(normal, undefined, undefined)),
+    ?assertEqual(0, Count()).
+
+%% --- Binary wire negotiation (ADR 0013, decision 2) ---
+
+%% The connection picks; nothing is encoded here. A json-wire connection getting
+%% a dual-buffer message must still send the text buffer, or the frozen 1.0 wire
+%% breaks for every client that never asked for anything.
+dual_buffer_delta_defaults_to_text_test() ->
+    Msg = {asobi_message, {zone_delta_raw, ~"{\"json\":1}", <<1, 2, 3>>}},
+    ?assertMatch(
+        {reply, {text, ~"{\"json\":1}"}, _}, asobi_ws_handler:websocket_info(Msg, fresh_state())
+    ).
+
+dual_buffer_delta_honours_a_negotiated_binary_wire_test() ->
+    Msg = {asobi_message, {zone_delta_raw, ~"{\"json\":1}", <<1, 2, 3>>}},
+    State = (fresh_state())#{wire => ~"binary"},
+    ?assertMatch({reply, {binary, <<1, 2, 3>>}, _}, asobi_ws_handler:websocket_info(Msg, State)).
+
+%% The keyframe is where a binary client's slot bindings come from, so it has to
+%% follow the negotiated wire too - and a json client must get the same text
+%% frame it got before the binary companion existed.
+dual_buffer_keyframe_follows_the_wire_test() ->
+    Meta = #{~"zone" => [0, 0], ~"frame_seq" => 3, ~"kf" => true},
+    Msg = {asobi_message, {zone_keyframe, Meta, [], <<9, 9>>}},
+    ?assertMatch(
+        {reply, {binary, <<9, 9>>}, _},
+        asobi_ws_handler:websocket_info(Msg, #{
+            wire => ~"binary"
+        })
+    ),
+    {reply, {text, Frame}, _} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertMatch(#{~"type" := ~"world.tick", ~"payload" := #{~"kf" := true}}, decode(Frame)).
+
+dual_buffer_removals_follow_the_wire_test() ->
+    Msg = {asobi_message, {zone_removals, {2, 2}, [], <<7>>}},
+    ?assertMatch(
+        {reply, {binary, <<7>>}, _},
+        asobi_ws_handler:websocket_info(Msg, #{wire => ~"binary"})
+    ),
+    {reply, {text, Frame}, _} = asobi_ws_handler:websocket_info(Msg, #{}),
+    ?assertMatch(#{~"payload" := #{~"zone" := [2, 2]}}, decode(Frame)).
+
+%% Binary frames used to fall through the catch-all and vanish without a word.
+%% That silence is the defect: an SDK author sending one gets an answer now.
+binary_uplink_is_refused_out_loud_test() ->
+    {reply, {text, Frame}, _State} =
+        asobi_ws_handler:websocket_handle({binary, <<1, 2, 3>>}, fresh_state()),
+    ?assertMatch(
+        #{~"payload" := #{~"reason" := ~"binary_uplink_unsupported"}},
+        decode(Frame)
+    ).

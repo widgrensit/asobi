@@ -1,7 +1,7 @@
 -module(asobi_router).
 -behaviour(nova_router).
 
--export([routes/1]).
+-export([routes/1, core_routes/0]).
 
 %% Every route accepts its real method plus OPTIONS. Nova's middleware chain
 %% runs `nova_router` before `nova_cors_plugin`, so a route that doesn't
@@ -13,11 +13,20 @@
 %% memoised function rather than a process: nova is in asobi's `applications`
 %% list, so nova_sup:init/1 compiles this route table before asobi_app:start/2
 %% has run and before any asobi process exists. Resolving here validates the
-%% installed set at the earliest possible moment. Extensions contribute no
-%% routes at all; core owns the whole table.
+%% installed set at the earliest possible moment. Core owns the whole table:
+%% an extension declares entries in its manifest's `routes/0`, and this is the
+%% one place they are mounted.
 -spec routes(atom()) -> [map()].
 routes(_Environment) ->
-    _ = asobi_extensions:resolve(),
+    Extensions = asobi_extensions:resolve(),
+    core_routes() ++ extension_routes(Extensions).
+
+%% Core's own groups, without resolving extensions. `asobi_extension_reserved`
+%% derives the reserved http claims from this - it is called from inside
+%% `asobi_extensions:resolve/0`, where reading `routes/1` would re-enter the
+%% resolver before its term exists.
+-spec core_routes() -> [map()].
+core_routes() ->
     [
         auth_routes(),
         iap_routes(),
@@ -218,7 +227,16 @@ api_routes() ->
             }},
             {~"/storage/:collection/:key", fun asobi_storage_controller:delete_storage/1, #{
                 methods => [delete, options]
-            }}
+            }},
+
+            %% Extension RPC over HTTP. The same dispatcher the socket
+            %% `rpc.call` frame reaches (`asobi_rpc:dispatch/2`), in the
+            %% player-scoped chain so the body cap, CORS and rate limiter apply
+            %% and a tokenless caller is refused before the controller - which
+            %% matches dispatch's own `unauthenticated` branch. The `/api/v1/rpc`
+            %% prefix is reserved in `asobi_extension_reserved:route_prefixes/0`
+            %% so no extension can claim this frozen core route.
+            {~"/rpc/:method", fun asobi_rpc_controller:call/1, #{methods => [post, options]}}
         ]
     }.
 
@@ -246,6 +264,17 @@ ops_routes() ->
                 methods => [get, options]
             }},
             {~"/players/:id", fun asobi_ops_controller:player/1, #{methods => [get, options]}},
+            %% After every `:id` route, and that is the asobi#326 trap rather
+            %% than a style choice. routing_tree prepends on insert and returns
+            %% on the first *matching sibling* without backtracking, so the
+            %% `:id` binding happily matches the literal segment `guests` and
+            %% then fails to find `purge` beneath it. Declared last, the literal
+            %% is prepended ahead of the binding and is tried first.
+            %% `asobi_router_tests` resolves every declared route and fails if
+            %% this moves back up.
+            {~"/players/guests/purge", fun asobi_ops_controller:purge_guests/1, #{
+                methods => [post, options]
+            }},
             {~"/matches", fun asobi_ops_controller:matches/1, #{methods => [get, options]}},
             {~"/matches/:id", fun asobi_ops_controller:match/1, #{methods => [get, options]}},
             {~"/features", fun asobi_ops_controller:features/1, #{methods => [get, options]}},
@@ -284,12 +313,13 @@ ops_routes() ->
             {~"/notifications", fun asobi_ops_controller:notifications/1, #{
                 methods => [get, options]
             }},
-            %% The one route core owns on behalf of extensions. Extensions
-            %% contribute no routes at all; this dispatches every action an
-            %% installed manifest declares, exactly as one WebSocket frame type
-            %% dispatches `rpc/0`. Its class is per action and comes from that
-            %% manifest, so it is deliberately absent from
-            %% `asobi_ops_caps:classes/0` - see `m:asobi_ops_extension`.
+            %% The one ops-plane route core owns on behalf of extensions -
+            %% `routes/0` mounts player and webhook surfaces, never operator
+            %% ones. This dispatches every action an installed manifest
+            %% declares, exactly as one WebSocket frame type dispatches
+            %% `rpc/0`. Its class is per action and comes from that manifest,
+            %% so it is deliberately absent from `asobi_ops_caps:classes/0` -
+            %% see `m:asobi_ops_extension`.
             {~"/ext/:extension/:action", fun asobi_ops_extension:handle/1, #{
                 methods => [get, post, put, delete, options]
             }}
@@ -336,3 +366,46 @@ ws_routes() ->
             {~"/ws", asobi_ws_handler, #{protocol => ws}}
         ]
     }.
+
+%% The declared route seam. Each manifest's `routes/0` entries mount here,
+%% under core's global plugin chain: the groups declare no `plugins` key, so
+%% Nova applies the chain from its own env - a group naming `plugins` would
+%% replace it, which is the Nova-apps hazard this seam exists to close.
+%% Ordering against core's groups is irrelevant by construction:
+%% `asobi_extensions:validate/1` refused any two patterns that could match
+%% one request, so the asobi#326 declaration-order trap cannot arise, and an
+%% uninstalled extension's paths are simply absent - an unknown route, not a
+%% reserved-looking one.
+extension_routes(Extensions) ->
+    lists:append([extension_groups(Routes) || #{routes := Routes} <- Extensions]).
+
+%% The classifier is total over the validated shape, so a route that somehow
+%% lost its security key crashes the compile loudly instead of vanishing
+%% from the table - or worse, mounting under the wrong chain.
+extension_groups(Routes) ->
+    [
+        Group
+     || Security <- [player, webhook],
+        Group <- security_group(Security, [E || E <- Routes, security(E) =:= Security])
+    ].
+
+security(#{security := Security}) -> Security.
+
+%% `player` is the same chain `api_routes/0` carries; `webhook` mounts open,
+%% like `auth_routes/0`, for a server-to-server caller that cannot hold a
+%% player token - the handler authenticates its caller itself, and the rate
+%% limiter puts it in the dedicated webhook bucket rather than the api one.
+security_group(_Security, []) ->
+    [];
+security_group(player, Entries) ->
+    [#{prefix => ~"", security => fun asobi_auth_plugin:verify/1, routes => mounted(Entries)}];
+security_group(webhook, Entries) ->
+    [#{prefix => ~"", security => false, routes => mounted(Entries)}].
+
+mounted(Entries) ->
+    [mount(Entry) || Entry <- Entries].
+
+%% Total on purpose: a malformed entry cannot exist after validation, and if
+%% one ever does, a function_clause here beats a route silently not mounted.
+mount(#{path := Path, method := Method, mfa := {Module, Function, 1}}) ->
+    {Path, fun Module:Function/1, #{methods => [Method, options]}}.

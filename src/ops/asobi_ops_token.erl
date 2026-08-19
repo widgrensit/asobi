@@ -66,7 +66,11 @@ the lifetime is capped rather than merely checked.
     sub := binary(),
     caps := [asobi_ops_caps:class()],
     iat := integer(),
-    exp := integer()
+    exp := integer(),
+    %% Not signed into the payload - this is the token's own MAC, added by
+    %% `verify/1` so a caller can identify the token it just verified without
+    %% keeping the token itself.
+    id := binary()
 }.
 
 -export_type([claims/0]).
@@ -120,12 +124,19 @@ verify(Token, Key, EnvId) ->
         [?VERSION, Payload, Mac] ->
             Signed = <<?VERSION/binary, ".", Payload/binary>>,
             case authentic(Key, Signed, Mac) of
-                true -> claims(Payload, EnvId);
+                true -> with_id(claims(Payload, EnvId), Mac);
                 false -> {error, bad_signature}
             end;
         _ ->
             {error, malformed}
     end.
+
+%% The MAC identifies this token, and it is the MAC rather than the whole token
+%% so nothing downstream ends up holding a replayable credential in order to
+%% remember it. Distinct tokens have distinct MACs by construction; identical
+%% ones are the same token, which is the question being asked.
+with_id({ok, Claims}, Mac) -> {ok, Claims#{id => Mac}};
+with_id({error, _} = Err, _Mac) -> Err.
 
 %% Constant time, and over the decoded MAC rather than its text, so a token
 %% carrying differently-padded base64 of the right MAC is still the right MAC.
@@ -189,14 +200,24 @@ classes(Names, Known) ->
         false -> false
     end.
 
-claims_json(#{env := Env, sub := Sub, caps := Caps, iat := Iat, exp := Exp}) ->
-    #{
+%% `jti` is optional and passed through untouched. It is not read on this side
+%% at all - the token's own MAC is what identifies it for single-use - but a
+%% minter needs somewhere to put a nonce, because `iat` is only second-granular
+%% and two mints for the same person, environment and caps inside one second
+%% would otherwise be byte-identical, and a token spent once would refuse its
+%% own twin.
+claims_json(#{env := Env, sub := Sub, caps := Caps, iat := Iat, exp := Exp} = Claims) ->
+    Base = #{
         ~"env" => Env,
         ~"sub" => Sub,
         ~"caps" => [atom_to_binary(C, utf8) || C <- Caps],
         ~"iat" => Iat,
         ~"exp" => Exp
-    }.
+    },
+    case maps:get(jti, Claims, undefined) of
+        Jti when is_binary(Jti) -> Base#{~"jti" => Jti};
+        _None -> Base
+    end.
 
 %% Both halves or nothing: a node that knows its key but not which environment
 %% it is cannot check `env`, and answering "close enough" there is how a token

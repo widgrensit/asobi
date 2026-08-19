@@ -6,9 +6,11 @@ The ops plane's one extension seam: `/api/v1/ops/ext/:extension/:action`.
 action - `quests.define` was the first - had nowhere to put it. `ops/0` is
 that home, and this module is what makes it reachable.
 
-Extensions contribute no routes of their own. Core owns this one and dispatches
-every declared action behind it, exactly as it owns one WebSocket frame type
-and dispatches `rpc/0` behind that. The route table stays core's.
+Extensions contribute no routes of their own on this plane - `routes/0`
+declares player and webhook surfaces, never operator ones. Core owns this one
+route and dispatches every declared action behind it, exactly as it owns one
+WebSocket frame type and dispatches `rpc/0` behind that. The route table stays
+core's.
 
 ## What authorises
 
@@ -101,6 +103,8 @@ dispatch(Extension, Action, Actor, Req) ->
 ctx(Extension, Action, Actor) ->
     #{actor => Actor, extension => Extension, action => Action}.
 
+-spec call({module(), atom(), 2}, map(), ctx()) ->
+    asobi_rpc:reply() | {raised, atom(), term(), erlang:stacktrace()}.
 call({M, F, 2}, Params, Ctx) ->
     try
         M:F(Params, Ctx)

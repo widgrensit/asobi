@@ -23,6 +23,15 @@ fully succeed" an index scan rather than a jsonb parse.
 `{error, Reason}` is the operation that never got as far as having subjects -
 a rejected parameter, a lost connection.
 
+An extension ops handler returns `t:asobi_rpc:reply/0` and is audited without
+translation: `{ok, Map}` is the single-subject success, and `{error, Code}`
+or `{error, Code, Details}` is an operation that failed as a whole. The
+stored reason is the code; `Details` is the caller's diagnostic and already
+went to the caller. A handler that raises arrives as the seam's own
+`{raised, Class, Reason, Stack}` value, and an off-contract return arrives as
+itself; both are audited as `error`. The row build is total: a shape the
+audit cannot describe must not become a mutation it does not record.
+
 ## When the audit write itself fails
 
 **The audit never fails the operation.** It runs after the mutation has
@@ -61,7 +70,11 @@ to hide one by exploding.
 
 -type subject() :: binary().
 -type failure() :: {subject(), term()}.
--type outcome() :: {ok, [subject()], [failure()]} | {error, term()}.
+-type outcome() ::
+    {ok, [subject()], [failure()]}
+    | {error, term()}
+    | asobi_rpc:reply()
+    | {raised, atom(), term(), erlang:stacktrace()}.
 -type target() :: {binary(), subject() | undefined} | undefined.
 
 -export_type([subject/0, failure/0, outcome/0, target/0]).
@@ -79,7 +92,7 @@ Run `Fun` and audit whatever it returns.
 Returns `Fun`'s own value unchanged, so wrapping a call site is a
 substitution rather than a rewrite.
 """.
--spec mutation(asobi_ops_auth:actor(), binary(), target(), fun(() -> outcome())) -> outcome().
+-spec mutation(asobi_ops_auth:actor(), binary(), target(), fun(() -> Outcome)) -> Outcome.
 mutation(Actor, Action, Target, Fun) ->
     try Fun() of
         Outcome ->
@@ -98,7 +111,7 @@ Prefer `mutation/4`. This exists for a call site that performs its own
 sequencing and genuinely holds the real outcome; it can still be handed a
 lie, which `mutation/4` cannot.
 """.
--spec record(asobi_ops_auth:actor(), binary(), target(), outcome()) -> ok.
+-spec record(asobi_ops_auth:actor(), binary(), target(), term()) -> ok.
 record(Actor, Action, Target, Outcome) ->
     %% Never let the audit path itself decide the fate of the operation it
     %% describes: a raise here - a lost connection, an unexpected reason term -
@@ -134,7 +147,7 @@ record_strict(Actor, Action, Target, Outcome) ->
         {error, Reason} -> {error, Reason}
     end.
 
--spec write(asobi_ops_auth:actor(), binary(), target(), outcome()) -> ok.
+-spec write(asobi_ops_auth:actor(), binary(), target(), term()) -> ok.
 write(Actor, Action, Target, Outcome) ->
     Params = params(Actor, Action, Target, Outcome),
     CS = kura_changeset:cast(
@@ -161,7 +174,7 @@ loggable(#{occurred_at := {{Y, Mo, D}, {H, Mi, S}}} = Params) ->
     ),
     Params#{occurred_at => Rendered}.
 
--spec params(asobi_ops_auth:actor(), binary(), target(), outcome()) -> map().
+-spec params(asobi_ops_auth:actor(), binary(), target(), term()) -> map().
 params(Actor, Action, Target, Outcome) ->
     #{
         id := ActorId,
@@ -192,23 +205,28 @@ target(undefined) -> #{};
 target({Type, undefined}) -> #{target_type => Type};
 target({Type, Id}) -> #{target_type => Type, target_id => Id}.
 
--spec counts(outcome()) -> {non_neg_integer(), non_neg_integer()}.
-counts({ok, Succeeded, Failed}) -> {length(Succeeded), length(Failed)};
-counts({error, _Reason}) -> {0, 0}.
+-spec counts(term()) -> {non_neg_integer(), non_neg_integer()}.
+counts({ok, Succeeded, Failed}) when is_list(Succeeded), is_list(Failed) ->
+    {length(Succeeded), length(Failed)};
+counts({ok, Result}) when is_map(Result) ->
+    {1, 0};
+counts(_Other) ->
+    {0, 0}.
 
 %% A bulk call where every subject failed is not a partial success. It is
 %% recorded as `error` so the "did not fully succeed" query and the "nothing
 %% happened" query are answerable separately.
--spec classify(outcome()) -> binary().
-classify({ok, _Succeeded, []}) -> ~"ok";
+-spec classify(term()) -> binary().
+classify({ok, Succeeded, []}) when is_list(Succeeded) -> ~"ok";
 classify({ok, [], [_ | _]}) -> ~"error";
 classify({ok, [_ | _], [_ | _]}) -> ~"partial";
-classify({error, _Reason}) -> ~"error".
+classify({ok, Result}) when is_map(Result) -> ~"ok";
+classify(_Other) -> ~"error".
 
--spec details(outcome()) -> map().
+-spec details(term()) -> map().
 details({ok, _Succeeded, []}) ->
     #{};
-details({ok, _Succeeded, Failed}) ->
+details({ok, _Succeeded, Failed}) when is_list(Failed) ->
     Shown = lists:sublist(Failed, ?MAX_DETAIL_FAILURES),
     #{
         failures => [
@@ -217,8 +235,18 @@ details({ok, _Succeeded, Failed}) ->
         ],
         failures_omitted => length(Failed) - length(Shown)
     };
+%% A handler's own result can carry player data, so a success row stores none
+%% of it - the row is attribution, not a response cache.
+details({ok, Result}) when is_map(Result) ->
+    #{};
 details({error, Reason}) ->
-    #{reason => reason(Reason)}.
+    #{reason => reason(Reason)};
+details({error, Code, Details}) when is_map(Details) ->
+    #{reason => reason(Code)};
+details({raised, Class, Reason, _Stack}) ->
+    #{reason => reason({Class, Reason})};
+details(Other) ->
+    #{reason => reason(Other)}.
 
 -spec reason(term()) -> binary().
 reason(Reason) when is_binary(Reason) ->

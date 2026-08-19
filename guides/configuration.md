@@ -20,6 +20,8 @@ Declare settings as globals at the top of your match script:
 -- match.lua
 match_size = 4
 max_players = 10
+min_players = 4     -- defaults to match_size; higher makes the match wait for backfill
+quick_play = true   -- defaults to FALSE for matches: without it match.find_or_create refuses
 strategy = "fill"
 bots = { script = "bots/arena_bot.lua" }
 ```
@@ -28,11 +30,12 @@ bots = { script = "bots/arena_bot.lua" }
 |--------|----------|---------|-------------|
 | `match_size` | yes | none | Minimum players to start a match |
 | `max_players` | no | `match_size` | Maximum players per match |
+| `min_players` | no | `match_size` | Players needed before the loop starts. Higher than `match_size` spawns a match that waits for backfill, and gives up after 60s |
 | `strategy` | no | `"fill"` | `"fill"`, `"skill_based"`, or a custom module |
 | `bots` | no | none | `{ script = "path/to/bot.lua" }` - see [Bots](lua-bots.md) |
 | `game_type` | no | `"match"` | `"match"` or `"world"` |
 | `listed` | no | `false` for matches, `true` for worlds | Whether instances appear in discovery (`match.list` / `world.list`). Never gates joining |
-| `quick_play` | no | `true` | Whether `world.find_or_create` may place a player into an existing instance of this mode |
+| `quick_play` | no | `false` for matches, `true` for worlds | Whether `match.find_or_create` / `world.find_or_create` may place a player into an existing instance of this mode. A match mode that does not set it is refused with `quick_play_disabled`. Independent of `listed` |
 | `state_strategy` | no | none | `"shared"` selects the encode-once broadcast path |
 | `guest_auth` | no | `false` | Declares that this game offers anonymous play. The operator still has to supply a pepper |
 | `registration` | no | none | `"open"`, `"oauth_only"` or `"closed"`. The operator's `sys.config` wins when it sets one |
@@ -76,8 +79,10 @@ you write `sys.config` instead.
 | `ASOBI_DB_PASSWORD` | `postgres` | Database password |
 | `ASOBI_DB_SOCKET_OPTS` | `inet` | Erlang term fragment spliced into kura's `socket_options` list. `inet`, `inet6`, `inet, {nodelay, true}`. Set `inet6` for IPv6-only Postgres networks |
 | `ASOBI_CORS_ORIGINS` | none | Allowed CORS origin. Effectively required for any browser client: unset renders an empty `Access-Control-Allow-Origin`, which no browser accepts |
-| `ASOBI_NODE_HOST` | `127.0.0.1` | Erlang node hostname, in `-name asobi@...`. Not a bind address |
-| `ERLANG_COOKIE` | `asobi` | Erlang distribution cookie. The default is the literal string `asobi` |
+| `ASOBI_NODE_HOST` | `127.0.0.1` | Erlang node hostname, in `-name ${ASOBI_NODE_NAME}@...`. Not a bind address |
+| `ASOBI_NODE_NAME` | `asobi` | Erlang node base name. Change it only to run a second asobi node in the same network namespace - the datagram gateway is the one case. **Every node in a cluster must use the same value**: `asobi_cluster` builds its peers by reusing the current node's base name |
+| `ERLANG_COOKIE` | `asobi` | Erlang distribution cookie. The default is the literal string `asobi`, so it is public. Two nodes sharing a network namespace share an EPMD, so the engine and the datagram gateway must be given **different** cookies |
+| `ASOBI_BINARY_WIRE` | off | `1` / `true` turns on the binary `world.tick` for clients that ask for it. Required by the [datagram plane](datagram-plane.md), which cannot bind a slot without it |
 
 The database port is **not** a variable. It is fixed at `5432` in the image's
 `sys.config`, so a Postgres on another port means supplying your own.
@@ -159,7 +164,7 @@ Shorthand (Erlang module only):
 | `skill_expand_rate` | `50` | Window expansion per 5 seconds (`skill_based` only) |
 | `bots` | `#{}` | Bot configuration - see [Bots](lua-bots.md) |
 | `listed` | `false` for matches, `true` for worlds | Whether instances appear in discovery (`match.list` / `world.list`). Matches are unlisted by default: a matchmaker-spawned match is already assigned to its players, so opt in explicitly |
-| `quick_play` | `true` | Whether `world.find_or_create` may place a player into an existing world of this mode. Read on the world entry path for whatever mode name it is handed, so setting it `false` on a match mode is protective rather than inert. Independent of `listed` - see [World server](world-server.md#visibility) |
+| `quick_play` | `true` for worlds, **`false` for matches** | Whether `world.find_or_create` / `match.find_or_create` may place a player into an existing instance of this mode. Match modes default closed so a mode written before `match.find_or_create` existed is not exposed on upgrade. Independent of `listed` - see [World server](world-server.md#visibility) |
 
 ### Operator modes and game-declared modes
 
@@ -298,6 +303,176 @@ A rejected request gets `403 client_gate_denied`, with the gate's own reason in
 `details.reason` (`client_gate_unavailable` when the gate itself failed). It
 runs after the rate limiter, so a flood is shed by the cheap in-memory check
 before it reaches an external verification service.
+
+## The datagram gateway
+
+Its own release and its own image, `ghcr.io/widgrensit/asobi_dgram`. It contains
+the gateway application and its three dependencies - kernel, stdlib, telemetry,
+plus the rate limiter - and that is all: no nova, no kura, no shigoto, no Lua.
+
+```erlang
+{dgram, #{port => 7777, shards => 4}}
+```
+
+The separation is the point rather than a deployment convenience: the gateway
+binds a UDP port and parses packets from anyone on the internet, and it must not
+share a process tree with the Lua sandbox or your database credentials.
+
+**`role` is the old way of asking for this and it no longer isolates anything on
+its own.** Setting `{role, dgram_gw}` on the engine image still starts the
+gateway and only the gateway - but OTP starts an application's dependencies
+before its start callback runs, so kura and shigoto have already opened a pool
+with your credentials and run migrations by the time the role is read
+(asobi#513). The key still works, for the deployments that already use it. The
+image is what makes it a boundary.
+
+`shards` is the number of `SO_REUSEPORT` receiver sockets and defaults to the
+scheduler count capped at 8. **It is fixed at boot.** Adding or removing a socket
+reshuffles the kernel's hash and breaks every flow already running through the
+gateway, so there is no reload path and changing it is a restart with a
+reconnect for every player on the plane.
+
+### The engine side
+
+The engine dials the gateway; the gateway never dials the engine. So the engine
+needs to know where it is, and both ends need the same secret:
+
+```erlang
+%% On the engine
+{dgram_gateway, #{host => {127, 0, 0, 1}, port => 7778}},
+{dgram_link_secret, <<"...">>},
+{dgram_endpoint, ~"udp.example.com:7777"},
+
+%% On the gateway
+{role, dgram_gw},
+{dgram, #{port => 7777, link_port => 7778, shards => 4}},
+{dgram_link_secret, <<"...">>}
+```
+
+`dgram_gateway` is the opt-in. Without it the engine dials nothing, mints nothing
+and answers `datagram_unavailable` to any client that asks - which is a normal
+answer, not an error.
+
+`dgram_endpoint` is what a client is told to send to, handed over in the mint
+response. Putting it there rather than having the client resolve it is what makes
+the plane independent of DNS and of SNI, and why a non-standard port costs the
+client nothing.
+
+**The link is loopback-only and is not encrypted.** It carries mint secrets, so
+it binds `127.0.0.1` and refuses to be told otherwise. Two containers sharing a
+network namespace is the shape it is built for; separate hosts need a tunnel, and
+that is an operator decision rather than something to default.
+
+Deliberately **not** distributed Erlang, which would have been the obvious answer
+and is the wrong one: dist is all-or-nothing, so a node that can reach another can
+call any function in it. Handing that to the process parsing packets from the
+internet gives back most of what the two-role split is for.
+
+### Describing your transform fields
+
+Nothing is sent on the plane until you say what a position *is*. There is no
+default and that is deliberate: guessing `x` and `y` at some scale would silently
+pick a precision for a world that might be a thousand times larger.
+
+```erlang
+{dgram_pose, #{
+    period_ticks => 20,
+    fields => [
+        #{name => ~"x",  scale => 100},
+        #{name => ~"y",  scale => 100},
+        #{name => ~"vx", scale => 100},
+        #{name => ~"vy", scale => 100}
+    ]
+}}
+```
+
+The list is the canonical order, so a client decodes a fixed layout and the wire
+carries no field names at all. **At most eight fields** - the per-record bitmask
+is one byte - and a ninth disables the plane rather than dropping a field
+silently.
+
+`scale` converts to the `int16` the wire carries: `100` gives two decimal places
+and a range of about +/-327 world units. A bigger world needs a smaller scale and
+coarser steps, which is a trade only your game can make. **A value outside the
+range saturates and is counted** on `asobi.dgram.pose_saturated`, never wrapped -
+wrapping would teleport an entity across the world, which looks like a game bug,
+where saturation looks like what it is.
+
+`period_ticks` is the axial refresh. An entity that stops moving stops being
+mentioned, so a client that missed its last update would keep it wrong forever;
+each tick additionally re-sends every entity whose slot falls in that tick's
+slice, so at 20 ticks nothing is stale for more than a second. It costs no acks,
+no per-client state and no extra encode.
+
+Only these fields travel on the plane. Everything else about an entity -
+including its creation and removal - rides `world.tick` on the WebSocket, where
+it is ordered and cannot be lost.
+
+### Clients ask for it over the WebSocket
+
+A client mints with `rpc.call` on the method `asobi.datagram.open`, which is a
+frame every SDK already implements, so the datagram plane adds **zero** frame
+types to the JSON wire. The reply carries `conn_id`, `kup`, `epoch`, `endpoint`
+and `expires_in`.
+
+The plane is optional in every state: the WebSocket carries everything
+throughout, and a client that never reaches the gateway is degraded rather than
+broken. **[The datagram plane](datagram-plane.md) is the whole story end to end**
+- what it carries, the compose file, the client side, and what happens when it
+does not work.
+
+## Binary `world.tick`
+
+Off by default. Turning it on lets a client ask for `world.tick` as a binary
+frame at `session.connect`, about a quarter of the bytes and several times
+cheaper to decode - the numbers and the encoding are in
+[the protocol guide](websocket-protocol.md#binary-worldtick).
+
+```erlang
+{binary_wire, true}
+```
+
+or, from a container:
+
+```
+ASOBI_BINARY_WIRE=1
+```
+
+A zone reads this once when it starts, so an already-running world keeps the
+setting it started with.
+
+**The [datagram plane](datagram-plane.md) requires it.** A pose datagram carries
+a slot and nothing else, and the only frame that binds a slot to an entity is an
+`add` on this wire - which `session.connect` refuses to hand any client while
+this is off. asobi logs `dgram_pose_without_binary_wire` at boot and disables
+poses rather than sending datagrams every client would discard.
+
+**A frame carries at most 32 distinct field names**, because the field header
+indexes the dictionary in five bits. Past that the frame is sent as text, which
+is correct but costs the entities in it their datagram fast path - see
+[the protocol guide](websocket-protocol.md#binary-worldtick) for what to watch
+for.
+
+A zone that cannot encode its entities at all drops to the text wire and then
+retries on a doubling backoff, starting at a minute and stopping at an hour:
+
+```erlang
+{binary_wire_retry_ms, 60000}
+```
+
+Lower it if your game legitimately produces short-lived unencodable entities and
+you would rather it recovered sooner; the cost of a retry is one refused encode
+on one broadcast tick. `0` retries on every broadcast, which is what the tests
+use and not a setting a deployment needs.
+
+What it costs while on: a zone can have subscribers on both wires, so it builds
+two buffers per broadcast instead of one. That is two encodes per zone per tick
+rather than one per subscriber, and it is paid whether or not anyone has
+negotiated binary. Measured at roughly 50 us per zone per broadcast tick against
+a 50 ms budget.
+
+Clients that never ask see exactly what they saw before, so turning it on is
+safe for a live deployment. Leave it off if no client in your game asks for it.
 
 ## WebSocket origin allowlist
 
@@ -484,7 +659,7 @@ operator half.
 | `guest_verifier_pepper` | none | Key-id -> pepper map, or a single binary. Each pepper must be at least 32 bytes; a shorter one is treated as absent. Presence is the operator's on switch |
 | `guest_verifier_key_id` | `~"v1"` | Which pepper key id to use when minting new verifiers |
 | `guest_unlinked_cap` | `100000` | Soft ceiling on unclaimed guests, or `infinity`. Anything else falls back to the default and logs `invalid_guest_unlinked_cap` |
-| `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent |
+| `guest_reap_after` | unset | Seconds of inactivity since the device last resumed; unset disables the reaper, so guests are permanent. Also reads `ASOBI_GUEST_REAP_AFTER`. On cloud this is the **Guests** picker on the environment row, not a key you write |
 
 The cap is a soft ceiling, not an exact one: the count comes from a short-TTL
 cache rather than a `COUNT` per create, so it can overshoot by roughly (TTL x
@@ -495,9 +670,14 @@ full deployment. Both log `guest_create_denied` with a `reason`; the cap denial
 also logs the `count` and `cap` it compared, which is what tells you whether
 the ceiling is anywhere near.
 
-Clients can shed guests themselves with `POST /api/v1/players/me/erase`
-(see [REST API](rest-api.md#erasing-your-own-account)), which is the only guest
-removal available when `guest_reap_after` is not settable.
+Clients can also shed guests themselves with `POST /api/v1/players/me/erase`
+(see [REST API](rest-api.md#erasing-your-own-account)). Reach for it when a
+player asks to be deleted, not as a way to do housekeeping: a client-side
+erasure is one HTTP request per account, issued by a process that may be on its
+way out. Several engines bind a response callback to the object that made the
+call, so the natural place to put it - a quit, a teardown, a screen closing -
+is exactly where the reply is dropped and the request may never land. Retention
+is the server's job; use this setting for it.
 
 Measured from the last resume, not from account creation. Under device auth a
 guest stays unclaimed for life - there is no password to set - so account age
@@ -625,6 +805,12 @@ five - `console_session_ttl`, `console_secure_cookie`, `console_api_base`,
 need a `sys.config`. A variable overrides `sys.config` only when it is set, so
 the two coexist.
 
+`guest_reap_after` reads `ASOBI_GUEST_REAP_AFTER`, in seconds, on the same
+terms. Anything that is not a positive integer leaves it unset, which means
+guests are kept for ever: a node that cannot parse its own retention setting
+must not fall back to deleting accounts on a schedule nobody chose. `0` is the
+explicit "off".
+
 `console_bundle_app` is only for a host whose extensions ship their own operator
 screens; see [Extending the operator console](console-extensions.md). It has no
 environment variable on purpose: it names an application in the release, so it
@@ -639,6 +825,23 @@ the console needs a sticky route behind a load balancer and a restart signs
 everyone out - see [Clustering](clustering.md) and
 [Operator console](console.md), which owns turning it on, signing in, what the
 screens show and the troubleshooting.
+
+## Storage
+
+Cloud saves and the generic key-value store, served at `/api/v1/saves*` and
+`/api/v1/storage*` and exposed to Lua as `game.storage.*`. On by default; set
+`storage` to `false` to switch the whole subsystem off - the opposite default
+to the console, which is off until asked for.
+
+```erlang
+{storage, false}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `storage` | `true` | Serve the storage subsystem. When `false` the seven `/saves` and `/storage` routes answer 404 and the `game.storage.*` Lua namespace is withheld at VM install |
+
+It has no environment variable; set it in `sys.config`.
 
 ## Vote templates
 
@@ -655,7 +858,7 @@ module:
 }}
 ```
 
-## World capacity
+## Instance capacity
 
 Bounds on persistent world creation, enforced as a DoS backstop:
 
@@ -667,6 +870,18 @@ Bounds on persistent world creation, enforced as a DoS backstop:
 A player at the per-player cap gets `429 world.player_limit_reached`; once the
 global cap is reached further creates get `503 world.capacity_reached`. The
 global cap is checked first.
+
+Matches have a node-wide cap of their own:
+
+```erlang
+{match_max, 1000}            %% default 1000
+```
+
+It bounds `match.find_or_create`, and answers `match_capacity_reached`. The
+matchmaker used to bound match creation implicitly - forming one took
+`match_size` queued tickets - and that bound disappears once a single player can
+create a match. There is no per-player match cap: matches carry no owner, unlike
+worlds.
 
 ## Join rate
 

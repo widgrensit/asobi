@@ -84,9 +84,29 @@ working and a new one reads one place: see `legacy/2`.
     %% Extension RPC. `rpc` is a core code domain, so no extension may own the
     %% `rpc` prefix and mint codes that look like the dispatcher's own.
     {~"rpc.unknown_method", 404, ~"No installed extension serves this RPC method."},
+    %% Not a failure. The WebSocket carries everything in every state, so a
+    %% client that cannot mint stays on TCP and loses latency, nothing else.
+    {~"datagram_unavailable", 503, ~"The datagram plane is not available. Stay on the WebSocket."},
     {~"rpc.invalid_cid", 400, ~"`cid` must be 1-64 printable ASCII characters."},
     {~"rpc.unsupported_protocol", 400, ~"This server does not speak that RPC protocol version."},
     {~"rpc.invalid_params", 400, ~"`params` must be a JSON object."},
+
+    %% Extension event push. `asobi_extensions:emit/4` fails closed: an event
+    %% whose name is malformed, whose domain the emitter does not own, whose data
+    %% is not JSON-encodable, or whose encoded data is too large never reaches a
+    %% player.
+    {
+        ~"event.invalid_name",
+        400,
+        ~"An event name must be `<domain>.<name>` in [A-Za-z0-9_-], up to 64 bytes."
+    },
+    {
+        ~"event.unowned_domain",
+        403,
+        ~"The event's domain is not an RPC prefix this extension owns."
+    },
+    {~"event.invalid_data", 400, ~"The event data is not JSON-encodable."},
+    {~"event.payload_too_large", 413, ~"The event data is larger than the server accepts."},
 
     %% Accounts, providers, guests.
     {~"auth.registration_closed", 403, ~"This deployment is not accepting new players."},
@@ -195,6 +215,27 @@ working and a new one reads one place: see `legacy/2`.
         ~"The username in the request body is not this player's username."
     },
     {~"ops.erase_failed", 500, ~"The erasure was rolled back and nothing was deleted."},
+    {
+        ~"ops.invalid_cutoff",
+        400,
+        ~"A guest purge must name `inactive_for_seconds` as a whole number of seconds, 0 or more."
+    },
+    {
+        ~"ops.purge_count_mismatch",
+        409,
+        ~"The cohort is no longer the size the request confirmed. Nothing was deleted."
+    },
+    {~"ops.purge_failed", 500, ~"The cohort could not be selected. Nothing was deleted."},
+    {
+        ~"ops.orphaned_extension_rows",
+        409,
+        ~"A removed extension's rows still reference this player and block the erase. Reinstall the package so its erase sweep runs, or purge its tables."
+    },
+    {
+        ~"ops.export_incomplete",
+        500,
+        ~"An installed extension failed to export. No export was produced."
+    },
 
     %% Operator console. One 404 covers both "this node does not serve the
     %% console" and "no such asset", so a caller cannot tell a deployment that
@@ -202,13 +243,20 @@ working and a new one reads one place: see `legacy/2`.
     {~"console.not_found", 404, ~"No console resource exists at this path."},
     {~"console.not_built", 503, ~"The console bundle is not built into this release."},
 
-    %% Cloud saves.
+    %% Cloud saves. save.not_found is also what the slot-keyed /saves routes
+    %% return when storage is switched off at the release level
+    %% (asobi_storage:enabled/0), so a disabled deployment reads the same as an
+    %% empty one - see asobi_storage_controller.
     {~"save.not_found", 404, ~"No cloud save exists in this slot."},
     {~"save.too_large", 413, ~"The save data is larger than the per-slot limit."},
     {~"save.version_conflict", 409, ~"The slot was written by another client."},
     {~"save.slot_limit_reached", 409, ~"The player has no free cloud-save slots."},
 
-    %% Generic storage.
+    %% Generic storage. storage.not_found is also what the /storage routes
+    %% return when storage is switched off (asobi_storage:enabled/0), the
+    %% collection/key counterpart to save.not_found for the /saves routes: each
+    %% family answers with its own genuine-miss code so the off-state cannot be
+    %% fingerprinted against an enabled but empty deployment.
     {~"storage.not_found", 404, ~"No object exists at this collection and key."},
     {~"storage.forbidden", 403, ~"The object's permissions do not allow this."},
     {~"storage.value_too_large", 413, ~"The value is larger than the per-object limit."},

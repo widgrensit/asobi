@@ -18,7 +18,38 @@ init([]) ->
         intensity => 10,
         period => 60
     },
-    Children = [
+    {ok, {SupFlags, children(role())}}.
+
+%% Narrowed here rather than taken from application:get_env/3, which types as
+%% term(). An operator typo must not silently select neither role and boot an
+%% empty tree that looks healthy.
+-spec role() -> engine | dgram_gw.
+role() ->
+    case application:get_env(asobi, role, engine) of
+        dgram_gw -> dgram_gw;
+        _ -> engine
+    end.
+
+%% One image, two roles. The datagram gateway binds a UDP port and parses packets
+%% from anyone on the internet, so it must not share a process tree with the Lua
+%% sandbox or the tenant database credentials (ADR 0012, decision 14). Running it
+%% as its own role rather than its own repo keeps the codec shared and the build
+%% single; the isolation that matters is at the container boundary, and this is
+%% what draws it.
+%%
+%% `engine` is the default, so a deployment that has never heard of the gateway
+%% gets exactly what it had.
+-spec children(engine | dgram_gw) -> [supervisor:child_spec()].
+%% Nothing. The gateway's tree belongs to `asobi_dgram_gw_app`, which starts it
+%% from its own application - so it also starts in the gateway RELEASE, where this
+%% supervisor does not exist at all (asobi#513). Kept as a clause rather than
+%% folded into the engine one because a node running the old single-release
+%% two-role deployment still boots asobi here, and it must start no zone, no Lua
+%% and no pool.
+children(dgram_gw) ->
+    [];
+children(_Engine) ->
+    [
         rate_limit_spec(),
         oidc_providers_spec(),
         auth_cache_spec(),
@@ -38,8 +69,36 @@ init([]) ->
         lua_game_config_spec(),
         lua_sup(),
         extension_sup()
-    ],
-    {ok, {SupFlags, Children}}.
+        | dgram_link_children()
+    ].
+
+%% Only when a gateway is configured. A deployment with no datagram plane starts
+%% nothing and pays nothing, which is what makes the plane genuinely optional
+%% rather than optional-if-you-remember-to-turn-it-off.
+dgram_link_children() ->
+    case asobi_dgram_link_client:enabled() of
+        false ->
+            [];
+        true ->
+            [
+                #{
+                    id => asobi_dgram_link_client,
+                    start => {asobi_dgram_link_client, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [asobi_dgram_link_client]
+                },
+                #{
+                    id => asobi_dgram_mint,
+                    start => {asobi_dgram_mint, start_link, []},
+                    restart => permanent,
+                    shutdown => 5000,
+                    type => worker,
+                    modules => [asobi_dgram_mint]
+                }
+            ]
+    end.
 
 %% The asobi_lua merge: asobi_lua used to be its own OTP application, whose
 %% start callback loaded the Lua game config and then started asobi_lua_sup.
@@ -250,6 +309,13 @@ register_limiters() ->
         %% number because the honest frequency is lower.
         erase => #{algorithm => sliding_window, limit => 3, window => 60000},
         iap => #{algorithm => sliding_window, limit => 10, window => 1000},
+        %% Extension routes mounted with `security => webhook` (see
+        %% asobi_extension:routes/0). A webhook handler authenticates its
+        %% caller itself - signature crypto on every request - so letting
+        %% tokenless traffic ride the 300/s api bucket makes each request a
+        %% CPU amplifier. Same shape and size as iap, which is the known
+        %% webhook case the seam exists for.
+        webhook => #{algorithm => sliding_window, limit => 10, window => 1000},
         api => #{algorithm => sliding_window, limit => 300, window => 1000},
         ws_connect => #{algorithm => sliding_window, limit => 60, window => 1000},
         %% Per-player bound on world/match joins (asobi#193). Joining is how a
@@ -289,7 +355,26 @@ register_limiters() ->
         %% own 5/sec budget scales that blocking load linearly with attacker
         %% count. Same reasoning as guest_global. Size from your real
         %% concurrent-player target; this default is a placeholder.
-        rehome_global => #{algorithm => sliding_window, limit => 200, window => 1000}
+        rehome_global => #{algorithm => sliding_window, limit => 200, window => 1000},
+        %% world.resync is the one inbound frame whose response is orders of
+        %% magnitude larger than the request: a ~120-byte ask produces a full
+        %% zone keyframe, measured at ~50 KB of JSON for a 400-entity zone, so
+        %% roughly 400x. Two limiters because one cannot cover both shapes of
+        %% abuse. Per player bounds a single client looping the request; the
+        %% global bucket bounds the aggregate, because per-player alone lets N
+        %% players cost N times the egress and the node's uplink does not care
+        %% whose request it was.
+        %%
+        %% Keyed on player_id rather than IP on purpose. The frame is only
+        %% reachable on an authenticated session, and IP keying would starve
+        %% every player behind one carrier-grade NAT - the same reasoning
+        %% asobi_sup already applies to the rehome pair.
+        %%
+        %% An honest client needs this once per detected gap, and a gap on a TCP
+        %% wire should be impossible, so 2 per 10 s is generous. A client hitting
+        %% the limit is already broken and backing it off is the correct answer.
+        resync => #{algorithm => sliding_window, limit => 2, window => 10000},
+        resync_global => #{algorithm => sliding_window, limit => 20, window => 1000}
     },
     Configured =
         case application:get_env(asobi, rate_limits, #{}) of
@@ -315,6 +400,7 @@ register_limiters() ->
 limiter_name(auth) -> asobi_auth_limiter;
 limiter_name(register) -> asobi_register_limiter;
 limiter_name(iap) -> asobi_iap_limiter;
+limiter_name(webhook) -> asobi_webhook_limiter;
 limiter_name(api) -> asobi_api_limiter;
 limiter_name(ws_connect) -> asobi_ws_connect_limiter;
 limiter_name(join) -> asobi_join_limiter;
@@ -322,7 +408,9 @@ limiter_name(erase) -> asobi_erase_limiter;
 limiter_name(guest_global) -> asobi_guest_global_limiter;
 limiter_name(script_log) -> asobi_script_log_limiter;
 limiter_name(rehome) -> asobi_rehome_limiter;
-limiter_name(rehome_global) -> asobi_rehome_global_limiter.
+limiter_name(rehome_global) -> asobi_rehome_global_limiter;
+limiter_name(resync) -> asobi_world_resync_limiter;
+limiter_name(resync_global) -> asobi_world_resync_global_limiter.
 
 cluster_spec() ->
     #{

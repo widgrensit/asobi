@@ -3,14 +3,66 @@
 
 -export([start/2, stop/1]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -spec start(application:start_type(), term()) -> {ok, pid()} | {error, term()}.
 start(_StartType, _StartArgs) ->
     %% Before the router compiles: whether the console routes exist at all is
     %% read from the `console` key, so the environment has to have been folded
     %% in by now.
     asobi_console_env:apply(),
+    %% Guest retention is read the same way and for the same reason, but it is
+    %% not console configuration, so it gets its own module rather than a
+    %% second meaning for that one. Order does not matter: the reaper reads the
+    %% key at sweep time, not at start.
+    asobi_guest_env:apply(),
+    %% Before asobi_sup reads `role`, because the role decides which supervision
+    %% tree starts at all. Without this the whole datagram plane is unreachable
+    %% from the published image, which is configured by environment variables
+    %% rather than by a sys.config nobody using that image can edit.
+    asobi_dgram_env:apply(),
     setup_telemetry(),
     asobi_error:register_handler(),
+    case asobi_dgram_gw_sup:enabled() of
+        true -> start_gateway();
+        false -> start_engine()
+    end,
+    case asobi_sup:start_link() of
+        {ok, Pid} -> {ok, Pid};
+        ignore -> {error, supervisor_ignored};
+        {error, _} = Err -> Err
+    end.
+
+%% The gateway role exists to shrink the internet-facing surface, and an HTTP API
+%% is surface. Nothing behind it starts in this role - no auth limiter, no session
+%% store, no database - so every request it answered was a 500 out of a
+%% half-booted plugin chain, and in a shared network namespace (the only topology
+%% where the loopback link actually connects) it also raced the engine for the
+%% port and sometimes won (asobi#511).
+%%
+%% Suspended rather than never started: nova is an application dependency and
+%% binds its listener before asobi's start callback runs, so this is the first
+%% moment the role is known. The window is one boot, not the life of the
+%% container.
+%%
+%% And suspended rather than STOPPED, which is not a detail: suspending closes the
+%% listening socket and frees the port, but leaves the listener registered with
+%% ranch. `nova_app:prep_stop/1` calls `ranch:suspend_listener/1` and
+%% `ranch:info/1` on the way down, and both raise `badarg` on a listener that has
+%% been removed - so stopping it made every gateway shutdown produce a crash
+%% report for a state the operator configured deliberately.
+start_gateway() ->
+    case ranch:suspend_listener(nova_listener) of
+        ok ->
+            ?LOG_NOTICE(#{msg => ~"http_listener_suspended", reason => ~"role=dgram_gw"});
+        {error, Reason} ->
+            ?LOG_WARNING(#{msg => ~"http_listener_suspend_failed", error => Reason})
+    end.
+
+%% Everything the gateway role must not do: it has no database, no Lua runtime and
+%% no extensions, and running any of it there is either a crash or a connection to
+%% a database the role is specifically built not to hold credentials for.
+start_engine() ->
     register_lua_game_modes(),
     report_extensions(),
     case kura_migrator:migrate(asobi_repo) of
@@ -21,11 +73,7 @@ start(_StartType, _StartArgs) ->
             logger:error(#{msg => ~"migration_failed", error => MigErr})
     end,
     asobi_registration:log_mode(),
-    case asobi_sup:start_link() of
-        {ok, Pid} -> {ok, Pid};
-        ignore -> {error, supervisor_ignored};
-        {error, _} = Err -> Err
-    end.
+    ok.
 
 setup_telemetry() ->
     asobi_telemetry:setup(),

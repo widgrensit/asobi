@@ -28,6 +28,8 @@ configure via `sys.config` are unaffected).
 ```lua
 match_size     = 4                          -- required, positive integer
 max_players    = 10                         -- optional, defaults to match_size
+min_players    = 4                          -- optional, defaults to match_size; higher than
+                                            -- match_size spawns a match that waits for backfill
 strategy       = "fill"                     -- optional, "fill" | "skill_based"
 bots           = { script = "bots/ai.lua", min_players = 4 } -- optional; min_players defaults to match_size, enabled defaults to true
 game_type      = "world"                    -- optional, "match" (default) or "world"
@@ -312,11 +314,13 @@ load_match_config(ScriptPath) ->
 read_match_globals(ScriptPath, St) ->
     MatchSize = read_global_int(~"match_size", St),
     MaxPlayers = read_global_int(~"max_players", St),
+    MinPlayers = read_global_int(~"min_players", St),
     Strategy = read_global_string(~"strategy", St),
     Bots = read_global_table(~"bots", St),
     GameType = read_global_string(~"game_type", St),
     StateStrategy = read_global_string(~"state_strategy", St),
     TickRate = read_global_int(~"tick_rate", St),
+    BroadcastInterval = read_global_int(~"broadcast_interval", St),
     GridSize = read_global_int(~"grid_size", St),
     ZoneSize = read_global_int(~"zone_size", St),
     ViewRadius = read_global_int(~"view_radius", St),
@@ -361,7 +365,12 @@ read_match_globals(ScriptPath, St) ->
             %% (asobi_matchmaker), worlds listed (asobi_game_modes:world_config/1).
             Config14 = maybe_add_bool(Config13, listed, Listed),
             Config15 = maybe_add_bool(Config14, quick_play, QuickPlay),
-            {ok, Config15};
+            Config16 = maybe_add_int(Config15, broadcast_interval, BroadcastInterval),
+            %% asobi#481: asobi_match_server has always read and honoured
+            %% min_players; nothing could set it. Omitted here it defaults to
+            %% match_size downstream, so declaring nothing changes nothing.
+            Config17 = maybe_add_int(Config16, min_players, MinPlayers),
+            {ok, Config17};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.

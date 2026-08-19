@@ -101,7 +101,20 @@ world_server_test_() ->
         {"#304: oversized game.broadcast payload is not fanned out to players",
             fun broadcast_oversized_payload_is_rejected/0},
         {"#304: normal-size game.broadcast payload is still delivered",
-            fun broadcast_normal_payload_is_delivered/0}
+            fun broadcast_normal_payload_is_delivered/0},
+        {timeout, 15,
+            {"#462: vote calls into a finished world error rather than hang",
+                fun vote_calls_into_finished_world_error/0}},
+        {"#462: cast_vote with a non-binary option does not crash the world",
+            fun cast_vote_non_binary_option_does_not_crash_world/0},
+        {timeout, 15,
+            {"#462: cast_vote with a list option (approval/ranked) reaches the vote server",
+                fun cast_vote_list_option_reaches_vote_server/0}},
+        {"#466: an unexpected call to a loading world replies world_not_ready, not crash",
+            fun loading_call_replies_world_not_ready/0},
+        {timeout, 15,
+            {"#469: an unexpected call to a finished world replies not_in_match, not hang",
+                fun unexpected_call_to_finished_world_replies_not_in_match/0}}
     ]}.
 
 starts_running() ->
@@ -638,4 +651,127 @@ flush_sent() ->
     receive
         {sent, _, _} = M -> [M | flush_sent()]
     after 0 -> []
+    end.
+
+%% asobi#462: a vote.cast/vote.veto into a finished world landed on
+%% finished/3's catch-all, which swallowed the {call, From} with no reply, so
+%% the caller (an infinity gen_statem:call) blocked until the ~5s cleanup
+%% timeout. The finished-state vote clauses now reply immediately with
+%% not_in_match - the same registered code the dead-fabric path returns.
+vote_calls_into_finished_world_error() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    asobi_world_server:cancel(Pid),
+    wait_for_world_status(Pid, finished, 60),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {cast_vote, ~"pf1", ~"v1", ~"o1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {use_veto, ~"pf1", ~"v1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    stop_world(Ctx).
+
+%% asobi#469: the finished state enumerated a couple of call clauses and then
+%% swallowed every other {call, From} on the catch-all, so a call the finished
+%% state did not name (here a reconnect) hung the caller until the ~5s cleanup
+%% timeout. A single general call catch-all now replies not_in_match to any
+%% unexpected call, and votes into a finished world still return not_in_match.
+unexpected_call_to_finished_world_replies_not_in_match() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    asobi_world_server:cancel(Pid),
+    wait_for_world_status(Pid, finished, 60),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {reconnect, ~"pf1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {cast_vote, ~"pf1", ~"v1", ~"o1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    stop_world(Ctx).
+
+%% asobi#462: the world cast_vote path was guard-free and forwarded an
+%% unvalidated non-binary option straight to asobi_vote_server. A vote.cast
+%% carrying a non-binary option_id (a JSON number/null) now degrades to
+%% {error, invalid_option} and the world survives, never forwarding the junk.
+cast_vote_non_binary_option_does_not_crash_world() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    ?assertEqual(
+        {error, invalid_option},
+        gen_statem:call(Pid, {cast_vote, ~"pnb1", ~"v1", 12345}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    ?assertEqual(running, maps:get(status, asobi_world_server:get_info(Pid))),
+    stop_world(Ctx).
+
+wait_for_world_status(_Pid, _Status, 0) ->
+    error(timeout_waiting_for_status);
+wait_for_world_status(Pid, Status, N) ->
+    case maps:get(status, asobi_world_server:get_info(Pid), undefined) of
+        Status ->
+            ok;
+        _ ->
+            timer:sleep(20),
+            wait_for_world_status(Pid, Status, N - 1)
+    end.
+
+%% asobi#462 regression guard: the world cast_vote path was guard-free and
+%% forwarded any option straight to asobi_vote_server; the fix guards it with
+%% is_binary(OptionId) orelse is_list(OptionId). This proves a valid list
+%% option (approval/ranked) still reaches handle_cast_vote and is accepted,
+%% while a list carrying a non-binary and a bare non-binary scalar both degrade
+%% to invalid_option with no crash.
+cast_vote_list_option_reaches_vote_server() ->
+    ensure_vote_sup(),
+    Ctx = #{world_pid := Pid} = start_world(),
+    ok = asobi_world_server:join(Pid, ~"pl1"),
+    {ok, VotePid} = asobi_world_server:start_vote(Pid, #{
+        vote_id => ~"v1",
+        method => approval,
+        options => [#{id => ~"a", label => ~"A"}, #{id => ~"b", label => ~"B"}],
+        window_ms => 60000
+    }),
+    ?assertEqual(ok, gen_statem:call(Pid, {cast_vote, ~"pl1", ~"v1", [~"a", ~"b"]}, 2000)),
+    ?assertEqual(
+        {error, invalid_option},
+        gen_statem:call(Pid, {cast_vote, ~"pl1", ~"v1", [~"a", 123]}, 2000)
+    ),
+    ?assertEqual(
+        {error, invalid_option},
+        gen_statem:call(Pid, {cast_vote, ~"pl1", ~"v1", 123}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    gen_statem:stop(VotePid),
+    stop_world(Ctx).
+
+%% asobi#466: the loading state had no call catch-all, so a call other than
+%% get_info/listing/join function_clause-crashed the whole world and hung the
+%% caller. A naturally started world transitions to running immediately, so
+%% sys:replace_state forces the state name back to loading deterministically;
+%% the large tick_rate keeps the ticker from casting post_tick (unhandled in
+%% loading) during the test.
+loading_call_replies_world_not_ready() ->
+    Ctx = #{world_pid := Pid} = start_world(#{tick_rate => 3600000}),
+    sys:replace_state(Pid, fun({_State, Data}) -> {loading, Data} end),
+    ?assertEqual(
+        {error, world_not_ready},
+        gen_statem:call(Pid, {cast_vote, ~"p1", ~"v1", ~"a"}, 2000)
+    ),
+    ?assertEqual(
+        {error, world_not_ready},
+        gen_statem:call(Pid, {use_veto, ~"p1", ~"v1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    stop_world(Ctx).
+
+ensure_vote_sup() ->
+    case whereis(asobi_vote_sup) of
+        undefined ->
+            {ok, _} = asobi_vote_sup:start_link(),
+            ok;
+        _ ->
+            ok
     end.

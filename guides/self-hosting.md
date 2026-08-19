@@ -174,6 +174,20 @@ The image was renamed from `ghcr.io/widgrensit/asobi_lua`. That name is no
 longer rebuilt - tags already published keep working and are not going away,
 but they will not get fixes - so change your compose file.
 
+`ghcr.io/widgrensit/asobi` is now built from the
+[`asobi_bundle`](https://github.com/widgrensit/asobi_bundle) meta-package, so it
+contains asobi plus every first-party extension (quests, seasons, ...). The name
+and everything you do with it are unchanged. If you build your own release
+instead of using this image, depend on `asobi_bundle` (not bare `asobi`) to get
+the same set.
+
+`ghcr.io/widgrensit/asobi_dgram`, the [datagram gateway](#adding-the-datagram-plane),
+is built from the asobi repository instead, and for the opposite reason: the
+bundle exists so an extension cannot silently vanish from the engine image, and
+the gateway must contain no extensions at all - no nova, no kura, no Lua. Its
+closure is checked on every build, and the image is not pushed if anything that
+holds credentials appears in it.
+
 ```yaml
 services:
   postgres:
@@ -282,9 +296,12 @@ close a quiet WebSocket, which surfaces as players dropping on a timer nobody
 configured.
 
 `ASOBI_NODE_HOST` is not in that compose on purpose. It names the Erlang node
-(`-name asobi@${ASOBI_NODE_HOST}` in `config/vm.args.src`), not a bind address;
-the port asobi listens on is `ASOBI_PORT`. The image default `127.0.0.1` is
-what you want for a single-node deploy.
+(`-name ${ASOBI_NODE_NAME}@${ASOBI_NODE_HOST}` in `config/vm.args.src`), not a
+bind address; the port asobi listens on is `ASOBI_PORT`. The image default
+`127.0.0.1` is what you want for a single-node deploy. `ASOBI_NODE_NAME`
+defaults to `asobi` and only needs changing to run two asobi nodes in one
+network namespace, which the [datagram gateway](#adding-the-datagram-plane)
+does.
 
 For a single node, also close distribution off. The shipped `vm.args` carries
 the line commented out:
@@ -327,6 +344,154 @@ a player or refund a purchase.
 
 Both share the game port, so anyone who can reach your game can reach
 `/console`. Restrict it at the proxy.
+
+## Adding the datagram plane
+
+Optional, off by default, and worth it only if your game moves things around: it
+puts entity **positions** on UDP so one lost packet costs one frame of staleness
+rather than stalling everything behind a TCP retransmit. Everything else -
+including entity creation, removal and every non-transform field - keeps
+travelling on the WebSocket, in every state, whatever happens to the plane.
+
+**It is two containers, and two different images.** The gateway binds a UDP port
+and parses packets from anyone on the internet, so it must not run your game -
+and "must not" here is a property of what is in the image, not of a flag it is
+started with. `ghcr.io/widgrensit/asobi_dgram` is a release containing the
+gateway application and nothing else: no nova, no kura, no shigoto, no Lua. There
+is no HTTP listener in it, no migration to run, and no database driver to open a
+pool with.
+
+That distinction is worth stating plainly, because it used to be a role switch
+and a role switch cannot do this. OTP starts an application's dependencies before
+its start callback runs, so by the time the old `ASOBI_ROLE=dgram_gw` was read,
+the engine image had already opened a pool with your `ASOBI_DB_*` credentials and
+run migrations (asobi#513). Setting the role on the engine image still works and
+still has that flaw; use the gateway image.
+
+If you build your own images, the gateway is `docker build --target gateway`
+against this repository.
+
+They **share a network namespace** - a sidecar in compose, two containers in one
+pod on Kubernetes. The engine dials the gateway over loopback, because the
+gateway binds its link port on `127.0.0.1`: the link carries mint credentials
+with no transport security of its own, so it must never touch a routable address.
+A gateway on its own compose network is therefore unreachable whatever you point
+`ASOBI_DGRAM_GATEWAY` at, and the plane silently degrades to WebSocket for every
+player (asobi#511).
+
+What the shared namespace keeps is the isolation that does the work: the gateway
+has its own environment, its own filesystem and its own process tree. What it
+gives up is a private loopback, and **that is where Erlang distribution lives**.
+Give the two roles different cookies and different `ASOBI_NODE_NAME`s, both shown
+below; without that, a bug in the code parsing internet packets is a shell on the
+node running your game.
+
+```bash
+openssl rand -hex 32 > dgram_secret.txt
+printf 'dgram_secret.txt\n' >> .gitignore
+```
+
+The two roles also need **different Erlang cookies**. They share a network
+namespace, so they share a loopback and an EPMD, and a shared cookie means the
+container parsing hostile UDP can `rpc:call` into the one holding your Lua
+sandbox and your database credentials. The image ships a public default, so
+setting both is not optional:
+
+```bash
+echo "ERLANG_COOKIE=$(openssl rand -hex 24)"    # engine, in your .env
+echo "DGRAM_COOKIE=$(openssl rand -hex 24)"     # gateway, in your .env
+```
+
+```yaml
+  asobi:
+    image: ghcr.io/widgrensit/asobi:latest
+    # ...everything from the compose above, plus:
+    environment:
+      # Where to dial the gateway. This is the engine's opt-in: without it
+      # nothing is dialled and clients are told the plane is unavailable.
+      # Loopback, not a compose service name - see above.
+      ASOBI_DGRAM_GATEWAY: "127.0.0.1:7778"
+      # What clients are told to send to. Your public address, not the
+      # container's - and it is delivered in the mint reply, which is why the
+      # plane needs no DNS and no SNI and why a non-standard port is free.
+      ASOBI_DGRAM_ENDPOINT: "udp.example.com:7777"
+      ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
+      # What a position IS, in canonical order. No default: guessing a scale
+      # would silently pick a precision for a world that might be a thousand
+      # times larger. `100` gives two decimals and a range of about +/-327 world
+      # units - a bigger world needs a smaller scale and coarser steps.
+      ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
+      # The plane's precondition: only the binary `world.tick` binds a slot, and
+      # no client is served it while this is off - so every pose would be
+      # discarded client-side. asobi logs an error at boot and disables poses if
+      # the manifest is configured without it.
+      ASOBI_BINARY_WIRE: "1"
+      ERLANG_COOKIE: ${ERLANG_COOKIE:?set ERLANG_COOKIE in .env}
+    ports:
+      # The gateway's UDP port, published here: it is this container's namespace.
+      - "7777:7777/udp"
+    volumes:
+      - ./dgram_secret.txt:/run/secrets/dgram:ro
+
+  dgram:
+    # Not the engine image with a role set - see above.
+    image: ghcr.io/widgrensit/asobi_dgram:latest
+    network_mode: "service:asobi"
+    depends_on:
+      - asobi
+    environment:
+      # ASOBI_ROLE and the ports are baked into this image; set here only where
+      # you want something other than the defaults.
+      ASOBI_DGRAM_PORT: 7777
+      ASOBI_DGRAM_LINK_PORT: 7778
+      ASOBI_DGRAM_LINK_SECRET_FILE: /run/secrets/dgram
+      # Same manifest as the engine. The gateway does not read it, but a future
+      # version might, and two copies that can disagree is worse than one.
+      ASOBI_DGRAM_POSE_FIELDS: "x:100,y:100,vx:100,vy:100"
+      # A DIFFERENT cookie from the engine's. One namespace means one loopback,
+      # and a shared cookie makes distribution a path from the process parsing
+      # internet packets into the one running your game. The node name is already
+      # distinct in this image, which the shared EPMD requires.
+      ERLANG_COOKIE: ${DGRAM_COOKIE:?set DGRAM_COOKIE in .env}
+    volumes:
+      - ./dgram_secret.txt:/run/secrets/dgram:ro
+    restart: unless-stopped
+```
+
+Open **UDP** 7777 on your firewall. Never publish the link port: it carries mint
+secrets and has no transport security of its own, which is why it binds loopback
+and why the namespace is shared rather than the port exposed.
+
+Clients opt in per SDK - `realtime.request_datagram = true` in Godot, Defold and
+LOVE today; see [the datagram plane](datagram-plane.md) for the client side and
+the SDK support table. A client on a network that blocks UDP, or a web export where raw UDP does
+not exist, silently stays on the WebSocket and loses nothing but latency.
+
+### Checking it works
+
+```
+asobi.dgram.link_up          the engine attached to the gateway
+asobi.dgram.canary_missed    consecutive >= 2 means the receive loop is wedged
+asobi.dgram.dropped          gate=mac is the one to wake up for
+asobi.dgram.pose_saturated   your scale is wrong for your world size
+```
+
+Two log lines say the plane is not working, and both name the cause:
+
+- `dgram link unreachable, datagram plane is down` - the engine cannot reach the
+  gateway. Almost always the topology: the link port binds loopback, so the two
+  roles have to share a network namespace. Every client is answered
+  `datagram_unavailable` until this clears.
+- `binary world.tick frame refused, falling back to text` - a zone's entities do
+  not fit the binary wire, so the entities that frame introduced get no poses.
+  The line carries the zone, the distinct field-name count (the cap is 32) and
+  the widest entity, and it is throttled to one per zone per minute with the
+  suppressed count attached.
+
+The gateway proves itself by sending itself a real datagram every five seconds
+and waiting for the reply, so a wedged receive loop fails readiness where a
+port-bound check would not. It does **not** prove every shard: the kernel chooses
+which one receives the probe, so a healthy canary means at least one is alive.
 
 ## Tuning knobs
 
@@ -381,6 +546,9 @@ that evaluates on a *running* node, and `asobi_lua_validate:cli/1` ends in
 
 - **The console is off** unless you turned it on. Leave it off if nobody needs
   it; if you turn it on, put it behind the proxy restriction above.
+- **Storage is on** unless you set `{storage, false}`. Off, the `/saves` and
+  `/storage` routes answer 404 and Lua's `game.storage.*` is withheld - see
+  [Configuration](configuration.md#storage).
 - **Guest auth is off** until the game declares `guest_auth = true` in its Lua
   *and* the operator configures a pepper of at least 32 bytes. Both halves are
   required (ADR 0004), and the operator half currently needs a `sys.config`:

@@ -1,0 +1,628 @@
+[
+  {
+    "bytes": 135,
+    "frame": {
+      "frame_seq": 1,
+      "kf": false,
+      "kind": "sequenced",
+      "records": [
+        {
+          "fields": {
+            "alive": true,
+            "hp": 100,
+            "name": "player one",
+            "stunned": false,
+            "target": null,
+            "x": 12.5,
+            "y": -3.25
+          },
+          "gen": 0,
+          "id": "01a0115f-547e-714f-829f-408c855ab77b",
+          "op": "add",
+          "slot": 7
+        }
+      ],
+      "tick": 20,
+      "zone": [0,0]
+    },
+    "name": "add_with_all_value_types"
+  },
+  {
+    "bytes": 1039,
+    "frame": {
+      "frame_seq": 4711,
+      "kf": false,
+      "kind": "sequenced",
+      "records": [
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 1.5,
+            "y": -0.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 1
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 3.0,
+            "y": -0.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 2
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 4.5,
+            "y": -0.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 3
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 6.0,
+            "y": -1.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 4
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 7.5,
+            "y": -1.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 5
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 9.0,
+            "y": -1.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 6
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 10.5,
+            "y": -1.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 7
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 12.0,
+            "y": -2.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 8
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 13.5,
+            "y": -2.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 9
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 15.0,
+            "y": -2.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 10
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 16.5,
+            "y": -2.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 11
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 18.0,
+            "y": -3.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 12
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 19.5,
+            "y": -3.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 13
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 21.0,
+            "y": -3.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 14
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 22.5,
+            "y": -3.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 15
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 24.0,
+            "y": -4.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 16
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 25.5,
+            "y": -4.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 17
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 27.0,
+            "y": -4.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 18
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 28.5,
+            "y": -4.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 19
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 30.0,
+            "y": -5.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 20
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 31.5,
+            "y": -5.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 21
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 33.0,
+            "y": -5.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 22
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 34.5,
+            "y": -5.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 23
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 36.0,
+            "y": -6.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 24
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 37.5,
+            "y": -6.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 25
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 39.0,
+            "y": -6.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 26
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 40.5,
+            "y": -6.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 27
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 42.0,
+            "y": -7.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 28
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 43.5,
+            "y": -7.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 29
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 45.0,
+            "y": -7.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 30
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 46.5,
+            "y": -7.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 31
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 48.0,
+            "y": -8.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 32
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 49.5,
+            "y": -8.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 33
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 51.0,
+            "y": -8.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 34
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 52.5,
+            "y": -8.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 35
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 54.0,
+            "y": -9.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 36
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 55.5,
+            "y": -9.25
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 37
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 57.0,
+            "y": -9.5
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 38
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 58.5,
+            "y": -9.75
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 39
+        },
+        {
+          "fields": {
+            "vx": 0.5,
+            "vy": -0.5,
+            "x": 60.0,
+            "y": -10.0
+          },
+          "gen": 0,
+          "op": "update",
+          "slot": 40
+        }
+      ],
+      "tick": 94220,
+      "zone": [3,-2]
+    },
+    "name": "steady_state_40_updates"
+  },
+  {
+    "bytes": 298,
+    "frame": {
+      "frame_seq": 88,
+      "kf": true,
+      "kind": "sequenced",
+      "records": [
+        {
+          "fields": {
+            "x": 1.0,
+            "y": 0.0
+          },
+          "gen": 1,
+          "id": "000000001-0000-7000-8000-000000000000",
+          "op": "add",
+          "slot": 1
+        },
+        {
+          "fields": {
+            "x": 2.0,
+            "y": 0.0
+          },
+          "gen": 2,
+          "id": "000000002-0000-7000-8000-000000000000",
+          "op": "add",
+          "slot": 2
+        },
+        {
+          "fields": {
+            "x": 3.0,
+            "y": 0.0
+          },
+          "gen": 3,
+          "id": "000000003-0000-7000-8000-000000000000",
+          "op": "add",
+          "slot": 3
+        },
+        {
+          "fields": {
+            "x": 4.0,
+            "y": 0.0
+          },
+          "gen": 4,
+          "id": "000000004-0000-7000-8000-000000000000",
+          "op": "add",
+          "slot": 4
+        },
+        {
+          "fields": {
+            "x": 5.0,
+            "y": 0.0
+          },
+          "gen": 5,
+          "id": "000000005-0000-7000-8000-000000000000",
+          "op": "add",
+          "slot": 5
+        }
+      ],
+      "tick": 0,
+      "zone": [-1,-1]
+    },
+    "name": "keyframe_all_adds"
+  },
+  {
+    "bytes": 44,
+    "frame": {
+      "frame_seq": 12,
+      "kf": false,
+      "kind": "sequenced",
+      "records": [
+        {
+          "gen": 7,
+          "op": "remove",
+          "slot": 1
+        },
+        {
+          "gen": 7,
+          "op": "remove",
+          "slot": 2
+        },
+        {
+          "gen": 7,
+          "op": "remove",
+          "slot": 65535
+        }
+      ],
+      "tick": 240,
+      "zone": [0,0]
+    },
+    "name": "removes_only"
+  },
+  {
+    "bytes": 39,
+    "frame": {
+      "frame_seq": 0,
+      "kf": false,
+      "kind": "ungated",
+      "records": [
+        {
+          "gen": 255,
+          "op": "remove",
+          "slot": 3
+        },
+        {
+          "gen": 255,
+          "op": "remove",
+          "slot": 9
+        }
+      ],
+      "tick": 0,
+      "zone": [5,5]
+    },
+    "name": "ungated_leave_removals"
+  },
+  {
+    "bytes": 29,
+    "frame": {
+      "frame_seq": 0,
+      "kf": true,
+      "kind": "sequenced",
+      "records": [],
+      "tick": 0,
+      "zone": [0,0]
+    },
+    "name": "empty_keyframe"
+  },
+  {
+    "bytes": 41,
+    "frame": {
+      "frame_seq": 9007199254740991,
+      "kf": false,
+      "kind": "sequenced",
+      "records": [
+        {
+          "fields": { "x": 0.0 },
+          "gen": 255,
+          "op": "update",
+          "slot": 0
+        }
+      ],
+      "tick": 9007199254740991,
+      "zone": [-2147483648,2147483647]
+    },
+    "name": "extremes"
+  }
+]

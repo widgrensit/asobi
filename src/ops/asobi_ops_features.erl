@@ -113,6 +113,7 @@ capabilities() ->
             {~"matches", any_mode(fun is_match_mode/1)},
             {~"oidc", configured_collection(oidc_providers)},
             {~"steam", configured(steam_api_key)},
+            {~"storage", asobi_storage:enabled()},
             {~"worlds", any_mode(fun is_world_mode/1)}
         ])
     ].

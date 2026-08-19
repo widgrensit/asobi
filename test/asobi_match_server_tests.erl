@@ -989,6 +989,121 @@ broadcast_in_finished_is_not_swallowed_test() ->
     meck:unload(asobi_test_game),
     cleanup(ok).
 
+%% asobi#462: a vote.cast/vote.veto into a finished match landed on
+%% finished/3's catch-all, which swallowed the {call, From} with no reply, so
+%% the caller (an infinity gen_statem:call) blocked until the ~5s cleanup
+%% timeout. The finished-state vote clauses now reply immediately with
+%% not_in_match - the same registered code the dead-fabric path returns.
+vote_calls_into_finished_match_error_test() ->
+    setup(),
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"pf1"),
+    ok = asobi_match_server:join(Pid, ~"pf2"),
+    timer:sleep(50),
+    ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    asobi_match_server:cancel(Pid),
+    wait_for_status(Pid, finished, 60),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {cast_vote, ~"pf1", ~"v1", ~"o1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {use_veto, ~"pf1", ~"v1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    gen_statem:stop(Pid),
+    cleanup(ok).
+
+%% asobi#469: the finished state enumerated a couple of call clauses and then
+%% swallowed every other {call, From} on the catch-all, so a call the finished
+%% state did not name (here a reconnect) hung the caller until the ~5s cleanup
+%% timeout. A single general call catch-all now replies not_in_match to any
+%% unexpected call, and votes into a finished match still return not_in_match.
+unexpected_call_to_finished_match_replies_not_in_match_test() ->
+    setup(),
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"pf1"),
+    ok = asobi_match_server:join(Pid, ~"pf2"),
+    timer:sleep(50),
+    ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    asobi_match_server:cancel(Pid),
+    wait_for_status(Pid, finished, 60),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {reconnect, ~"pf1"}, 2000)
+    ),
+    ?assertEqual(
+        {error, not_in_match},
+        gen_statem:call(Pid, {cast_vote, ~"pf1", ~"v1", ~"o1"}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    gen_statem:stop(Pid),
+    cleanup(ok).
+
+%% asobi#462: a vote.cast with a non-binary option_id (a JSON number/null)
+%% missed running/3's is_binary guard and, with no catch-all there, crashed
+%% the whole match on function_clause - every player in it - on one malformed
+%% frame. It now degrades to {error, invalid_option} and the match survives.
+cast_vote_non_binary_option_does_not_crash_match_test() ->
+    setup(),
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"pnb1"),
+    ok = asobi_match_server:join(Pid, ~"pnb2"),
+    timer:sleep(50),
+    ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    ?assertEqual(
+        {error, invalid_option},
+        gen_statem:call(Pid, {cast_vote, ~"pnb1", ~"v1", 12345}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    stop(Pid),
+    cleanup(ok).
+
+%% asobi#462 regression guard: a valid option_id is a binary OR a list of
+%% binaries (approval/ranked - asobi_vote_server:cast_vote accepts
+%% binary() | [binary()]). An earlier is_binary(OptionId)-only guard rejected
+%% every list vote as invalid_option before it reached the vote server; the
+%% widened guard forwards a list through, and asobi_vote_server accepts a valid
+%% one and rejects a bad one - neither path crashes the match.
+cast_vote_list_option_reaches_vote_server_test() ->
+    setup(),
+    ensure_vote_sup(),
+    Pid = start_match(#{min_players => 2, max_players => 2}),
+    ok = asobi_match_server:join(Pid, ~"pl1"),
+    ok = asobi_match_server:join(Pid, ~"pl2"),
+    timer:sleep(50),
+    ?assertEqual(running, maps:get(status, asobi_match_server:get_info(Pid))),
+    {ok, VotePid} = asobi_match_server:start_vote(Pid, #{
+        vote_id => ~"v1",
+        method => approval,
+        options => [#{id => ~"a", label => ~"A"}, #{id => ~"b", label => ~"B"}],
+        window_ms => 60000
+    }),
+    ?assertEqual(ok, gen_statem:call(Pid, {cast_vote, ~"pl1", ~"v1", [~"a", ~"b"]}, 2000)),
+    ?assertEqual(
+        {error, invalid_option},
+        gen_statem:call(Pid, {cast_vote, ~"pl1", ~"v1", [~"a", 123]}, 2000)
+    ),
+    ?assertEqual(
+        {error, invalid_option},
+        gen_statem:call(Pid, {cast_vote, ~"pl1", ~"v1", 123}, 2000)
+    ),
+    ?assert(is_process_alive(Pid)),
+    gen_statem:stop(VotePid),
+    stop(Pid),
+    cleanup(ok).
+
+ensure_vote_sup() ->
+    case whereis(asobi_vote_sup) of
+        undefined ->
+            {ok, _} = asobi_vote_sup:start_link(),
+            ok;
+        _ ->
+            ok
+    end.
+
 empty_phases_does_not_finish_test() ->
     %% Inject phases/1 that returns []. Before the fix, the match would
     %% transition to `finished` on the first tick because asobi_phase:init([])

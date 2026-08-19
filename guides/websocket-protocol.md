@@ -69,10 +69,10 @@ The runtime validates the leaf name before it goes on the wire:
 
 <!-- BEGIN reserved-event-names (verified against asobi_ws_handler:reserved_event_names/0 by asobi_protocol_coverage_tests) -->
 ```
-finished            joined              left                list
-matched             matchmaker_expired  matchmaker_failed   phase_changed
-state               terrain             tick                vote_result
-vote_start          vote_tally          vote_vetoed
+ack                 finished            joined              left
+list                matched             matchmaker_expired  matchmaker_failed
+phase_changed       state               terrain             tick
+vote_result         vote_start          vote_tally          vote_vetoed
 ```
 <!-- END reserved-event-names -->
 
@@ -102,12 +102,37 @@ token is the `access_token` from any auth route.
 Response:
 
 ```json
-{"type": "session.connected", "payload": {"player_id": "..."}}
+{"type": "session.connected", "payload": {"player_id": "...", "wire": "json"}}
 ```
 
 A bad or expired token answers `error` with reason `invalid_token` and code
 `unauthenticated`, and the socket stays open so the client can retry with a
 refreshed token.
+
+#### Choosing a wire
+
+`session.connect` may ask for the binary `world.tick` encoding:
+
+```json
+{"type": "session.connect", "payload": {"token": "...", "wire": "binary"}}
+```
+
+The reply always states the wire you actually got, which is not always the one
+you asked for: a server with `asobi.binary_wire` off answers `"json"`. Read it
+rather than assuming, and never infer the answer from the opcode of the first
+frame that happens to arrive.
+
+Asking for binary changes `world.tick` and nothing else. `world.ack`,
+`world.terrain`, `match.*`, `module.*` and every `error` stay JSON text on both
+wires, so a binary client is one that handles both frame types, not one that
+stops handling text. A frame the server cannot encode as binary also arrives as
+text: an entity field holding a list or a nested map, or a frame needing more
+than the 32 field names the dictionary can index.
+
+The uplink is text-only on both wires. A binary frame sent to the server answers
+`error` with reason `binary_uplink_unsupported`.
+
+See [Binary `world.tick`](#binary-worldtick) for the encoding.
 
 ### `session.heartbeat`
 
@@ -187,6 +212,36 @@ to listed.
 Distinct from `GET /api/v1/matches`, which reads the match *record* table
 (finished matches, an audit trail). `GET /api/v1/matches/live` is the REST
 equivalent of this message.
+
+### `match.find_or_create`
+
+Get into a live match of a mode, spawning one if there is none.
+
+```json
+{"type": "match.find_or_create", "cid": "1", "payload": {"mode": "arena"}}
+```
+
+Replies with `match.joined`, exactly as `match.join` does. The payload takes
+`mode` only - every other match parameter comes from mode config, so a client
+cannot choose `max_players` or the tick rate.
+
+Eligibility is `quick_play`, not `listed` - they are independent axes. A match
+mode **defaults to `quick_play = false`**, so a mode is reachable through the
+matchmaker alone until you opt it in. A mode that is not eligible answers
+`quick_play_disabled`, the same reason `world.find_or_create` uses.
+
+That default is deliberate: every match mode written before this frame existed
+declares no `quick_play`, and defaulting it open would expose a ranked mode to a
+client that had never been rated or queued.
+
+Prefer this to `match.list` followed by `match.join`: the two-step version
+races, and two clients reading the same empty listing will each create a match.
+This resolves server-side and is serialized, so simultaneous callers converge on
+one match.
+
+Subject to the same join rate limit as `match.join` and `world.join`, and to a
+node-wide cap on live matches (`asobi.match_max`, default 1000), which answers
+`match_capacity_reached`. A world mode is refused with `wrong_mode_type`.
 
 ### `match.join`
 
@@ -284,6 +339,17 @@ Send game input to the match server.
 {"type": "match.input", "payload": {"action": "move", "x": 10, "y": 5}}
 ```
 
+As with [`world.input`](#worldinput), the `payload` IS the input map. Two
+**deprecated** compatibility shapes survive here and will go at the next
+protocol break: a payload whose only key is `data` mapped to an object is
+unwrapped to that object, and one whose only key is `data` mapped to a JSON
+*string* is decoded and unwrapped. A malformed string, a decoded value that is
+not an object, or a `payload` that is not an object at all is answered with
+`error`, reason `invalid_payload`.
+
+When the connection is in a world rather than a match, `match.input` is routed
+to your zone, so the two frames reach the same `handle_input/3`.
+
 Input sent while not in a match or world is dropped. The first drop (at
 most one per 5 seconds per connection) is answered with an error event so
 the client can tell input is going nowhere:
@@ -353,6 +419,24 @@ raw, because it may be any scripting value (string, number, table).
 
 ```json
 {"type": "module.message", "payload": {"module": "lua", "message": "you are player 3"}}
+```
+
+### `module.event` (server push)
+
+A named, routable event an extension pushes to a player from its own Erlang
+code with `asobi_extensions:emit/4`. Unlike `module.message` (an unnamed dev
+message) this frame carries a routing key clients dispatch on. It is emitted as
+a single frame with no legacy alias.
+
+`module` is the emitter's registered short name. `event` is `<domain>.<name>`,
+where `domain` is an RPC prefix the extension owns. `data` is always an object.
+
+`module` may legitimately differ from the `event` domain, because an extension
+can own an RPC prefix that is not its own name - so a consumer should key off
+whichever of the two it actually means, deliberately.
+
+```json
+{"type": "module.event", "payload": {"module": "quests", "event": "quests.completed", "data": {"quest_id": "01j8x000000000000000000042", "reward": 250}}}
 ```
 
 ### `game.error` / `game.message` (server push, deprecated)
@@ -596,12 +680,28 @@ Join a specific world by id (e.g. one returned from `world.list`).
 
 ### `world.input`
 
-Send game input to your zone. The `payload` IS the input map - there is
-no inner `data` wrapper. Field names are entirely up to your game; the
-server only forwards the map verbatim to your `handle_input/3` callback.
+Send game input to your zone. The `payload` IS the input map; the server
+forwards it verbatim to your `handle_input/3` callback and field names are
+entirely up to your game.
+
+One **deprecated** compatibility shape survives: a payload whose *only* key is
+`data`, mapped to an object, is unwrapped to that object. It exists for clients
+that predate this rule and will be removed at the next protocol break; do not
+send it. A `data` key alongside any other key is not special, and neither is a
+`data` whose value is not an object - both reach `handle_input/3` untouched,
+with the rest of the payload intact.
+
+A `payload` that is not an object at all is rejected with an `error` frame,
+reason `invalid_payload`. It is not silently treated as empty input.
+
+For client-side prediction, add an optional `seq` *alongside* `payload` (a
+sibling, so "the payload IS the input map" stays true). The server echoes the
+highest consumed `seq` back as a [`world.ack`](#worldack-server-push); see
+[Client-side prediction](#client-side-prediction). A `seq` that is not a
+non-negative integer below 2^53 is ignored.
 
 ```json
-{"type": "world.input", "payload": {"kind": "move", "x": 600, "y": 480}}
+{"type": "world.input", "seq": 412, "payload": {"kind": "move", "x": 600, "y": 480}}
 ```
 
 The server routes the message to whichever zone owns your player
@@ -633,7 +733,7 @@ the **initial snapshot** for every entity in the zone - register your
 handler before sending the join message or you miss it.
 
 ```json
-{"type": "world.tick", "payload": {"tick": 42, "updates": [{"op": "a", "id": "01HX...", "x": 600, "y": 480, "type": "player"}]}}
+{"type": "world.tick", "payload": {"zone": [3, 5], "frame_seq": 118, "kf": false, "tick": 42, "updates": [{"op": "a", "id": "01HX...", "x": 600, "y": 480, "type": "player"}]}}
 ```
 
 `updates` is a list of entity deltas. `op` values:
@@ -643,6 +743,203 @@ handler before sending the join message or you miss it.
 | `"a"` | Added, full state | id + every field on the entity |
 | `"u"` | Updated, diff | id + only changed fields |
 | `"r"` | Removed | id only |
+
+#### Apply per zone, and check the sequence
+
+| Field | Meaning |
+|-------|---------|
+| `zone` | The zone these updates belong to, as `[x, y]`. |
+| `frame_seq` | Contiguous per zone, advancing only on a frame actually sent. |
+| `kf` | `true` on a keyframe: a complete baseline for that zone, all `op: "a"`. |
+
+**Keep one entity table per zone, keyed by `zone`, never one flat table.** You
+are subscribed to an interest ring of several zones at once, each an independent
+process, and messages are ordered per sender only. Crossing a boundary emits an
+`op: "r"` from the zone you left and an `op: "a"` from the zone you entered, from
+two different senders, so they can reach you in either order. Applied into one
+flat table, the removal can land last and delete an entity you will never hear
+about again. Per-zone tables make that unreachable.
+
+**`frame_seq` is how you detect loss.** It has no gaps by construction, so a
+frame whose sequence is more than one past the last you applied for that zone
+means you missed something; a frame at or below it is stale and should be
+dropped. `tick` cannot do this job - it skips on `broadcast_interval` and is
+suppressed on a quiet tick, so a gap in it is ambiguous.
+
+Two frames are applied **ungated**, without the sequence check:
+
+- `kf: true`, which resets your high-water mark to the value it carries. That is
+  what makes a zone restart recoverable.
+- A frame with no `frame_seq` at all, which is the removal list you get for the
+  zone you are leaving. Gating it would leave you holding ghosts forever.
+
+On a gap, send [`world.resync`](#worldresync) for that zone and you get a fresh
+keyframe.
+
+### Binary `world.tick`
+
+A client that negotiated `"wire": "binary"` at
+[`session.connect`](#choosing-a-wire) receives `world.tick` as a **WebSocket
+binary frame** carrying the same information in about a quarter of the bytes, and
+materially cheaper to decode: measured against native JSON, 2.4x faster in
+Godot's GDScript and 33x faster than the pure-Lua parser Defold and LOVE ship.
+Every other message type still arrives as JSON text.
+
+All multi-byte integers and floats are **little-endian**. That is not the usual
+choice for a wire format, and it is deliberate: Godot's
+`PackedByteArray.decode_*` reads little-endian and has no big-endian counterpart,
+so network byte order would force a hand-rolled byte loop in interpreted
+GDScript - and those native calls are exactly why the codec beats JSON there
+rather than losing to it. Every other target reads either order for the same
+price, so the runtime with no room to spare picks.
+
+```
+frame    Kind:8, ZX:32/signed, ZY:32/signed, FrameSeq:64, Kf:8, Tick:64,
+         DictLen:8, Dict, RecCount:16, Records
+
+dict     for each name: Len:8, Name/binary            (at most 32 names)
+record   Op:8, Slot:16, [IdLen:8, Id/binary]?, FieldCount:8, Fields
+field    Type:3, Idx:5, Value                         (one header byte)
+```
+
+`Kind` is `1` for a frame holding a position in the zone's sequence and `2` for
+one that does not - the binary equivalent of the text wire omitting `frame_seq`.
+A `2` frame is the leave-removal list, and it is applied ungated.
+
+`Op` is `0` add, `1` update, `2` remove. `Type` selects the value encoding:
+
+| `Type` | Value |
+|--------|-------|
+| 0 | `float32` |
+| 1 | `int32`, signed |
+| 2 | `true`, no bytes follow |
+| 3 | `false`, no bytes follow |
+| 4 | `Len:16, UTF-8 bytes` |
+| 5 | `null`, no bytes follow |
+
+`Idx` indexes the frame's own dictionary, so forty records all carrying
+`x, y, vx, vy` pay for four names rather than a hundred and sixty. The frame is
+self-describing: nothing is negotiated up front and nothing survives a
+reconnect.
+
+**Five bits of index means a frame carries at most 32 distinct field names**, and
+this is a budget worth knowing before you hit it. It is counted across the whole
+frame, not per entity, but one entity is what usually spends it: a delta names
+only the fields that changed, while the `add` that introduces an entity names all
+of them. An entity with 33 fields therefore cannot ride this wire at all.
+
+A frame past the budget is sent as text instead. That is safe for the frame and
+not safe on its own for what follows: **a text add carries no slot**, so the
+entities it introduced are not in your table, and the next binary frame names
+them in `op:"u"` records you have to drop - with a contiguous `frame_seq` that
+gives you no reason to resync.
+
+So the server repairs it rather than leaving it to you. The frame after a refused
+one is a **keyframe** - `kf: true`, all adds - which re-establishes every binding.
+Nothing is required of a client that already applies keyframes the way this guide
+describes. If that keyframe is refused too, the cause is the shape of the game's
+entities rather than one frame, and the zone gives the binary wire up: every
+client on it falls back to text, which carries everything, and the datagram
+plane switches off with it. The zone asks again later on a doubling backoff -
+a minute, then two, up to an hour - so an entity that was briefly unencodable
+costs a pause rather than the rest of the zone's life. A successful retry is
+itself a keyframe, so every client is rebound by it.
+
+Both outcomes are visible server-side, and neither is silent on the client's
+behalf. If a game seems to be missing the datagram plane, count the fields on its
+widest entity and look for `binary world.tick frame refused` or
+`binary wire disabled for this zone` in the server log; both name the zone, the
+distinct-name count and the widest entity.
+
+**Entities are 2-byte slots, and the slot is scoped to the zone.** A record
+carries the full entity id on an **add only**, which is where the binding is
+established; update and remove carry the slot and generation alone.
+
+`Gen` advances every time a slot is rebound to a different entity. On this wire it
+is redundant, because the stream is ordered and reliable and `frame_seq` already
+bounds the reuse hazard, and it is carried anyway so that a client also running
+the datagram plane can keep one slot table for both carriers rather than two that
+can disagree. If you are only on the WebSocket you can ignore it. Keep a slot-to-id table per
+zone - slot 5 in one zone has nothing to do with slot 5 in another - and let an
+add REPLACE any binding already there, because a freed slot is eventually
+reused. There is no mapping message and none is needed: a keyframe is all-adds,
+so `world.resync` re-establishes every binding for you.
+
+The binary wire is also what the [datagram plane](datagram-plane.md) builds on:
+its `pose` frames carry slots, and the bindings come from the `add` records here.
+
+A committed fixture corpus lives in `priv/wire_fixtures/` - one `.bin` per case
+plus a `manifest.json` saying what each decodes to. Test your decoder against
+it; the server's own CI asserts those bytes are still what it produces.
+
+### Client-side prediction
+
+asobi is server-authoritative, and server-side rollback, replay and lag
+compensation are out of scope (TCP transport - see
+[migrate-from-hathora](migrate-from-hathora.md)). The server half that
+*client-side* prediction needs - an ack telling a client which of its inputs the
+authoritative state already includes - is a first-class primitive:
+
+1. The client stamps each `world.input` with its own increasing `seq` (a sibling
+   of `payload`) and applies the input locally right away (the prediction).
+2. The server records the highest `seq` it consumed for that player - a rejected
+   input still counts, so a dropped input never strands the client - and sends it
+   back on the next broadcast as a [`world.ack`](#worldack-server-push)
+   addressed to that connection alone.
+3. The client discards every predicted input up to that `seq` and replays the
+   rest on top of the authoritative `world.tick` state (the reconciliation).
+
+Set [`broadcast_interval`](world-server.md) to 1 so the ack returns every tick.
+
+The ack is addressed to one connection: it is sent only to clients that opted in
+by stamping a `seq`, and never rides the shared `world.tick`, so one player's
+input stream is never broadcast to the rest of the zone.
+
+**`seq` never goes backwards on a connection.** The high-water mark is recorded
+per zone, and a player is subscribed to their whole interest ring, so during a
+crossing more than one zone can hold a mark for them. The connection drops any
+ack that does not advance the highest `seq` it has already sent you, so you can
+prune against the value you receive without tracking a maximum yourself.
+
+**If your SDK does not yet surface `world.ack`**, the same reconciliation works
+in userland: write the `seq` onto the player's entity in `handle_input/3`
+(`entity.last_seq = input.seq`) and read it back off the `world.tick` delta. The
+tradeoff is that `last_seq` then sits on the shared entity delta, so it reaches
+every subscriber in the zone - its bandwidth scales with zone population, which
+is exactly what the `world.ack` frame avoids.
+
+### `world.ack` (server push)
+
+Acknowledgement of the highest `world.input` `seq` the server has consumed for
+you as of `tick`, and monotonic for the life of the connection. Addressed to your
+connection alone, and sent only to clients that stamped a `seq` on their input;
+use it to reconcile prediction (above).
+
+```json
+{"type": "world.ack", "payload": {"tick": 42, "seq": 412}}
+```
+
+### `world.resync`
+
+Ask one zone to re-send its baseline, after a `frame_seq` gap tells you a frame
+went missing.
+
+```json
+{"type": "world.resync", "payload": {"zone": [3, 5]}}
+```
+
+There is no reply of its own. The answer is a `world.tick` with `kf: true` for
+that zone, holding every entity as an `op: "a"` - so on the binary wire it also
+re-establishes every slot binding.
+
+A request naming a zone you are not subscribed to is dropped in silence rather
+than answered. There is nothing to repair, and answering would turn resync into
+a way to read any zone in the world.
+
+Rate limited on two buckets, per player first and then fleet-wide: **2 per 10s
+per player** and **20 per second across the server**. A client that needs more
+than that is not recovering from loss, it is looping. Tune under
+`asobi.rate_limits`, groups `resync` and `resync_global`.
 
 ### `world.terrain` (server push)
 
@@ -889,7 +1186,8 @@ changing your vote more times than the vote's `max_revotes` allows (3 by
 default) is `rate_limited`. The refusals that come from the vote itself -
 `vote_not_found`, `vote_closed`, `not_eligible`, `invalid_option` - have no
 code of their own and arrive as `ws.request_failed` with the reason in
-`details`.
+`details`. A vote in a world that has not finished loading is
+`world_not_ready`, carried the same way.
 
 ### `vote.veto`
 
@@ -908,7 +1206,8 @@ in match config and `veto_enabled` on the vote.
 
 An unknown vote is `vote_not_found`, a player out of tokens is
 `no_veto_tokens`, and a vote that did not enable vetoes is `veto_disabled`.
-None of the three has a code of its own either.
+None of the three has a code of its own either. A veto in a world that has not
+finished loading is `world_not_ready`, carried the same way.
 
 ### `match.vote_start` (server push)
 
@@ -1069,6 +1368,46 @@ reflected back. Codes core itself adds for this surface:
 | `invalid_payload` | `payload` itself was not an object |
 | `unauthenticated` | The socket has not completed `session.connect` |
 | `not_ready` | The node is still running migrations. Retry |
+
+### HTTP transport
+
+The same RPC also answers over HTTP, for a client with no open socket:
+
+```
+POST /api/v1/rpc/quests.claim
+```
+
+- The method is the last path segment, so `quests.claim` here is the method the
+  socket names in its payload. The body carries only `params`:
+
+```json
+{"params": {"quest_id": "q-1"}}
+```
+
+- `protocol` is injected server-side, so an HTTP client never sends it, and
+  `rpc.unsupported_protocol` cannot fire here; the version lives in the
+  `/api/v1/` path instead.
+- There is no `cid`. An HTTP reply is self-correlating - it is the response to
+  this one request and nothing else.
+
+The reply is the **same envelope** the socket sends,
+`{"type": ..., "payload": ...}`, carrying the same `rpc.ok` or `rpc.error`
+below it, plus an HTTP status: `200` for `rpc.ok`, and the error object's own
+status otherwise (the status the [REST API](rest-api.md#errors) gives that
+code).
+
+```json
+200 OK
+{"type": "rpc.ok", "payload": {"result": {"reward": 100}}}
+```
+
+```json
+404 Not Found
+{"type": "rpc.error", "payload": {"error": {"code": "rpc.unknown_method", "message": "No installed extension serves this RPC method.", "details": {}}}}
+```
+
+Both transports share one envelope below the transport, so a single SDK decoder
+reads a reply whether it arrived on the socket or from this endpoint.
 
 ## Next steps
 

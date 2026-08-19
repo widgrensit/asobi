@@ -42,6 +42,8 @@ lua_match_test_() ->
         {"tick signals finished", fun tick_finishes/0},
         {"get_state returns player view", fun get_state_view/0},
         {"vote_requested returns config at right tick", fun vote_requested_ok/0},
+        {"an unknown vote-config key is left as the script wrote it (#489)",
+            fun vote_requested_leaves_unknown_keys_alone/0},
         {"vote_requested returns none normally", fun vote_requested_none/0},
         {"vote_resolved updates state", fun vote_resolved_ok/0},
         {"finish_immediately script", fun finish_immediately/0},
@@ -289,16 +291,42 @@ get_state_view() ->
     View = asobi_lua_match:get_state(~"player1", State1),
     ?assert(is_map(View)).
 
+%% asobi#489: this used to assert is_map/1 and tolerate `none`, so it passed
+%% while the feature was unreachable. The config a Lua script returns decodes
+%% with BINARY keys, and asobi_vote_server reads ATOM ones - maps:get(options,
+%% Merged) has no default, so it raised badkey, the vote server failed to start,
+%% and do_start_vote/3 swallowed it. Assert the exact reads the vote server
+%% performs instead.
 vote_requested_ok() ->
     {ok, State0} = init_match(),
     {ok, State1} = asobi_lua_match:join(~"player1", State0),
     State50 = tick_n(50, State1),
-    case asobi_lua_match:vote_requested(State50) of
-        {ok, VoteConfig} ->
-            ?assert(is_map(VoteConfig));
-        none ->
-            ok
-    end.
+    {ok, VoteConfig} = asobi_lua_match:vote_requested(State50),
+    %% Every read asobi_vote_server:init/1 does on a script-supplied key.
+    ?assertEqual(~"test_vote", maps:get(template, VoteConfig)),
+    ?assertEqual(~"plurality", maps:get(method, VoteConfig)),
+    ?assertEqual(5000, maps:get(window_ms, VoteConfig)),
+    Options = maps:get(options, VoteConfig),
+    ?assertEqual(2, length(Options)),
+    %% validate_option/2 comprehends on `#{id := Id}`, so a binary id key makes
+    %% every cast_vote fail to match its own option.
+    ?assertEqual(
+        [~"opt_a", ~"opt_b"],
+        lists:sort([maps:get(id, O) || O <- Options]),
+        "option ids must be reachable on the atom key the vote server matches"
+    ),
+    ?assertEqual(~"Option A", maps:get(label, hd(Options))),
+    %% A key the script did not write must not be invented.
+    ?assertNot(maps:is_key(veto_enabled, VoteConfig)).
+
+%% Keys outside the whitelist are left exactly as written. Translating whatever
+%% a script puts in the table would be binary_to_atom/2 on untrusted input.
+vote_requested_leaves_unknown_keys_alone() ->
+    Config = #{~"custom_thing" => 1, ~"template" => ~"t"},
+    Normalised = asobi_lua_match:normalise_vote_config(Config),
+    ?assertEqual(~"t", maps:get(template, Normalised)),
+    ?assertEqual(1, maps:get(~"custom_thing", Normalised)),
+    ?assertNot(maps:is_key(custom_thing, Normalised)).
 
 vote_requested_none() ->
     {ok, State0} = init_match(),

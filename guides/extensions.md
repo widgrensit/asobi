@@ -34,7 +34,7 @@ failure and Hex rejects outright.
 Validate the set before you boot it:
 
 ```erlang
-{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.68.2"}}}]}.
+{project_plugins, [{asobi, {git, "https://github.com/widgrensit/asobi.git", {tag, "v0.83.5"}}}]}.
 ```
 
 ```sh
@@ -60,20 +60,27 @@ extension means building your own release from the Hex package.
 | Game logic, in-match, server-side | `game.quests.progress(player_id, 1)` | "player killed something, +1" |
 | Game client, over the network | an `rpc.call` frame - `ws.rpc(...)` in JS, `rpc_call(...)` in Godot, `realtime:rpc(...)` in Defold and LÖVE | "give me my reward" |
 | An operator, on the ops plane | `POST /api/v1/ops/ext/quests/define` | "add a daily quest" |
+| An HTTP caller, on a declared route | `GET /api/v1/quests/board` via `routes/0` | a preserved REST surface, or a store's webhook |
 
 An extension with only the wire cannot observe gameplay; one with only Lua
 cannot be triggered by a player action from the client. The third is a
 different audience, not a third way to reach the same one: `rpc/0` is
-player-scoped, and no player ever holds an operator capability.
+player-scoped, and no player ever holds an operator capability. The fourth is
+deliberately narrow - see
+[Declaring an HTTP route](#declaring-an-http-route) for when a route is the
+right answer and when `rpc/0` is.
 
 ## What you declare
 
 ```erlang
 -module(asobi_quests_extension).
 -behaviour(asobi_extension).
--export([info/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0, erase_player/1]).
+-export([info/0, requires/0, rpc/0, lua/0, sup/0, owns/0, codes/0, ops/0,
+         erase_player/1, export_player/1]).
 
 info() -> #{name => quests, extension_version => 1}.
+
+requires() -> [economy].
 
 rpc()  -> #{~"quests.list"  => {asobi_quests_rpc, list,  2},
             ~"quests.claim" => {asobi_quests_rpc, claim, 2}}.
@@ -108,6 +115,8 @@ extension.
 
 Only `info/0` is required. The rest default to nothing.
 
+- `requires/0` - the subsystems and extensions this one calls, by name. See
+  [Declaring dependencies](#declaring-dependencies).
 - `rpc/0` - core cannot guess that `quests.claim` is `{asobi_quests_rpc, claim, 2}`.
   The arity is always 2; see [Writing an RPC handler](#writing-an-rpc-handler).
 - `lua/0` - the `game.<ns>.*` surface a Lua game calls. See
@@ -119,6 +128,8 @@ Only `info/0` is required. The rest default to nothing.
   [Error codes](#error-codes).
 - `ops/0` - operator actions, reached on the ops plane rather than by a player.
   See [Writing an operator action](#writing-an-operator-action).
+- `routes/0` - HTTP routes, for preserved REST surfaces and webhooks. See
+  [Declaring an HTTP route](#declaring-an-http-route).
 - `erase_player/1` - how to erase one player, when your rows do not cascade.
   See [Deleting a player](#deleting-a-player).
 - `info/0` - `name` is the extension's identity and the root of everything it
@@ -300,10 +311,10 @@ GET  /api/v1/ops/ext/quests/summary?filter=active
 
 `/api/v1/ops/ext/:extension/:action` is the extension seam on the ops plane,
 and this is what puts something behind it. Core's own routes there are reads
-apart from erasing and exporting a player. You still declare no routes: core
-owns `/ext/:extension/:action` and dispatches every declared action behind it,
-the same way it owns one WebSocket frame type and dispatches `rpc/0` behind
-that.
+apart from erasing and exporting a player. You declare no operator routes -
+`routes/0` mounts player and webhook surfaces, never this plane: core owns
+`/ext/:extension/:action` and dispatches every declared action behind it, the
+same way it owns one WebSocket frame type and dispatches `rpc/0` behind that.
 
 Know what gates it. On a stock deployment there is no `ops_secret`, so every
 bearer request is denied 403 and none of this is reachable. Once a secret is
@@ -375,6 +386,84 @@ Each of these is a build failure at `rebar3 asobi check`, and again at boot:
 - `method` is `get`, `post`, `put` or `delete`
 - `class` is `read`, `player_data` or `config`
 - `mfa` is `{Module, Function, 2}`
+
+## Declaring an HTTP route
+
+`routes/0` exists for two callers, and it is worth being blunt about which
+before showing the shape. It preserves REST surfaces - a subsystem extracted
+out of core keeps serving the exact paths every vendored SDK already calls -
+and it receives server-to-server webhooks, where the sender is a store's
+backend that could never hold a player token. A **new client-facing feature
+should use `rpc/0` instead**: one `rpc(method, params)` symbol reaches every
+SDK with zero per-extension SDK work, while a new REST route has no SDK
+surface at all. That is a listing guideline, not a mechanical ban - the
+catalogue review asks "why is this a route and not an rpc method", and "it is
+a webhook" is an accepted answer.
+
+```erlang
+routes() ->
+    [#{path => ~"/api/v1/quests/board", method => get,
+       mfa => {asobi_quests_controller, board, 1}, security => player},
+     #{path => ~"/api/v1/quests/webhook/steam", method => post,
+       mfa => {asobi_quests_controller, steam_notification, 1}, security => webhook}].
+```
+
+Routes live under your extension's own name, exactly like every other
+namespace you claim: `/api/v1/quests/...` for an extension named `quests`. A
+subsystem extracted out of core is the one exception - it keeps its historic
+core paths, and core's own table stops serving them in the same release.
+
+Declared, not mounted: core's router mounts every entry at boot, inside its
+global plugin chain - body cap, rate limiter, security headers - which an
+extension can neither replace nor reorder. The handler is a Nova controller,
+applied as `Module:Function(Req)`, so the arity is 1 - unlike the `rpc/0`
+and `ops/0` seams, whose handlers never see a request.
+
+`security` picks what stands in front of it:
+
+- `player` - the authenticated player-token check every core `/api/v1` route
+  carries. `Req` arrives with `auth_data` holding `player_id`, and a bare
+  request is refused exactly as it is on a core route. The default choice.
+- `webhook` - no player check, for the server-to-server case. The handler
+  must authenticate its caller itself - a signature, a shared secret -
+  because nothing else will. Webhook paths run in the dedicated `webhook`
+  rate-limit bucket (10/s per caller, the same shape as iap) rather than
+  the general 300/s api bucket: a webhook handler does signature crypto on
+  every request, so the api budget would make it a CPU amplifier.
+
+One path carries exactly one security class - declaring the same path under
+both is a build failure, not a coin-flip on which chain OPTIONS lands in.
+
+Every declared path is a derived `http` claim (see
+[Namespaces](#namespaces)), and the comparison is structural: two paths
+collide when the routing tree cannot serve both - some request matches both
+patterns (`/saves/:slot` and `/saves/:id` are one claim), or one pattern
+diverges from the other at a binding at any depth, the shape that lets one
+route swallow lookups meant for the other. A collision with another
+extension, with any path a co-mounted application serves (core's own table,
+and `nova_apps` like nova_resilience's `/health`), or with a privileged
+plane prefix (`/api/v1/ops`, `/api/v1/auth`, `/api/v1/iap`, `/console`,
+`/ws`) is a build failure at `rebar3 asobi check` and a refusal at boot - a
+route can never be silently shadowed first-compiled-wins, and declaration
+order never matters. The other side of that coin is the 404 discipline: a
+path whose extension is not installed is simply absent from the table,
+answering 404 like any path that never meant anything. That discipline is
+path-level only - a mounted path answers a wrong-method request with 405
+plus an allow header, exactly as core routes do, so the methods on declared
+paths are enumerable; that trade is accepted.
+
+Each of these is a build failure, like the `ops/0` list above:
+
+- `path` is `/`-rooted, with non-empty segments that are literals
+  (`[A-Za-z0-9_~-]`) or `:name` bindings
+- `method` is `get`, `post`, `put` or `delete`
+- `mfa` is `{Module, Function, 1}`, and it names an exported function - a
+  missing handler is refused here, not discovered as a 500
+- `security` is `player` or `webhook`, and one path carries one class
+- no two entries in one manifest serve the same path and method, and no two
+  declare patterns that collide - the same path under several methods is fine
+- with `owns().http` named, every declared path is listed in it, verbatim,
+  and every listed token is itself a `/`-rooted path
 
 ## Writing a Lua binding
 
@@ -522,6 +611,45 @@ Two failure modes are worth stating plainly:
   budget and going dark anyway. The marker is written once, before this
   supervisor exists, so it cannot flip later and there is nothing to retry.
 
+## Declaring dependencies
+
+`requires/0` names the subsystems and extensions this one calls:
+
+```erlang
+requires() -> [economy].
+```
+
+A bare list of names, never version ranges. The names are core subsystems
+(`economy`, `leaderboards`, `notifications`, `storage`, `tournaments`,
+`social`, `chat`, `iap`, `matches`, `world`, `votes`, `presence`, `timers`)
+and other installed extensions. Which versions work together is the
+dependency pin's job -
+`{asobi, "~> 0.83.0"}` in your `rebar.config`, and the bundle's lockstep for a
+first-party set - so `requires/0` says only *that* you call into a thing, never
+*which* of it.
+
+Two things read it, both through the one `rebar3 asobi check`:
+
+- **A name that resolves to nothing is refused.** If a required name is neither
+  a core subsystem nor an installed extension, the build fails and the boot
+  backstop refuses, naming your extension and the missing dependency - not an
+  `undef` the first time a client reaches the code that was never installed.
+- **It orders boot.** A requirement on another extension must be backed by an
+  ordinary OTP application dependency, so the resolver already starts the
+  provider first (the same dependency order your `sup/0` children rely on).
+  Declare `requires => [leaderboards]` and make your application depend on
+  `asobi_leaderboards`; the requirement without the application dependency is
+  refused, because nothing would guarantee the boot order. A requirement on an
+  always-present core subsystem imposes no ordering.
+
+The set a name resolves against is the union of core's subsystem names and the
+installed extensions' names, and that union is what keeps a `requires` correct
+when a core subsystem later ships as its own package: the name moves from the
+core side of the union to the extension side, and the requirement stays
+satisfied because the bundle installs the package. `economy` is a core
+subsystem you may depend on today and an extracted extension tomorrow, and
+`requires => [economy]` reads the same either way.
+
 ## Namespaces
 
 `owns/0` reserves names. Two extensions claiming the same table, RPC prefix,
@@ -537,6 +665,7 @@ kind derives:
 | `lua` | the namespaces in `lua/0` |
 | `tables` | `table/0` on your `kura_schema` modules |
 | `queues` | `queue/0` on your `shigoto_worker` modules |
+| `http` | the paths in `routes/0` |
 
 So a collision is caught even before either extension has bothered with
 `owns/0`, and a queue you actually run is claimed whether or not you remembered
@@ -545,9 +674,19 @@ kind at all says "this is the whole set", so anything derived outside it is a
 build failure - which is what catches a worker on `quests` under an `owns/0`
 saying `quest`.
 
+`http` alone compares structurally rather than by name: two paths are one
+claim when the routing tree cannot serve both - a request matches both, or
+they diverge at a binding at any depth. An `owns().http` entry with no route
+behind it is a plain reservation, and reserves with the same exclusivity.
+
 Core's reserved names derive from core itself by the same rules: Lua namespaces
 from `asobi_lua_surface:reserved_namespaces/0`, tables from core's schemas,
-queues from core's shigoto workers.
+queues from core's shigoto workers, route paths from every co-mounted
+application's route table - core's own plus `nova_apps`, so
+nova_resilience's `/health`, `/ready` and `/live` are as unclaimable as
+`/api/v1/matches`. Five plane prefixes (`/api/v1/ops`, `/api/v1/auth`,
+`/api/v1/iap`, `/console`, `/ws`) are reserved whole: nothing mounts under
+them, whatever it would resolve to.
 
 Reserved RPC prefixes are the domains of `asobi_error:core_codes/0` plus every
 core Lua namespace, because an RPC prefix and an error-code domain are the same
@@ -704,18 +843,68 @@ than merely discouraged: a database cascade fires below the transaction's
 control flow, so `erase_player/1` would never be called at all and the receipts
 would be destroyed silently.
 
-### There is no `export_player/1`
+### Removing the package, and the rows it leaves
+
+Uninstalling an extension does not drop its tables or delete its rows: a
+package removal is a code change, not a data migration, because destroying
+player progress stays a deliberate act. But the rows outlive the code that
+swept them. The foreign key into `players.id` is still `no_action`, and nothing
+runs the extension's `erase_player/1` any more, so the next erasure of a player
+those rows reference cannot delete the `players` row - and without the policy
+below that surfaces as a bare Postgres constraint error and leaves the player
+permanently un-eraseable.
+
+Core names the blocker instead. `asobi_player_erase` catches the
+`foreign_key_violation` and returns `{error, {orphaned_extension_rows, Table}}`,
+naming the referencing table the absent package owns; the ops route
+(`POST /api/v1/ops/players/:id/erase`) answers `ops.orphaned_extension_rows`
+(409) with that table in `details`, and the guest reaper logs it. The player is
+not erased and the transaction rolls back. There are two honest ways out:
+
+- **Keep the package installed.** Its `erase_player/1` stays on the erasure
+  path and keeps sweeping, so erasure never breaks in the first place.
+- **Purge its tables.** Delete the extension's rows deliberately -
+  `asobi ext remove` (asobi-cli) prints the per-table statements derived from
+  the package's `owns/0` table claims, run by the operator. Destroying player
+  progress stays a decision, never a side effect - but so does keeping GDPR
+  erase working.
+
+### `export_player/1`
 
 Core exports a player - `GET /api/v1/ops/players/:id/export` - and the payload
-covers core's tables only. Extensions do not contribute to it, and that is a
-decision rather than a gap.
+names **every** installed extension under an `extensions` key: the data your
+`export_player/1` returned, or a `skipped` marker when you do not export one.
 
 `erase_player/1` earns its keep because the foreign key forces you to answer:
 skip it and the player row physically cannot be deleted. An export callback has
-no such forcing function, so an extension that skipped it would produce a
-silently incomplete export and nothing would fail - a worse contract than no
-contract. If one ever ships, core will have to name in the payload which
-installed extensions contributed and which did not.
+no such forcing function - an extension that skipped an unmarked one would
+produce a silently incomplete export and nothing would fail - so the artefact
+itself is the forcing function. A skipped extension is a visible marker in the
+export a data subject or auditor reads, not an absence nobody can detect.
+
+```erlang
+-spec export_player(binary()) -> {ok, #{binary() => term()}} | {error, term()}.
+export_player(PlayerId) ->
+    {ok, Rows} = asobi_repo:all(by_player(asobi_quest_progress, PlayerId)),
+    {ok, #{~"quest_progress" => [maps:with([quest_id, counter], Row) || Row <- Rows]}}.
+```
+
+The map keys are your own section names, mirroring core's per-table sections.
+Apply the same rule core does: positive allowlists via `maps:with/2`, never
+subtractive filters - an extension carrying a token or secret column is one
+schema field away from exporting it otherwise. And every row you return must
+be one this player owns - core cannot check that for you. Where one column
+holds several players' data, lift out this player's part rather than exporting
+the column whole, the way core exports only the requester's own choice from
+`votes.votes_cast`.
+
+A missing callback is a marker; a failing one fails the export. Returning
+`{error, _}`, raising, or returning a section `json:encode/1` cannot encode
+means data was promised and not delivered - exactly the silent incompleteness
+the marker exists to prevent - so the whole request answers
+`500 ops.export_incomplete` and no artefact is produced. There is no
+transaction: core's export is a sequence of plain reads, and yours run in the
+same untransacted pass, after core's own sections.
 
 ## Counters
 
@@ -749,9 +938,17 @@ A fixture extension needs no `.app` file and no separate build.
 `asobi_fixture_app:install/3` hands `application:load/1` an application spec
 directly, with your manifest module in its `modules` list - exactly what
 discovery reads. `asobi_fixture_quests_extension` declares all of `rpc/0`,
-`lua/0`, `ops/0`, `codes/0` and `owns/0`; `asobi_fixture_minimal_extension` is
-the `info/0`-only case; `asobi_fixture_clans_extension` is a second extension
-whose application depends on the first, so start order is observable.
+`lua/0`, `ops/0`, `codes/0`, `routes/0` and `owns/0`;
+`asobi_fixture_minimal_extension` is the `info/0`-only case;
+`asobi_fixture_clans_extension` is a second extension whose application
+depends on the first, so start order is observable.
+
+A declared route only exists in a table compiled after the extension was
+installed, so `asobi_extension_routes_SUITE` installs its fixture and then
+restarts the node - there is no memo to clear after the fact, unlike the RPC
+registry. Route validation and mounting need no server at all:
+`asobi_extension_routes_tests` checks the compiled table with
+`nova_router:compile/1`, the same way `asobi_router_tests` does.
 
 Exercise `rpc/0` without a socket by calling the dispatcher directly.
 `asobi_rpc:handle(Cid, Payload, Caller)` takes the payload map and a caller of

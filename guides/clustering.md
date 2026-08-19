@@ -22,14 +22,21 @@ already written to Postgres survive; play does not resume elsewhere.
 ## Forming a cluster
 
 The image is driven by environment variables, and that includes the node name
-and the cookie. `config/vm.args.src` renders `-name asobi@${ASOBI_NODE_HOST}`
-and `-setcookie ${ERLANG_COOKIE}`, so every node shares the base name `asobi`
-and one cookie:
+and the cookie. `config/vm.args.src` renders
+`-name ${ASOBI_NODE_NAME}@${ASOBI_NODE_HOST}` and `-setcookie ${ERLANG_COOKIE}`,
+so every node shares one base name and one cookie:
 
 ```
 ASOBI_NODE_HOST=10.0.0.1
 ERLANG_COOKIE=<shared-secret>
 ```
+
+**Leave `ASOBI_NODE_NAME` alone in a cluster.** It defaults to `asobi`, and
+`asobi_cluster` builds every peer name by reusing the *current* node's base name
+- so a per-host value makes discovery find nothing, silently and with no error
+anywhere. The one deployment that changes it is the datagram gateway, which is
+not a cluster member: it shares a network namespace with its engine and needs a
+name that does not collide in the shared EPMD.
 
 `ghcr.io/widgrensit/asobi` also reads `ASOBI_PORT`, `ASOBI_DB_HOST`,
 `ASOBI_DB_NAME`, `ASOBI_DB_USER`, `ASOBI_DB_PASSWORD`, `ASOBI_DB_SOCKET_OPTS`

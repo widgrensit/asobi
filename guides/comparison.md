@@ -93,8 +93,13 @@ is CPU spent on message processing, not memory. Figures and method are in
 
 ## When to choose something else
 
-- You need sub-3ms UDP latency for a twitch FPS, fighting game or racer. Pair
-  asobi with a UDP relay, or use a physics-first product for the simulation.
+- You are building a twitch FPS, fighting game or racer, where what kills you is
+  the retransmission tail on a lossy path rather than the median RTT. Run the
+  simulation over your own UDP netcode and use asobi for everything around it,
+  or take a physics-first product for the simulation layer. Worth checking the
+  alternatives on this point specifically rather than assuming: a production UDP
+  game-state transport is rarer in this category than the marketing suggests,
+  and several of the obvious comparisons are WebSocket-over-TCP underneath.
 - You need deep LiveOps tooling (A/B testing, segmentation, push campaigns)
   today.
 - You need a fully managed cloud at hyperscaler breadth. asobi's managed

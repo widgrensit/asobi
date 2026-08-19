@@ -249,14 +249,24 @@ erase_guest(PlayerId) ->
             skipped
     catch
         Class:CReason:Stacktrace ->
-            ?LOG_WARNING(#{
-                event => guest_reap_cascade_error,
-                player_id => PlayerId,
-                class => Class,
-                reason => CReason,
-                stacktrace => Stacktrace
-            }),
-            skipped
+            case asobi_player_erase:orphan_blocker(CReason) of
+                {orphaned_extension_rows, Table} ->
+                    ?LOG_WARNING(#{
+                        event => guest_reap_orphaned_extension_rows,
+                        player_id => PlayerId,
+                        table => Table
+                    }),
+                    skipped;
+                not_orphaned ->
+                    ?LOG_WARNING(#{
+                        event => guest_reap_cascade_error,
+                        player_id => PlayerId,
+                        class => Class,
+                        reason => CReason,
+                        stacktrace => Stacktrace
+                    }),
+                    skipped
+            end
     end.
 
 -doc """

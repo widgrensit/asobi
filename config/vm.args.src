@@ -1,4 +1,9 @@
--name asobi@${ASOBI_NODE_HOST}
+## The node name is a variable so that two roles from the same image can share a
+## network namespace - which the datagram gateway must, since its link port binds
+## loopback. One namespace is one EPMD, and two nodes registering the same name
+## means the second one does not boot. Defaults to `asobi` in the published
+## image; a cluster still shares that base name (see guides/clustering.md).
+-name ${ASOBI_NODE_NAME}@${ASOBI_NODE_HOST}
 
 -setcookie ${ERLANG_COOKIE}
 

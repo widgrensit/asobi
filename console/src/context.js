@@ -32,6 +32,17 @@ export function useCapability(name) {
   return all.some((entry) => (entry.capabilities || []).some((cap) => cap.name === name && cap.enabled));
 }
 
+// Whether the signed-in actor holds a capability class (ADR 0007). Distinct
+// from `useCapability`, which asks what this NODE can do: a node that supports
+// erasure still refuses it to a credential without the class, and a button
+// that 403s is worse than no button.
+//
+// This hides, it does not authorise. The plane decides.
+export function useActorCap(name) {
+  const actor = useActor();
+  return Boolean(actor && Array.isArray(actor.caps) && actor.caps.includes(name));
+}
+
 // Names of the extensions the node reports installed.
 export function installedNames(features) {
   if (!features || !Array.isArray(features.extensions)) return null;

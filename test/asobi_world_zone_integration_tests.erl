@@ -62,6 +62,10 @@ world_zone_integration_test_() ->
         {"multiple players share same zone process", fun shared_zone_process/0},
         {"get_active_zones correct after lazy joins", fun active_zones_after_joins/0},
         {"small grid backward compat", fun small_grid_backward_compat/0},
+        {"broadcast_interval override reaches the zone process (#463)",
+            fun broadcast_interval_reaches_the_zone/0},
+        {"broadcast_interval defaults to 3 when unset (#463)",
+            fun broadcast_interval_defaults_to_three/0},
         {"world.input crossing a zone boundary rehomes the player",
             fun world_input_rehomes_across_boundary/0},
         {"a binary-keyed (Lua-shaped) player entity rehomes across a boundary",
@@ -103,6 +107,22 @@ default_prespawns_all() ->
         end,
         [{X, Y} || X <- lists:seq(0, 2), Y <- lists:seq(0, 2)]
     ),
+    stop_world(Ctx).
+
+%% asobi#463: a mode-set broadcast_interval must reach the zone PROCESS, not just
+%% world_config/1. This is the hop that was missing - the value was read by
+%% asobi_zone but never placed into BaseZoneConfig.
+broadcast_interval_reaches_the_zone() ->
+    Ctx = #{zone_mgr := Mgr} = start_world(#{broadcast_interval => 1}),
+    {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
+    ?assertEqual(1, maps:get(broadcast_interval, sys:get_state(ZonePid))),
+    stop_world(Ctx).
+
+%% The default is unchanged: a world that sets nothing runs on 3.
+broadcast_interval_defaults_to_three() ->
+    Ctx = #{zone_mgr := Mgr} = start_world(),
+    {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
+    ?assertEqual(3, maps:get(broadcast_interval, sys:get_state(ZonePid))),
     stop_world(Ctx).
 
 %% lazy_zones=true means no zones spawned at startup
@@ -502,24 +522,44 @@ fake_session(PlayerId, Owner) ->
     ok = pg:join(nova_scope, {player, PlayerId}, Pid),
     Pid.
 
-%% Blocks until PlayerId's forwarded messages include a zone_delta mentioning
-%% EntityId, or the timeout elapses.
+%% Blocks until PlayerId's forwarded messages mention EntityId in ANY of the
+%% three world.tick carriers, or the timeout elapses.
+%%
+%% All three are needed since the join keyframe stopped being a snapshot of
+%% `entities`. A backfilled entity now reaches an existing subscriber through the
+%% shared broadcast, which is pre-encoded JSON precisely so one encode serves
+%% every subscriber (ADR 0001), so a helper that only reads the tuple carriers
+%% would sit blind through the frame that actually delivers it.
 received_entity(PlayerId, EntityId) ->
     receive
-        {PlayerId, {asobi_message, {zone_delta, _Tick, Ops}}} ->
-            HasEntity = lists:any(
-                fun
-                    (#{~"id" := Id}) -> Id =:= EntityId;
-                    (_) -> false
-                end,
-                Ops
-            ),
-            case HasEntity of
-                true -> true;
-                false -> received_entity(PlayerId, EntityId)
+        {PlayerId, {asobi_message, Msg}} ->
+            case tick_ops(Msg) of
+                skip ->
+                    received_entity(PlayerId, EntityId);
+                Ops ->
+                    case lists:any(fun(Op) -> op_id(Op) =:= EntityId end, Ops) of
+                        true -> true;
+                        false -> received_entity(PlayerId, EntityId)
+                    end
             end
     after 500 -> false
     end.
+
+%% The op list out of whichever world.tick carrier this is, or `skip` for a
+%% message that is not one.
+tick_ops({zone_keyframe, _Meta, Ops}) -> Ops;
+tick_ops({zone_removals, _Coords, Ops}) -> Ops;
+tick_ops({zone_delta_raw, PreEncoded}) -> decoded_ops(PreEncoded);
+tick_ops(_Other) -> skip.
+
+decoded_ops(PreEncoded) ->
+    case json:decode(PreEncoded) of
+        #{~"type" := ~"world.tick", ~"payload" := #{~"updates" := Ops}} -> Ops;
+        _ -> skip
+    end.
+
+op_id(#{~"id" := Id}) -> Id;
+op_id(_) -> undefined.
 
 %% Regression for widgrensit/asobi#275: a zone that a crossing brings into
 %% existence for the first time must pick up every already-connected player
@@ -649,7 +689,16 @@ script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
 %% (op "r") for EntityId, or the timeout elapses.
 received_removal(PlayerId, EntityId) ->
     receive
-        {PlayerId, {asobi_message, {zone_delta, _Tick, Ops}}} ->
+        {PlayerId, {asobi_message, Msg}} when
+            element(1, Msg) =:= zone_removals;
+            element(1, Msg) =:= zone_delta_raw;
+            element(1, Msg) =:= zone_keyframe
+        ->
+            Ops =
+                case tick_ops(Msg) of
+                    skip -> [];
+                    L -> L
+                end,
             HasRemoval = lists:any(
                 fun
                     (#{~"op" := ~"r", ~"id" := Id}) -> Id =:= EntityId;

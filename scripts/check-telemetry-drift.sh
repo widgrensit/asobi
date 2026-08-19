@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fails if guides/observability.md and the telemetry events in src/ disagree.
+# Fails if guides/observability.md and the telemetry events in the source disagree.
 #
 #   scripts/check-telemetry-drift.sh
 #
@@ -24,8 +24,10 @@ guide="$repo_root/guides/observability.md"
   exit 1
 }
 
-# Emitted: every [asobi, domain, event] literal in src/, as dotted names.
-emitted="$(grep -rhoE '\[asobi, [a-z_]+, [a-z_]+\]' "$repo_root/src" --include=*.erl |
+# Emitted: every [asobi, domain, event] literal in the source, as dotted names.
+# Both trees: the datagram plane's events live in the gateway application, which
+# ships as a release of its own (asobi#513).
+emitted="$(grep -rhoE '\[asobi, [a-z_]+, [a-z_]+\]' "$repo_root/src" "$repo_root/apps" --include=*.erl |
   sed 's/\[asobi, /asobi./; s/, /./; s/\]//' | sort -u)"
 
 # Documented: the same dotted names inside the guide's code blocks.
@@ -37,7 +39,7 @@ extra="$(comm -13 <(printf '%s\n' "$emitted") <(printf '%s\n' "$documented"))"
 status=0
 
 if [ -n "$missing" ]; then
-  printf '\nEmitted in src/ but not documented in guides/observability.md:\n\n' >&2
+  printf '\nEmitted in the source but not documented in guides/observability.md:\n\n' >&2
   printf '%s\n' "$missing" | sed 's/^/  /' >&2
   status=1
 fi

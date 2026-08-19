@@ -2,9 +2,17 @@
 -moduledoc """
 Delete one player and everything core holds about them, in one transaction.
 
-This is the single place core deletes a player. `m:asobi_guest_reaper` is one
-caller of it, not the site itself, and the operator-facing route
-(`POST /api/v1/ops/players/:id/erase`) is another.
+This is the single place core deletes a player. `steps/1` is the delete
+sequence; three callers reach it, each wrapping its own transaction:
+
+* `run/1,2` here - the shell and the operator route
+  (`POST /api/v1/ops/players/:id/erase`);
+* `m:asobi_guest_reaper` - the retention sweep;
+* `asobi_player_controller:erase_self/1` - the data subject's own
+  `POST /api/v1/players/me/erase`.
+
+All three route a rolled-back erasure through `orphan_blocker/1` so a removed
+extension's rows are named rather than surfaced as a bare constraint error.
 
 ## Why the child list is written out here
 
@@ -48,6 +56,28 @@ that argument rather than by oversight:
   puts personal data in it owns erasing it, which is what
   `c:asobi_extension:erase_player/1` is for.
 
+## Rows a removed extension leaves behind
+
+Core clears its own children and each *installed* extension's `erase_player/1`
+clears the extension's. A package that has been **removed** runs neither: its
+tables and rows survive the uninstall, its foreign key into `players.id` is
+still `no_action`, and the parent delete this function ends on raises against
+them. Rather than surface that as a bare `{badmatch, {pgsql_error, ...}}`, the
+delete sequence is wrapped so a `foreign_key_violation` (SQLSTATE 23503)
+becomes `{error, {orphaned_extension_rows, Table}}` - `Table` is the referencing
+table the absent package owns, read from the Postgres error. The player is not
+erased, the transaction rolls back cleanly, and the operator learns which
+package to reinstall or purge instead of reading a constraint name off a
+stacktrace. `guides/extensions.md` documents the rule where it bites.
+
+The translation is **narrow**: only a 23503 naming a table *outside*
+`core_relations/0` - the set `steps/1` itself sweeps, plus `players` and the
+ops audit table - reads as extension residue. A 23503 naming a core-swept
+table, or one carrying no table name, is a core bug or a write-race, not a
+removed package; those keep the raw reason and surface as
+`ops.erase_failed` (500), which is the escalate signal, never the benign
+"reinstall the package" 409.
+
 ## Atomic, never best-effort
 
 One transaction, every result asserted, so a bare `{error, _}` becomes a
@@ -74,12 +104,27 @@ Evicting the player from `m:asobi_auth_cache` and from every live
 `m:asobi_leaderboard_server`, and killing the live session, run **after** the
 commit, because an ETS eviction and a process exit cannot roll back. All are
 idempotent, so a retry is safe. See `after_commit/1`.
+
+Those post-commit surfaces split two ways. Revoking the auth cache and killing
+the session are core's own session/identity teardown for the player it just
+deleted - kernel work erase owns and will always own. Taking the player off a
+running leaderboard is a *subsystem* cleaning up its own in-memory state, and
+core should not name a subsystem's internals at its own call site. So the
+leaderboard eviction runs through a registry, `post_erase_hooks/0`, one
+`{Module, Function}` per subsystem that needs post-commit cleanup, invoked
+best-effort in list order. When leaderboards extracts (Wave 2)
+`post_erase_hooks/0` is reimplemented to walk the installed subsystems - the
+same registry ratchet 3 introduces - rather than return this literal, so the
+leaderboard entry is no longer named here; nothing re-registers itself into a
+list. The registry stays core-internal until then, deliberately off the public
+`m:asobi_extension` behaviour, which is a separate contract decision.
 """.
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("kura/include/kura.hrl").
 
--export([steps/1, after_commit/1, run/1, run/2]).
+-export([steps/1, after_commit/1, run/1, run/2, orphan_blocker/1, core_relations/0]).
+-export([post_erase_hooks/0]).
 
 -define(ACTION, ~"players.erase").
 -define(CLASS, erasure).
@@ -159,13 +204,15 @@ run(PlayerId, #{caps := Caps} = Actor) when is_binary(PlayerId) ->
 -spec erase_player(binary(), asobi_ops_auth:actor()) -> {ok, map()} | {error, term()}.
 erase_player(PlayerId, Actor) ->
     try asobi_repo:transaction(fun() -> erase_txn(PlayerId, Actor) end) of
-        {ok, Summary} ->
+        {ok, Summary} when is_map(Summary) ->
             %% Not bare `after_commit(PlayerId)`: an exception raised in a
-            %% `try ... of` body escapes the `catch` below, so a gen_server
-            %% timeout in one of the three evictions would answer `{error, _}`
-            %% for an erasure that had already committed, and log nothing. The
-            %% rows are gone by this point, so a failed eviction is a thing to
-            %% log and retry by hand, never a reason to report failure.
+            %% `try ... of` body escapes the `catch` below. `after_commit/1`
+            %% isolates each post-commit hook, so a subsystem's failure is
+            %% already logged and swallowed there; wrapping the whole call is
+            %% the belt that keeps a raise from the orchestration itself off the
+            %% result of an erasure that had already committed. The rows are
+            %% gone by this point, so a failed hook is a thing to log and retry
+            %% by hand, never a reason to report failure.
             after_commit_best_effort(PlayerId),
             {ok, Summary};
         {error, _Reason} = Error ->
@@ -179,6 +226,23 @@ erase_player(PlayerId, Actor) ->
             {error, {unexpected, Other}}
     catch
         Class:Reason:Stacktrace ->
+            rolled_back(PlayerId, Class, Reason, Stacktrace)
+    end.
+
+%% A foreign_key_violation that survives the whole delete sequence is a table
+%% core does not sweep - a removed extension's rows. Name it; everything else
+%% keeps the raw class/reason.
+-spec rolled_back(binary(), atom(), term(), list()) -> {error, term()}.
+rolled_back(PlayerId, Class, Reason, Stacktrace) ->
+    case orphan_blocker(Reason) of
+        {orphaned_extension_rows, Table} = Orphaned ->
+            ?LOG_ERROR(#{
+                msg => ~"player erase blocked by orphaned extension rows",
+                player_id => PlayerId,
+                table => Table
+            }),
+            {error, Orphaned};
+        not_orphaned ->
             ?LOG_ERROR(#{
                 msg => ~"player erase rolled back",
                 player_id => PlayerId,
@@ -218,26 +282,93 @@ The in-memory surfaces the transaction cannot cover, run after it commits.
 
 An ETS eviction and a process exit cannot roll back, so none of these may run
 before the commit. `run/1,2` call this for you; a caller that holds its own
-transaction - `m:asobi_guest_reaper` - calls it once that transaction has
-committed.
+transaction - `m:asobi_guest_reaper` and `asobi_player_controller:erase_self/1`
+- calls it once that transaction has committed.
 
-* `m:asobi_auth_cache` - without it a deleted player's access token keeps
-  resolving for up to `auth_cache_ttl_ms` against a row that no longer exists,
-  which is the revocation SLA that module's moduledoc already states.
-* `m:asobi_leaderboard_server` - each board keeps its entries in ETS and reads
-  from there, hydrating from Postgres only at init. Deleting the rows does not
-  take an erased player off a board that is already running, and a score still
-  pending for them re-inserts against a foreign key that is now gone. See
-  `asobi_leaderboard_server:evict_player/1`.
-* The live session.
+Two kinds of work run here, and the split is deliberate:
 
-All three are idempotent, so a retried erasure is safe.
+* **Kernel teardown**, run directly. `m:asobi_auth_cache` - without it a
+  deleted player's access token keeps resolving for up to `auth_cache_ttl_ms`
+  against a row that no longer exists, which is the revocation SLA that
+  module's moduledoc already states. The live session, killed through
+  `m:asobi_presence`. Both are erase's own session/identity teardown for the
+  player it just deleted; neither is a subsystem's concern and neither will
+  ever extract, so core names them here rather than on the registry.
+* **Subsystem cleanup**, run through `post_erase_hooks/0`. Today that is
+  `m:asobi_leaderboard_server`: each board keeps its entries in ETS and reads
+  from there, hydrating from Postgres only at init, so deleting the rows does
+  not take an erased player off a board that is already running, and a score
+  still pending for them re-inserts against a foreign key that is now gone. It
+  is a subsystem cleaning up its own state, so it is a registered hook, not a
+  call core spells out here.
+
+Every step is idempotent, so a retried erasure is safe, and every step is
+best-effort in isolation: one that raises is logged, naming the step, and
+swallowed, so a wedged subsystem cannot stop another's cleanup or the kernel
+teardown, and a committed erasure always stands.
 """.
 -spec after_commit(binary()) -> ok.
 after_commit(PlayerId) ->
-    ok = asobi_auth_cache:revoke_player(PlayerId),
-    ok = asobi_leaderboard_server:evict_player(PlayerId),
-    ok = asobi_presence:disconnect(PlayerId, ~"erased").
+    %% Kernel teardown first, then the subsystem hooks, in list order - the
+    %% whole sequence is deterministic. Each step is isolated so one failure
+    %% never reaches the next.
+    best_effort_step(PlayerId, {asobi_auth_cache, revoke_player}, fun() ->
+        ok = asobi_auth_cache:revoke_player(PlayerId)
+    end),
+    best_effort_step(PlayerId, {asobi_presence, disconnect}, fun() ->
+        ok = asobi_presence:disconnect(PlayerId, ~"erased")
+    end),
+    _ = [run_hook(PlayerId, Hook) || Hook <- post_erase_hooks()],
+    ok.
+
+-spec run_hook(binary(), {module(), atom()}) -> ok.
+run_hook(PlayerId, {Module, Function} = Hook) ->
+    best_effort_step(PlayerId, Hook, fun() -> ok = Module:Function(PlayerId) end).
+
+-doc """
+The subsystem cleanups to run after a player-erase commits, in order.
+
+The seam. Each entry is one subsystem's post-commit cleanup of the player just
+erased, invoked as `Module:Function(PlayerId)` by `after_commit/1`. It exists so
+core does not name a subsystem's internals mid-`after_commit/1`: the one edge
+that used to reach straight into `asobi_leaderboard_server:evict_player/1` is
+now this single list entry. When leaderboards extracts (Wave 2) this function is
+reimplemented to walk the installed subsystems - the same registry ratchet 3
+introduces - rather than return a literal, so the leaderboard entry is no longer
+named here. There is no extension-facing hook-registration API today and this is
+not one; the registry is kept core-internal for now, off the public
+`m:asobi_extension` behaviour, which is a separate contract decision.
+
+Ordered and deterministic: hooks run top to bottom, after the kernel teardown.
+""".
+-spec post_erase_hooks() -> [{module(), atom()}].
+post_erase_hooks() ->
+    [
+        {asobi_leaderboard_server, evict_player}
+    ].
+
+%% One post-commit step, best-effort. A raise is logged, naming the step, and
+%% swallowed with `ok`, so the caller runs the next step regardless: the rows
+%% are already gone, and one subsystem's failure must not block another's
+%% cleanup or the kernel teardown. The `ok =` inside each step's fun still holds
+%% - a step that answers anything else raises a badmatch, which is caught here.
+-spec best_effort_step(binary(), {module(), atom()}, fun(() -> ok)) -> ok.
+best_effort_step(PlayerId, Step, Fun) ->
+    try
+        Fun(),
+        ok
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_ERROR(#{
+                msg => ~"player erase committed but a post-commit step failed",
+                player_id => PlayerId,
+                step => Step,
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            }),
+            ok
+    end.
 
 -spec after_commit_best_effort(binary()) -> ok.
 after_commit_best_effort(PlayerId) ->
@@ -246,7 +377,7 @@ after_commit_best_effort(PlayerId) ->
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
-                msg => ~"player erase committed but post-commit eviction failed",
+                msg => ~"player erase committed but post-commit orchestration failed",
                 player_id => PlayerId,
                 class => Class,
                 reason => Reason,
@@ -306,3 +437,78 @@ shell_actor() ->
         caps => asobi_ops_caps:class_names(),
         attested => false
     }.
+
+-doc """
+Classify an exception raised inside the erase transaction.
+
+`{orphaned_extension_rows, Table}` only when the failure was a Postgres
+`foreign_key_violation` (SQLSTATE 23503) naming a table **outside**
+`core_relations/0`. Core clears every child it owns before deleting `players`,
+so a foreign key that still refuses the parent delete and names a table core
+does not sweep belongs to a removed extension. A 23503 naming a core-swept
+table (a bug or a write-race), or one carrying no table name, is `not_orphaned`
+and keeps its raw reason so it escalates rather than reads as a benign removed
+package. Every non-23503 failure is `not_orphaned` too. Exported for the other
+callers of the delete sequence - `m:asobi_guest_reaper` and
+`asobi_player_controller:erase_self/1` - which wrap their own transaction.
+""".
+-spec orphan_blocker(term()) -> {orphaned_extension_rows, binary()} | not_orphaned.
+orphan_blocker({badmatch, Inner}) ->
+    orphan_blocker(Inner);
+orphan_blocker({error, Inner}) ->
+    orphan_blocker(Inner);
+orphan_blocker({pgsql_error, Fields}) when is_map(Fields) ->
+    orphan_from_fields(Fields);
+orphan_blocker(_Other) ->
+    not_orphaned.
+
+-spec orphan_from_fields(map()) -> {orphaned_extension_rows, binary()} | not_orphaned.
+orphan_from_fields(#{code := ~"23503", table := Table}) when is_binary(Table), Table =/= ~"" ->
+    case is_core_relation(Table) of
+        true -> not_orphaned;
+        false -> {orphaned_extension_rows, Table}
+    end;
+orphan_from_fields(_Fields) ->
+    not_orphaned.
+
+-spec is_core_relation(binary()) -> boolean().
+is_core_relation(Table) ->
+    lists:member(Table, core_relations()).
+
+-doc """
+The Postgres relations `steps/1` clears, by their real table names.
+
+The escalation boundary for `orphan_blocker/1`: a 23503 naming one of these is
+a core defect or a write-race, not a removed extension. Derived from the schema
+modules `steps/1` sweeps (`asobi_player:table/0` and friends give the real
+relation name, which differs from the module name), plus the ops audit table
+`asobi_ops_audit:record_strict/4` writes inside the same transaction. `players`
+is already in the swept set. `asobi_player_erase_tests` fails if `steps/1` gains
+a schema whose table is not covered here.
+""".
+-spec core_relations() -> [binary()].
+core_relations() ->
+    [Schema:table() || Schema <- swept_schemas()] ++ [asobi_ops_audit_entry:table()].
+
+%% The schemas `steps/1` sweeps a player out of. Single source of truth for
+%% `core_relations/0`; keep in step with `steps/1`.
+-spec swept_schemas() -> [module()].
+swept_schemas() ->
+    [
+        asobi_iap_transaction,
+        asobi_group,
+        asobi_transaction,
+        asobi_wallet,
+        asobi_player_item,
+        asobi_storage,
+        asobi_cloud_save,
+        asobi_notification,
+        asobi_leaderboard_entry,
+        asobi_chat_message,
+        asobi_group_member,
+        asobi_friendship,
+        asobi_player_stats,
+        asobi_player_token,
+        asobi_player_identity,
+        asobi_player
+    ].
