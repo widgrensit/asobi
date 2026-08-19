@@ -473,6 +473,64 @@ a_rejected_connection_does_not_decrement_test() ->
     ok = asobi_ws_handler:terminate(normal, undefined, #{session => undefined}),
     ?assertEqual(0, Count()).
 
+%% asobi#525: `[asobi, session, disconnected]` was declared in the frozen event
+%% surface, specced, and emitted by nobody - so a consumer saw session starts
+%% carrying a player_id and ends carrying none, and could never close one out.
+capture_event(Ref, Event) ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    Self = self(),
+    telemetry:attach(Ref, Event, fun(_E, M, Meta, _) -> Self ! {Ref, M, Meta} end, []),
+    fun() ->
+        telemetry:detach(Ref),
+        receive
+            {Ref, M, Meta} -> {M, Meta}
+        after 0 -> none
+        end
+    end.
+
+an_authenticated_session_closes_out_on_terminate_test() ->
+    Ref = make_ref(),
+    Captured = capture_event(Ref, [asobi, session, disconnected]),
+    Started = erlang:system_time(millisecond) - 1500,
+    ok = asobi_ws_handler:terminate(normal, undefined, #{
+        connected_at => 1,
+        session => undefined,
+        player_id => ~"p1",
+        session_started_at => Started
+    }),
+    {Measurements, Metadata} = Captured(),
+    ?assertEqual(~"p1", maps:get(player_id, Metadata)),
+    ?assertEqual(1, maps:get(count, Measurements)),
+    %% Roughly the elapsed time, not the exact value - the clock moves between
+    %% the two calls.
+    ?assert(maps:get(duration_ms, Measurements) >= 1500).
+
+%% The trap the fix exists to avoid. `connected_at` is set when the SOCKET opens,
+%% before authentication, so it is not the session clock: a state that has it and
+%% no `session_started_at` never became a session and must stay silent rather
+%% than report the socket's lifetime under a session event.
+a_socket_that_never_authenticated_emits_no_session_end_test() ->
+    Ref = make_ref(),
+    Captured = capture_event(Ref, [asobi, session, disconnected]),
+    ok = asobi_ws_handler:terminate(normal, undefined, #{
+        connected_at => 1, session => undefined
+    }),
+    ?assertEqual(none, Captured()).
+
+%% duration_ms is specced pos_integer(). A session that opens and closes inside
+%% the same millisecond must not report zero.
+a_sub_millisecond_session_reports_one_not_zero_test() ->
+    Ref = make_ref(),
+    Captured = capture_event(Ref, [asobi, session, disconnected]),
+    ok = asobi_ws_handler:terminate(normal, undefined, #{
+        connected_at => 1,
+        session => undefined,
+        player_id => ~"p1",
+        session_started_at => erlang:system_time(millisecond)
+    }),
+    {Measurements, _Metadata} = Captured(),
+    ?assert(maps:get(duration_ms, Measurements) >= 1).
+
 %% The gauge fix must not cost a session its shutdown. A state carrying a session
 %% pid stops it whether or not the connection was ever counted, which is why
 %% terminate/3 checks the two conditions separately rather than matching both at

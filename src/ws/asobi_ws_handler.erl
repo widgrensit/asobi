@@ -577,6 +577,7 @@ terminate(_Reason, _Req, State) when is_map(State) ->
         true -> asobi_telemetry:ws_disconnected();
         false -> ok
     end,
+    session_disconnected(State),
     case maps:get(session, State, undefined) of
         undefined -> ok;
         SessionPid -> asobi_player_session:stop(SessionPid)
@@ -584,6 +585,30 @@ terminate(_Reason, _Req, State) when is_map(State) ->
     ok;
 terminate(_Reason, _Req, _State) ->
     ok.
+
+%% Closes out `[asobi, session, connected]`, which until now had no counterpart:
+%% the only disconnect emitted was `ws_disconnected/0`, which carries no
+%% player_id, so a consumer could open a session and never close it (asobi#525).
+%%
+%% Both keys are set together at `session.connect`, so a socket that never
+%% authenticated matches neither clause and stays silent - it was never a
+%% session.
+session_disconnected(#{player_id := PlayerId, session_started_at := StartedAt}) when
+    is_binary(PlayerId), is_integer(StartedAt)
+->
+    Elapsed = erlang:system_time(millisecond) - StartedAt,
+    asobi_telemetry:session_disconnected(PlayerId, at_least_one_ms(Elapsed));
+session_disconnected(_State) ->
+    ok.
+
+%% `duration_ms` is declared `pos_integer()`, and a session that opens and closes
+%% inside the same millisecond would otherwise report zero. A clause rather than
+%% `max/2` because eqWAlizer types `erlang:max/2` as `term()` - it orders any two
+%% terms - so the spec would stop being checked at the one call site that needs
+%% it.
+-spec at_least_one_ms(integer()) -> pos_integer().
+at_least_one_ms(Ms) when Ms > 0 -> Ms;
+at_least_one_ms(_NotYetAMillisecond) -> 1.
 
 %% --- Message Routing ---
 
@@ -608,7 +633,14 @@ handle_message(#{~"type" := ~"session.connect", ~"payload" := Payload} = Msg, St
             }),
             State1 = cancel_idle_auth_timer(State),
             {reply, {text, Reply}, State1#{
-                session => SessionPid, player_id => PlayerId, wire => Wire
+                session => SessionPid,
+                player_id => PlayerId,
+                wire => Wire,
+                %% Its own clock, not `connected_at`. That one starts when the
+                %% socket opens, so it counts the pre-auth idle window too - a
+                %% duration reported under `[asobi, session, disconnected]` would
+                %% then mean "socket lifetime" while the event name says session.
+                session_started_at => erlang:system_time(millisecond)
             }};
         {error, Reason} ->
             Reply = encode_error(Cid, Reason),
