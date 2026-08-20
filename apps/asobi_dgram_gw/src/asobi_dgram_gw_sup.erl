@@ -94,6 +94,16 @@ start_link() ->
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 10, period => 60},
+    {ok, {SupFlags, children(enabled())}}.
+
+%% The engine loads this application for the shared codec, so `init/1` runs there
+%% too. Starting the tree would bind the public UDP port and 7778 inside the
+%% process tree holding the Lua sandbox and the tenant credentials - the exact
+%% thing ADR 0012 decision 14 splits the roles to prevent - and would leave a real
+%% gateway sidecar crash-looping on eaddrinuse (asobi#530).
+children(false) ->
+    [];
+children(true) ->
     %% Order matters on the way up and is the reason this is a list rather than
     %% a set: limiters before anything can be received, the table before a
     %% datagram can name a conn_id, and the sender before a receiver can need to
@@ -101,15 +111,14 @@ init([]) ->
     %% can be handed work by someone outside the node - which is also why the
     %% sender resolves its socket on first use rather than at init: it starts
     %% before the sockets it borrows from exist.
-    {ok,
-        {SupFlags, [
-            limits_spec(),
-            table_spec(),
-            link_server_spec(),
-            sender_spec(),
-            rx_sup_spec(),
-            canary_spec()
-        ]}}.
+    [
+        limits_spec(),
+        table_spec(),
+        link_server_spec(),
+        sender_spec(),
+        rx_sup_spec(),
+        canary_spec()
+    ].
 
 %% --- Internal ---
 
