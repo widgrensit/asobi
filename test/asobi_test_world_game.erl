@@ -29,7 +29,10 @@ spawn_position(_PlayerId, _State) ->
 zone_tick(Entities, ZoneState) ->
     {Entities, ZoneState}.
 
--spec handle_input(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+-spec handle_input(binary(), map(), map()) ->
+    {ok, map()} | {ok, map(), non_neg_integer()} | {error, term()}.
+handle_input(_PlayerId, #{~"action" := ~"consume", ~"consumed" := Consumed}, Entities) ->
+    {ok, Entities, Consumed};
 handle_input(PlayerId, #{~"action" := ~"move", ~"x" := X, ~"y" := Y}, Entities) ->
     case maps:find(PlayerId, Entities) of
         {ok, Entity} ->

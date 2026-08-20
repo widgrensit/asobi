@@ -11,7 +11,7 @@ function join(player_id, state, ctx)         -- ctx is the client join context
 function leave(player_id, state)             -- return updated state
 function spawn_position(player_id, state)    -- return {x, y}
 function zone_tick(entities, zone_state)     -- return entities, zone_state
-function handle_input(player_id, input, entities) -- return entities
+function handle_input(player_id, input, entities) -- return entities[, consumed_seq]
 function post_tick(tick, state)              -- return state (or state + vote/finished)
 -- Optional:
 function generate_world(seed, config)        -- return zone_states table
@@ -267,7 +267,27 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
 zone_tick(Entities, ZoneState) ->
     {Entities, ZoneState}.
 
--spec handle_input(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+-doc """
+Delegates to the script's `handle_input`.
+
+A second Lua return value is the client sequence the script has consumed, and
+it becomes the `world.ack` for that player instead of the seq the client
+stamped on the frame - see the `asobi_world` callback for why a game that
+batches several simulation steps into one frame needs to say what it *ran*
+rather than what *arrived*:
+
+```lua
+function handle_input(player_id, input, entities)
+  local watermark = apply_steps(input.steps, entities)
+  return entities, watermark
+end
+```
+
+A non-numeric or negative second value is refused with a warning and the frame
+stamp is used, so a script cannot ack something the client will not accept.
+""".
+-spec handle_input(binary(), map(), map()) ->
+    {ok, map()} | {ok, map(), non_neg_integer()} | {error, term()}.
 handle_input(PlayerId, Input, Entities) ->
     case erlang:get(?PD_KEY) of
         #{lua_state := LuaSt} = ZoneState ->
@@ -279,9 +299,10 @@ handle_input(PlayerId, Input, Entities) ->
                     handle_input, [PlayerId, EncInput, EncEntities], LuaSt2
                 )
             of
-                {ok, [Ents1 | _], LuaSt3} ->
-                    erlang:put(?PD_KEY, ZoneState#{lua_state => LuaSt3}),
-                    {ok, asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt3))};
+                {ok, Rets, LuaSt3} ->
+                    ZoneState1 = ZoneState#{lua_state => LuaSt3},
+                    erlang:put(?PD_KEY, ZoneState1),
+                    input_result(Rets, LuaSt3, Entities, ZoneState1);
                 {error, Reason} ->
                     log_lua_error(handle_input, Reason, ZoneState),
                     ZoneState1 = asobi_lua_dev_errors:maybe_notify(
@@ -714,6 +735,45 @@ parse_coords(Bin) ->
             end;
         _ ->
             error
+    end.
+
+%% `handle_input` returns entities, and optionally the client seq the script has
+%% consumed. The seq becomes that player's world.ack instead of the seq stamped
+%% on the frame, so a script that batches several simulation steps into one
+%% frame acks what it RAN rather than what ARRIVED (see the `asobi_world`
+%% callback). An empty return list is a script whose handle_input returns
+%% nothing: leave the entities alone rather than crashing the shared zone.
+input_result([], _LuaSt, Entities, _ZoneState) ->
+    {ok, Entities};
+input_result([Ents | Rest], LuaSt, _Entities, ZoneState) ->
+    Decoded = asobi_lua_api:atomize_entities(decode_to_map(Ents, LuaSt)),
+    case Rest of
+        [] ->
+            {ok, Decoded};
+        [Consumed | _] ->
+            case consumed_seq(Consumed, LuaSt) of
+                {ok, Seq} ->
+                    {ok, Decoded, Seq};
+                none ->
+                    {ok, Decoded};
+                invalid ->
+                    log_lua_error(handle_input, invalid_consumed_seq, ZoneState),
+                    {ok, Decoded}
+            end
+    end.
+
+%% Deliberately NOT asobi_lua_phases:to_integer/1, which turns anything
+%% non-numeric into 0 - acking seq 0 would tell the client the server had
+%% consumed nothing, which is a worse answer than falling back to the frame
+%% stamp. An explicit `nil` is the ordinary "no ack for this input" case a
+%% script writes when it has nothing new to report, so it is not an error.
+consumed_seq(nil, _LuaSt) ->
+    none;
+consumed_seq(Value, LuaSt) ->
+    case luerl:decode(Value, LuaSt) of
+        N when is_number(N), N >= 0 -> {ok, trunc(N)};
+        nil -> none;
+        _ -> invalid
     end.
 
 decode_to_map(Term, LuaSt) ->

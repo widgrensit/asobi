@@ -78,6 +78,58 @@ handle_input_uses_zone_state_from_proc_dict_test() ->
     {_, _ZoneState2} = asobi_lua_world:zone_tick(Entities1, ZoneState1),
     erlang:erase({asobi_lua_world, zone_state}).
 
+%% asobi#532: a script that batches several simulation steps into one frame
+%% reports the seq it actually consumed as a second return value, and that
+%% becomes the world.ack instead of the seq stamped on the frame.
+handle_input_reports_consumed_seq_test() ->
+    ZoneState1 = prime_ack_zone(),
+    ?assertEqual(
+        {ok, #{~"p1" => #{type => ~"player", x => 1, y => 2}}, 42},
+        asobi_lua_world:handle_input(
+            ~"p1", #{~"x" => 1, ~"y" => 2, ~"consumed" => 42}, #{}
+        )
+    ),
+    %% A fractional seq truncates rather than reaching the zone as a float:
+    %% Lua has one number type and every integer arrives here as one.
+    ?assertMatch(
+        {ok, _, 7},
+        asobi_lua_world:handle_input(~"p1", #{~"consumed" => 7.9}, #{})
+    ),
+    _ = ZoneState1,
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% No second return value is the ordinary case and must stay a 2-tuple, so
+%% every script written before this existed keeps acking the frame stamp.
+handle_input_without_consumed_seq_is_unchanged_test() ->
+    _ = prime_ack_zone(),
+    ?assertMatch(
+        {ok, #{~"p1" := #{x := 3}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 3}, #{})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% A script returning something that is not a seq must not ack it: falling back
+%% to the frame stamp is recoverable, acking garbage is not.
+handle_input_invalid_consumed_seq_falls_back_test() ->
+    _ = prime_ack_zone(),
+    ?assertMatch(
+        {ok, #{~"p1" := #{x := 4}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 4, ~"consumed" => ~"nope"}, #{})
+    ),
+    ?assertMatch(
+        {ok, #{~"p1" := #{x := 5}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 5, ~"consumed" => -1}, #{})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+prime_ack_zone() ->
+    Config = #{game_config => #{lua_script => fixture("config_ack_world.lua")}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ZoneState1.
+
 handle_input_without_stash_is_noop_test() ->
     erlang:erase({asobi_lua_world, zone_state}),
     ?assertEqual(

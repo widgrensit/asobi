@@ -925,23 +925,57 @@ apply_inputs(GameMod, Queue, Entities) ->
     apply_inputs(GameMod, Queue, Entities, #{}).
 
 apply_inputs(_GameMod, [], Entities, Acks) ->
-    {Entities, Acks};
+    {Entities, unwrap_acks(Acks)};
 apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, Acks) ->
-    %% A rejected input still advances the ack (asobi#474): the client asked the
-    %% server to consume this seq and it did, it just declined the effect.
-    %% Otherwise a client waits forever on an input the server chose to drop.
-    Acks1 = record_ack(PlayerId, Seq, Acks),
     case GameMod:handle_input(PlayerId, Input, Entities) of
         {ok, Entities1} ->
-            apply_inputs(GameMod, Rest, Entities1, Acks1);
+            apply_inputs(GameMod, Rest, Entities1, stamped_ack(PlayerId, Seq, Acks));
+        {ok, Entities1, Consumed} ->
+            apply_inputs(GameMod, Rest, Entities1, reported_ack(PlayerId, Seq, Consumed, Acks));
         {error, Reason} ->
+            %% A rejected input still advances the ack (asobi#474): the client
+            %% asked the server to consume this seq and it did, it just declined
+            %% the effect. Otherwise a client waits forever on an input the
+            %% server chose to drop.
             ?LOG_WARNING(#{
                 msg => ~"zone input rejected",
                 player_id => PlayerId,
                 reason => Reason
             }),
-            apply_inputs(GameMod, Rest, Entities, Acks1)
+            apply_inputs(GameMod, Rest, Entities, stamped_ack(PlayerId, Seq, Acks))
     end.
+
+%% Within one tick an ack candidate is either STAMPED (the seq the client put on
+%% the frame, meaning "this arrived") or REPORTED (what handle_input said it
+%% consumed, meaning "this ran"). A report is authoritative for the rest of the
+%% tick and the newest report wins, because a game that batches steps into one
+%% frame and parks the overflow has to be able to ack BELOW the frame stamp -
+%% max-ing the two would let "arrived" overwrite "ran", which is the overclaim
+%% this exists to prevent. Cross-tick monotonicity is still enforced by
+%% record_ack when the tick's candidates merge into player_ack.
+stamped_ack(PlayerId, Seq, Acks) ->
+    case Acks of
+        #{PlayerId := {reported, _}} -> Acks;
+        #{PlayerId := {stamped, Prev}} when Prev >= Seq -> Acks;
+        _ when is_integer(Seq), Seq >= 0 -> Acks#{PlayerId => {stamped, Seq}};
+        _ -> Acks
+    end.
+
+reported_ack(PlayerId, _Seq, Consumed, Acks) when is_integer(Consumed), Consumed >= 0 ->
+    Acks#{PlayerId => {reported, Consumed}};
+reported_ack(PlayerId, Seq, Consumed, Acks) ->
+    %% A game module is user code, so a nonsense consumed seq must neither crash
+    %% the shared zone nor silently ack something the client cannot use. Fall
+    %% back to the frame stamp and say so.
+    ?LOG_WARNING(#{
+        msg => ~"handle_input reported an invalid consumed seq",
+        player_id => PlayerId,
+        consumed => Consumed
+    }),
+    stamped_ack(PlayerId, Seq, Acks).
+
+unwrap_acks(Acks) ->
+    maps:map(fun(_PlayerId, {_Kind, Seq}) -> Seq end, Acks).
 
 %% Keep the highest seq per player. world.input carries a monotonic client seq;
 %% out-of-order or duplicate delivery must never regress the ack. Inputs with no

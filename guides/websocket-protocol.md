@@ -901,6 +901,52 @@ crossing more than one zone can hold a mark for them. The connection drops any
 ack that does not advance the highest `seq` it has already sent you, so you can
 prune against the value you receive without tracking a maximum yourself.
 
+#### Batched input and the ack
+
+Step 2 says "the highest `seq` it consumed", and by default that is the `seq`
+stamped on the frame: one input frame, one input, nothing to disagree about.
+
+A client predicting faster than the zone ticks changes that. At 60 Hz against a
+12.5 Hz zone there are roughly five simulation steps per tick, so a frame
+carries a *batch* of steps rather than one, and a zone that caps how many steps
+it runs per tick parks the rest for the next one. The frame stamp then no longer
+describes what ran:
+
+- Stamp the frame with the **last** seq in the batch and the ack overclaims
+  whenever steps are parked. The client discards predicted steps the server has
+  not applied yet, cannot replay them, and drifts until something resyncs it.
+- Stamp it with the **first** seq and the ack underclaims. The client replays
+  steps the server already applied and overshoots on every reconciliation.
+
+Return the seq you actually consumed and the ack carries that instead:
+
+```erlang
+handle_input(PlayerId, #{~"steps" := Steps}, Entities) ->
+    {Entities1, Watermark} = apply_steps(PlayerId, Steps, Entities),
+    {ok, Entities1, Watermark}.
+```
+
+```lua
+function handle_input(player_id, input, entities)
+  local watermark = apply_steps(input.steps, entities)
+  return entities, watermark
+end
+```
+
+The number is in your client's own sequence space - the same numbering the steps
+inside the payload carry - and asobi only refuses to let it walk the ack
+backwards. Three rules come with it:
+
+- **Report on every input or on none.** A reported seq wins over a frame stamp
+  for the rest of that tick, but an input you do not report for contributes its
+  stamp, and the higher of the two is what the client hears.
+- **`{error, Reason}` still acks the frame stamp**, because a client must never
+  wait forever on an input the server chose to drop. A game that parks should
+  model refusal as `{ok, Entities, Watermark}` instead.
+- **Deduplicate by the same watermark.** A client that re-sends unacknowledged
+  steps for redundancy (what makes an unreliable carrier safe) will hand you
+  steps you have already run; skip them, and report the watermark either way.
+
 **If your SDK does not yet surface `world.ack`**, the same reconciliation works
 in userland: write the `seq` onto the player's entity in `handle_input/3`
 (`entity.last_seq = input.seq`) and read it back off the `world.tick` delta. The

@@ -47,9 +47,33 @@ behind the join.
 -callback zone_tick(Entities :: map(), ZoneState :: term()) ->
     {Entities1 :: map(), ZoneState1 :: term()}.
 
--doc "Apply a player input to a zone's entities.".
+-doc """
+Apply a player input to a zone's entities.
+
+Return `{ok, Entities1, ConsumedSeq}` to tell asobi which client sequence
+this input actually advanced the simulation to. Without it the `world.ack`
+carries the `seq` the client stamped on the frame, which says the frame
+*arrived*, not how much of it *ran*. The two differ for any game that puts
+more than one simulation step in a frame: a client predicting at 60 Hz
+against a 12.5 Hz zone batches several steps per frame, and a zone that
+caps how many it runs per tick parks the rest. Acking the frame stamp then
+either overclaims (the client discards predicted steps the server has not
+run and can never replay them) or underclaims (the client replays steps the
+server already applied and overshoots).
+
+`ConsumedSeq` is in the client's own sequence space - the same numbering the
+steps inside `Input` carry - and asobi never interprets it beyond refusing
+to let the ack go backwards. Report it on **every** input or on none: a
+module that reports for some inputs and not others makes the frame stamp of
+an unreported input race its own watermark, and the higher of the two wins.
+`{error, Reason}` still advances the ack to the frame stamp, so a module
+that parks should model refusal as `{ok, Entities, Watermark}` rather than
+an error.
+""".
 -callback handle_input(PlayerId :: binary(), Input :: map(), Entities :: map()) ->
-    {ok, Entities1 :: map()} | {error, Reason :: term()}.
+    {ok, Entities1 :: map()}
+    | {ok, Entities1 :: map(), ConsumedSeq :: non_neg_integer()}
+    | {error, Reason :: term()}.
 
 -doc "Global post-tick hook: continue, trigger a vote, or finish the world.".
 -callback post_tick(Tick :: non_neg_integer(), GameState :: term()) ->
