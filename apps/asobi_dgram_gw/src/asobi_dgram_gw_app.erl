@@ -21,8 +21,9 @@ would read them is not in the container.
 
 `asobi` depends on this application for the shared codec, so the engine loads it
 too. Starting the gateway's tree there would bind a UDP port on every engine, so
-the role is read here as well and the engine gets an empty supervisor. One
-application, two roles, and the release decides which one can happen.
+`asobi_dgram_gw_sup:init/1` reads the role as well and the engine gets a
+supervisor with no children. One application, two roles, and the release decides
+which one can happen.
 """.
 
 -behaviour(application).

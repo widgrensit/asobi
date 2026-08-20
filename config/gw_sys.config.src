@@ -2,9 +2,13 @@
 %%
 %% Deliberately tiny, and that is the point of asobi#513: this release contains
 %% no nova, no kura and no shigoto, so it has nothing to configure for them - and
-%% it must not reference ${ASOBI_DB_*}, which a gateway container has no reason to
-%% be given. Everything the gateway itself needs (role, ports, shard count, link
-%% secret) arrives through environment variables read by `asobi_dgram_env`.
+%% it must not reference any ASOBI_DB_ variable, which a gateway container has no
+%% reason to be given. Written without braces on purpose: relx's start script
+%% substitutes every $-brace form it finds in this file, comments included, and a
+%% name it cannot resolve spins its awk loop at 100% CPU forever (asobi#529).
+%%
+%% Everything the gateway itself needs (role, ports, shard count, link secret)
+%% arrives through environment variables read by `asobi_dgram_env`.
 [
     {kernel, [
         {logger_level, info},

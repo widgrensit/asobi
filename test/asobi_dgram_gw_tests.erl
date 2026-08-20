@@ -7,6 +7,8 @@ role_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         {"engine is the default, and it is the whole tree", fun engine_is_the_default/0},
         {"the gateway role starts none of the engine", fun gw_role_starts_no_engine/0},
+        {"the engine role starts none of the gateway", fun engine_role_starts_no_gateway/0},
+        {"the gateway role starts all of the gateway", fun gw_role_starts_the_tree/0},
         {"the gateway application carries nothing that holds credentials",
             fun gateway_application_is_minimal/0},
         {"shards default to the schedulers, capped", fun shard_default/0}
@@ -37,7 +39,7 @@ engine_is_the_default() ->
     application:unset_env(asobi, role),
     ?assertNot(asobi_dgram_gw_sup:enabled()),
     {ok, {_Flags, Children}} = asobi_sup:init([]),
-    Ids = [maps:get(id, C) || C <- Children],
+    Ids = [Id || #{id := Id} <- Children],
     ?assert(lists:member(asobi_world_sup, Ids)),
     ?assert(lists:member(asobi_lua_sup, Ids)),
     ?assertNot(lists:member(asobi_dgram_gw_sup, Ids)).
@@ -71,6 +73,34 @@ gateway_application_is_minimal() ->
     _ = application:load(asobi),
     {ok, AsobiDeps} = application:get_key(asobi, applications),
     ?assert(lists:member(asobi_dgram_gw, AsobiDeps)).
+
+%% asobi#530: `asobi` lists `asobi_dgram_gw` in `applications` for the shared
+%% codec, so this supervisor's `init/1` runs on every engine. Returning the child
+%% list there binds the public UDP port and 7778 inside the process tree holding
+%% the Lua sandbox and the tenant credentials - the isolation ADR 0012 decision 14
+%% exists to enforce - and crash-loops any real gateway sidecar on eaddrinuse.
+%% Worse, without a sidecar the plane keeps working through the engine's
+%% in-process gateway, so nothing tells the operator the boundary is gone.
+engine_role_starts_no_gateway() ->
+    application:unset_env(asobi, role),
+    {ok, {_Flags, Children}} = asobi_dgram_gw_sup:init([]),
+    ?assertEqual([], Children).
+
+gw_role_starts_the_tree() ->
+    application:set_env(asobi, role, dgram_gw),
+    {ok, {_Flags, Children}} = asobi_dgram_gw_sup:init([]),
+    Ids = [Id || #{id := Id} <- Children],
+    ?assertEqual(
+        [
+            asobi_dgram_limits,
+            asobi_dgram_table,
+            asobi_dgram_link_server,
+            asobi_dgram_sender,
+            asobi_dgram_rx_sup,
+            asobi_dgram_canary
+        ],
+        Ids
+    ).
 
 %% One receiver per scheduler is the shape SO_REUSEPORT is for. More sockets than
 %% schedulers buys nothing and multiplies the flows a restart breaks, because the
