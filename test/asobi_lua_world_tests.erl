@@ -122,6 +122,23 @@ handle_input_invalid_consumed_seq_falls_back_test() ->
     ),
     erlang:erase({asobi_lua_world, zone_state}).
 
+%% A script whose handle_input falls off its end returns no values at all.
+%% asobi_lua_loader:call/3 hands back {ok, [], St} for that, which used to be a
+%% case_clause in the bridge - and the bridge runs inside the zone process, so
+%% one author's missing return killed the simulation for every player in that
+%% zone. Mirrors the same guard on the match side's `join`.
+handle_input_returning_nothing_leaves_entities_alone_test() ->
+    Config = #{game_config => #{lua_script => fixture("config_silent_input_world.lua")}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_, _} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ?assertEqual(
+        {ok, #{~"p1" => #{x => 1}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 1}, #{~"p1" => #{x => 1}})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
 prime_ack_zone() ->
     Config = #{game_config => #{lua_script => fixture("config_ack_world.lua")}},
     {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),

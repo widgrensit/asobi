@@ -62,13 +62,31 @@ run and can never replay them) or underclaims (the client replays steps the
 server already applied and overshoots).
 
 `ConsumedSeq` is in the client's own sequence space - the same numbering the
-steps inside `Input` carry - and asobi never interprets it beyond refusing
-to let the ack go backwards. Report it on **every** input or on none: a
-module that reports for some inputs and not others makes the frame stamp of
-an unreported input race its own watermark, and the higher of the two wins.
-`{error, Reason}` still advances the ack to the frame stamp, so a module
+steps inside `Input` carry - and asobi does not interpret it. Three rules
+come with it.
+
+**Report on every input or on none.** Within a tick a report always beats a
+frame stamp, whatever order they arrive in. The leak is across ticks and is
+not a race: a tick in which this module reported nothing records the frame
+stamp instead, and the ack keeps the highest value it has recorded, so one
+unreported tick pins the ack above the watermark for good.
+
+**Reporting acks a client that never stamped a `seq`.** Numbering the steps
+inside the payload and never stamping the frame is the cleanest form of the
+batching design, and a module reporting a consumed seq is asserting that its
+clients reconcile. A client that does not want acks should not be playing a
+game whose module reports them.
+
+**`{error, Reason}` still advances the ack to the frame stamp**, so a module
 that parks should model refusal as `{ok, Entities, Watermark}` rather than
 an error.
+
+A module that parks steps in `handle_input/3` and drains them in
+`zone_tick/2` has no channel to report the drain: the watermark rides out on
+the next input this module handles. Clients re-sending unacknowledged steps
+for redundancy produce one every tick, so this costs a tick of latency; a
+player at rest, sending nothing, leaves their final drain unacked until they
+move again.
 """.
 -callback handle_input(PlayerId :: binary(), Input :: map(), Entities :: map()) ->
     {ok, Entities1 :: map()}

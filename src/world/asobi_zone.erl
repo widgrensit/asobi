@@ -953,6 +953,8 @@ apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, Acks) ->
 %% max-ing the two would let "arrived" overwrite "ran", which is the overclaim
 %% this exists to prevent. Cross-tick monotonicity is still enforced by
 %% record_ack when the tick's candidates merge into player_ack.
+stamped_ack(_PlayerId, undefined, Acks) ->
+    Acks;
 stamped_ack(PlayerId, Seq, Acks) ->
     case Acks of
         #{PlayerId := {reported, _}} -> Acks;
@@ -961,6 +963,10 @@ stamped_ack(PlayerId, Seq, Acks) ->
         _ -> Acks
     end.
 
+%% Note the absent `Seq` guard: a report acks a client that never stamped one.
+%% Numbering steps inside the payload and leaving the frame unstamped is the
+%% cleanest form of the batching design, and a module that reports is asserting
+%% its clients reconcile - #474's stamp is not the only way to say so.
 reported_ack(PlayerId, _Seq, Consumed, Acks) when is_integer(Consumed), Consumed >= 0 ->
     Acks#{PlayerId => {reported, Consumed}};
 reported_ack(PlayerId, Seq, Consumed, Acks) ->

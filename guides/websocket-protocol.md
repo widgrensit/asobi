@@ -891,9 +891,12 @@ authoritative state already includes - is a first-class primitive:
 
 Set [`broadcast_interval`](world-server.md) to 1 so the ack returns every tick.
 
-The ack is addressed to one connection: it is sent only to clients that opted in
-by stamping a `seq`, and never rides the shared `world.tick`, so one player's
-input stream is never broadcast to the rest of the zone.
+The ack is addressed to one connection and never rides the shared `world.tick`,
+so one player's input stream is never broadcast to the rest of the zone. It is
+sent to clients that opted in by stamping a `seq`, and to clients whose game
+module reports a consumed seq for them - see
+[Batched input and the ack](#batched-input-and-the-ack), where numbering the
+steps inside the payload replaces stamping the frame.
 
 **`seq` never goes backwards on a connection.** The high-water mark is recorded
 per zone, and a player is subscribed to their whole interest ring, so during a
@@ -937,9 +940,17 @@ The number is in your client's own sequence space - the same numbering the steps
 inside the payload carry - and asobi only refuses to let it walk the ack
 backwards. Three rules come with it:
 
-- **Report on every input or on none.** A reported seq wins over a frame stamp
-  for the rest of that tick, but an input you do not report for contributes its
-  stamp, and the higher of the two is what the client hears.
+- **Report on every input or on none.** Within a tick a report always beats a
+  frame stamp, whatever order they arrive in. Across ticks it does not: a tick
+  in which you reported nothing records the frame stamp instead, and the ack
+  keeps the highest value it has recorded, so one unreported tick pins the ack
+  above your watermark for good.
+- **Reporting acks a client that never stamped a `seq`.** If your client numbers
+  its steps inside the payload it never needs to stamp the frame at all.
+- **Draining parked steps in `zone_tick` has no report channel.** The watermark
+  rides out on the next input you handle, which a client re-sending
+  unacknowledged steps produces every tick - so it costs a tick, except for a
+  player at rest, whose final drain stays unacked until they move.
 - **`{error, Reason}` still acks the frame stamp**, because a client must never
   wait forever on an input the server chose to drop. A game that parks should
   model refusal as `{ok, Entities, Watermark}` instead.
