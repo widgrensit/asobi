@@ -53,6 +53,11 @@ setup() ->
 
 cleanup(Prev) ->
     meck:unload(asobi_dgram_link_client),
+    %% The mirror is a named table the real mint creates for itself at boot, so a
+    %% stand-in left behind here makes any later test that starts a mint crash on
+    %% `already_exists`.
+    drop_table(asobi_dgram_conns),
+    drop_table(asobi_pose_capture),
     [
         case V of
             undefined -> application:unset_env(asobi, K);
@@ -60,6 +65,13 @@ cleanup(Prev) ->
         end
      || {K, V} <- Prev
     ],
+    ok.
+
+drop_table(Name) ->
+    case ets:whereis(Name) of
+        undefined -> ok;
+        _Tid -> ets:delete(Name)
+    end,
     ok.
 
 %% --- Tests ---

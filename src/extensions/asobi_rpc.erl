@@ -126,7 +126,11 @@ everything in front of the dispatcher, and these divergences are frozen:
 
 -doc "What a handler is told about its caller. Additive; never match it exhaustively.".
 -type ctx() :: #{
-    player_id := binary(), session := pid(), method := binary(), transport := ws | http
+    player_id := binary(),
+    session := pid(),
+    method := binary(),
+    transport := ws | http,
+    wire := binary()
 }.
 
 -doc "What a handler returns.".
@@ -140,10 +144,14 @@ The authenticated player behind the transport, or `unauthenticated`.
 
 `transport` marks which one so a handler can branch on `Ctx.transport`; it is
 optional here and defaults to `ws` in `invoke/5`, so a caller built without it
-stays safe.
+stays safe. `wire` is the wire that transport negotiated, optional the same way
+and defaulting to `~"json"` - a transport with no wire of its own (`http`) has
+the same answer as one that negotiated the text wire, which is what the mint
+records.
 """.
 -type caller() ::
-    #{player_id := binary(), session := pid(), transport => ws | http} | unauthenticated.
+    #{player_id := binary(), session := pid(), transport => ws | http, wire => binary()}
+    | unauthenticated.
 
 -export_type([params/0, ctx/0, reply/0, caller/0]).
 
@@ -260,7 +268,11 @@ invoke(Module, Function, Method, Params, #{player_id := PlayerId, session := Ses
         player_id => PlayerId,
         session => Session,
         method => Method,
-        transport => maps:get(transport, Caller, ws)
+        transport => maps:get(transport, Caller, ws),
+        %% Carried through rather than dropped: the datagram mint decides from it
+        %% whether poses can reach this connection, and a caller rebuilt without
+        %% it mints every session as JSON, so no pose is ever sent (asobi#527).
+        wire => maps:get(wire, Caller, ~"json")
     },
     try Module:Function(Params, Ctx) of
         Reply -> reply(Reply, Method)

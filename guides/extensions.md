@@ -236,8 +236,10 @@ differently, and a code you declared in `codes/0` reaches the client as
 itself. It is the same dialect core's own controllers speak
 (`{asobi_error, Code, Details}`), so there is one shape to learn.
 
-`Ctx` is `#{player_id, session, method}`. It may gain keys: match the ones you
-need with `:=` and never match it exhaustively.
+`Ctx` is `#{player_id, session, method, transport, wire}` - `transport` is `ws`
+or `http`, `wire` is the wire that transport negotiated (`~"json"` or
+`~"binary"`, and `~"json"` over HTTP, which has no wire of its own). It may
+gain keys: match the ones you need with `:=` and never match it exhaustively.
 
 Everything else is a defect and answers `internal` with one logged line naming
 the method: a handler that raises, one that returns outside the contract, one
