@@ -215,7 +215,13 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Hot-reload the script if it changed on disk since the last tick.
     %% Mirrors asobi_lua_match's per-tick reload — keeps live worlds in sync
     %% with on-disk edits without restarting the zone process.
-    ZoneState = asobi_lua_reload:maybe_hot_reload(ZoneState1),
+    %% #536: collect before the callback, not after it. The expensive moment
+    %% is asobi_lua_loader:call/4's copy of the whole state into its eval
+    %% worker, and this is the last point before it - collecting after meant
+    %% the tick paid the copy at the peak of the sawtooth every time, and a
+    %% tick that failed on heap or timeout never reached the collection at
+    %% all, so it failed identically on every following tick.
+    ZoneState = asobi_lua_loader:collect_state(asobi_lua_reload:maybe_hot_reload(ZoneState1)),
     %% asobi#253: refresh the live known-template set (?TEMPLATES_KEY) the
     %% instant a reload lands, before this tick's own zone_tick Lua body
     %% runs - not just from asobi_zone's separate, later
@@ -250,13 +256,10 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                 of
                     {ok, [Ents1, ZS1 | _], LuaSt2} ->
                         Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
-                        {Ents2,
-                            asobi_lua_loader:collect_state(ZoneState#{
-                                lua_state => LuaSt2, game_state => ZS1
-                            })};
+                        {Ents2, ZoneState#{lua_state => LuaSt2, game_state => ZS1}};
                     {ok, [Ents1 | _], LuaSt2} ->
                         Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
-                        {Ents2, asobi_lua_loader:collect_state(ZoneState#{lua_state => LuaSt2})};
+                        {Ents2, ZoneState#{lua_state => LuaSt2}};
                     {error, Reason} ->
                         log_lua_error(zone_tick, Reason, ZoneState),
                         {Entities, ZoneState}
@@ -322,11 +325,13 @@ post_tick(TickN, State0) ->
     %% Hot-reload the world-level script (separate from per-zone reload in
     %% zone_tick). Reloading at world level keeps phases, post_tick, and
     %% on_phase_* callbacks in sync with on-disk edits.
-    #{lua_state := LuaSt, game_state := GS} = State = asobi_lua_reload:maybe_hot_reload(State0),
+    %% #536: collect ahead of the callback - see zone_tick/2.
+    #{lua_state := LuaSt, game_state := GS} =
+        State = asobi_lua_loader:collect_state(asobi_lua_reload:maybe_hot_reload(State0)),
     case asobi_lua_loader:call(post_tick, [TickN, GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             Outcome = check_post_tick_result(GS1, LuaSt1),
-            State1 = asobi_lua_loader:collect_state(State#{lua_state => LuaSt1, game_state => GS1}),
+            State1 = State#{lua_state => LuaSt1, game_state => GS1},
             case Outcome of
                 ok ->
                     {ok, State1};

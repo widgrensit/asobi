@@ -31,9 +31,9 @@ load a specific script and pin its base directory for `require`.
 
 -export([new/1, new/2, new/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
 -export([is_defined/2]).
--export([collect_state/1]).
+-export([collect_state/1, state_words/0]).
 -ifdef(TEST).
--export([next_gc/3]).
+-export([next_gc/4, gc_budget_us/1]).
 -endif.
 
 -export_type([pre_install/0]).
@@ -52,14 +52,20 @@ load a specific script and pin its base directory for `require`.
 %% notices the hang.
 -define(DEFAULT_INIT_TIMEOUT_MS, 2000).
 
-%% Per-eval heap cap. A correctly-written tick handler should not
-%% allocate near 40MB; legitimate large state lives in the persistent
-%% Luerl state held by the gen_server, not in the per-eval process.
-%% Configurable via `asobi_lua.max_heap_words` for ops with unusual
-%% workloads. `kill => true` makes the VM kill the eval process if it
-%% allocates past the limit; the parent receives `{'DOWN', _, _, _,
-%% killed}` and surfaces `{error, heap_exhausted}` so the caller can
-%% distinguish heap-blow from timeout.
+%% Per-eval heap budget: what one callback may allocate *on top of* the
+%% state it was handed, not a cap on the process. #536: as an absolute
+%% `max_heap_size` at spawn this bounded the persistent Luerl state
+%% instead - the state is copied into the eval worker by the spawn
+%% itself, so a handler that allocated nothing was killed once the state
+%% behind it was large enough, and it was killed again on every tick
+%% until the collector next ran. `bounded_eval` therefore measures the
+%% worker's heap after the copy and caps it at that plus this budget, so
+%% the number means what it says here regardless of state size.
+%% Configurable via `asobi_lua.max_heap_words`. `kill => true` makes the
+%% VM kill the eval process if it allocates past the limit; the parent
+%% receives `{'DOWN', _, _, _, killed}` and surfaces
+%% `{error, heap_exhausted}` so the caller can distinguish heap-blow
+%% from timeout.
 -define(DEFAULT_MAX_HEAP_WORDS, 5_000_000).
 
 %% #348: CPU bound, expressed as reductions allowed per millisecond of the
@@ -101,10 +107,41 @@ load a specific script and pin its base directory for `require`.
 -define(GC_MIN_INTERVAL, 8).
 -define(GC_MAX_INTERVAL, 1024).
 -define(GC_BUDGET_US, 5_000).
+%% #536: a flat budget is the wrong yardstick, because what a collection buys
+%% is not measured in ticks - it is measured against the copy `call/4` makes
+%% on every callback. That copy costs ~51us per 1000 words of state (~7ms per
+%% MB): a no-op callback measured 1.8ms against a 0.4MB state, 41ms against
+%% 6MB and 418ms against 62MB. So a collection that shrinks a large state pays
+%% for itself many times over before the next one, and the flat 5ms ceiling
+%% backed the interval off to its maximum on exactly the states that could
+%% least afford it - the sawtooth in #536, whose peak still outgrew the eval
+%% budget. The budget therefore scales with the state being collected, capped
+%% at a quarter of one copy: past that the collection is visible in the tick
+%% itself, which is the only cost this trade is really spending.
+-define(GC_BUDGET_WORDS_PER_US, 80).
 %% Past this a single collection costs more than the leak does over the
 %% interval that would follow it, so stop rather than freeze the zone.
 -define(GC_ABANDON_US, 500_000).
 -define(GC_ANCHOR, ~"__asobi_gc_anchor").
+
+%% How often `collect_state/1` reports the measured state size, in calls. The
+%% collector's own interval is adaptive and can be off entirely, so the size
+%% cannot ride on a collection - it has to be reported on its own cadence or
+%% it goes silent exactly when an operator needs it.
+-define(STATE_SAMPLE_INTERVAL, 8).
+
+%% One warning per state when the copy `call/4` makes crosses ~100MB. There is
+%% no longer an absolute heap cap to trip (see ?DEFAULT_MAX_HEAP_WORDS), which
+%% is the point - but a state this size costs ~700ms per callback in copying
+%% alone, so it needs to be said out loud rather than only in telemetry.
+-define(STATE_WARN_WORDS, 12_500_000).
+
+%% Written by `bounded_eval` on the calling process - the zone, world or match
+%% gen_server - and read by `collect_state/1` on that same process. The eval
+%% worker's own heap immediately after the spawn *is* the copied state, so
+%% this measurement is exact and costs nothing; nothing else on the calling
+%% side can size the state without walking it.
+-define(STATE_WORDS_KEY, {?MODULE, state_words}).
 
 -spec new(binary() | string()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath) ->
@@ -230,29 +267,58 @@ call(FuncPath, Args, St, TimeoutMs) ->
 bounded_eval(Fun, TimeoutMs) ->
     Self = self(),
     Ref = make_ref(),
-    SpawnOpts = [
-        monitor,
-        {max_heap_size, #{
-            size => max_heap_words(),
-            kill => true,
-            error_logger => true,
-            include_shared_binaries => false
-        }}
-    ],
+    HeapBudget = max_heap_words(),
     {Pid, MonRef} =
         spawn_opt(
             fun() ->
-                Self ! {Ref, Fun()}
+                %% Bound before the body: tuple elements are evaluated in an
+                %% unspecified order, so the cap cannot be an argument to the
+                %% message it is meant to protect.
+                Base = cap_heap_above_state(HeapBudget),
+                Self ! {Ref, Base, Fun()}
             end,
-            SpawnOpts
+            %% Full sweeps only. The worker's heap is one big live term (the
+            %% copied state) plus whatever the callback allocates on top, so
+            %% generational collection has nothing to be clever about: it
+            %% promotes the state into an old heap and then keeps re-copying
+            %% it. Measured against the same callback: 132ms -> 64ms at a
+            %% 13MB state, 218ms -> 98ms at 39MB. It also makes the peak
+            %% predictable, which is what lets the cap below be relative.
+            [monitor, {fullsweep_after, 0}]
         ),
     Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
     await_eval(Pid, Ref, MonRef, Deadline, reduction_budget(TimeoutMs)).
 
+%% #536: the cap has to be set from inside the worker, because the term it has
+%% to exclude - the persistent Luerl state - is copied in by the spawn before
+%% the first instruction runs. Whatever is on the heap at that point is the
+%% state the caller handed us; the budget is what the callback may add to it.
+%% Nothing can allocate before this runs, so there is no uncapped window.
+%%
+%% The state is counted twice on purpose. A collection of an all-live heap
+%% copies it, so a worker that never allocates a word of its own still needs
+%% room for one more copy of what it was handed the moment it collects at all
+%% - with `Base + Budget` a large state is killed by its own first GC, which
+%% is the bug over again with a different arithmetic. `fullsweep_after = 0`
+%% above is what keeps that at one copy rather than an unbounded number of
+%% generational ones: measured peak is 1.2-1.5x Base across states from 0.3MB
+%% to 39MB, so 2x Base leaves the budget doing the deciding.
+-spec cap_heap_above_state(pos_integer()) -> non_neg_integer().
+cap_heap_above_state(Budget) ->
+    {total_heap_size, Base} = process_info(self(), total_heap_size),
+    _ = process_flag(max_heap_size, #{
+        size => 2 * Base + Budget,
+        kill => true,
+        error_logger => true,
+        include_shared_binaries => false
+    }),
+    Base.
+
 await_eval(Pid, Ref, MonRef, Deadline, Budget) ->
     receive
-        {Ref, Result} ->
+        {Ref, StateWords, Result} ->
             erlang:demonitor(MonRef, [flush]),
+            _ = put(?STATE_WORDS_KEY, StateWords),
             Result;
         {'DOWN', MonRef, process, Pid, killed} ->
             {error, heap_exhausted};
@@ -288,8 +354,9 @@ over_budget(Pid, Budget) ->
 kill_and_settle(Pid, Ref, MonRef, Reason) ->
     exit(Pid, kill),
     receive
-        {Ref, Result} ->
+        {Ref, StateWords, Result} ->
             erlang:demonitor(MonRef, [flush]),
+            _ = put(?STATE_WORDS_KEY, StateWords),
             Result;
         {'DOWN', MonRef, process, Pid, _} ->
             {error, Reason}
@@ -322,13 +389,21 @@ max_heap_words() ->
 -doc """
 Collect the Luerl state carried in a bridge state map, every so often.
 
-Call this once per tick from a bridge that holds a long-lived `lua_state`.
-Luerl never collects such a state on its own, so without this the per-tick
-`luerl:encode/2` of entities or inputs accumulates in it forever - and
-`call/4` copies the whole state into its eval worker and back on every
-callback, so the cost of a tick grows with everything the state has ever
-allocated. Collect on the calling process: it costs no extra copy there, and
-`luerl:gc/1` runs no Lua code so it cannot hang on a script.
+Call this once per tick from a bridge that holds a long-lived `lua_state`,
+**before** the tick's own callback. Luerl never collects such a state on its
+own, so without this the per-tick `luerl:encode/2` of entities or inputs
+accumulates in it forever - and `call/4` copies the whole state into its eval
+worker and back on every callback, so the cost of a tick grows with everything
+the state has ever allocated. Collect on the calling process: it costs no
+extra copy there, and `luerl:gc/1` runs no Lua code so it cannot hang on a
+script.
+
+#536: collecting *before* the callback rather than after it is what makes the
+collection worth its cost - the expensive moment is the copy, and this is the
+last point before it. It also breaks the wedge the collector was added to
+prevent but could not: a callback that fails on heap or timeout never reached
+a collection placed after it, so the state that caused the failure was carried
+into the next tick untouched, and every tick after that failed the same way.
 
 `game_state` is the one Luerl value asobi holds between callbacks. It is
 unreachable from the Lua root set while Erlang is between them, so the
@@ -341,30 +416,97 @@ Bookkeeping is kept under `lua_gc` in the same map. Set
 """.
 -spec collect_state(map()) -> map().
 collect_state(#{lua_state := St} = State) ->
-    Gc = maps:get(lua_gc, State, new_gc()),
+    Gc0 = maps:get(lua_gc, State, new_gc()),
+    Words = state_words(),
+    Gc1 = report_state_size(Words, State, Gc0),
     Anchor = maps:get(game_state, State, nil),
-    {St1, Gc1} = maybe_gc(St, Anchor, Gc),
-    State#{lua_state => St1, lua_gc => Gc1};
+    {St1, Gc2} = maybe_gc(St, Anchor, Words, Gc1),
+    State#{lua_state => St1, lua_gc => Gc2};
 collect_state(State) ->
     State.
+
+-doc """
+Size in words of the Luerl state the last bounded callback was handed, or
+`undefined` before one has run on this process.
+
+`call/4` spawns a worker and the spawn copies the state into it, so the
+worker's heap at its first instruction is that state, exactly, and reading it
+there costs nothing. Sizing the same term on the calling side would mean
+walking it. Callbacks that run inline (`call/3`, and `handle_input` - see
+ADR 0002) never spawn, so they do not refresh this; on a bridge that ticks,
+the tick does.
+""".
+-spec state_words() -> non_neg_integer() | undefined.
+state_words() ->
+    case erlang:get(?STATE_WORDS_KEY) of
+        N when is_integer(N), N >= 0 -> N;
+        _ -> undefined
+    end.
 
 new_gc() ->
     #{interval => ?GC_MIN_INTERVAL, countdown => ?GC_MIN_INTERVAL, enabled => true}.
 
-maybe_gc(St, _Anchor, #{enabled := false} = Gc) ->
+%% #536: before this, a state's size was invisible until zones started dying
+%% of it - there was no metric to alert on and no number in the logs. The
+%% sample rides on `collect_state/1` rather than on a collection, because the
+%% collector's interval is adaptive and can be off entirely.
+report_state_size(undefined, _State, Gc) ->
+    Gc;
+report_state_size(Words, State, Gc) ->
+    Gc1 =
+        case maps:get(sample, Gc, 0) of
+            0 ->
+                asobi_telemetry:lua_state_size(maps:get(script, State, undefined), Words),
+                Gc#{sample => ?STATE_SAMPLE_INTERVAL - 1};
+            N ->
+                Gc#{sample => N - 1}
+        end,
+    warn_large_state(Words, State, Gc1).
+
+warn_large_state(Words, State, Gc) when Words >= ?STATE_WARN_WORDS ->
+    case maps:get(warned, Gc, false) of
+        true ->
+            Gc;
+        false ->
+            ?LOG_WARNING(#{
+                event => lua_state_large,
+                state_words => Words,
+                state_mb => (Words * erlang:system_info(wordsize)) div 1048576,
+                script => maps:get(script, State, undefined),
+                msg =>
+                    ~"The Luerl state behind this bridge is large enough that copying it into each bounded callback dominates the tick. Every callback pays it. Reduce what the script keeps alive between callbacks."
+            }),
+            Gc#{warned => true}
+    end;
+warn_large_state(_Words, _State, Gc) ->
+    Gc#{warned => false}.
+
+maybe_gc(St, _Anchor, _Words, #{enabled := false} = Gc) ->
     {St, Gc};
-maybe_gc(St, _Anchor, #{countdown := N} = Gc) when N > 1 ->
+maybe_gc(St, _Anchor, _Words, #{countdown := N} = Gc) when N > 1 ->
     {St, Gc#{countdown := N - 1}};
-maybe_gc(St, Anchor, #{interval := Interval} = Gc) ->
+maybe_gc(St, Anchor, Words, #{interval := Interval} = Gc) ->
     case gc_disabled() of
         true ->
             {St, Gc#{enabled := false}};
         false ->
             {Us, St1} = timer:tc(fun() -> collect(St, Anchor) end),
-            {St1, next_gc(Us, Interval, Gc)}
+            {St1, next_gc(Us, gc_budget_us(Words), Interval, Gc)}
     end.
 
-next_gc(Us, Interval, Gc) when Us > ?GC_ABANDON_US ->
+%% What one collection may cost, in us. Scales with the state so that the
+%% interval only backs off when collecting really is worse than carrying the
+%% garbage - see ?GC_BUDGET_WORDS_PER_US.
+-spec gc_budget_us(non_neg_integer() | undefined) -> pos_integer().
+gc_budget_us(undefined) ->
+    ?GC_BUDGET_US;
+gc_budget_us(Words) when is_integer(Words) ->
+    case Words div ?GC_BUDGET_WORDS_PER_US of
+        Scaled when Scaled > ?GC_BUDGET_US -> Scaled;
+        _ -> ?GC_BUDGET_US
+    end.
+
+next_gc(Us, _Budget, Interval, Gc) when Us > ?GC_ABANDON_US ->
     ?LOG_WARNING(#{
         event => lua_gc_abandoned,
         duration_ms => Us div 1000,
@@ -372,11 +514,11 @@ next_gc(Us, Interval, Gc) when Us > ?GC_ABANDON_US ->
             ~"Luerl collection outran a tick budget and is now off for this state. Luerl's collector is quadratic in the live set, so a script holding a large table across callbacks cannot be collected cheaply. Lua memory here will grow unbounded until the script keeps less alive across callbacks."
     }),
     Gc#{enabled := false, countdown := Interval};
-next_gc(Us, Interval, Gc) ->
+next_gc(Us, Budget, Interval, Gc) ->
     Interval1 =
         if
-            Us > ?GC_BUDGET_US -> min(?GC_MAX_INTERVAL, Interval * 2);
-            Us < ?GC_BUDGET_US div 4 -> max(?GC_MIN_INTERVAL, Interval div 2);
+            Us > Budget -> min(?GC_MAX_INTERVAL, Interval * 2);
+            Us < Budget div 4 -> max(?GC_MIN_INTERVAL, Interval div 2);
             true -> Interval
         end,
     Gc#{interval := Interval1, countdown := Interval1}.

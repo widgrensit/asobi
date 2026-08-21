@@ -44,6 +44,60 @@ loader_test_() ->
             fun is_defined_true_for_non_function_global/0}
     ].
 
+%% --- #536: the eval's heap budget bounds the callback, not the state ---
+%%
+%% The state is copied into the eval worker by the spawn itself, so an
+%% absolute `max_heap_size` set at spawn bounded the persistent Luerl state
+%% instead of the callback's own allocation: a handler that allocated nothing
+%% was killed once the state behind it was large enough, and killed again on
+%% every tick until the collector next ran. The budget is now measured from
+%% the worker's heap after the copy, so the same callback under the same
+%% budget gets the same verdict whatever it was handed.
+
+heap_budget_test_() ->
+    {foreach, fun reset_heap_env/0, fun(_) -> reset_heap_env() end, [
+        {"the verdict does not depend on the size of the state", fun verdict_ignores_state_size/0},
+        {"a runaway callback is still killed", fun runaway_still_killed/0},
+        {"the state size is measured for free", fun state_words_measured/0}
+    ]}.
+
+reset_heap_env() ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    application:unset_env(asobi_lua, max_heap_words),
+    application:unset_env(asobi, max_heap_words),
+    ok.
+
+verdict_ignores_state_size() ->
+    application:set_env(asobi, max_heap_words, 2_000_000),
+    Small = churn_state(500),
+    Large = churn_state(60_000),
+    ?assert(erts_debug:flat_size(Large) > 2_000_000),
+    ?assertMatch({ok, _, _}, asobi_lua_loader:call(churn, [3_000], Small, 5_000)),
+    ?assertMatch({ok, _, _}, asobi_lua_loader:call(churn, [3_000], Large, 5_000)).
+
+runaway_still_killed() ->
+    application:set_env(asobi, max_heap_words, 500_000),
+    St = churn_state(500),
+    ?assertEqual({error, heap_exhausted}, asobi_lua_loader:call(churn, [400_000], St, 30_000)).
+
+state_words_measured() ->
+    Small = churn_state(500),
+    Large = churn_state(60_000),
+    {ok, _, _} = asobi_lua_loader:call(churn, [1], Small, 5_000),
+    SmallWords = asobi_lua_loader:state_words(),
+    {ok, _, _} = asobi_lua_loader:call(churn, [1], Large, 5_000),
+    LargeWords = asobi_lua_loader:state_words(),
+    ?assert(SmallWords > 0),
+    ?assert(LargeWords > 10 * SmallWords),
+    %% The worker's heap after the copy is the state, so the measurement
+    %% tracks what walking the term would have cost to find out.
+    ?assert(LargeWords >= erts_debug:flat_size(Large)).
+
+churn_state(Rows) ->
+    {ok, St} = asobi_lua_loader:new(fixture("gc_zone.lua")),
+    {ok, [_ | _], St1} = asobi_lua_loader:call(big_state, [Rows], St),
+    St1.
+
 %% --- #426: the periodic Luerl collector ---
 %%
 %% Luerl never collects a long-lived state on its own, so every per-tick
@@ -63,10 +117,13 @@ collector_test_() ->
         {"a state with no lua_state is untouched", fun no_lua_state_is_untouched/0},
         {"lua_gc=false disables the collector", fun env_disables_collector/0},
         {"the interval adapts to measured collection cost", fun interval_adapts_to_cost/0},
-        {"an uncollectable live set abandons the collector", fun huge_live_set_abandons/0}
+        {"an uncollectable live set abandons the collector", fun huge_live_set_abandons/0},
+        {"the collection budget scales with the state", fun budget_scales_with_state/0},
+        {"the state size is reported", fun state_size_is_reported/0}
     ]}.
 
 unset_gc_env() ->
+    {ok, _} = application:ensure_all_started(telemetry),
     application:unset_env(asobi_lua, lua_gc),
     application:unset_env(asobi, lua_gc),
     ok.
@@ -124,19 +181,39 @@ env_disables_collector() ->
 %% on how fast the machine running it is.
 interval_adapts_to_cost() ->
     Gc = #{interval => 64, countdown => 0, enabled => true},
-    Doubled = asobi_lua_loader:next_gc(20_000, 64, Gc),
+    B = 5_000,
+    Doubled = asobi_lua_loader:next_gc(20_000, B, 64, Gc),
     ?assertMatch(#{interval := 128, countdown := 128, enabled := true}, Doubled),
-    Halved = asobi_lua_loader:next_gc(100, 64, Gc),
+    Halved = asobi_lua_loader:next_gc(100, B, 64, Gc),
     ?assertMatch(#{interval := 32, countdown := 32}, Halved),
-    ?assertMatch(#{interval := 64}, asobi_lua_loader:next_gc(3_000, 64, Gc)),
+    ?assertMatch(#{interval := 64}, asobi_lua_loader:next_gc(3_000, B, 64, Gc)),
     %% Both ends are clamped, so a cheap state does not collect every tick and
     %% an expensive one still collects eventually.
     ?assertMatch(
-        #{interval := 8}, asobi_lua_loader:next_gc(1, 8, Gc#{interval => 8})
+        #{interval := 8}, asobi_lua_loader:next_gc(1, B, 8, Gc#{interval => 8})
     ),
     ?assertMatch(
         #{interval := 1024},
-        asobi_lua_loader:next_gc(20_000, 1024, Gc#{interval => 1024})
+        asobi_lua_loader:next_gc(20_000, B, 1024, Gc#{interval => 1024})
+    ).
+
+%% #536: the same 20ms collection is a backoff against a small state and a
+%% bargain against a large one, because what it is really competing with is
+%% call/4's copy of that state on every callback. A flat budget backed the
+%% interval off hardest on the states that could least afford it.
+budget_scales_with_state() ->
+    ?assertEqual(5_000, asobi_lua_loader:gc_budget_us(undefined)),
+    ?assertEqual(5_000, asobi_lua_loader:gc_budget_us(1_000)),
+    Big = asobi_lua_loader:gc_budget_us(8_000_000),
+    ?assert(Big > 5_000),
+    Gc = #{interval => 64, countdown => 0, enabled => true},
+    ?assertMatch(
+        #{interval := 128},
+        asobi_lua_loader:next_gc(20_000, asobi_lua_loader:gc_budget_us(1_000), 64, Gc)
+    ),
+    ?assertMatch(
+        #{interval := 32},
+        asobi_lua_loader:next_gc(20_000, Big, 64, Gc)
     ).
 
 %% Past the abandon ceiling a single collection costs more than the leak it
@@ -146,6 +223,35 @@ huge_live_set_abandons() ->
     S = collect(big_state(20000)),
     ?assertMatch(#{lua_gc := #{enabled := false}}, S),
     ?assert(is_list(gs_world(S))).
+
+%% #536: the size of the state is what decides what a Lua tick costs, and
+%% before this there was no way to see it short of walking the term by hand in
+%% a remote shell. It rides on collect_state/1 rather than on a collection,
+%% because the collector's interval is adaptive and can be off entirely.
+state_size_is_reported() ->
+    Handler = {?MODULE, make_ref()},
+    Self = self(),
+    ok = telemetry:attach(
+        Handler,
+        [asobi, lua, state],
+        fun(_E, Measurements, Meta, _) -> Self ! {sample, Measurements, Meta} end,
+        undefined
+    ),
+    try
+        S0 = gc_zone_state(),
+        S1 = tick_n(S0#{script => ~"gc_zone.lua"}, 1),
+        _ = asobi_lua_loader:collect_state(S1),
+        receive
+            {sample, #{words := Words, bytes := Bytes}, #{script := Script}} ->
+                ?assert(Words > 0),
+                ?assertEqual(Words * erlang:system_info(wordsize), Bytes),
+                ?assertEqual(~"gc_zone.lua", Script)
+        after 1000 ->
+            ?assert(false)
+        end
+    after
+        telemetry:detach(Handler)
+    end.
 
 big_state(Rows) ->
     #{lua_state := St0} = S0 = gc_zone_state(),

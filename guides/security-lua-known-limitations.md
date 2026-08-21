@@ -43,17 +43,22 @@ boundary](security-trust-model.md#handle-input-is-not-a-sandbox-boundary).
 
 Each callback child carries `max_heap_size` with `kill => true`
 (`max_heap_words`, 5,000,000 words by default), so one runaway allocation is
-killed and surfaces as `{error, heap_exhausted}`. Nothing caps a script's
-steady footprint: a state that sits just under the limit is copied into every
-later eval, and the total across concurrent matches is unbounded. The decode
-depth cap of 64 levels bounds recursion at the bridge boundary, not table size.
+killed and surfaces as `{error, heap_exhausted}`. The budget is measured
+against the state the callback was handed rather than being an absolute cap
+(asobi#536), so nothing caps a script's steady footprint at all: a state that
+grows without bound goes on being copied into every later eval, and the total
+across concurrent matches is unbounded. Watch `[asobi, lua, state]` for it.
+The decode depth cap of 64 levels bounds recursion at the bridge boundary, not
+table size.
 
 ### The per-callback state copy is linear
 
-Each bounded callback spawns a child that takes a full copy of the Luerl state.
-Cost is linear in script-side allocation, so a script that deliberately builds
-large stable tables makes every later callback pay the copy. Watch for
-unexplained per-tick latency growth on long-lived matches.
+Each bounded callback spawns a child that takes a full copy of the Luerl state,
+at roughly 7 ms per MB. Cost is linear in script-side allocation, so a script
+that deliberately builds large stable tables makes every later callback pay the
+copy - a 62 MB state costs 418 ms per callback before the script runs a line.
+Watch `[asobi, lua, state]` and for unexplained per-tick latency growth on
+long-lived matches.
 
 ## Deployment hygiene
 

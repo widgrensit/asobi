@@ -130,6 +130,19 @@ building an exporter safely - not a step to defer until after one is built.
   on a sustained non-zero rate, not on a single event - one skipped tick is a
   zone that ran long once, which is normal.
 
+#### Lua - `[asobi, lua, state]`
+
+- measurements `#{words, bytes}` - the size of the Luerl state behind one Lua
+  bridge (a zone, a world or a match); metadata `#{script}`, label-safe (one
+  per loaded game script, fixed at deploy). Added by asobi#536. Emitted per
+  bridge process rather than per zone coordinate, because the collector that
+  samples it (`asobi_lua_loader:collect_state/1`) runs inside that process and
+  knows nothing about the grid. Sampled, not per tick. This is the number that
+  decides what a Lua tick costs - asobi copies the state into the callback's
+  eval worker on every bounded callback, at roughly 7 ms per MB - and before
+  #536 it was not observable at all short of walking the term by hand in a
+  remote shell. Alert on the trend, not a threshold.
+
 #### Matchmaker - `[asobi, matchmaker, queued | deduped | removed | formed | failed]`
 
 - `queued`: metadata `#{player_id, mode}`

@@ -128,13 +128,20 @@ zone eventually takes longer to tick than the tick rate, at which point the
 world ticker starts skipping it (see [Observability](observability.md) for the
 `[asobi, zone, tick_skipped]` counter).
 
-asobi collects each Lua state periodically to keep that flat. The interval is
-not fixed: Luerl's collector walks the whole live set with a cost that grows
-faster than linearly, so asobi times each collection and adapts. A zone holding
-little across ticks gets collected often, which keeps both the collection and
-the per-tick copies cheap. A zone holding a large table across ticks gets
-collected rarely, because each collection is expensive and reclaims the same
-per-tick garbage either way.
+That copy is the dominant cost of a Lua tick, and it is worth knowing what it
+runs at: roughly 7 ms per MB of state. A callback that does nothing at all
+measures 1.8 ms against a 0.4 MB state, 41 ms against 6 MB and 418 ms against
+62 MB. A zone whose state reaches tens of MB is over its tick budget before
+its script has run a single line.
+
+asobi collects each Lua state periodically to keep that flat, immediately
+before the tick's own callback so the copy is of the collected state. The
+interval is not fixed: Luerl's collector walks the whole live set with a cost
+that grows faster than linearly, so asobi times each collection and adapts.
+What it compares that time against is the copy it saves, not a fixed ceiling -
+a collection that shrinks a large state pays for itself many times over before
+the next one, so a large state is collected often, and a state whose live set
+is genuinely too expensive to walk is collected rarely.
 
 That gives you one thing worth designing around: **what a script keeps alive
 between callbacks is more expensive than what it allocates inside one.** A
@@ -144,6 +151,11 @@ collection ever runs longer than a tick budget, asobi logs
 `lua_gc_abandoned` and stops collecting that state rather than freezing the
 zone for seconds at a time - Lua memory there will then grow unbounded, and
 the fix is to keep less alive across callbacks.
+
+`[asobi, lua, state]` reports the size of each Lua state as asobi measures it,
+so this is visible before zones start dying of it; asobi also logs
+`lua_state_large` once per state past ~100 MB. See
+[Observability](observability.md).
 
 Set `{asobi, [{lua_gc, false}]}` to turn the collector off entirely. There is
 no reason to do this outside diagnosing a problem with the collector itself.
@@ -156,9 +168,9 @@ no reason to do this outside diagnosing a problem with the collector itself.
 2. Leave a zone with no subscribers and no NPCs. Its process memory falls at
    the next tick (hibernation), and it stops entirely at the next sweep once
    it holds no entities at all.
-3. Play in a Lua zone for a few minutes and watch its process memory. It should
-   settle rather than climb. If it climbs, check the logs for
-   `lua_gc_abandoned`.
+3. Play in a Lua zone for a few minutes and watch `[asobi, lua, state]`. It
+   should settle rather than climb. If it climbs, check the logs for
+   `lua_gc_abandoned` and `lua_state_large`.
 
 ## Next
 
