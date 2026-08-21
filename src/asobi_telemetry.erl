@@ -6,6 +6,7 @@
 -export([world_started/2, world_finished/3, world_player_joined/2, world_player_left/2]).
 -export([world_phase_changed/3, world_tick/4]).
 -export([zone_opened/2, zone_closed/2, zone_tick_skipped/2]).
+-export([lua_state_size/2]).
 -export([
     matchmaker_queued/2,
     matchmaker_deduped/2,
@@ -71,6 +72,7 @@ events() ->
         [asobi, zone, opened],
         [asobi, zone, closed],
         [asobi, zone, tick_skipped],
+        [asobi, lua, state],
         [asobi, matchmaker, queued],
         [asobi, matchmaker, deduped],
         [asobi, matchmaker, removed],
@@ -229,6 +231,40 @@ only on a tick that actually skipped, so a healthy world emits nothing at all.
 -spec zone_tick_skipped(binary() | undefined, pos_integer()) -> ok.
 zone_tick_skipped(WorldId, Count) ->
     telemetry:execute([asobi, zone, tick_skipped], #{count => Count}, #{world_id => WorldId}).
+
+-doc """
+asobi#536: how large the Luerl state behind one Lua bridge (a zone, a world or
+a match) has grown, sampled by `asobi_lua_loader:collect_state/1` roughly once
+a second per bridge (`asobi_lua.state_sample_interval_ms`).
+
+This is the number that decides what a Lua tick costs. `asobi_lua_loader`
+copies the whole state into the eval worker on every bounded callback, at
+roughly 7 ms per MB, so a state that reaches tens of MB pushes a zone past its
+tick budget on its own - with no other symptom than CPU and, eventually, dead
+zones.
+
+Metadata is `#{script, kind, world_id | match_id, coords}`. `script` and `kind`
+(`zone | world | match`) are label-safe; the identifiers and `coords` are
+unbounded and must never be a label. One event is emitted per bridge *process*,
+so a world with a hundred live zones produces a hundred series - key them on
+`coords`, or the last zone to report overwrites every other one and the result
+reads as a single flapping gauge.
+
+Alert on the trend, not a threshold. A healthy zone's state is flat; one that
+climbs across a session is a script holding more alive between callbacks than
+the collector can reclaim.
+""".
+-spec lua_state_size(map(), non_neg_integer()) -> ok.
+lua_state_size(Meta, Words) when is_map(Meta) ->
+    telemetry:execute(
+        [asobi, lua, state],
+        %% `count` is in here because ADR 0005's conventions say every event
+        %% carries it, and an exporter written against that convention finds
+        %% nothing without it - even the other gauge-shaped event,
+        %% `[asobi, world, tick]`, carries one.
+        #{words => Words, bytes => Words * erlang:system_info(wordsize), count => 1},
+        Meta
+    ).
 
 %% --- Matchmaker Events ---
 

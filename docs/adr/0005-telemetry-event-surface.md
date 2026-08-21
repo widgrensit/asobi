@@ -130,6 +130,39 @@ building an exporter safely - not a step to defer until after one is built.
   on a sustained non-zero rate, not on a single event - one skipped tick is a
   zone that ran long once, which is normal.
 
+#### Lua - `[asobi, lua, state]`
+
+- measurements `#{words, bytes, count}` - the size of the Luerl state behind
+  one Lua bridge. Metadata is `#{script, kind}` on every emitter, plus
+  `world_id` on a zone or a world and `match_id` on a match, plus `coords` on
+  a zone only. `script` (one per loaded game script, fixed at deploy) and
+  `kind` (`zone | world | match`, a fixed enum) are label-safe; `world_id`,
+  `match_id` and `coords` are unbounded on the same grounds as
+  `[asobi, zone, opened]`'s and are never a label. **Every value may be
+  `undefined`, and the key set differs by `kind`, so a handler must be total
+  over it** - `telemetry` detaches a handler that raises, permanently, taking
+  every other asobi metric on that attachment with it. Added by asobi#536.
+- Emitted per bridge **process**, so a world with a hundred live zones is a
+  hundred series. Key them on `coords`; a `last_value` over `script` alone is
+  one flapping gauge showing whichever zone reported most recently, which is
+  worse than no metric. The identity is stamped at
+  `asobi_lua_world:init_zone_state/2` and its two siblings rather than derived
+  by the collector, which runs inside the bridge process and knows nothing
+  about the grid.
+- Sampled on **wall clock**, roughly once a second per bridge, overridable with
+  `asobi_lua.state_sample_interval_ms`. A per-tick counter would be a rate that
+  varies with the world's tick rate and multiplies by live zone count, which is
+  the same reasoning that sampled `[asobi, world, tick]` above.
+- This is the number that decides what a Lua tick costs - asobi copies the
+  state into the callback's eval worker on every bounded callback, at roughly
+  7 ms per MB - and before #536 it was not observable at all short of walking
+  the term by hand in a remote shell. Alert on the trend, not a threshold.
+- **It does not count Lua strings over 64 bytes.** The measurement is the eval
+  worker's heap after the copy, and refc binaries live off-heap, so a state
+  whose bulk is large strings reads small here. It is the right number for
+  what a callback copy costs (refc binaries are not copied either) and the
+  wrong one for what the node is holding.
+
 #### Matchmaker - `[asobi, matchmaker, queued | deduped | removed | formed | failed]`
 
 - `queued`: metadata `#{player_id, mode}`

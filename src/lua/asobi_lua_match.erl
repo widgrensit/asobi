@@ -88,7 +88,11 @@ init(Config) ->
                         lua_state => LuaSt2,
                         game_state => GameState,
                         script => ScriptPath,
-                        script_mtime => filelib:last_modified(ScriptPath)
+                        script_mtime => filelib:last_modified(ScriptPath),
+                        lua_bridge => #{
+                            kind => match,
+                            match_id => maps:get(match_id, Config, undefined)
+                        }
                     }};
                 {ok, [], _} ->
                     %% asobi_match:init/1 doesn't allow an error return; log and
@@ -210,7 +214,8 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) ->
     {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
     %% No bounded_eval: the per-input spawn dominates real Lua work at
-    %% high input rates. tick/1 still spawn-isolates. See ADR 0002.
+    %% high input rates. tick/1 still spawn-isolates. See
+    %% guides/security-trust-model.md.
     case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, GS], LuaSt1) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
@@ -225,14 +230,15 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
 
 -spec tick(map()) -> {ok, map()} | {finished, map(), map()}.
 tick(State0) ->
-    #{lua_state := LuaSt, game_state := GS} = State = asobi_lua_reload:maybe_hot_reload(State0),
+    %% #426: same per-tick Luerl leak as the zone path. #536: collected ahead
+    %% of the callback, so the copy asobi_lua_loader:call/4 makes is of the
+    %% collected state and a failing tick still gets its state collected.
+    #{lua_state := LuaSt, game_state := GS} =
+        State = asobi_lua_loader:collect_state(asobi_lua_reload:maybe_hot_reload(State0)),
     case asobi_lua_loader:call(tick, [GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             Finished = is_finished(GS1, LuaSt1),
-            %% #426: same per-tick Luerl leak as the zone path.
-            State1 = asobi_lua_loader:collect_state(State#{
-                lua_state => LuaSt1, game_state => GS1
-            }),
+            State1 = State#{lua_state => LuaSt1, game_state => GS1},
             case Finished of
                 {true, Result} -> {finished, Result, State1};
                 false -> {ok, State1}

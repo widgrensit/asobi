@@ -20,3 +20,14 @@ function big_state(n)
   end
   return { world = t, n = 0 }
 end
+
+-- #536: allocates a fixed amount of Lua garbage regardless of how large the
+-- state behind it already is. Used to prove the eval's heap budget measures
+-- what the callback allocated and not what it was handed.
+function churn(n)
+  local last
+  for i = 1, n do
+    last = { id = i, x = i * 1.5, name = 'churn_' .. i }
+  end
+  return last
+end

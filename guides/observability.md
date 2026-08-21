@@ -259,7 +259,7 @@ asobi.world.player_joined        asobi.world.player_left
 asobi.world.phase_changed        asobi.world.tick
 asobi.zone.opened                asobi.zone.closed
 asobi.zone.tick_skipped          asobi.join.rate_limited
-asobi.rehome.rate_limited
+asobi.rehome.rate_limited        asobi.lua.state
 ```
 
 `asobi.world.tick` is sampled rather than emitted every tick - at 20 Hz per
@@ -273,6 +273,24 @@ normal; alert on the rate, not the event. Rising counts here usually mean a
 `zone_tick` doing too much, too many entities in one zone, or Lua memory that
 is no longer being collected - see
 [Performance tuning](performance-tuning.md#lua-memory).
+
+`asobi.lua.state` is what tells you which of those it is. It reports `words`
+and `bytes` for the Luerl state behind one Lua bridge - a zone, a world or a
+match - about once a second per bridge
+(`asobi_lua.state_sample_interval_ms`). That size decides what a Lua tick
+costs, because asobi copies the whole state into the callback's eval worker at
+roughly 7 ms per MB, so a state climbing through tens of MB pushes a zone past
+its tick budget on its own. A healthy zone's state is flat; alert on the trend
+rather than a threshold.
+
+Metadata is `#{script, kind, world_id | match_id, coords}`. `script` and `kind`
+(`zone | world | match`) are label-safe; the identifiers and `coords` are
+unbounded and must not be labels. The event is per bridge process, so a world
+with a hundred live zones produces a hundred series - key them on `coords`, or
+whichever zone reported last overwrites the rest and you get one flapping
+gauge. asobi also logs `lua_state_large` once per excursion past
+`state_warn_words` (~100 MB by default), for operators without a metrics
+pipeline attached.
 
 ### Gameplay systems
 

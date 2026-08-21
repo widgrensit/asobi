@@ -43,17 +43,39 @@ boundary](security-trust-model.md#handle-input-is-not-a-sandbox-boundary).
 
 Each callback child carries `max_heap_size` with `kill => true`
 (`max_heap_words`, 5,000,000 words by default), so one runaway allocation is
-killed and surfaces as `{error, heap_exhausted}`. Nothing caps a script's
-steady footprint: a state that sits just under the limit is copied into every
-later eval, and the total across concurrent matches is unbounded. The decode
-depth cap of 64 levels bounds recursion at the bridge boundary, not table size.
+killed and surfaces as `{error, heap_exhausted}`. The budget is measured
+against the state the callback was handed rather than being an absolute cap
+(asobi#536), so nothing caps a script's steady footprint at all: a state that
+grows without bound goes on being copied into every later eval, and the total
+across concurrent matches is unbounded. Watch `[asobi, lua, state]` for it.
+The decode depth cap of 64 levels bounds recursion at the bridge boundary, not
+table size.
 
 ### The per-callback state copy is linear
 
-Each bounded callback spawns a child that takes a full copy of the Luerl state.
-Cost is linear in script-side allocation, so a script that deliberately builds
-large stable tables makes every later callback pay the copy. Watch for
-unexplained per-tick latency growth on long-lived matches.
+Each bounded callback spawns a child that takes a full copy of the Luerl state,
+at roughly 7 ms per MB. Cost is linear in script-side allocation, so a script
+that deliberately builds large stable tables makes every later callback pay the
+copy - a 62 MB state costs 418 ms per callback before the script runs a line.
+Watch `[asobi, lua, state]` and for unexplained per-tick latency growth on
+long-lived matches.
+
+That copy is also what the child's heap budget is measured from since
+asobi#536, which changes how much memory a node needs at peak. The child now
+completes instead of being killed at a fixed ceiling, so its peak is about
+`2 x state + max_heap_words` rather than `max_heap_words`, and zones tick in
+parallel - so the node-wide transient is roughly `3 x state` summed over every
+zone ticking at once, not `max_heap_words` per zone. Size a node for that
+rather than for the budget. It is a worst case under the cap, not a typical
+figure: measured peak is 1.2-1.5x the state. This is the one exposure #536
+widened; the unbounded persistent state described above predates it.
+
+One thing `[asobi, lua, state]` will not show you: Lua strings over 64 bytes
+are refc binaries and live off the process heap, so they are counted neither in
+the reported size nor against the eval cap. A state whose bulk is large strings
+grows invisibly to both. The reported number is the right one for what a
+callback copy costs, because refc binaries are not copied either, and the wrong
+one for what the node is holding.
 
 ## Deployment hygiene
 

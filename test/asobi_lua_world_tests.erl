@@ -1061,3 +1061,36 @@ bump_mtime(Path) ->
         calendar:datetime_to_gregorian_seconds({{Y, M, D}, {H, Mi, S}}) + 2
     ),
     ok = file:write_file_info(Path, FI#file_info{mtime = NewMtime}).
+
+%% asobi#536: `[asobi, lua, state]` is one series per bridge process, so
+%% without an identity every zone in a world reports under the same label set.
+%% The world and the zone read differently-shaped config maps - which is how
+%% the world one shipped reading a key that is never present - so assert the
+%% stamping at each call site against the map its real caller passes.
+bridge_identity_test_() ->
+    [
+        {"a world bridge stamps its world id", fun world_bridge_identity/0},
+        {"a zone bridge stamps its world id and coords", fun zone_bridge_identity/0}
+    ].
+
+%% Exactly what asobi_world_server:init/1 hands GameMod:init/1: the game
+%% config with match_id injected, and no nested game_config key.
+world_bridge_identity() ->
+    Config = #{lua_script => fixture("gc_zone.lua"), match_id => ~"world-42"},
+    {ok, State} = asobi_lua_world:init(Config),
+    ?assertEqual(#{kind => world, world_id => ~"world-42"}, maps:get(lua_bridge, State)).
+
+%% The zone one does nest game_config - see asobi_zone's init_zone_state
+%% continue clause.
+zone_bridge_identity() ->
+    ZoneConfig = #{
+        world_id => ~"w1",
+        coords => {2, 3},
+        game_module => asobi_lua_world,
+        game_config => #{lua_script => fixture("gc_zone.lua")}
+    },
+    ZoneState = asobi_lua_world:init_zone_state(ZoneConfig, #{}),
+    ?assertEqual(
+        #{kind => zone, world_id => ~"w1", coords => {2, 3}},
+        maps:get(lua_bridge, ZoneState)
+    ).
