@@ -279,7 +279,7 @@ The full match info, including the roster:
 `join_refused` carries the game's own reason string in
 `error.details.refused_reason` when the script gave one. It is game
 vocabulary, never an asobi code - see
-[Refusing a join](lua-scripting.md#refusing-a-join).
+[Refusing a join](lua-scripting.md#join-player_id-state-or-join-player_id-state-ctx).
 
 ```json
 {"type": "error", "cid": "j-1", "payload": {"reason": "join_refused", "error": {"code": "match.join_refused", "message": "The game refused this join. See `details.refused_reason`.", "details": {"refused_reason": "wrong_code"}}}}
@@ -381,7 +381,7 @@ request that caused it when there was one:
   several common failures. On this page that covers the world capacity pair
   (`world_capacity_reached`, `player_world_limit_reached`, which REST answers
   as `world.capacity_reached` and `world.player_limit_reached`) and every
-  join-context rejection listed under [Join context](#join-context). Match a
+  join-context rejection listed under [Join context](#match-join). Match a
   reason string on `details.reason` for those, not a code.
 - `error.message` is prose for a human reading a log. Do not parse it.
 - `error.details` is **always** an object, `{}` when there is nothing to add.
@@ -779,7 +779,7 @@ keyframe.
 ### Binary `world.tick`
 
 A client that negotiated `"wire": "binary"` at
-[`session.connect`](#choosing-a-wire) receives `world.tick` as a **WebSocket
+[`session.connect`](#session-connect) receives `world.tick` as a **WebSocket
 binary frame** carrying the same information in about a quarter of the bytes, and
 materially cheaper to decode: measured against native JSON, 2.4x faster in
 Godot's GDScript and 33x faster than the pure-Lua parser Defold and LOVE ship.
@@ -895,7 +895,7 @@ The ack is addressed to one connection and never rides the shared `world.tick`,
 so one player's input stream is never broadcast to the rest of the zone. It is
 sent to clients that opted in by stamping a `seq`, and to clients whose game
 module reports a consumed seq for them - see
-[Batched input and the ack](#batched-input-and-the-ack), where numbering the
+[Batched input and the ack](#client-side-prediction), where numbering the
 steps inside the payload replaces stamping the frame.
 
 **`seq` never goes backwards on a connection.** The high-water mark is recorded

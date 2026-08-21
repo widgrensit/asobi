@@ -283,7 +283,7 @@ Erlang caller inside the release, and by nothing else - there is no
 `match.create` frame and no `POST /api/v1/matches`.
 
 Gate entry by implementing `join/3` in your game module and checking the join
-context - see [WebSocket protocol](websocket-protocol.md#join-context). To let
+context - see [WebSocket protocol](websocket-protocol.md#match-join). To let
 friends find your session in a browser instead, see
 [World server](world-server.md).
 
