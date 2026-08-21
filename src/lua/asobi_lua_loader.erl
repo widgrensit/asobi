@@ -42,6 +42,9 @@ load a specific script and pin its base directory for `require`.
 
 -include_lib("kernel/include/file.hrl").
 -include_lib("kernel/include/logger.hrl").
+%% For `#luerl.g` - the authoritative `_G`, needed to write the collector's
+%% anchor past whatever metatable a script has put on it. See `collect/2`.
+-include_lib("luerl/include/luerl.hrl").
 
 -define(LOADED_TABLE, ~"_ASOBI_LOADED").
 %% M-2/M-3/H-1: any luerl:do/2 invocation that runs script-author code
@@ -122,6 +125,12 @@ load a specific script and pin its base directory for `require`.
 %% Past this a single collection costs more than the leak does over the
 %% interval that would follow it, so stop rather than freeze the zone.
 -define(GC_ABANDON_US, 500_000).
+%% ...but stop for a cool-down, not for the life of the bridge. One collection
+%% over the ceiling is as likely to be a BEAM GC pause or a busy scheduler as
+%% proof the live set is permanently uncollectable, and a collector that never
+%% re-arms fails open: the state then grows unbounded with one warning to show
+%% for it. Retrying every few minutes costs at most one overrun per interval.
+-define(GC_RETRY_MS, 300_000).
 %% The scaled budget has to stay under the abandon ceiling, because the
 %% abandon clause is tested first: a budget above it makes the "this
 %% collection overran, back off" branch unreachable, and then every
@@ -293,6 +302,13 @@ bounded_eval(Fun, TimeoutMs) ->
                 %% unspecified order, so the cap cannot be an argument to the
                 %% message it is meant to protect.
                 Base = cap_heap_above_state(HeapBudget),
+                %% Sent separately, and first. A callback killed on heap, time
+                %% or reductions never sends its result - and that is exactly
+                %% the state whose size an operator needs, because a bridge
+                %% stuck in a failing-tick loop would otherwise stop reporting
+                %% at the moment the trouble starts. Nothing has allocated yet
+                %% at this point, so this send always lands.
+                Self ! {Ref, {state_words, Base}},
                 Self ! {Ref, Base, Fun()}
             end,
             %% Full sweeps only. The worker's heap is one big live term (the
@@ -334,9 +350,11 @@ cap_heap_above_state(Budget) ->
 
 await_eval(Pid, Ref, MonRef, Deadline, Budget) ->
     receive
-        {Ref, StateWords, Result} ->
+        {Ref, {state_words, Base}} ->
+            _ = put(?STATE_WORDS_KEY, Base),
+            await_eval(Pid, Ref, MonRef, Deadline, Budget);
+        {Ref, _Base, Result} ->
             erlang:demonitor(MonRef, [flush]),
-            _ = put(?STATE_WORDS_KEY, StateWords),
             Result;
         {'DOWN', MonRef, process, Pid, killed} ->
             {error, heap_exhausted};
@@ -372,9 +390,13 @@ over_budget(Pid, Budget) ->
 kill_and_settle(Pid, Ref, MonRef, Reason) ->
     exit(Pid, kill),
     receive
-        {Ref, StateWords, Result} ->
+        %% Drain the measurement rather than leaving it in the bridge's
+        %% mailbox, and keep it: a killed callback is when its size matters.
+        {Ref, {state_words, Base}} ->
+            _ = put(?STATE_WORDS_KEY, Base),
+            kill_and_settle(Pid, Ref, MonRef, Reason);
+        {Ref, _Base, Result} ->
             erlang:demonitor(MonRef, [flush]),
-            _ = put(?STATE_WORDS_KEY, StateWords),
             Result;
         {'DOWN', MonRef, process, Pid, _} ->
             {error, Reason}
@@ -522,14 +544,23 @@ state_warn_words() ->
 
 %% One warning per excursion, not per state: `warned` is cleared again once the
 %% state comes back under the threshold, so a state that crosses it twice says
-%% so twice. A threshold of 0 silences it.
+%% so twice. The clearing point is 10% below the warning point rather than the
+%% same number - `collect_state/1` runs every tick, so without the gap a state
+%% hovering on the threshold logs on every upward crossing, which is once a
+%% tick. A threshold of 0 silences it.
 warn_large_state(Words, State, Gc) ->
     Threshold = state_warn_words(),
-    case Threshold > 0 andalso Words >= Threshold of
+    Warned = maps:get(warned, Gc, false),
+    Over =
+        case Warned of
+            true -> Words >= Threshold * 9 div 10;
+            false -> Words >= Threshold
+        end,
+    case Threshold > 0 andalso Over of
         false ->
             Gc#{warned => false};
         true ->
-            case maps:get(warned, Gc, false) of
+            case Warned of
                 true ->
                     Gc;
                 false ->
@@ -545,6 +576,11 @@ warn_large_state(Words, State, Gc) ->
             end
     end.
 
+maybe_gc(St, Anchor, Words, #{enabled := false, retry_at := At} = Gc) ->
+    case erlang:monotonic_time(millisecond) >= At of
+        true -> maybe_gc(St, Anchor, Words, Gc#{enabled := true, countdown := 1});
+        false -> {St, Gc}
+    end;
 maybe_gc(St, _Anchor, _Words, #{enabled := false} = Gc) ->
     {St, Gc};
 maybe_gc(St, _Anchor, _Words, #{countdown := N} = Gc) when N > 1 ->
@@ -578,7 +614,11 @@ next_gc(Us, _Budget, Interval, Gc) when Us > ?GC_ABANDON_US ->
         msg =>
             ~"Luerl collection outran a tick budget and is now off for this state. Luerl's collector is quadratic in the live set, so a script holding a large table across callbacks cannot be collected cheaply. Lua memory here will grow unbounded until the script keeps less alive across callbacks."
     }),
-    Gc#{enabled := false, countdown := Interval};
+    Gc#{
+        enabled := false,
+        countdown := Interval,
+        retry_at => erlang:monotonic_time(millisecond) + ?GC_RETRY_MS
+    };
 next_gc(Us, Budget, Interval, Gc) ->
     Interval1 =
         if
@@ -588,25 +628,40 @@ next_gc(Us, Budget, Interval, Gc) ->
         end,
     Gc#{interval := Interval1, countdown := Interval1}.
 
-%% A failed anchor leaves the state exactly as it was: skipping a collection
-%% costs memory, collecting without the anchor corrupts the caller's refs.
+%% The anchor is asobi's bookkeeping, not the script's data, so it is written
+%% past `_G`'s metatable.
+%%
+%% `luerl:set_table_keys/3` honours `__newindex`, and `setmetatable(_G, ...)`
+%% is explicitly permitted (see `guides/security-trust-model.md`). `unanchor`
+%% clears the key each time, so the key is always absent when the next
+%% collection writes it and the metamethod fires every single time. Two
+%% consequences, both measured:
+%%
+%% - A `__newindex` that does not return runs script-authored Lua on the
+%%   bridge gen_server itself, outside `bounded_eval` - no wall-clock budget,
+%%   no reduction budget, no heap cap. `while true do end` burned 4.7 billion
+%%   reductions on the zone process and never returned, so the zone answers no
+%%   call again and never terminates for a supervisor to restart.
+%% - The likelier one: an ordinary strict-globals metatable that *raises*.
+%%   `set_table_keys/3` catches it, the anchor fails, the collection is
+%%   skipped - and because the skipped collection costs no time, the adaptive
+%%   interval reads it as cheap and drives itself to its minimum. Measured at
+%%   400 ticks: 8417 live tables against 11 for the same script without the
+%%   metatable, with `enabled => true` throughout and no log or telemetry.
+%%   That is #536 re-opened, invisibly, by one ordinary line of Lua.
+%%
+%% A raw write cannot fail and cannot run script code, so the previous
+%% "leave the state alone if the anchor failed" path has nothing left to
+%% guard. `luerl_heap` is internal to luerl, which is why the dep is pinned
+%% to a patch range - asobi already depends on `luerl_lib` the same way.
 collect(St, Anchor) ->
-    case anchor(Anchor, St) of
-        {ok, St1} -> unanchor(luerl:gc(St1));
-        error -> St
-    end.
-
-anchor(Anchor, St) ->
-    case luerl:set_table_keys([?GC_ANCHOR], Anchor, St) of
-        {ok, St1} -> {ok, St1};
-        _ -> error
-    end.
+    unanchor(luerl:gc(raw_anchor(Anchor, St))).
 
 unanchor(St) ->
-    case luerl:set_table_keys([?GC_ANCHOR], nil, St) of
-        {ok, St1} -> St1;
-        _ -> St
-    end.
+    raw_anchor(nil, St).
+
+raw_anchor(Value, #luerl{g = G} = St) ->
+    luerl_heap:raw_set_table_key(G, ?GC_ANCHOR, Value, St).
 
 gc_disabled() ->
     asobi_lua_env:get_env(lua_gc) =:= {ok, false}.

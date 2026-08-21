@@ -258,7 +258,11 @@ the collector can reclaim.
 lua_state_size(Meta, Words) when is_map(Meta) ->
     telemetry:execute(
         [asobi, lua, state],
-        #{words => Words, bytes => Words * erlang:system_info(wordsize)},
+        %% `count` is in here because ADR 0005's conventions say every event
+        %% carries it, and an exporter written against that convention finds
+        %% nothing without it - even the other gauge-shaped event,
+        %% `[asobi, world, tick]`, carries one.
+        #{words => Words, bytes => Words * erlang:system_info(wordsize), count => 1},
         Meta
     ).
 

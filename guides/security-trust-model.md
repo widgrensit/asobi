@@ -76,6 +76,23 @@ The macros are not all in one place. Match budgets are `?*_TIMEOUT` in
 budget is a literal `50` at the call site in `asobi_bot.erl` rather than a
 macro. Grep for `asobi_lua_loader:call(` if you need the authoritative set.
 
+## The GC anchor is written past `_G`'s metatable
+
+asobi collects each Lua state periodically, and to do that it has to keep the
+one value it holds between callbacks (`game_state`) reachable from Lua's root
+set for the duration. It writes that anchor **raw**, past any metatable the
+script has installed on `_G`.
+
+That matters because `setmetatable(_G, ...)` is permitted (above), and the
+metamethod-honouring setter would make asobi's own bookkeeping write run script
+code on the zone, world or match process itself - outside the spawned child, so
+with no wall-clock budget, no reduction budget and no heap cap. A `__newindex`
+that never returns would wedge that process permanently; an ordinary
+strict-globals `__newindex` that raises would make every collection silently
+fail while the collector reported itself healthy. Neither is reachable: the raw
+write runs no Lua and cannot fail, and the anchor is cleared again before the
+callback runs, so a script never observes it.
+
 ## handle-input is not a sandbox boundary
 
 `handle_input/3` is the one callback that does not spawn-isolate. At realistic

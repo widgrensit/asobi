@@ -129,6 +129,8 @@ collector_test_() ->
         {"lua_gc=false disables the collector", fun env_disables_collector/0},
         {"the interval adapts to measured collection cost", fun interval_adapts_to_cost/0},
         {"an uncollectable live set abandons the collector", fun huge_live_set_abandons/0},
+        {"a _G metatable cannot defeat the collector", fun strict_globals_still_collects/0},
+        {"a _G metatable cannot run on the bridge process", fun hostile_globals_cannot_hang/0},
         {"the collection budget scales with the state", fun budget_scales_with_state/0},
         {"the back-off stays reachable at a huge state",
             fun backoff_stays_reachable_at_a_huge_state/0},
@@ -298,6 +300,49 @@ state_size_is_reported() ->
     after
         telemetry:detach(Handler)
     end.
+
+%% The collector's anchor is written into `_G`. `setmetatable(_G, ...)` is
+%% explicitly permitted by the trust model, and the metmethod-honouring setter
+%% would let an ordinary strict-globals metatable raise on that write - which
+%% `luerl:set_table_keys/3` catches, so the collection is silently skipped. The
+%% skipped collection costs no time, so the adaptive interval reads it as cheap
+%% and drives itself to its minimum: the bookkeeping reports healthy collection
+%% every 8 ticks while nothing is reclaimed at all. Measured before the raw
+%% write: 8417 live tables against 11 for the same script without the
+%% metatable.
+strict_globals_still_collects() ->
+    Strict = live_tables(collect(tick_n(script_state("strict_globals.lua"), 400))),
+    Clean = live_tables(collect(tick_n(script_state("gc_zone.lua"), 400))),
+    ?assert(Strict < Clean * 4).
+
+%% The unbounded-execution form of the same hole. A `__newindex` that never
+%% returns runs script-authored Lua on the bridge gen_server, outside
+%% bounded_eval - no wall-clock budget, no reduction budget, no heap cap.
+%% Measured before the raw write: 4.7 billion reductions on the zone process
+%% and it never returned, so the zone answers no call again and never
+%% terminates for a supervisor to restart it.
+hostile_globals_cannot_hang() ->
+    Self = self(),
+    S = script_state("hostile_globals.lua"),
+    {Pid, Mon} = spawn_opt(fun() -> Self ! {done, collect(S)} end, [monitor]),
+    receive
+        {done, _} ->
+            erlang:demonitor(Mon, [flush])
+    after 10000 ->
+        exit(Pid, kill),
+        erlang:error(collect_state_ran_script_code_on_the_bridge_process)
+    end.
+
+script_state(File) ->
+    {ok, St} = asobi_lua_loader:new(fixture(File)),
+    {ok, [GS | _], St1} = asobi_lua_loader:call(init, [nil], St),
+    #{lua_state => St1, game_state => GS}.
+
+%% Reaching into luerl's table store is what the #536 reporter had to do in a
+%% remote shell, and it is the only way to assert a collection reclaimed
+%% something rather than merely returning.
+live_tables(#{lua_state := St}) ->
+    maps:size(element(2, element(2, St))).
 
 big_state(Rows) ->
     #{lua_state := St0} = S0 = gc_zone_state(),

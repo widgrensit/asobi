@@ -132,12 +132,16 @@ building an exporter safely - not a step to defer until after one is built.
 
 #### Lua - `[asobi, lua, state]`
 
-- measurements `#{words, bytes}` - the size of the Luerl state behind one Lua
-  bridge; metadata `#{script, kind, world_id | match_id, coords}`. `script`
-  (one per loaded game script, fixed at deploy) and `kind`
-  (`zone | world | match`, a fixed enum) are label-safe; `world_id`,
+- measurements `#{words, bytes, count}` - the size of the Luerl state behind
+  one Lua bridge. Metadata is `#{script, kind}` on every emitter, plus
+  `world_id` on a zone or a world and `match_id` on a match, plus `coords` on
+  a zone only. `script` (one per loaded game script, fixed at deploy) and
+  `kind` (`zone | world | match`, a fixed enum) are label-safe; `world_id`,
   `match_id` and `coords` are unbounded on the same grounds as
-  `[asobi, zone, opened]`'s and are never a label. Added by asobi#536.
+  `[asobi, zone, opened]`'s and are never a label. **Every value may be
+  `undefined`, and the key set differs by `kind`, so a handler must be total
+  over it** - `telemetry` detaches a handler that raises, permanently, taking
+  every other asobi metric on that attachment with it. Added by asobi#536.
 - Emitted per bridge **process**, so a world with a hundred live zones is a
   hundred series. Key them on `coords`; a `last_value` over `script` alone is
   one flapping gauge showing whichever zone reported most recently, which is
@@ -153,6 +157,11 @@ building an exporter safely - not a step to defer until after one is built.
   state into the callback's eval worker on every bounded callback, at roughly
   7 ms per MB - and before #536 it was not observable at all short of walking
   the term by hand in a remote shell. Alert on the trend, not a threshold.
+- **It does not count Lua strings over 64 bytes.** The measurement is the eval
+  worker's heap after the copy, and refc binaries live off-heap, so a state
+  whose bulk is large strings reads small here. It is the right number for
+  what a callback copy costs (refc binaries are not copied either) and the
+  wrong one for what the node is holding.
 
 #### Matchmaker - `[asobi, matchmaker, queued | deduped | removed | formed | failed]`
 

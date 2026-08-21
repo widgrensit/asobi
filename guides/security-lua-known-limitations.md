@@ -66,8 +66,16 @@ completes instead of being killed at a fixed ceiling, so its peak is about
 `2 x state + max_heap_words` rather than `max_heap_words`, and zones tick in
 parallel - so the node-wide transient is roughly `3 x state` summed over every
 zone ticking at once, not `max_heap_words` per zone. Size a node for that
-rather than for the budget. This is the one exposure #536 widened; the
-unbounded persistent state described above predates it.
+rather than for the budget. It is a worst case under the cap, not a typical
+figure: measured peak is 1.2-1.5x the state. This is the one exposure #536
+widened; the unbounded persistent state described above predates it.
+
+One thing `[asobi, lua, state]` will not show you: Lua strings over 64 bytes
+are refc binaries and live off the process heap, so they are counted neither in
+the reported size nor against the eval cap. A state whose bulk is large strings
+grows invisibly to both. The reported number is the right one for what a
+callback copy costs, because refc binaries are not copied either, and the wrong
+one for what the node is holding.
 
 ## Deployment hygiene
 
