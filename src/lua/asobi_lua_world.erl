@@ -91,7 +91,13 @@ init(Config) ->
                         lua_state => LuaSt2,
                         game_state => GameState,
                         script => ScriptPath,
-                        script_mtime => filelib:last_modified(ScriptPath)
+                        script_mtime => filelib:last_modified(ScriptPath),
+                        lua_bridge => #{
+                            kind => world,
+                            world_id => maps:get(
+                                world_id, Config, maps:get(match_id, GameConfig, undefined)
+                            )
+                        }
                     }};
                 {ok, [], _} ->
                     ?LOG_ERROR(#{
@@ -183,7 +189,8 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 %% A process dictionary keyed by `self()` (as used for ?PD_KEY above) does
 %% NOT fix this: every Lua callback invoked with a wall-clock budget
 %% (asobi_lua_loader:call/4, which is everything except handle_input/3 -
-%% see ADR 0002) runs the actual Lua call inside a short-lived worker
+%% see the trust model, guides/security-trust-model.md) runs the actual
+%% Lua call inside a short-lived worker
 %% process spawned by asobi_lua_loader:bounded_eval/2, not the zone
 %% process itself. `game.zone.spawn` is called from `zone_tick`, so its
 %% closure's `self()` at call time is that ephemeral worker, not the zone
@@ -297,7 +304,8 @@ handle_input(PlayerId, Input, Entities) ->
         #{lua_state := LuaSt} = ZoneState ->
             {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
             {EncEntities, LuaSt2} = luerl:encode(Entities, LuaSt1),
-            %% No bounded_eval: see ADR 0002.
+            %% No bounded_eval: handle_input is not a sandbox boundary, see
+            %% guides/security-trust-model.md.
             case
                 asobi_lua_loader:call(
                     handle_input, [PlayerId, EncInput, EncEntities], LuaSt2
@@ -926,7 +934,16 @@ init_zone_state(Config, ZoneState00) ->
                         game_state => GameState,
                         script => ScriptPath,
                         script_mtime => filelib:last_modified(ScriptPath),
-                        templates_tab => TemplatesTab
+                        templates_tab => TemplatesTab,
+                        %% #536: identity for `[asobi, lua, state]`. Every zone
+                        %% in a world runs the same script, so without these
+                        %% they all report under one label set. Not persisted -
+                        %% dump_zone_state/1 carries game_state only.
+                        lua_bridge => #{
+                            kind => zone,
+                            world_id => maps:get(world_id, Config, undefined),
+                            coords => maps:get(coords, Config, undefined)
+                        }
                     };
                 {error, Reason} ->
                     ?LOG_ERROR(#{

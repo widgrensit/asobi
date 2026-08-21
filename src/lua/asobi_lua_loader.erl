@@ -122,19 +122,36 @@ load a specific script and pin its base directory for `require`.
 %% Past this a single collection costs more than the leak does over the
 %% interval that would follow it, so stop rather than freeze the zone.
 -define(GC_ABANDON_US, 500_000).
+%% The scaled budget has to stay under the abandon ceiling, because the
+%% abandon clause is tested first: a budget above it makes the "this
+%% collection overran, back off" branch unreachable, and then every
+%% collection that does not abandon looks cheap and drives the interval
+%% down to its minimum. That inverts the whole loop on the largest states -
+%% exactly the ones #536 is about - so the ceiling is load-bearing, not a
+%% tidy-up. A quarter leaves the back-off a working range either side.
+-define(GC_BUDGET_CEILING_US, (?GC_ABANDON_US div 4)).
 -define(GC_ANCHOR, ~"__asobi_gc_anchor").
 
-%% How often `collect_state/1` reports the measured state size, in calls. The
-%% collector's own interval is adaptive and can be off entirely, so the size
-%% cannot ride on a collection - it has to be reported on its own cadence or
-%% it goes silent exactly when an operator needs it.
--define(STATE_SAMPLE_INTERVAL, 8).
+%% How often `collect_state/1` reports the measured state size. The collector's
+%% own interval is adaptive and can be off entirely, so the size cannot ride on
+%% a collection - it has to be reported on its own cadence or it goes silent
+%% exactly when an operator needs it.
+%%
+%% Wall-clock rather than a tick count, for the reason ADR 0005 gives for
+%% `[asobi, world, tick]`: a per-call counter is a rate that depends on the
+%% world's tick rate, and this one is emitted per *bridge*, so a hundred live
+%% zones multiply it. One event per second per bridge is a sink an operator can
+%% keep. Override with `asobi_lua.state_sample_interval_ms`.
+-define(DEFAULT_STATE_SAMPLE_INTERVAL_MS, 1000).
 
-%% One warning per state when the copy `call/4` makes crosses ~100MB. There is
-%% no longer an absolute heap cap to trip (see ?DEFAULT_MAX_HEAP_WORDS), which
-%% is the point - but a state this size costs ~700ms per callback in copying
-%% alone, so it needs to be said out loud rather than only in telemetry.
--define(STATE_WARN_WORDS, 12_500_000).
+%% One warning per excursion when the copy `call/4` makes crosses ~100MB. There
+%% is no longer an absolute heap cap to trip (see ?DEFAULT_MAX_HEAP_WORDS),
+%% which is the point - but a state this size costs ~700ms per callback in
+%% copying alone, so it needs to be said out loud rather than only in
+%% telemetry. What "too large" means depends on the world's tick budget, which
+%% asobi_lua_loader cannot see, so it is a knob:
+%% `asobi_lua.state_warn_words`, 0 to silence.
+-define(DEFAULT_STATE_WARN_WORDS, 12_500_000).
 
 %% Written by `bounded_eval` on the calling process - the zone, world or match
 %% gen_server - and read by `collect_state/1` on that same process. The eval
@@ -157,7 +174,8 @@ new(ScriptPath, TimeoutMs) ->
 %% script eval — that is the only window in which adding tables to `_G`
 %% (e.g. the `game.*` API) makes them reachable from every callback the
 %% script defines, including `handle_input` which doesn't go through a
-%% spawn round-trip (see ADR 0002).
+%% spawn round-trip (it is not a sandbox boundary, see
+%% guides/security-trust-model.md).
 -spec new(binary() | string(), non_neg_integer(), pre_install()) ->
     {ok, dynamic()} | {error, term()}.
 new(ScriptPath, TimeoutMs, PreInstall) when is_function(PreInstall, 1) ->
@@ -417,7 +435,7 @@ Bookkeeping is kept under `lua_gc` in the same map. Set
 -spec collect_state(map()) -> map().
 collect_state(#{lua_state := St} = State) ->
     Gc0 = maps:get(lua_gc, State, new_gc()),
-    Words = state_words(),
+    Words = take_state_words(),
     Gc1 = report_state_size(Words, State, Gc0),
     Anchor = maps:get(game_state, State, nil),
     {St1, Gc2} = maybe_gc(St, Anchor, Words, Gc1),
@@ -432,16 +450,29 @@ Size in words of the Luerl state the last bounded callback was handed, or
 `call/4` spawns a worker and the spawn copies the state into it, so the
 worker's heap at its first instruction is that state, exactly, and reading it
 there costs nothing. Sizing the same term on the calling side would mean
-walking it. Callbacks that run inline (`call/3`, and `handle_input` - see
-ADR 0002) never spawn, so they do not refresh this; on a bridge that ticks,
-the tick does.
+walking it. Callbacks that run inline (`call/3`, and `handle_input`, which is
+not a sandbox boundary - see `guides/security-trust-model.md`) never spawn, so
+they do not refresh this; on a bridge that ticks, the tick does.
+
+It belongs to **the last bounded call on this process, whichever state that
+was**, not necessarily to the state you are holding. A process that boots a
+throwaway VM - `asobi_lua_world:init_zone_state/2` does, to read
+`spawn_templates` - measures that one. `collect_state/1` consumes the value
+rather than reading it, so a stale measurement can be attributed at most once.
 """.
 -spec state_words() -> non_neg_integer() | undefined.
 state_words() ->
-    case erlang:get(?STATE_WORDS_KEY) of
-        N when is_integer(N), N >= 0 -> N;
-        _ -> undefined
-    end.
+    normalise_words(erlang:get(?STATE_WORDS_KEY)).
+
+%% Consume rather than read: a value left behind outlives the call it belongs
+%% to, and `gc_budget_us/1` acts on it, so staleness is not merely cosmetic.
+%% With collect-before-callback the order is collect (take) then call (write),
+%% so a bridge that ticks always has a fresh one and nothing is lost.
+take_state_words() ->
+    normalise_words(erlang:erase(?STATE_WORDS_KEY)).
+
+normalise_words(N) when is_integer(N), N >= 0 -> N;
+normalise_words(_) -> undefined.
 
 new_gc() ->
     #{interval => ?GC_MIN_INTERVAL, countdown => ?GC_MIN_INTERVAL, enabled => true}.
@@ -453,33 +484,66 @@ new_gc() ->
 report_state_size(undefined, _State, Gc) ->
     Gc;
 report_state_size(Words, State, Gc) ->
+    Now = erlang:monotonic_time(millisecond),
+    %% Defaulting the deadline to `Now` rather than 0 makes the first call
+    %% sample: monotonic time has an arbitrary origin and is routinely
+    %% negative, so 0 is a deadline in the future on a fresh node.
     Gc1 =
-        case maps:get(sample, Gc, 0) of
-            0 ->
-                asobi_telemetry:lua_state_size(maps:get(script, State, undefined), Words),
-                Gc#{sample => ?STATE_SAMPLE_INTERVAL - 1};
-            N ->
-                Gc#{sample => N - 1}
+        case Now >= maps:get(sample_at, Gc, Now) of
+            true ->
+                asobi_telemetry:lua_state_size(bridge_meta(State), Words),
+                Gc#{sample_at => Now + state_sample_interval_ms()};
+            false ->
+                Gc
         end,
     warn_large_state(Words, State, Gc1).
 
-warn_large_state(Words, State, Gc) when Words >= ?STATE_WARN_WORDS ->
-    case maps:get(warned, Gc, false) of
-        true ->
-            Gc;
+%% ADR 0005: `script` is the label-safe one and `kind` is a fixed enum; the
+%% world/zone/match identifiers are unbounded and are metadata only. Without
+%% them every live zone reports under one identical label set, which reads as a
+%% single flapping gauge rather than one series per bridge.
+bridge_meta(State) ->
+    Meta = maps:get(lua_bridge, State, #{}),
+    Meta#{script => maps:get(script, State, undefined)}.
+
+-spec state_sample_interval_ms() -> non_neg_integer().
+state_sample_interval_ms() ->
+    case asobi_lua_env:get_env(state_sample_interval_ms) of
+        {ok, N} when is_integer(N), N >= 0 -> N;
+        _ -> ?DEFAULT_STATE_SAMPLE_INTERVAL_MS
+    end.
+
+-spec state_warn_words() -> non_neg_integer().
+state_warn_words() ->
+    case asobi_lua_env:get_env(state_warn_words) of
+        {ok, N} when is_integer(N), N >= 0 -> N;
+        _ -> ?DEFAULT_STATE_WARN_WORDS
+    end.
+
+%% One warning per excursion, not per state: `warned` is cleared again once the
+%% state comes back under the threshold, so a state that crosses it twice says
+%% so twice. A threshold of 0 silences it.
+warn_large_state(Words, State, Gc) ->
+    Threshold = state_warn_words(),
+    case Threshold > 0 andalso Words >= Threshold of
         false ->
-            ?LOG_WARNING(#{
-                event => lua_state_large,
-                state_words => Words,
-                state_mb => (Words * erlang:system_info(wordsize)) div 1048576,
-                script => maps:get(script, State, undefined),
-                msg =>
-                    ~"The Luerl state behind this bridge is large enough that copying it into each bounded callback dominates the tick. Every callback pays it. Reduce what the script keeps alive between callbacks."
-            }),
-            Gc#{warned => true}
-    end;
-warn_large_state(_Words, _State, Gc) ->
-    Gc#{warned => false}.
+            Gc#{warned => false};
+        true ->
+            case maps:get(warned, Gc, false) of
+                true ->
+                    Gc;
+                false ->
+                    ?LOG_WARNING(#{
+                        event => lua_state_large,
+                        state_words => Words,
+                        state_mb => (Words * erlang:system_info(wordsize)) div 1048576,
+                        script => maps:get(script, State, undefined),
+                        msg =>
+                            ~"The Luerl state behind this bridge is large enough that copying it into each bounded callback dominates the tick. Every callback pays it. Reduce what the script keeps alive between callbacks."
+                    }),
+                    Gc#{warned => true}
+            end
+    end.
 
 maybe_gc(St, _Anchor, _Words, #{enabled := false} = Gc) ->
     {St, Gc};
@@ -502,6 +566,7 @@ gc_budget_us(undefined) ->
     ?GC_BUDGET_US;
 gc_budget_us(Words) when is_integer(Words) ->
     case Words div ?GC_BUDGET_WORDS_PER_US of
+        Scaled when Scaled > ?GC_BUDGET_CEILING_US -> ?GC_BUDGET_CEILING_US;
         Scaled when Scaled > ?GC_BUDGET_US -> Scaled;
         _ -> ?GC_BUDGET_US
     end.

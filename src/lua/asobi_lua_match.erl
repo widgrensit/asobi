@@ -88,7 +88,11 @@ init(Config) ->
                         lua_state => LuaSt2,
                         game_state => GameState,
                         script => ScriptPath,
-                        script_mtime => filelib:last_modified(ScriptPath)
+                        script_mtime => filelib:last_modified(ScriptPath),
+                        lua_bridge => #{
+                            kind => match,
+                            match_id => maps:get(match_id, Config, undefined)
+                        }
                     }};
                 {ok, [], _} ->
                     %% asobi_match:init/1 doesn't allow an error return; log and
@@ -210,7 +214,8 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) ->
     {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
     %% No bounded_eval: the per-input spawn dominates real Lua work at
-    %% high input rates. tick/1 still spawn-isolates. See ADR 0002.
+    %% high input rates. tick/1 still spawn-isolates. See
+    %% guides/security-trust-model.md.
     case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, GS], LuaSt1) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};

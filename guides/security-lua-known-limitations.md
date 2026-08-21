@@ -60,6 +60,15 @@ copy - a 62 MB state costs 418 ms per callback before the script runs a line.
 Watch `[asobi, lua, state]` and for unexplained per-tick latency growth on
 long-lived matches.
 
+That copy is also what the child's heap budget is measured from since
+asobi#536, which changes how much memory a node needs at peak. The child now
+completes instead of being killed at a fixed ceiling, so its peak is about
+`2 x state + max_heap_words` rather than `max_heap_words`, and zones tick in
+parallel - so the node-wide transient is roughly `3 x state` summed over every
+zone ticking at once, not `max_heap_words` per zone. Size a node for that
+rather than for the budget. This is the one exposure #536 widened; the
+unbounded persistent state described above predates it.
+
 ## Deployment hygiene
 
 ### The release tree in the container is writable

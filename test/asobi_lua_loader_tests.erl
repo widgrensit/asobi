@@ -58,6 +58,7 @@ heap_budget_test_() ->
     {foreach, fun reset_heap_env/0, fun(_) -> reset_heap_env() end, [
         {"the verdict does not depend on the size of the state", fun verdict_ignores_state_size/0},
         {"a runaway callback is still killed", fun runaway_still_killed/0},
+        {"the configured budget decides the verdict", fun budget_gates_the_verdict/0},
         {"the state size is measured for free", fun state_words_measured/0}
     ]}.
 
@@ -79,6 +80,16 @@ runaway_still_killed() ->
     application:set_env(asobi, max_heap_words, 500_000),
     St = churn_state(500),
     ?assertEqual({error, heap_exhausted}, asobi_lua_loader:call(churn, [400_000], St, 30_000)).
+
+%% One state, one callback, two budgets. Without this the runaway test above
+%% passes just as happily against a cap a hundred times too wide - it pins
+%% "eventually killed", not "killed near the number an operator configured".
+budget_gates_the_verdict() ->
+    St = churn_state(500),
+    application:set_env(asobi, max_heap_words, 5_000_000),
+    ?assertMatch({ok, _, _}, asobi_lua_loader:call(churn, [8_000], St, 30_000)),
+    application:set_env(asobi, max_heap_words, 200_000),
+    ?assertEqual({error, heap_exhausted}, asobi_lua_loader:call(churn, [8_000], St, 30_000)).
 
 state_words_measured() ->
     Small = churn_state(500),
@@ -119,6 +130,8 @@ collector_test_() ->
         {"the interval adapts to measured collection cost", fun interval_adapts_to_cost/0},
         {"an uncollectable live set abandons the collector", fun huge_live_set_abandons/0},
         {"the collection budget scales with the state", fun budget_scales_with_state/0},
+        {"the back-off stays reachable at a huge state",
+            fun backoff_stays_reachable_at_a_huge_state/0},
         {"the state size is reported", fun state_size_is_reported/0}
     ]}.
 
@@ -216,6 +229,28 @@ budget_scales_with_state() ->
         asobi_lua_loader:next_gc(20_000, Big, 64, Gc)
     ).
 
+%% The scaled budget must stay below the abandon ceiling, because that clause
+%% is tested first. A budget above it makes "this collection overran, back off"
+%% unreachable: everything that would have tripped it abandons instead, and
+%% everything that does not abandon looks cheap, so the interval falls to its
+%% minimum on precisely the largest states. 500 MB is inside the range #536
+%% reports, so that is where this is pinned.
+backoff_stays_reachable_at_a_huge_state() ->
+    Words = 62_500_000,
+    Budget = asobi_lua_loader:gc_budget_us(Words),
+    ?assert(Budget < 500_000),
+    Gc = #{interval => 64, countdown => 0, enabled => true},
+    %% Costs more than the budget but not enough to abandon: must back off.
+    ?assertMatch(
+        #{interval := 128, enabled := true},
+        asobi_lua_loader:next_gc(Budget + 1, Budget, 64, Gc)
+    ),
+    %% And the abandon path is still the one that catches a real overrun.
+    ?assertMatch(
+        #{enabled := false},
+        asobi_lua_loader:next_gc(600_000, Budget, 64, Gc)
+    ).
+
 %% Past the abandon ceiling a single collection costs more than the leak it
 %% prevents, so the collector stops rather than freezing the zone for seconds
 %% at a time. The state is left exactly as the collection found it.
@@ -239,13 +274,24 @@ state_size_is_reported() ->
     ),
     try
         S0 = gc_zone_state(),
-        S1 = tick_n(S0#{script => ~"gc_zone.lua"}, 1),
+        Bridge = #{kind => zone, world_id => ~"w1", coords => {2, 3}},
+        S1 = tick_n(S0#{script => ~"gc_zone.lua", lua_bridge => Bridge}, 1),
         _ = asobi_lua_loader:collect_state(S1),
         receive
-            {sample, #{words := Words, bytes := Bytes}, #{script := Script}} ->
+            {sample, #{words := Words, bytes := Bytes}, Meta} ->
                 ?assert(Words > 0),
                 ?assertEqual(Words * erlang:system_info(wordsize), Bytes),
-                ?assertEqual(~"gc_zone.lua", Script)
+                %% Without the bridge identity every zone in a world reports
+                %% under one label set and the series is unusable.
+                ?assertEqual(
+                    #{
+                        script => ~"gc_zone.lua",
+                        kind => zone,
+                        world_id => ~"w1",
+                        coords => {2, 3}
+                    },
+                    Meta
+                )
         after 1000 ->
             ?assert(false)
         end

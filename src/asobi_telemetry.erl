@@ -234,25 +234,32 @@ zone_tick_skipped(WorldId, Count) ->
 
 -doc """
 asobi#536: how large the Luerl state behind one Lua bridge (a zone, a world or
-a match) has grown, sampled by `asobi_lua_loader:collect_state/1`.
+a match) has grown, sampled by `asobi_lua_loader:collect_state/1` roughly once
+a second per bridge (`asobi_lua.state_sample_interval_ms`).
 
 This is the number that decides what a Lua tick costs. `asobi_lua_loader`
 copies the whole state into the eval worker on every bounded callback, at
 roughly 7 ms per MB, so a state that reaches tens of MB pushes a zone past its
 tick budget on its own - with no other symptom than CPU and, eventually, dead
-zones. Emitted per bridge process, not per zone coordinate: `script` is the
-only metadata, and it is label-safe (one per loaded game script).
+zones.
+
+Metadata is `#{script, kind, world_id | match_id, coords}`. `script` and `kind`
+(`zone | world | match`) are label-safe; the identifiers and `coords` are
+unbounded and must never be a label. One event is emitted per bridge *process*,
+so a world with a hundred live zones produces a hundred series - key them on
+`coords`, or the last zone to report overwrites every other one and the result
+reads as a single flapping gauge.
 
 Alert on the trend, not a threshold. A healthy zone's state is flat; one that
 climbs across a session is a script holding more alive between callbacks than
 the collector can reclaim.
 """.
--spec lua_state_size(binary() | string() | undefined, non_neg_integer()) -> ok.
-lua_state_size(Script, Words) ->
+-spec lua_state_size(map(), non_neg_integer()) -> ok.
+lua_state_size(Meta, Words) when is_map(Meta) ->
     telemetry:execute(
         [asobi, lua, state],
         #{words => Words, bytes => Words * erlang:system_info(wordsize)},
-        #{script => Script}
+        Meta
     ).
 
 %% --- Matchmaker Events ---

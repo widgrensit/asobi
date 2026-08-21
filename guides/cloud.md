@@ -403,7 +403,7 @@ writes it), `registration` on the operator side, `script_registration`,
 
 **Lua runtime dials.** `max_heap_words`, `max_reductions_per_ms`,
 `reload_mode`, `config_watch_interval`, `dev_errors`, `terrain_providers`,
-`lua_gc`. A
+`lua_gc`, `state_warn_words`, `state_sample_interval_ms`. A
 large-world game on cloud is limited to the default terrain provider
 allowlist.
 
