@@ -60,7 +60,9 @@ heap_budget_test_() ->
         {"the verdict does not depend on the size of the state", fun verdict_ignores_state_size/0},
         {"a runaway callback is still killed", fun runaway_still_killed/0},
         {"the configured budget decides the verdict", fun budget_gates_the_verdict/0},
-        {"the state size is measured for free", fun state_words_measured/0}
+        {"the state size is measured for free", fun state_words_measured/0},
+        {"a killed callback still reports its state size", fun killed_callback_reports_size/0},
+        {"the measurement is consumed, not read", fun state_words_is_consumed/0}
     ]}.
 
 reset_heap_env() ->
@@ -105,6 +107,40 @@ state_words_measured() ->
     %% tracks what walking the term would have cost to find out.
     ?assert(LargeWords >= erts_debug:flat_size(Large)).
 
+%% The measurement used to ride on the result message, which a callback killed
+%% on heap, time or reductions never sends - so the metric went dark on exactly
+%% the ticks it exists for, and the collector fell back to the flat budget this
+%% branch identifies as the pathology. A bridge stuck in a failing-tick loop is
+%% when an operator most needs the number.
+killed_callback_reports_size() ->
+    St = churn_state(2_000),
+    application:set_env(asobi, max_heap_words, 200_000),
+    ?assertEqual({error, heap_exhausted}, asobi_lua_loader:call(churn, [400_000], St, 30_000)),
+    Killed = asobi_lua_loader:state_words(),
+    ?assert(is_integer(Killed) andalso Killed > 0),
+    %% ...and the same down the kill_and_settle path, which a callback that
+    %% overruns its wall-clock or reduction budget takes instead. Which of the
+    %% two fires first is a race at this deadline and does not matter here.
+    _ = erlang:erase(),
+    application:set_env(asobi, max_heap_words, 5_000_000),
+    ?assertMatch(
+        {error, Reason} when Reason =:= timeout orelse Reason =:= reductions_exhausted,
+        asobi_lua_loader:call(churn, [5_000_000], St, 50)
+    ),
+    Settled = asobi_lua_loader:state_words(),
+    ?assert(is_integer(Settled) andalso Settled > 0).
+
+%% collect_state/1 takes the value rather than reading it, so a measurement
+%% cannot be attributed to a later state that never produced one - a process
+%% evaluates more than one Luerl state (init_zone_state/2 boots a throwaway VM
+%% to read spawn_templates) and gc_budget_us/1 acts on what it finds.
+state_words_is_consumed() ->
+    St = churn_state(500),
+    {ok, _, _} = asobi_lua_loader:call(churn, [1], St, 5_000),
+    ?assert(is_integer(asobi_lua_loader:state_words())),
+    _ = asobi_lua_loader:collect_state(#{lua_state => St}),
+    ?assertEqual(undefined, asobi_lua_loader:state_words()).
+
 churn_state(Rows) ->
     {ok, St} = asobi_lua_loader:new(fixture("gc_zone.lua")),
     {ok, [_ | _], St1} = asobi_lua_loader:call(big_state, [Rows], St),
@@ -136,6 +172,8 @@ collector_test_() ->
         {"the collection budget scales with the state", fun budget_scales_with_state/0},
         {"the back-off stays reachable at a huge state",
             fun backoff_stays_reachable_at_a_huge_state/0},
+        {"the size sample is rate-limited", fun size_sample_is_rate_limited/0},
+        {"an abandoned collector re-arms", fun abandoned_collector_re_arms/0},
         {"the state size is reported", fun state_size_is_reported/0}
     ]}.
 
@@ -351,6 +389,63 @@ script_state(File) ->
 %% silently wrong count.
 live_tables(#{lua_state := St}) ->
     maps:size((St#luerl.tabs)#tstruct.data).
+
+%% One event per bridge per interval, not one per tick: this is emitted from
+%% every zone, so at an 80Hz tick across a hundred zones the unsampled form is
+%% thousands of events a second.
+size_sample_is_rate_limited() ->
+    Handler = {?MODULE, make_ref()},
+    Self = self(),
+    ok = telemetry:attach(
+        Handler,
+        [asobi, lua, state],
+        fun(_E, M, _Meta, _) -> Self ! {sample, M} end,
+        undefined
+    ),
+    try
+        application:set_env(asobi, state_sample_interval_ms, 60_000),
+        %% Each round must refresh the measurement through a *bounded* call,
+        %% because collect_state/1 consumes it. Without that the second and
+        %% third rounds report nothing for want of a measurement and the test
+        %% passes whatever the interval does - which is how it first shipped.
+        S1 = sample_round(gc_zone_state()),
+        S2 = sample_round(S1),
+        _ = sample_round(S2),
+        ?assertEqual(1, drain_samples(0))
+    after
+        application:unset_env(asobi, state_sample_interval_ms),
+        telemetry:detach(Handler)
+    end.
+
+sample_round(#{lua_state := St, game_state := GS} = State) ->
+    {Enc, St1} = luerl:encode(entities(), St),
+    {ok, [_, GS1 | _], St2} = asobi_lua_loader:call(zone_tick, [Enc, GS], St1, 5_000),
+    ?assert(is_integer(asobi_lua_loader:state_words())),
+    asobi_lua_loader:collect_state(State#{lua_state => St2, game_state => GS1}).
+
+drain_samples(N) ->
+    receive
+        {sample, _} -> drain_samples(N + 1)
+    after 50 ->
+        N
+    end.
+
+%% Abandoning for the life of the bridge fails open - one slow collection is as
+%% likely to be a BEAM GC pause as proof the live set is uncollectable, and the
+%% state then grows unbounded with one warning to show for it.
+abandoned_collector_re_arms() ->
+    Past = erlang:monotonic_time(millisecond) - 1,
+    Abandoned = #{interval => 8, countdown => 8, enabled => false, retry_at => Past},
+    #{lua_gc := ReArmed} = asobi_lua_loader:collect_state(
+        (gc_zone_state())#{lua_gc => Abandoned}
+    ),
+    ?assertMatch(#{enabled := true}, ReArmed),
+    %% ...but one whose cool-down has not expired stays off.
+    Future = erlang:monotonic_time(millisecond) + 600_000,
+    #{lua_gc := StillOff} = asobi_lua_loader:collect_state(
+        (gc_zone_state())#{lua_gc => Abandoned#{retry_at => Future}}
+    ),
+    ?assertMatch(#{enabled := false}, StillOff).
 
 big_state(Rows) ->
     #{lua_state := St0} = S0 = gc_zone_state(),

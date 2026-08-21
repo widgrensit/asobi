@@ -940,3 +940,14 @@ match_script_log_allowed_key_shape() ->
     after
         file:delete(Path)
     end.
+
+%% asobi#536: see asobi_lua_world_tests:bridge_identity_test_/0. The match
+%% bridge reads match_id straight off the config asobi_match_server:init/1
+%% passes.
+bridge_identity_test_() ->
+    [{"a match bridge stamps its match id", fun match_bridge_identity/0}].
+
+match_bridge_identity() ->
+    Config = #{lua_script => fixture("test_match.lua"), match_id => ~"match-7"},
+    {ok, State} = asobi_lua_match:init(Config),
+    ?assertEqual(#{kind => match, match_id => ~"match-7"}, maps:get(lua_bridge, State)).

@@ -100,3 +100,34 @@ game_error_emits_single_event_test() ->
     after
         telemetry:detach(Ref)
     end.
+
+%% asobi#536: ADR 0005 treats the event surface as a locked contract, so the
+%% shape of a new event is worth pinning - measurements carry `count` like
+%% every other emitter, `bytes` is derived from `words`, and the bridge
+%% identity passes through untouched rather than being reshaped here.
+lua_state_size_test() ->
+    Handler = {?MODULE, make_ref()},
+    Self = self(),
+    ok = telemetry:attach(
+        Handler,
+        [asobi, lua, state],
+        fun(E, M, Meta, _) -> Self ! {event, E, M, Meta} end,
+        undefined
+    ),
+    try
+        Meta = #{script => ~"world.lua", kind => zone, world_id => ~"w1", coords => {1, 2}},
+        ok = asobi_telemetry:lua_state_size(Meta, 1000),
+        receive
+            {event, Event, Measurements, Got} ->
+                ?assertEqual([asobi, lua, state], Event),
+                ?assertEqual(
+                    #{words => 1000, bytes => 1000 * erlang:system_info(wordsize), count => 1},
+                    Measurements
+                ),
+                ?assertEqual(Meta, Got)
+        after 1000 ->
+            ?assert(false)
+        end
+    after
+        telemetry:detach(Handler)
+    end.
