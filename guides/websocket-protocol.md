@@ -132,7 +132,7 @@ than the 32 field names the dictionary can index.
 The uplink is text-only on both wires. A binary frame sent to the server answers
 `error` with reason `binary_uplink_unsupported`.
 
-See [Binary `world.tick`](#binary-worldtick) for the encoding.
+See [Binary `world.tick`](#binary-world-tick) for the encoding.
 
 ### `session.heartbeat`
 
@@ -279,7 +279,7 @@ The full match info, including the roster:
 `join_refused` carries the game's own reason string in
 `error.details.refused_reason` when the script gave one. It is game
 vocabulary, never an asobi code - see
-[Refusing a join](lua-scripting.md#refusing-a-join).
+[Refusing a join](lua-scripting.md#join-player_id-state-or-join-player_id-state-ctx).
 
 ```json
 {"type": "error", "cid": "j-1", "payload": {"reason": "join_refused", "error": {"code": "match.join_refused", "message": "The game refused this join. See `details.refused_reason`.", "details": {"refused_reason": "wrong_code"}}}}
@@ -339,7 +339,7 @@ Send game input to the match server.
 {"type": "match.input", "payload": {"action": "move", "x": 10, "y": 5}}
 ```
 
-As with [`world.input`](#worldinput), the `payload` IS the input map. Two
+As with [`world.input`](#world-input), the `payload` IS the input map. Two
 **deprecated** compatibility shapes survive here and will go at the next
 protocol break: a payload whose only key is `data` mapped to an object is
 unwrapped to that object, and one whose only key is `data` mapped to a JSON
@@ -381,7 +381,7 @@ request that caused it when there was one:
   several common failures. On this page that covers the world capacity pair
   (`world_capacity_reached`, `player_world_limit_reached`, which REST answers
   as `world.capacity_reached` and `world.player_limit_reached`) and every
-  join-context rejection listed under [Join context](#join-context). Match a
+  join-context rejection listed under [Join context](#match-join). Match a
   reason string on `details.reason` for those, not a code.
 - `error.message` is prose for a human reading a log. Do not parse it.
 - `error.details` is **always** an object, `{}` when there is nothing to add.
@@ -696,7 +696,7 @@ reason `invalid_payload`. It is not silently treated as empty input.
 
 For client-side prediction, add an optional `seq` *alongside* `payload` (a
 sibling, so "the payload IS the input map" stays true). The server echoes the
-highest consumed `seq` back as a [`world.ack`](#worldack-server-push); see
+highest consumed `seq` back as a [`world.ack`](#world-ack-server-push); see
 [Client-side prediction](#client-side-prediction). A `seq` that is not a
 non-negative integer below 2^53 is ignored.
 
@@ -773,13 +773,13 @@ Two frames are applied **ungated**, without the sequence check:
 - A frame with no `frame_seq` at all, which is the removal list you get for the
   zone you are leaving. Gating it would leave you holding ghosts forever.
 
-On a gap, send [`world.resync`](#worldresync) for that zone and you get a fresh
+On a gap, send [`world.resync`](#world-resync) for that zone and you get a fresh
 keyframe.
 
 ### Binary `world.tick`
 
 A client that negotiated `"wire": "binary"` at
-[`session.connect`](#choosing-a-wire) receives `world.tick` as a **WebSocket
+[`session.connect`](#session-connect) receives `world.tick` as a **WebSocket
 binary frame** carrying the same information in about a quarter of the bytes, and
 materially cheaper to decode: measured against native JSON, 2.4x faster in
 Godot's GDScript and 33x faster than the pure-Lua parser Defold and LOVE ship.
@@ -884,7 +884,7 @@ authoritative state already includes - is a first-class primitive:
    of `payload`) and applies the input locally right away (the prediction).
 2. The server records the highest `seq` it consumed for that player - a rejected
    input still counts, so a dropped input never strands the client - and sends it
-   back on the next broadcast as a [`world.ack`](#worldack-server-push)
+   back on the next broadcast as a [`world.ack`](#world-ack-server-push)
    addressed to that connection alone.
 3. The client discards every predicted input up to that `seq` and replays the
    rest on top of the authoritative `world.tick` state (the reconciliation).
@@ -895,7 +895,7 @@ The ack is addressed to one connection and never rides the shared `world.tick`,
 so one player's input stream is never broadcast to the rest of the zone. It is
 sent to clients that opted in by stamping a `seq`, and to clients whose game
 module reports a consumed seq for them - see
-[Batched input and the ack](#batched-input-and-the-ack), where numbering the
+[Batched input and the ack](#client-side-prediction), where numbering the
 steps inside the payload replaces stamping the frame.
 
 **`seq` never goes backwards on a connection.** The high-water mark is recorded

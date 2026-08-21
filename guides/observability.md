@@ -131,7 +131,7 @@ asobi.wire.binary_refused
 ```
 
 The `asobi.dgram.*` events fire only on a node in the
-[`dgram_gw` role](configuration.md#the-datagram-gateway-role).
+[`dgram_gw` role](configuration.md#the-datagram-gateway).
 
 `asobi.dgram.dropped` is the one to build a dashboard on, and `gate` is why it is
 one event rather than seven. Nothing is ever sent back to a rejected datagram, so
@@ -201,7 +201,7 @@ worth alerting on: a spike in either is either an attack or a client
 misconfiguration, and both are invisible in game metrics.
 
 `asobi.ws.legacy_input_unwrap` counts input frames sent in the deprecated
-sole-`data` shape (see [WebSocket protocol](websocket-protocol.md#worldinput)).
+sole-`data` shape (see [WebSocket protocol](websocket-protocol.md#world-input)).
 It is not an error, and not worth an alert: it exists so the carve-out can be
 retired once the counter reaches zero for a release, instead of guessing which
 clients still depend on it.

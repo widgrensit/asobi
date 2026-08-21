@@ -3,7 +3,7 @@
 asobi is one Erlang/OTP node holding the game backend, the Lua runtime and the
 operator console. There are two front doors onto it:
 
-- **[Lua + Docker](#lua--docker)** - run the image, write game logic in Lua. The default path.
+- **[Lua + Docker](#lua-docker)** - run the image, write game logic in Lua. The default path.
 - **[Erlang OTP](#erlang-otp)** - depend on the Hex package and write game logic in Erlang.
 
 Command blocks that differ per OS are shown for both bash (Linux, macOS, Git
@@ -175,7 +175,7 @@ A 200 with:
 That means auth, the database, REST and the Lua runtime are all live.
 
 `access_token` is what the WebSocket handshake sends (see
-[Connect via WebSocket](#connect-via-websocket)) and what goes in the
+[Connect via WebSocket](#5-connect-via-websocket)) and what goes in the
 `Authorization: Bearer` header on REST calls. It is valid for 60 minutes.
 `refresh_token` buys a new pair from `POST /api/v1/auth/refresh` and is valid
 for 30 days. Neither TTL is configurable today.

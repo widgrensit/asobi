@@ -62,3 +62,6 @@ jobs:
 
       - name: Telemetry events match the observability guide
         run: scripts/check-telemetry-drift.sh
+
+      - name: Guide anchors resolve
+        run: scripts/check-doc-anchors.sh

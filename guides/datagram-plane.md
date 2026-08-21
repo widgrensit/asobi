@@ -200,7 +200,7 @@ what it is.
 
 `ASOBI_DGRAM_POSE_PERIOD` (default 20) is the axial refresh in ticks.
 
-Full variable list in [Configuration](configuration.md#the-datagram-gateway-role).
+Full variable list in [Configuration](configuration.md#the-datagram-gateway).
 
 ## Client setup
 
@@ -295,7 +295,7 @@ reconfigure.
 
 A pose record carries a slot and nothing else, and the only frame that binds a
 slot to an entity is an `add` on the [binary
-`world.tick`](websocket-protocol.md#binary-worldtick). So a client that connected
+`world.tick`](websocket-protocol.md#binary-world-tick). So a client that connected
 without `"wire": "binary"` cannot resolve a pose, and the server does not send it
 any - it would be dropped client-side and the entity would look frozen with
 nothing in either log to say why.
@@ -356,10 +356,10 @@ than left for a reader to discover.
 
 ## Further reading
 
-- [Configuration](configuration.md#the-datagram-gateway-role) - every variable.
+- [Configuration](configuration.md#the-datagram-gateway) - every variable.
 - [Self-hosting](self-hosting.md#adding-the-datagram-plane) - the compose file in
   context.
-- [WebSocket protocol](websocket-protocol.md#binary-worldtick) - the binary
+- [WebSocket protocol](websocket-protocol.md#binary-world-tick) - the binary
   `world.tick` encoding, which the plane depends on for its slot bindings.
 - ADR 0012 and ADR 0013 in `docs/adr/` - the protocol design, why it was
   rejected, and why it was reopened.

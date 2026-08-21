@@ -120,7 +120,7 @@ To close a match to backfill, call
 end of round one, once the objective spawns, whenever the game says so. A
 closed match answers `match.locked`; a full one answers `match.full`. To turn
 away one specific player rather than everybody, return `nil` from
-[`join`](lua-scripting.md#refusing-a-join) instead.
+[`join`](lua-scripting.md#join-player_id-state-or-join-player_id-state-ctx) instead.
 
 ### The 60-second timeout
 
@@ -162,7 +162,7 @@ Nothing creates the hub at boot. The first `world.find_or_create` instantiates
 it and it stays up from then on; after a restart the first player recreates it.
 
 Worlds are subject to `world_max_per_player` (5) and `world_max` (1000) - see
-[World capacity](configuration.md#world-capacity).
+[World capacity](configuration.md#instance-capacity).
 
 ### Private lobbies
 
@@ -185,7 +185,7 @@ Hide it from the browser with `listed = false` in the script. That is discovery
 only - it never gates joining, so the join callback above is still the whole
 gate. `listed` and `quick_play` are properties of the mode, not of one
 instance, so every world of that mode is equally hidden. See
-[Join context](websocket-protocol.md#join-context).
+[Join context](websocket-protocol.md#match-join).
 
 ### Telling the room someone arrived
 

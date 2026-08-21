@@ -130,7 +130,7 @@ end
 Asynchronous, like `broadcast`: a join already in the mailbox ahead of the flag
 still gets in. Closing a match stops the next joiner, not one already through
 the door. To refuse a specific player instead, return `nil` from
-[`join`](lua-scripting.md#refusing-a-join).
+[`join`](lua-scripting.md#join-player_id-state-or-join-player_id-state-ctx).
 
 ## Bots
 

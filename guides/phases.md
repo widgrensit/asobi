@@ -132,7 +132,7 @@ block on the listing and join reply - `status`, `phase`, `remaining_ms` and the
 pending `start_condition`. Broadcast anything richer yourself from
 `on_phase_started`.
 
-See [WebSocket protocol](websocket-protocol.md#worldphase_changed-server-push)
+See [WebSocket protocol](websocket-protocol.md#world-phase_changed-server-push)
 for the frame envelope and [Lobbies](lobbies.md) for `game.broadcast`.
 
 ### Erlang games

@@ -426,7 +426,7 @@ does not work.
 Off by default. Turning it on lets a client ask for `world.tick` as a binary
 frame at `session.connect`, about a quarter of the bytes and several times
 cheaper to decode - the numbers and the encoding are in
-[the protocol guide](websocket-protocol.md#binary-worldtick).
+[the protocol guide](websocket-protocol.md#binary-world-tick).
 
 ```erlang
 {binary_wire, true}
@@ -450,7 +450,7 @@ poses rather than sending datagrams every client would discard.
 **A frame carries at most 32 distinct field names**, because the field header
 indexes the dictionary in five bits. Past that the frame is sent as text, which
 is correct but costs the entities in it their datagram fast path - see
-[the protocol guide](websocket-protocol.md#binary-worldtick) for what to watch
+[the protocol guide](websocket-protocol.md#binary-world-tick) for what to watch
 for.
 
 A zone that cannot encode its entities at all drops to the text wire and then

@@ -196,7 +196,7 @@ are cached for 500ms.
 `POST /api/v1/worlds` returns **201** with the world info, **429**
 `world.player_limit_reached` when the player is at their per-player cap, and
 **503** `world.capacity_reached` when the global cap is reached. See
-[World capacity](configuration.md#world-capacity). The equivalent
+[World capacity](configuration.md#instance-capacity). The equivalent
 `world.create` failures over WebSocket carry no code of their own - see the
 [WebSocket protocol](websocket-protocol.md).
 

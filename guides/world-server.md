@@ -205,12 +205,12 @@ end
 |---|---|---|
 | `init(config)` | yes | Return the initial global game state |
 | `join(player_id, state)` | yes | Player joined; return state |
-| `join(player_id, state, ctx)` | no | Same, plus the client's join context. Declare the third parameter and it is used instead - see [Join context](websocket-protocol.md#join-context) |
+| `join(player_id, state, ctx)` | no | Same, plus the client's join context. Declare the third parameter and it is used instead - see [Join context](websocket-protocol.md#match-join) |
 | `leave(player_id, state)` | yes | Player left; return state |
 | `spawn_position(player_id, state)` | yes | Return a `{x=N, y=N}` table |
 | `post_tick(tick, state)` | yes | Global tick logic. Set `_finished` and `_result` on state to end the world |
 | `zone_tick(entities, zone_state)` | no | Per-zone simulation; return both |
-| `handle_input(player_id, input, entities)` | no | Apply one player's input to that zone's entities. A second return value is the client seq you consumed - see [Batched input and the ack](websocket-protocol.md#batched-input-and-the-ack) |
+| `handle_input(player_id, input, entities)` | no | Apply one player's input to that zone's entities. A second return value is the client seq you consumed - see [Batched input and the ack](websocket-protocol.md#client-side-prediction) |
 | `generate_world(seed, config)` | no | Return a table keyed by `"x,y"` strings |
 | `get_state(player_id, state)` | no | Player-visible state |
 | `spawn_templates(config)` | no | See [Spawn templates](#spawn-templates) |
@@ -321,7 +321,7 @@ post_tick(_TickN, State) ->
 | `leave/2` | yes | Player left the world |
 | `spawn_position/2` | yes | Return `{ok, {X, Y}}` for new player placement |
 | `zone_tick/2` | yes | Per-zone simulation: `(Entities, ZoneState) -> {Entities, ZoneState}` |
-| `handle_input/3` | yes | Process player input within a zone's entities. Return `{ok, Entities, ConsumedSeq}` to ack what you *ran* rather than what arrived - see [Batched input and the ack](websocket-protocol.md#batched-input-and-the-ack) |
+| `handle_input/3` | yes | Process player input within a zone's entities. Return `{ok, Entities, ConsumedSeq}` to ack what you *ran* rather than what arrived - see [Batched input and the ack](websocket-protocol.md#client-side-prediction) |
 | `post_tick/2` | yes | Global post-tick: return `{ok, State}`, `{vote, Config, State}`, or `{finished, Result, State}` |
 | `generate_world/2` | no | Procedural generation: `(Seed, Config) -> {ok, #{Coords => ZoneState}}` |
 | `get_state/2` | no | Per-player state view |
