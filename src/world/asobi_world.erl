@@ -62,8 +62,14 @@ run and can never replay them) or underclaims (the client replays steps the
 server already applied and overshoots).
 
 `ConsumedSeq` is in the client's own sequence space - the same numbering the
-steps inside `Input` carry - and asobi does not interpret it. Three rules
-come with it.
+steps inside `Input` carry - and asobi does not interpret it beyond bounding
+it: a non-negative integer no larger than `?MAX_ACK_SEQ`
+(`-include_lib("asobi/include/asobi_ack.hrl")`), the same bound the
+client-stamped `seq` is held to, because this value is echoed to that client on
+every broadcast tick and the SDKs read it into an int64. Anything else is
+refused with a warning and the frame stamp is used instead.
+
+The rules that come with it.
 
 **Report on every input or on none.** Within a tick a report always beats a
 frame stamp, whatever order they arrive in. The leak is across ticks and is
@@ -77,9 +83,10 @@ batching design, and a module reporting a consumed seq is asserting that its
 clients reconcile. A client that does not want acks should not be playing a
 game whose module reports them.
 
-**`{error, Reason}` still advances the ack to the frame stamp**, so a module
-that parks should model refusal as `{ok, Entities, Watermark}` rather than
-an error.
+**`{error, Reason}` still advances the ack to the frame stamp** - unless a
+report already landed this tick, which outranks it, because refusing one input
+does not unrun the steps another already consumed. A module that parks should
+model refusal as `{ok, Entities, Watermark}` rather than an error.
 
 A module that parks steps in `handle_input/3` and drains them in
 `zone_tick/2` has no channel to report the drain: the watermark rides out on

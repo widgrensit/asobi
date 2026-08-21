@@ -21,6 +21,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -endif.
 
 -include_lib("kernel/include/logger.hrl").
+-include("asobi_ack.hrl").
 
 -define(PG_SCOPE, nova_scope).
 %% Must match asobi_world_server's own defaults of the same name.
@@ -618,15 +619,15 @@ terminate(normal, #{world_id := WorldId, coords := Coords} = State) ->
     clear_zone_backup(WorldId, Coords),
     notify_zone_manager_terminated(State),
     %% asobi#252 review: a zone that ever suppressed a log line leaves a
-    %% permanent drop-count row otherwise - this Key's lifetime ends here.
-    asobi_script_log_limiter:forget({WorldId, Coords}),
+    %% permanent drop-count row otherwise - these Keys' lifetime ends here.
+    forget_log_keys(WorldId, Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate({shutdown, _}, #{world_id := WorldId, coords := Coords} = State) ->
     maybe_final_snapshot(State),
     clear_zone_backup(WorldId, Coords),
     notify_zone_manager_terminated(State),
-    asobi_script_log_limiter:forget({WorldId, Coords}),
+    forget_log_keys(WorldId, Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities} = State) ->
@@ -634,7 +635,7 @@ terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities
     maybe_final_snapshot(State),
     backup_zone_state(WorldId, Coords, Entities),
     notify_zone_manager_terminated(State),
-    asobi_script_log_limiter:forget({WorldId, Coords}),
+    forget_log_keys(WorldId, Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok.
 
@@ -816,7 +817,9 @@ do_tick(
     %% this, a burst of moves arriving in one tick window collapses to the
     %% OLDEST input's state — every later move gets overwritten by the
     %% next-handle_input call walking the list head-first.
-    {Entities2, TickAcks} = apply_inputs(GameMod, lists:reverse(Queue), Entities0),
+    {Entities2, TickAcks} = apply_inputs(
+        GameMod, lists:reverse(Queue), Entities0, invalid_seq_log_key(WorldId, Coords)
+    ),
     PlayerAck1 = maps:fold(fun record_ack/3, maps:get(player_ack, State, #{}), TickAcks),
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
@@ -921,67 +924,96 @@ apply_timer_events([{entity_timer_expired, EntityId, _TimerId, OnComplete} | Res
         end,
     apply_timer_events(Rest, Entities1).
 
-apply_inputs(GameMod, Queue, Entities) ->
-    apply_inputs(GameMod, Queue, Entities, #{}).
+apply_inputs(GameMod, Queue, Entities, LogKey) ->
+    apply_inputs(GameMod, Queue, Entities, LogKey, {#{}, #{}}).
 
-apply_inputs(_GameMod, [], Entities, Acks) ->
-    {Entities, unwrap_acks(Acks)};
-apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, Acks) ->
+%% Two maps, not one tagged map: a stamp says an input ARRIVED, a report says
+%% how much of it RAN, and the merge below is the whole rule - a report is
+%% authoritative for the rest of the tick, so the right-hand map wins per
+%% player. Max-ing the two together instead would let "arrived" beat "ran",
+%% which is the overclaim a game that parks overflow steps needs to avoid.
+%% Stamps still max among themselves, via the same record_ack/3 that merges
+%% this tick into player_ack.
+apply_inputs(_GameMod, [], Entities, _LogKey, {Stamped, Reported}) ->
+    {Entities, maps:merge(Stamped, Reported)};
+apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, LogKey, Acks) ->
     case GameMod:handle_input(PlayerId, Input, Entities) of
         {ok, Entities1} ->
-            apply_inputs(GameMod, Rest, Entities1, stamped_ack(PlayerId, Seq, Acks));
+            apply_inputs(GameMod, Rest, Entities1, LogKey, stamped_ack(PlayerId, Seq, Acks));
         {ok, Entities1, Consumed} ->
-            apply_inputs(GameMod, Rest, Entities1, reported_ack(PlayerId, Seq, Consumed, Acks));
+            apply_inputs(
+                GameMod,
+                Rest,
+                Entities1,
+                LogKey,
+                reported_ack(PlayerId, Seq, Consumed, LogKey, Acks)
+            );
         {error, Reason} ->
             %% A rejected input still advances the ack (asobi#474): the client
             %% asked the server to consume this seq and it did, it just declined
             %% the effect. Otherwise a client waits forever on an input the
-            %% server chose to drop.
+            %% server chose to drop. A report already recorded this tick still
+            %% outranks it - refusing one input does not unrun the others.
             ?LOG_WARNING(#{
                 msg => ~"zone input rejected",
                 player_id => PlayerId,
                 reason => Reason
             }),
-            apply_inputs(GameMod, Rest, Entities, stamped_ack(PlayerId, Seq, Acks))
+            apply_inputs(GameMod, Rest, Entities, LogKey, stamped_ack(PlayerId, Seq, Acks))
     end.
 
-%% Within one tick an ack candidate is either STAMPED (the seq the client put on
-%% the frame, meaning "this arrived") or REPORTED (what handle_input said it
-%% consumed, meaning "this ran"). A report is authoritative for the rest of the
-%% tick and the newest report wins, because a game that batches steps into one
-%% frame and parks the overflow has to be able to ack BELOW the frame stamp -
-%% max-ing the two would let "arrived" overwrite "ran", which is the overclaim
-%% this exists to prevent. Cross-tick monotonicity is still enforced by
-%% record_ack when the tick's candidates merge into player_ack.
-stamped_ack(_PlayerId, undefined, Acks) ->
-    Acks;
-stamped_ack(PlayerId, Seq, Acks) ->
-    case Acks of
-        #{PlayerId := {reported, _}} -> Acks;
-        #{PlayerId := {stamped, Prev}} when Prev >= Seq -> Acks;
-        _ when is_integer(Seq), Seq >= 0 -> Acks#{PlayerId => {stamped, Seq}};
-        _ -> Acks
-    end.
+stamped_ack(PlayerId, Seq, {Stamped, Reported}) ->
+    {record_ack(PlayerId, Seq, Stamped), Reported}.
 
 %% Note the absent `Seq` guard: a report acks a client that never stamped one.
 %% Numbering steps inside the payload and leaving the frame unstamped is the
 %% cleanest form of the batching design, and a module that reports is asserting
 %% its clients reconcile - #474's stamp is not the only way to say so.
-reported_ack(PlayerId, _Seq, Consumed, Acks) when is_integer(Consumed), Consumed >= 0 ->
-    Acks#{PlayerId => {reported, Consumed}};
-reported_ack(PlayerId, Seq, Consumed, Acks) ->
+%%
+%% ?MAX_ACK_SEQ is not decoration. The documented way to write this callback is
+%% to derive the watermark from the client's own payload, so the value is
+%% attacker-influenced by design, and it is echoed on every broadcast tick to a
+%% session whose ack gate keeps the highest seq it has sent. One unbounded
+%% bignum would therefore be both a per-tick encode amplifier and a permanent
+%% kill of that connection's ack stream from every zone.
+reported_ack(PlayerId, _Seq, Consumed, _LogKey, {Stamped, Reported}) when
+    is_integer(Consumed), Consumed >= 0, Consumed =< ?MAX_ACK_SEQ
+->
+    %% Newest report wins: a module revising its watermark down within a tick
+    %% is the parking case this exists for.
+    {Stamped, Reported#{PlayerId => Consumed}};
+reported_ack(PlayerId, Seq, Consumed, LogKey, Acks) ->
     %% A game module is user code, so a nonsense consumed seq must neither crash
     %% the shared zone nor silently ack something the client cannot use. Fall
     %% back to the frame stamp and say so.
-    ?LOG_WARNING(#{
-        msg => ~"handle_input reported an invalid consumed seq",
-        player_id => PlayerId,
-        consumed => Consumed
-    }),
+    %%
+    %% The term itself is never logged, only its shape: it is usually a field
+    %% lifted straight off the client's payload, so its size and depth are
+    %% attacker-chosen, and `logger` in sync mode charges the write back to
+    %% THIS process - the zone every other player in it is simulated by.
+    %% Keyed per zone rather than per player: a player-keyed bucket is minted
+    %% by the flood it is meant to bound and nothing would ever reclaim it,
+    %% since forget/1 runs at zone terminate and deletes an exact key.
+    case asobi_script_log_limiter:allow(LogKey) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg => ~"handle_input reported an invalid consumed seq",
+                player_id => PlayerId,
+                consumed => classify_consumed(Consumed),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end,
     stamped_ack(PlayerId, Seq, Acks).
 
-unwrap_acks(Acks) ->
-    maps:map(fun(_PlayerId, {_Kind, Seq}) -> Seq end, Acks).
+classify_consumed(N) when is_integer(N), N < 0 -> negative;
+classify_consumed(N) when is_integer(N) -> above_max_ack_seq;
+classify_consumed(N) when is_float(N) -> float;
+classify_consumed(_) -> not_a_number.
+
+invalid_seq_log_key(WorldId, Coords) ->
+    {WorldId, Coords, invalid_consumed_seq}.
 
 %% Keep the highest seq per player. world.input carries a monotonic client seq;
 %% out-of-order or duplicate delivery must never regress the ack. Inputs with no
@@ -1517,9 +1549,9 @@ wire_encodable(Fields) ->
 is_wire_value(V) when is_number(V); is_boolean(V); is_binary(V); V =:= null -> true;
 is_wire_value(_) -> false.
 
-%% asobi#474: input ack, addressed to one connection. Iterate the opted-in
-%% players (those with a recorded seq) and send world.ack only to the ones still
-%% subscribed. The mark is per zone, so a crossing player can be acked by both
+%% asobi#474: input ack, addressed to one connection. Iterate the players with a
+%% recorded mark - a stamped seq, or a seq their game module reported consuming
+%% - and send world.ack only to the ones still subscribed. The mark is per zone, so a crossing player can be acked by both
 %% the zone they left and the one they entered; asobi_player_session drops any
 %% ack that does not advance, which is what makes the frame monotonic. Kept
 %% off the shared world.tick binary so the ack never leaks one player's input
@@ -1892,6 +1924,12 @@ maybe_final_snapshot(_) ->
     ok.
 
 %% --- Zone State Backup/Recovery ---
+
+%% Every limiter key this zone can mint. forget/1 deletes an exact key, so a
+%% new bucket that is not listed here is a permanent ETS row per zone.
+forget_log_keys(WorldId, Coords) ->
+    asobi_script_log_limiter:forget({WorldId, Coords}),
+    asobi_script_log_limiter:forget(invalid_seq_log_key(WorldId, Coords)).
 
 backup_zone_state(WorldId, Coords, Entities) ->
     case ets:info(asobi_world_state) of

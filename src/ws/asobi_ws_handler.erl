@@ -18,6 +18,7 @@
 -export([reserved_event_names/0, event_name_binary/1, is_event_name_char/1]).
 
 -include_lib("kernel/include/logger.hrl").
+-include("asobi_ack.hrl").
 
 -define(WS_MSG_LIMIT, 60).
 -define(WS_MSG_WINDOW_MS, 1000).
@@ -1103,7 +1104,7 @@ handle_message(
     %% out of range degrades to no-ack rather than crashing the handler.
     Seq =
         case maps:get(~"seq", Msg, undefined) of
-            N when is_integer(N), N >= 0, N =< 16#1FFFFFFFFFFFFF -> N;
+            N when is_integer(N), N >= 0, N =< ?MAX_ACK_SEQ -> N;
             _ -> undefined
         end,
     try asobi_player_session:get_state(SessionPid) of

@@ -937,8 +937,12 @@ end
 ```
 
 The number is in your client's own sequence space - the same numbering the steps
-inside the payload carry - and asobi only refuses to let it walk the ack
-backwards. Three rules come with it:
+inside the payload carry - and must be a non-negative integer no larger than
+2^53-1, the same bound the client-stamped `seq` is held to. Anything else is
+refused with a warning and the frame stamp is used instead: the value is echoed
+to your client on every broadcast tick, so a wider one would be an encode
+amplifier and unreadable to any SDK holding it in an int64. The rules that come
+with it:
 
 - **Report on every input or on none.** Within a tick a report always beats a
   frame stamp, whatever order they arrive in. Across ticks it does not: a tick
@@ -946,14 +950,18 @@ backwards. Three rules come with it:
   keeps the highest value it has recorded, so one unreported tick pins the ack
   above your watermark for good.
 - **Reporting acks a client that never stamped a `seq`.** If your client numbers
-  its steps inside the payload it never needs to stamp the frame at all.
+  its steps inside the payload it never needs to stamp the frame at all. SDK
+  authors: this means `world.ack` can arrive unsolicited, so a client that never
+  opted in must drop it silently rather than log or raise per frame.
 - **Draining parked steps in `zone_tick` has no report channel.** The watermark
   rides out on the next input you handle, which a client re-sending
   unacknowledged steps produces every tick - so it costs a tick, except for a
   player at rest, whose final drain stays unacked until they move.
 - **`{error, Reason}` still acks the frame stamp**, because a client must never
-  wait forever on an input the server chose to drop. A game that parks should
-  model refusal as `{ok, Entities, Watermark}` instead.
+  wait forever on an input the server chose to drop - unless a report already
+  landed this tick, which outranks it. Refusing one input does not unrun the
+  steps another already consumed. A game that parks should model refusal as
+  `{ok, Entities, Watermark}` instead.
 - **Deduplicate by the same watermark.** A client that re-sends unacknowledged
   steps for redundancy (what makes an unreliable carrier safe) will hand you
   steps you have already run; skip them, and report the watermark either way.
