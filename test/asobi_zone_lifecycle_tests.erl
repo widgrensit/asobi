@@ -101,12 +101,23 @@ dump_zone_state_strips_runtime() ->
 %% zone. All three clauses call forget/1 identically (same call, same
 %% position, before pg:leave), so this single case already protects the
 %% wiring a refactor could plausibly break.
+%% Every bucket a zone can mint, not just the base one: forget/1 deletes an exact
+%% key, so a derived bucket that terminate/2 does not name is a permanent ETS row
+%% per zone. Seeding only {WorldId, Coords} is what let the derived buckets go
+%% uncovered - deleting their forget/1 call left the whole suite green.
 terminate_clears_script_log_drop_row() ->
     ok = asobi_script_log_limiter:init_table(),
     WorldId = ~"lc_normal",
     Coords = {9, 1},
-    Key = {WorldId, Coords},
-    true = ets:insert(asobi_script_log_limiter_drops, {Key, 3}),
+    Keys = [
+        {WorldId, Coords},
+        {WorldId, Coords, invalid_consumed_seq},
+        {WorldId, Coords, input_rejected},
+        {WorldId, Coords, batch_contract},
+        {WorldId, Coords, unknown_outcome},
+        {WorldId, Coords, no_input_handler}
+    ],
+    [true = ets:insert(asobi_script_log_limiter_drops, {K, 3}) || K <- Keys],
     Pid = start_zone(asobi_test_world_game, #{world_id => WorldId, coords => Coords}),
     gen_server:stop(Pid),
-    ?assertEqual([], ets:lookup(asobi_script_log_limiter_drops, Key)).
+    [?assertEqual({K, []}, {K, ets:lookup(asobi_script_log_limiter_drops, K)}) || K <- Keys].

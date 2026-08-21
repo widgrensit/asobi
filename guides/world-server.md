@@ -210,7 +210,7 @@ end
 | `spawn_position(player_id, state)` | yes | Return a `{x=N, y=N}` table |
 | `post_tick(tick, state)` | yes | Global tick logic. Set `_finished` and `_result` on state to end the world |
 | `zone_tick(entities, zone_state)` | no | Per-zone simulation; return both |
-| `handle_input(player_id, input, entities)` | no | Apply one player's input to that zone's entities. A second return value is the client seq you consumed - see [Batched input and the ack](websocket-protocol.md#client-side-prediction) |
+| `handle_input(player_id, input, entities)` | no | Apply one player's input to that zone's entities. A second return value is the client seq you consumed - see [Batched input and the ack](websocket-protocol.md#client-side-prediction). Every input in a tick is handed the same table rather than a copy, but returning nothing still discards whatever that call mutated - see [Players in one zone](performance-tuning.md#players-in-one-zone) |
 | `generate_world(seed, config)` | no | Return a table keyed by `"x,y"` strings |
 | `get_state(player_id, state)` | no | Player-visible state |
 | `spawn_templates(config)` | no | See [Spawn templates](#spawn-templates) |
@@ -321,7 +321,8 @@ post_tick(_TickN, State) ->
 | `leave/2` | yes | Player left the world |
 | `spawn_position/2` | yes | Return `{ok, {X, Y}}` for new player placement |
 | `zone_tick/2` | yes | Per-zone simulation: `(Entities, ZoneState) -> {Entities, ZoneState}` |
-| `handle_input/3` | yes | Process player input within a zone's entities. Return `{ok, Entities, ConsumedSeq}` to ack what you *ran* rather than what arrived - see [Batched input and the ack](websocket-protocol.md#client-side-prediction) |
+| `handle_input/3` | one of | Process player input within a zone's entities. Return `{ok, Entities, ConsumedSeq}` to ack what you *ran* rather than what arrived - see [Batched input and the ack](websocket-protocol.md#client-side-prediction) |
+| `handle_input_batch/2` | one of | The whole tick's inputs in one call, returning one entity map plus one outcome per input. Export it instead of `handle_input/3` when your per-input cost is dominated by marshalling the entity map rather than by the input. Exporting it shadows `handle_input/3` entirely. asobi still owns the ack policy: you return one outcome per input - see [Players in one zone](performance-tuning.md#players-in-one-zone) |
 | `post_tick/2` | yes | Global post-tick: return `{ok, State}`, `{vote, Config, State}`, or `{finished, Result, State}` |
 | `generate_world/2` | no | Procedural generation: `(Seed, Config) -> {ok, #{Coords => ZoneState}}` |
 | `get_state/2` | no | Per-player state view |

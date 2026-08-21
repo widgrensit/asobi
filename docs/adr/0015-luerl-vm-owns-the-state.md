@@ -130,6 +130,43 @@ small message to the process that owns the state.**
 - A Lua tick's cost stops tracking the size of the state. That is the entire
   point, and it is what makes a large-state game viable rather than merely
   diagnosable.
+- **Every Luerl reference held across a call must be anchored, and this needs to
+  be a stated contract before 0015 lands rather than reasoned about per site.**
+  Decision item 2 makes "the bridge holds opaque refs and passes them back and
+  forth" the normal shape, so what is today one value (`game_state`, anchored by
+  `collect_state/1`) becomes many. `handle_input_batch/2` is the first of those,
+  and the failure mode is worth stating precisely, because "nothing collects
+  here" is the reasoning that produces it. luerl's root set is `_G`, the stack
+  and the live call frames, so a table Erlang carries between calls is reachable
+  only while some frame names it - and a script declaring
+  `function handle_input(p, i)` when three arguments were passed drops it. A
+  collection at that moment frees it, its slot returns to the free list, the
+  next `luerl:encode/2` recycles it, and the held reference aliases that data.
+  Reproduced during this PR: a zone's entire entity map came back as one
+  player's input frame, which `asobi_zone` accepts (it is still a map) and the
+  snapshotter persists.
+
+  Three things close it, and only the last generalises. `collectgarbage` was
+  reachable from Lua and has since been stripped from the sandbox
+  (`guides/security-sandbox.md`), which removes the reachable path.
+  `asobi_lua_loader:anchor_ref/2` roots the reference in a second raw `_G` slot
+  alongside the collector's, and `ref_anchored/2` re-checks it after every call
+  because `_G` is script-writable. Under 0015 the class is what matters: every
+  ref crossing a call boundary needs the same treatment, which is why this
+  belongs in the contract rather than in a fix.
+
+  A second lesson from the same change, and the one that will matter more under
+  0015: **the Luerl state being functional is a rollback primitive.** A batched
+  `handle_input` hands the script the entity table itself, so an empty return
+  could not "leave the entities alone" the way the per-input path does - there
+  is no Erlang-side copy to fall back on. Reverting to the state from before the
+  call reverts the heap the mutation lived in, at no cost. Anything under 0015
+  that needs to undo a callback's effect without copying has the same tool.
+- **The blast radius of a killed VM widens if `handle_input` is ever batched and
+  budgeted.** The Consequences below reopen the `handle_input` sandbox exemption
+  on the grounds that its reason is gone. If it comes back under a budget, note
+  that a batched `handle_input` makes one bad input cost the whole tick's inputs
+  rather than one, because the batch is a single callback.
 - The `handle_input` exemption (ADR 0002 in the asobi_lua lineage) can be
   revisited, because the reason for it — a copy per input frame — is gone.
   Whether it *should* be is a separate decision.

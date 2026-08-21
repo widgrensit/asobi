@@ -180,7 +180,7 @@ handle_info(
     %% than sent another one. Without this the fan-out is open-loop - a zone
     %% whose `zone_tick` outruns `tick_rate` takes casts faster than it can
     %% retire them and its mailbox grows without bound, which on a Lua world
-    %% is terminal: the upkeep that would recover it (a `collectgarbage/0`,
+    %% is terminal: the upkeep that would recover it (a Luerl collection,
     %% releasing entities so the reaper can stop the zone) is itself carried
     %% by a tick, so it queues behind the backlog exactly when it is needed.
     %% Dropping a tick is strictly better than queueing one - the zone tick is

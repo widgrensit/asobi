@@ -16,6 +16,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -export([query_radius/3, query_rect/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
 -ifdef(TEST).
+-export([shape_of/1]).
 -export([past_zone_margin/4, classify_crossing/5]).
 -export([log_refusal/6, distinct_field_names/1, widest_entity/1]).
 -endif.
@@ -818,7 +819,7 @@ do_tick(
     %% OLDEST input's state — every later move gets overwritten by the
     %% next-handle_input call walking the list head-first.
     {Entities2, TickAcks} = apply_inputs(
-        GameMod, lists:reverse(Queue), Entities0, invalid_seq_log_key(WorldId, Coords)
+        GameMod, lists:reverse(Queue), Entities0, {WorldId, Coords}
     ),
     PlayerAck1 = maps:fold(fun record_ack/3, maps:get(player_ack, State, #{}), TickAcks),
     Now = erlang:system_time(millisecond),
@@ -924,8 +925,224 @@ apply_timer_events([{entity_timer_expired, EntityId, _TimerId, OnComplete} | Res
         end,
     apply_timer_events(Rest, Entities1).
 
+%% A module that exports handle_input_batch/2 gets the whole queue in one call.
+%% The ack policy below is unchanged either way - the batch reports an outcome
+%% per input and asobi still decides what that means for world.ack - so the only
+%% thing the batch buys is that a bridge marshalling the entity map across a
+%% language boundary does it once per tick instead of once per input.
+apply_inputs(_GameMod, [], Entities, _LogKey) ->
+    {Entities, #{}};
 apply_inputs(GameMod, Queue, Entities, LogKey) ->
-    apply_inputs(GameMod, Queue, Entities, LogKey, {#{}, #{}}).
+    case input_mode(GameMod) of
+        batch ->
+            apply_input_batch(GameMod, Queue, Entities, LogKey);
+        per_input ->
+            apply_per_input(GameMod, Queue, Entities, LogKey, {#{}, #{}});
+        none ->
+            %% Both input callbacks are optional, so a world that takes no player
+            %% input is legal - but one that RECEIVES input with no handler will
+            %% never process any, so this is an error, not a degraded mode.
+            log_no_input_handler(GameMod, LogKey),
+            {Entities, stamp_all(Queue)}
+    end.
+
+%% No code:ensure_loaded/1: do_tick/2 calls GameMod:zone_tick/2 before it ever
+%% reaches here, and a remote call forces the load.
+input_mode(GameMod) ->
+    case erlang:function_exported(GameMod, handle_input_batch, 2) of
+        true ->
+            batch;
+        false ->
+            case erlang:function_exported(GameMod, handle_input, 3) of
+                true -> per_input;
+                false -> none
+            end
+    end.
+
+%% Telemetry is emitted unconditionally, outside the limiter: suppressing the
+%% line must not suppress the rate an operator alerts on (asobi_script_log_limiter's
+%% own contract). Same at every other limited site below.
+log_no_input_handler(GameMod, LogKey) ->
+    asobi_telemetry:game_error(no_input_handler, #{game_module => GameMod}),
+    case asobi_script_log_limiter:allow(no_input_handler_log_key(LogKey)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_ERROR(#{
+                msg =>
+                    ~"game module exports neither handle_input/3 nor handle_input_batch/2; inputs acked and dropped",
+                game_module => GameMod,
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
+
+apply_input_batch(GameMod, Queue, Entities, LogKey) ->
+    Inputs = [{PlayerId, Input} || {PlayerId, _Seq, Input} <- Queue],
+    case GameMod:handle_input_batch(Inputs, Entities) of
+        {ok, Entities1, Outcomes} when is_map(Entities1) ->
+            %% No length/1 on `Outcomes`: is_list/1 admits an IMPROPER list, and
+            %% length/1 then raises badarg inside the zone every other player
+            %% here is simulated by. Walking the two lists in lockstep makes
+            %% wrong-length, improper-tail and not-a-list one case, and that case
+            %% is a bail-out rather than a crash.
+            case pair_outcomes(Queue, Outcomes, LogKey) of
+                {ok, Acks} ->
+                    {Entities1, Acks};
+                mismatch ->
+                    log_bad_batch(GameMod, length(Queue), outcome_shape(Outcomes), LogKey),
+                    %% NOT stamp_all/1. A stamp claims every arriving seq ran,
+                    %% and asobi_player_session's ack gate is monotonic per
+                    %% socket - so an overclaim here permanently buries whatever
+                    %% watermark the module meant to report, for every player in
+                    %% the tick, including ones whose own input was fine.
+                    %% Acking nothing is recoverable: the next clean tick acks
+                    %% past it.
+                    {Entities1, #{}}
+            end;
+        Other ->
+            %% Deliberately NOT a fallback to the per-input path: the batch may
+            %% already have applied some of these inputs, and running them again
+            %% would double-apply them.
+            log_bad_batch(GameMod, length(Queue), return_shape(Other), LogKey),
+            %% Acks nothing, same as the mismatch arm and for the same reason:
+            %% `{ok, not_a_map, [{consumed, 30}]}` lands here, and stamping over
+            %% that report would bury it permanently.
+            {Entities, #{}}
+    end.
+
+%% Limited as well as shape-only: this fires once per tick for as long as the
+%% module stays broken, and multiplies by every live zone in the world.
+log_bad_batch(GameMod, Expected, Got, LogKey) ->
+    asobi_telemetry:game_error(batch_contract, #{game_module => GameMod}),
+    case asobi_script_log_limiter:allow(bad_batch_log_key(LogKey)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg => ~"handle_input_batch broke its contract; this tick's inputs are unacked",
+                game_module => GameMod,
+                inputs => Expected,
+                outcomes => Got,
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
+
+%% Shape, never the term: a game module's return can carry the whole entity map,
+%% and this is written synchronously on the zone at tick rate. Same reasoning as
+%% reported_ack/5's. `{ok, Map, _}` needs no clause - it matches
+%% apply_input_batch/4's first case clause and never reaches this arm.
+return_shape(T) -> shape_of(T).
+
+outcome_shape(L) when is_list(L) ->
+    try
+        {list, length(L)}
+    catch
+        error:badarg -> improper_list
+    end;
+outcome_shape(T) ->
+    shape_of(T).
+
+shape_of(T) when is_atom(T) -> T;
+shape_of(T) when is_map(T) -> map;
+shape_of(T) when is_binary(T) -> {binary, byte_size(T)};
+shape_of(T) when is_number(T) -> number;
+%% Tag and arity. `{error, {out_of_range, 5}}` is the ordinary shape of a
+%% rejection reason and the tag is the developer's own word for what went wrong,
+%% so collapsing it to `other` would redact the only useful half.
+shape_of(T) when is_tuple(T), tuple_size(T) > 0 ->
+    {tuple, tag_of(element(1, T)), tuple_size(T)};
+shape_of(_) ->
+    other.
+
+%% One level, not one level per nesting. Recursing through shape_of/1 here is
+%% O(depth) to build and O(depth^2) to pretty-print - a 200k-deep left-spine
+%% tuple renders a 40 GB log line. A tag that is itself a tuple carries no
+%% developer word worth preserving.
+tag_of(T) when is_atom(T) -> T;
+tag_of(T) when is_binary(T) -> {binary, byte_size(T)};
+tag_of(T) when is_number(T) -> number;
+tag_of(_) -> other.
+
+%% Only the no-input-handler path, where nothing else will ever ack and the
+%% client would otherwise wait forever. Both contract-violation arms ack nothing
+%% instead: a stamp over a report is permanent, a missing ack is not.
+stamp_all(Queue) ->
+    stamp_all(Queue, #{}).
+
+stamp_all([], Stamped) ->
+    Stamped;
+stamp_all([{PlayerId, Seq, _Input} | Rest], Stamped) ->
+    stamp_all(Rest, record_ack(PlayerId, Seq, Stamped)).
+
+%% Shape first, apply second. apply_outcomes/4 emits rate-limited logs as it
+%% walks, so discovering the mismatch halfway would spend limiter budget on
+%% rejections the zone then discards - and starve the contract warning that
+%% actually explains the tick.
+pair_outcomes(Queue, Outcomes, LogKey) ->
+    case same_length(Queue, Outcomes) of
+        true -> {ok, apply_outcomes(Queue, Outcomes, LogKey, {#{}, #{}})};
+        false -> mismatch
+    end.
+
+%% Total, and deliberately not length/1 on either side: is_list/1 admits an
+%% improper list and length/1 would then raise badarg inside the zone.
+same_length([], []) -> true;
+same_length([_ | Q], [_ | O]) -> same_length(Q, O);
+same_length(_, _) -> false.
+
+apply_outcomes([], [], _LogKey, {Stamped, Reported}) ->
+    maps:merge(Stamped, Reported);
+apply_outcomes([{PlayerId, Seq, _Input} | Rest], [ok | Outcomes], LogKey, Acks) ->
+    apply_outcomes(Rest, Outcomes, LogKey, stamped_ack(PlayerId, Seq, Acks));
+apply_outcomes(
+    [{PlayerId, Seq, _Input} | Rest], [{consumed, Consumed} | Outcomes], LogKey, Acks
+) ->
+    apply_outcomes(
+        Rest, Outcomes, LogKey, reported_ack(PlayerId, Seq, Consumed, LogKey, Acks)
+    );
+apply_outcomes([{PlayerId, Seq, _Input} | Rest], [{error, Reason} | Outcomes], LogKey, Acks) ->
+    %% Limited, unlike the per-input path's equivalent: a batch hands back every
+    %% rejection in the tick at once, so an always-rejecting module turns this
+    %% into inputs-per-tick warnings per tick, written synchronously on the zone
+    %% every other player in it is simulated by. Same bucket and same reasoning
+    %% as reported_ack/5.
+    log_rejected(PlayerId, Reason, LogKey),
+    apply_outcomes(Rest, Outcomes, LogKey, stamped_ack(PlayerId, Seq, Acks));
+apply_outcomes([{PlayerId, Seq, _Input} | Rest], [Bad | Outcomes], LogKey, Acks) ->
+    %% Shape and limited, for the same reason as log_rejected/3: this runs once
+    %% per input, and the documented way to write the callback lifts values
+    %% straight off the client payload, so `Bad` is attacker-influenced in both
+    %% size and depth.
+    asobi_telemetry:game_error(unknown_outcome, #{}),
+    case asobi_script_log_limiter:allow(unknown_outcome_log_key(LogKey)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg => ~"handle_input_batch returned an unknown outcome; acking by frame stamp",
+                player_id => PlayerId,
+                outcome => shape_of(Bad),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end,
+    apply_outcomes(Rest, Outcomes, LogKey, stamped_ack(PlayerId, Seq, Acks)).
+
+%% Shape rather than the term, because a Lua script fills a rejection reason from
+%% client input via `error(...)`, and limited because this fires once per
+%% rejected input.
+log_rejected(PlayerId, Reason, LogKey) ->
+    asobi_telemetry:game_error(input_rejected, #{}),
+    case asobi_script_log_limiter:allow(reject_log_key(LogKey)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg => ~"zone input rejected",
+                player_id => PlayerId,
+                reason => shape_of(Reason),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
 
 %% Two maps, not one tagged map: a stamp says an input ARRIVED, a report says
 %% how much of it RAN, and the merge below is the whole rule - a report is
@@ -934,14 +1151,14 @@ apply_inputs(GameMod, Queue, Entities, LogKey) ->
 %% which is the overclaim a game that parks overflow steps needs to avoid.
 %% Stamps still max among themselves, via the same record_ack/3 that merges
 %% this tick into player_ack.
-apply_inputs(_GameMod, [], Entities, _LogKey, {Stamped, Reported}) ->
+apply_per_input(_GameMod, [], Entities, _LogKey, {Stamped, Reported}) ->
     {Entities, maps:merge(Stamped, Reported)};
-apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, LogKey, Acks) ->
+apply_per_input(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, LogKey, Acks) ->
     case GameMod:handle_input(PlayerId, Input, Entities) of
         {ok, Entities1} ->
-            apply_inputs(GameMod, Rest, Entities1, LogKey, stamped_ack(PlayerId, Seq, Acks));
+            apply_per_input(GameMod, Rest, Entities1, LogKey, stamped_ack(PlayerId, Seq, Acks));
         {ok, Entities1, Consumed} ->
-            apply_inputs(
+            apply_per_input(
                 GameMod,
                 Rest,
                 Entities1,
@@ -954,12 +1171,8 @@ apply_inputs(GameMod, [{PlayerId, Seq, Input} | Rest], Entities, LogKey, Acks) -
             %% the effect. Otherwise a client waits forever on an input the
             %% server chose to drop. A report already recorded this tick still
             %% outranks it - refusing one input does not unrun the others.
-            ?LOG_WARNING(#{
-                msg => ~"zone input rejected",
-                player_id => PlayerId,
-                reason => Reason
-            }),
-            apply_inputs(GameMod, Rest, Entities, LogKey, stamped_ack(PlayerId, Seq, Acks))
+            log_rejected(PlayerId, Reason, LogKey),
+            apply_per_input(GameMod, Rest, Entities, LogKey, stamped_ack(PlayerId, Seq, Acks))
     end.
 
 stamped_ack(PlayerId, Seq, {Stamped, Reported}) ->
@@ -994,7 +1207,8 @@ reported_ack(PlayerId, Seq, Consumed, LogKey, Acks) ->
     %% Keyed per zone rather than per player: a player-keyed bucket is minted
     %% by the flood it is meant to bound and nothing would ever reclaim it,
     %% since forget/1 runs at zone terminate and deletes an exact key.
-    case asobi_script_log_limiter:allow(LogKey) of
+    asobi_telemetry:game_error(invalid_consumed_seq, #{}),
+    case asobi_script_log_limiter:allow(invalid_seq_log_key(LogKey)) of
         {true, SuppressedSinceLast} ->
             ?LOG_WARNING(#{
                 msg => ~"handle_input reported an invalid consumed seq",
@@ -1012,8 +1226,15 @@ classify_consumed(N) when is_integer(N) -> above_max_ack_seq;
 classify_consumed(N) when is_float(N) -> float;
 classify_consumed(_) -> not_a_number.
 
-invalid_seq_log_key(WorldId, Coords) ->
-    {WorldId, Coords, invalid_consumed_seq}.
+%% One bucket per class of failure, all derived from the zone's own id. Sharing
+%% one bucket blinds the others: the site that fires at input rate is the
+%% rejection warning, and a rejection happens because a CLIENT sent something
+%% invalid - so three bad inputs would silence the module-is-broken signals.
+invalid_seq_log_key({WorldId, Coords}) -> {WorldId, Coords, invalid_consumed_seq}.
+reject_log_key({WorldId, Coords}) -> {WorldId, Coords, input_rejected}.
+bad_batch_log_key({WorldId, Coords}) -> {WorldId, Coords, batch_contract}.
+unknown_outcome_log_key({WorldId, Coords}) -> {WorldId, Coords, unknown_outcome}.
+no_input_handler_log_key({WorldId, Coords}) -> {WorldId, Coords, no_input_handler}.
 
 %% Keep the highest seq per player. world.input carries a monotonic client seq;
 %% out-of-order or duplicate delivery must never regress the ack. Inputs with no
@@ -1928,8 +2149,13 @@ maybe_final_snapshot(_) ->
 %% Every limiter key this zone can mint. forget/1 deletes an exact key, so a
 %% new bucket that is not listed here is a permanent ETS row per zone.
 forget_log_keys(WorldId, Coords) ->
-    asobi_script_log_limiter:forget({WorldId, Coords}),
-    asobi_script_log_limiter:forget(invalid_seq_log_key(WorldId, Coords)).
+    Zone = {WorldId, Coords},
+    asobi_script_log_limiter:forget(Zone),
+    asobi_script_log_limiter:forget(invalid_seq_log_key(Zone)),
+    asobi_script_log_limiter:forget(reject_log_key(Zone)),
+    asobi_script_log_limiter:forget(bad_batch_log_key(Zone)),
+    asobi_script_log_limiter:forget(unknown_outcome_log_key(Zone)),
+    asobi_script_log_limiter:forget(no_input_handler_log_key(Zone)).
 
 backup_zone_state(WorldId, Coords, Entities) ->
     case ets:info(asobi_world_state) of

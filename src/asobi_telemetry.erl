@@ -33,7 +33,15 @@
 
 %% Categories of game-code error. A fixed literal set on purpose - never derive
 %% Kind from untrusted input (atom-table exhaustion). Extend as categories arise.
--type game_error_kind() :: lua_error | unknown_spawn_template | zone_unavailable.
+-type game_error_kind() ::
+    lua_error
+    | unknown_spawn_template
+    | zone_unavailable
+    | no_input_handler
+    | batch_contract
+    | unknown_outcome
+    | input_rejected
+    | invalid_consumed_seq.
 -export_type([game_error_kind/0]).
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).

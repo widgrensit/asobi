@@ -4,10 +4,26 @@ Behaviour for large-session world game modules.
 
 Unlike `asobi_match`, world games are spatially partitioned into zones. The game
 module provides zone-level tick logic and global post-tick events. Only `init/1`,
-`join/2`, `leave/2`, `spawn_position/2`, `zone_tick/2`, `handle_input/3`,
-`post_tick/2`, `init_zone_state/2`, and `dump_zone_state/1` are required; the rest
-are optional hooks (see `-optional_callbacks`).
+`join/2`, `leave/2`, `spawn_position/2`, `zone_tick/2` and `post_tick/2` are
+required; the rest are optional hooks (see `-optional_callbacks`).
+
+Input handling needs **one of** `handle_input/3` or `handle_input_batch/2`.
+Both are optional so a module can implement either, and a world that takes no
+player input at all can implement neither - asobi acks such inputs by frame
+stamp and logs once rather than failing the zone.
 """.
+
+-doc """
+What happened to one input in a `handle_input_batch/2` call. One per input, in
+the order they were handed over. The three constructors mirror `handle_input/3`'s
+three return shapes, minus the entity map the batch returns once.
+""".
+-type input_outcome() ::
+    ok
+    | {consumed, ConsumedSeq :: non_neg_integer()}
+    | {error, Reason :: term()}.
+
+-export_type([input_outcome/0]).
 
 -doc "Initialise global game state from the match config.".
 -callback init(Config :: map()) ->
@@ -99,6 +115,64 @@ move again.
     {ok, Entities1 :: map()}
     | {ok, Entities1 :: map(), ConsumedSeq :: non_neg_integer()}
     | {error, Reason :: term()}.
+
+-doc """
+Optional: apply a whole tick's queued inputs in one call.
+
+A module that exports this is handed the tick's inputs together and returns one
+entity map plus one outcome per input, in the same order. asobi still owns the
+ack policy - an outcome only says what happened to that input, and the mapping
+from outcome to `world.ack` is unchanged from `handle_input/3`:
+
+- `ok` acks the frame stamp, exactly as `{ok, Entities1}` does
+- `{consumed, Seq}` reports a watermark, exactly as `{ok, Entities1, Seq}` does
+- `{error, Reason}` logs and still advances the stamp, exactly as
+  `{error, Reason}` does
+
+It exists for bridges whose per-input cost is dominated by marshalling the
+entity map across a language boundary rather than by the input itself.
+`asobi_lua_world` encodes the map into Luerl once per tick here instead of once
+per input, which is the difference between O(inputs x entities) and O(entities)
+work per tick. The measurements are in
+[Performance tuning](performance-tuning.md#players-in-one-zone).
+
+Breaking the contract - a wrong-length outcome list, or a return that is not
+`{ok, Entities1, Outcomes}` at all - logs and acks **nothing** for that tick. A
+frame stamp would be worse than silence: the session's ack gate is monotonic, so
+stamping over a watermark the module did report buries it permanently, while a
+missing ack is undone by the next clean tick. A wrong-length list still keeps
+the entities the module handed back (it may already have applied them); an
+unusable return keeps the ones the zone held. Neither is re-run through
+`handle_input/3`, for the same reason.
+
+A module that does not export this gets `handle_input/3` per input, unchanged.
+
+Exporting it **shadows `handle_input/3` entirely** for that module: asobi never
+calls the per-input path when the batch exists. A module that exports both is
+carrying two implementations of one semantic and has to keep them in lockstep.
+
+An empty or invalid return means the same thing on both paths for the entities:
+leave them alone. That is not free here - the module is handed the map itself
+rather than a copy - so asobi reverts the Luerl state the call produced, which
+reverts the heap the mutation lived in. Without it, a handler written as "apply
+the move, then `return` to reject it" would keep the move, and one that looks
+its target up from a client-controlled field would be a write primitive on any
+entity in the zone. The revert is of the whole Luerl state, so a global the
+handler wrote on its reject path, or randomness it consumed, is discarded with
+it - `handle_input/3` kept those. Keep anything that must survive a rejection in
+`game_state` or on an entity.
+
+`asobi_lua_world` deliberately exports both. The batch is what production runs;
+`handle_input/3` is kept as the reference semantic the batch is checked against,
+and `asobi_lua_input_batch_tests:batch_agrees_with_per_input/0` drives the
+hostile-return corpus through both, comparing entities and outcomes. Delete it
+and the only cross-check on `batch_result/3` goes with it.
+""".
+-callback handle_input_batch(
+    Inputs :: [{PlayerId :: binary(), Input :: map()}],
+    Entities :: map()
+) ->
+    {ok, Entities1 :: map(), Outcomes :: [input_outcome()]}.
 
 -doc "Global post-tick hook: continue, trigger a vote, or finish the world.".
 -callback post_tick(Tick :: non_neg_integer(), GameState :: term()) ->
@@ -197,5 +271,7 @@ plain terms. The inverse of `init_zone_state`'s restore path.
     on_zone_loaded/2,
     on_zone_unloaded/2,
     init_zone_state/2,
-    dump_zone_state/1
+    dump_zone_state/1,
+    handle_input/3,
+    handle_input_batch/2
 ]).

@@ -663,7 +663,42 @@ is_defined_true_for_non_function_global() ->
     ?assert(asobi_lua_loader:is_defined(match_size, St)),
     ?assertNot(asobi_lua_loader:is_defined(some_field_never_set, St)).
 
+%% --- anchor_ref: what it is for ---
+
+%% The hazard, stated as a test so it stays true. A Luerl reference Erlang holds
+%% between calls is reachable only through luerl's root set - `_G`, the stack and
+%% the live call frames - so a collection while nothing names it frees the table,
+%% its slot goes back on the free list, and the very next encode recycles it. The
+%% reference then silently names somebody else's data rather than failing.
+unanchored_ref_aliases_after_a_collection_test() ->
+    St = sandboxed(),
+    {Held, St1} = luerl:encode(#{~"held" => true}, St),
+    St2 = luerl:gc(St1),
+    {_Other, St3} = luerl:encode(#{~"other" => 42}, St2),
+    ?assertEqual(#{~"other" => 42}, asobi_lua_api:decode_to_map(Held, St3)).
+
+anchored_ref_survives_a_collection_test() ->
+    St = sandboxed(),
+    {Held, St1} = luerl:encode(#{~"held" => true}, St),
+    St2 = asobi_lua_loader:anchor_ref(Held, St1),
+    St3 = luerl:gc(St2),
+    {_Other, St4} = luerl:encode(#{~"other" => 42}, St3),
+    ?assertEqual(#{~"held" => true}, asobi_lua_api:decode_to_map(Held, St4)).
+
+%% The anchor is one slot, so releasing it has to actually release: an anchor
+%% that never cleared would pin one table per bridge for the life of the zone.
+unanchor_ref_releases_the_root_test() ->
+    St = sandboxed(),
+    {Held, St1} = luerl:encode(#{~"held" => true}, St),
+    St2 = asobi_lua_loader:unanchor_ref(asobi_lua_loader:anchor_ref(Held, St1)),
+    St3 = luerl:gc(St2),
+    {_Other, St4} = luerl:encode(#{~"other" => 42}, St3),
+    ?assertEqual(#{~"other" => 42}, asobi_lua_api:decode_to_map(Held, St4)).
+
 %% --- Helpers ---
+
+sandboxed() ->
+    asobi_lua_loader:init_sandboxed().
 
 -spec encode_map(map(), dynamic()) -> dynamic().
 encode_map(Map, St) ->

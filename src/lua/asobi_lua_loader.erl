@@ -9,6 +9,9 @@ standard-library entry point cleared:
   `os.tmpname`
 - `io` (the whole library)
 - `dofile`, `loadfile`, `load`, `loadstring`
+- `collectgarbage` - asobi collects on its own schedule via `luerl:gc/1`;
+  letting a script force a synchronous mark-and-sweep on the zone process is
+  both a DoS surface and a way to free references Erlang is still holding
 - `package` (the whole library) — replaced by an `asobi_lua`-controlled
   `require/1` so scripts can still split logic across files
 
@@ -32,6 +35,7 @@ load a specific script and pin its base directory for `require`.
 -export([new/1, new/2, new/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
 -export([is_defined/2]).
 -export([collect_state/1]).
+-export([anchor_ref/2, unanchor_ref/1, ref_anchored/2]).
 -ifdef(TEST).
 -export([next_gc/4, gc_budget_us/1, state_words/0]).
 -endif.
@@ -91,7 +95,8 @@ load a specific script and pin its base directory for `require`.
 -define(REDUCTION_POLL_MS, 10).
 
 %% #426: Luerl never collects a long-lived state on its own - only an explicit
-%% `collectgarbage()` from Lua or `luerl:gc/1` from Erlang reclaims anything.
+%% `luerl:gc/1` from Erlang reclaims anything, and since `collectgarbage` is
+%% stripped from the sandbox that call is asobi's alone to make.
 %% Every per-tick `luerl:encode/2` therefore leaks: measured at ~3900 words per
 %% tick for a 50-entity zone, which is ~625 KB/s per zone at a 50 ms tick, and
 %% `bounded_eval` copies the whole state into the eval worker and back on every
@@ -140,6 +145,10 @@ load a specific script and pin its base directory for `require`.
 %% tidy-up. A quarter leaves the back-off a working range either side.
 -define(GC_BUDGET_CEILING_US, (?GC_ABANDON_US div 4)).
 -define(GC_ANCHOR, ~"__asobi_gc_anchor").
+%% A second root, for a value Erlang holds across `call/3` invocations rather
+%% than across a collection. Distinct from ?GC_ANCHOR so the two never evict
+%% each other: a collection can run while an input batch is mid-flight.
+-define(REF_ANCHOR, ~"__asobi_ref_anchor").
 
 %% How often `collect_state/1` reports the measured state size. The collector's
 %% own interval is adaptive and can be off entirely, so the size cannot ride on
@@ -639,8 +648,58 @@ collect(St, Anchor) ->
 unanchor(St) ->
     raw_anchor(nil, St).
 
-raw_anchor(Value, #luerl{g = G} = St) ->
-    luerl_heap:raw_set_table_key(G, ?GC_ANCHOR, Value, St).
+raw_anchor(Value, St) ->
+    raw_anchor_key(?GC_ANCHOR, Value, St).
+
+raw_anchor_key(Key, Value, #luerl{g = G} = St) ->
+    luerl_heap:raw_set_table_key(G, Key, Value, St).
+
+-doc """
+Root a Luerl reference in `_G` for as long as Erlang holds it between calls.
+
+Luerl's root set is `_G`, the stack and the live call frames, so a table that
+Erlang is carrying across `call/3` is reachable only while some frame happens to
+name it. A script that ignores an argument - `function handle_input(p, i)` when
+three were passed - drops it from the frame. If anything then collects, the
+table is freed, its slot returns to the free list, and the next
+`luerl:encode/2` recycles it: the reference Erlang still holds now aliases
+somebody else's data.
+
+`collectgarbage` is stripped from the sandbox, so no script can force that
+today, and this is the second layer rather than the only one. It is still the
+load-bearing one, because the strip closes one reachable path while this closes
+the class: any Erlang-side collection between two calls - which ADR 0015 makes
+the normal shape by holding refs across every call - has the same effect.
+
+Anchoring costs one raw `_G` write. Raw, for the reason `collect/2` gives: the
+metamethod-honouring setter would run a script's `__newindex` on the bridge
+process, outside `bounded_eval`.
+
+Pair every `anchor_ref/2` with an `unanchor_ref/1`, or the anchored table stays
+reachable and no collection can reclaim it.
+""".
+-spec anchor_ref(term(), dynamic()) -> dynamic().
+anchor_ref(Value, St) ->
+    raw_anchor_key(?REF_ANCHOR, Value, St).
+
+-doc "Drop the `anchor_ref/2` root.".
+-spec unanchor_ref(dynamic()) -> dynamic().
+unanchor_ref(St) ->
+    raw_anchor_key(?REF_ANCHOR, nil, St).
+
+-doc """
+Is `Value` still the value `anchor_ref/2` rooted?
+
+The raw write cannot be intercepted by a script's `_G` metatable, but the slot
+it writes to lives in `_G`, which scripts can assign to. `__asobi_ref_anchor =
+nil` from Lua drops asobi's root, and anything Erlang still holds is then one
+collection away from naming a recycled slot. A caller carrying a reference
+across `call/3` therefore has to re-check rather than assume, and treat `false`
+as "nothing I am holding is safe to decode".
+""".
+-spec ref_anchored(term(), dynamic()) -> boolean().
+ref_anchored(Value, #luerl{g = G} = St) ->
+    luerl_heap:raw_get_table_key(G, ?REF_ANCHOR, St) =:= Value.
 
 gc_disabled() ->
     asobi_lua_env:get_env(lua_gc) =:= {ok, false}.
@@ -670,7 +729,13 @@ strip_dangerous_globals(St) ->
     %% `game.log` (asobi_lua_api), which routes structured reports
     %% through the host logger behind a rate limit - closing exactly
     %% the two holes print was removed for.
+    %% `collectgarbage` is stripped for two reasons, both in
+    %% `guides/security-sandbox.md`: it is a synchronous, superlinear
+    %% mark-and-sweep on the shared zone process, and it lets a script decide
+    %% when references asobi holds between calls are freed. asobi collects on
+    %% its own schedule through `luerl:gc/1`, which is Erlang-side.
     Paths = [
+        [~"collectgarbage"],
         [~"os", ~"execute"],
         [~"os", ~"exit"],
         [~"os", ~"getenv"],

@@ -19,6 +19,16 @@ cannot reach them:
   `game.log(level, message[, meta])`, which routes a structured, size-bounded
   line through the host logger behind a rate limit (per match or zone, plus a
   node-wide backstop). See the Logging section of the Lua scripting guide.
+- Collection - `collectgarbage`. It runs a full mark-and-sweep of the state
+  synchronously on the shared zone process, and Luerl's mark phase is
+  superlinear in the live set, so a script calling it in a per-tick callback
+  stalls every other player in that zone. It also decides when values asobi is
+  holding between calls are freed, which is a correctness surface and not just a
+  performance one. Nothing is lost: asobi collects each state on its own
+  adaptive schedule, and Luerl's `collectgarbage` ignores every argument except
+  `"collect"`, so there was never a working `"count"` to read memory with. Use
+  the `[asobi, lua, state]` gauge instead - see
+  [Observability](observability.md).
 
 `os.clock`, `os.date`, `os.difftime` and `os.time` stay, so games can timestamp.
 
