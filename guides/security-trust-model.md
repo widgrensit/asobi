@@ -76,12 +76,18 @@ The macros are not all in one place. Match budgets are `?*_TIMEOUT` in
 budget is a literal `50` at the call site in `asobi_bot.erl` rather than a
 macro. Grep for `asobi_lua_loader:call(` if you need the authoritative set.
 
-## The GC anchor is written past `_G`'s metatable
+## The anchors are written past `_G`'s metatable
 
-asobi collects each Lua state periodically, and to do that it has to keep the
-one value it holds between callbacks (`game_state`) reachable from Lua's root
-set for the duration. It writes that anchor **raw**, past any metatable the
-script has installed on `_G`.
+asobi holds Luerl references between callbacks, and Lua's root set is `_G`, the
+stack and the live call frames - so a reference Erlang is carrying is reachable
+only while something roots it. There are two anchors:
+
+- `game_state`, rooted for the duration of a collection.
+- The entity map, rooted for the duration of an input batch
+  (`handle_input_batch/2`). This one is live **while your script runs**, which
+  the next section explains.
+
+Both are written **raw**, past any metatable the script has installed on `_G`.
 
 That matters because `setmetatable(_G, ...)` is permitted (above), and the
 metamethod-honouring setter would make asobi's own bookkeeping write run script
@@ -90,8 +96,17 @@ with no wall-clock budget, no reduction budget and no heap cap. A `__newindex`
 that never returns would wedge that process permanently; an ordinary
 strict-globals `__newindex` that raises would make every collection silently
 fail while the collector reported itself healthy. Neither is reachable: the raw
-write runs no Lua and cannot fail, and the anchor is cleared again before the
-callback runs, so a script never observes it.
+write runs no Lua and cannot fail.
+
+The collector's anchor is cleared again before the callback runs, so a script
+never observes that one. The batch anchor is different and deliberately so: it
+has to stay rooted across the calls it protects, so a script **can** see
+`__asobi_ref_anchor` in `pairs(_G)` and can clear it. Clearing it does not
+corrupt anything. asobi re-checks the anchor after every call with a raw read -
+which a `__index` metamethod cannot spoof, for the same reason the write cannot
+be intercepted - and a batch whose anchor has gone abandons the tick's inputs
+and hands the zone back the entity map it started with. The cost of tampering
+falls on the script that tampered.
 
 ## handle-input is not a sandbox boundary
 

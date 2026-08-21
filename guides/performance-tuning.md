@@ -160,6 +160,64 @@ so this is visible before zones start dying of it; asobi also logs
 Set `{asobi, [{lua_gc, false}]}` to turn the collector off entirely. There is
 no reason to do this outside diagnosing a problem with the collector itself.
 
+### Players in one zone
+
+The entity map is encoded into Lua **once per tick**, not once per input. That
+matters for any game where players cluster - a station, a battle, a spawn point
+- because the alternative scales with the product of the two.
+
+Measured on 2026-08-21, OTP 29.0.2 and luerl 1.5.1, 10 cores, on a zone holding
+200 entities of 27 fields, applying one five-step input frame per player per
+tick. One machine on one day, not a promise: measure your own game before you
+size anything, the way [Benchmarks](benchmarks.md) says. The tick rate here is 12.5 Hz (`tick_rate =
+80`), not the shipped default of 50 - the budget column says what each figure
+costs against **the default 50 ms**:
+
+| Players in the zone | Lua tables allocated per tick | Mean tick | Of a 50 ms budget |
+|---|---|---|---|
+| 1 | 386 | 16.0 ms | 32% |
+| 8 | 435 | 16.6 ms | 33% |
+| 32 | 603 | 17.3 ms | 35% |
+| 64 | 827 | 19.3 ms | 39% |
+
+The cost is dominated by entities: going from 1 player to 64 adds about seven
+Lua tables per player and 21% to the tick, where the entity count sets
+everything else. So the number to design around is how many entities a zone
+holds, not how many players stand in it.
+
+Before the entity map was hoisted out of the per-input path the same 64-player
+row allocated 13,490 tables and took 439 ms, which is nearly nine times the
+default budget and over five times an 80 ms one.
+
+A game module can opt into the same shape from Erlang by exporting
+`handle_input_batch/2` (see `asobi_world`); a module that does not gets
+`handle_input/3` per input, unchanged.
+
+Nothing about writing `handle_input` changes. Every input in a tick is handed
+the same entity table rather than a fresh copy, but an empty or invalid return
+still means "leave the entities alone" - asobi reverts the Lua state the call
+produced, which reverts the mutation with it. So this stays correct, and costs
+what it always did:
+
+```lua
+function handle_input(player_id, input, entities)
+    local p = entities[player_id]
+    if not p then return entities end
+    if math.abs(input.dx) > MAX_STEP then return end   -- rejected, move discarded
+    p.x = p.x + input.dx
+    return entities
+end
+```
+
+One thing the revert does take with it: a global the handler wrote before
+returning, or randomness it consumed, is rolled back too, where the per-input
+path kept those. Keep anything that must survive a rejection in `game_state` or
+on an entity rather than in a Lua global.
+
+The `nil` check is not decoration: an input can arrive for a player whose entity
+is not in this zone, and a script that indexes `p` blindly raises. asobi catches
+it and acks, so nothing corrupts, but the input is lost either way.
+
 ## Checkpoint
 
 1. In a match where everyone shares one view, set `state_strategy = "shared"`

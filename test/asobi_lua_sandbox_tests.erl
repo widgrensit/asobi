@@ -99,6 +99,15 @@ package_is_nil_test() ->
     St = fresh_state(),
     ?assertEqual(nil, eval_and_decode("return package", St)).
 
+%% --- collection blocked ---
+
+%% A script forcing a synchronous mark-and-sweep stalls the shared zone process,
+%% and decides when values asobi holds between calls are freed. asobi collects on
+%% its own schedule through luerl:gc/1, which is Erlang-side.
+collectgarbage_is_nil_test() ->
+    St = fresh_state(),
+    ?assertEqual(nil, eval_and_decode("return collectgarbage", St)).
+
 %% --- require: validation, traversal, escape ---
 
 require_rejects_dot_dot_test() ->

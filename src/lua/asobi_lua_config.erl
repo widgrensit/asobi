@@ -55,7 +55,7 @@ player_ttl_ms           = 0               -- optional, 0=remove on disconnect, -
 ```
 
 Setting `game_type = "world"` routes the script through the `asobi_lua_world`
-bridge (zone_tick/2 + handle_input/3 returning entities). Defaults to "match",
+bridge (zone_tick/2 + an input callback returning entities). Defaults to "match",
 which uses the `asobi_lua_match` bridge (tick/1 + wrapped-state callbacks).
 
 `guest_auth` and `registration` are read from `match.lua` in single-mode and

@@ -45,7 +45,7 @@ of hot reloads.
 -include("asobi_ack.hrl").
 
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
--export([zone_tick/2, handle_input/3, post_tick/2]).
+-export([zone_tick/2, handle_input/3, handle_input_batch/2, post_tick/2]).
 -ifdef(TEST).
 -export([zone_ctx/2, make_ctx/1]).
 -endif.
@@ -304,7 +304,7 @@ stamp is used, so a script cannot ack something the client will not accept.
 -spec handle_input(binary(), map(), map()) ->
     {ok, map()} | {ok, map(), non_neg_integer()} | {error, term()}.
 handle_input(PlayerId, Input, Entities) ->
-    case erlang:get(?PD_KEY) of
+    case stashed_zone_state() of
         #{lua_state := LuaSt} = ZoneState ->
             {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
             {EncEntities, LuaSt2} = luerl:encode(Entities, LuaSt1),
@@ -329,6 +329,179 @@ handle_input(PlayerId, Input, Entities) ->
             end;
         _ ->
             {ok, Entities}
+    end.
+
+-doc """
+Apply a tick's whole input queue with one encode of the entity map.
+
+`handle_input/3` encodes the entity map into Luerl on every call, so a zone with
+P players applied it P times per tick and decoded it P times back. That is the
+same map every time, and it dominated both the allocation and the tick: measured
+at 200 entities, `handle_input` allocated `208 x P` Lua tables per tick against
+`zone_tick`'s constant 177.6, and 64 players in one zone ran a tick well past
+any budget the world could be given. See
+`guides/performance-tuning.md`.
+
+Here the map is encoded once, the resulting Luerl reference is threaded through
+every input, and it is decoded once at the end. Each input still pays for its
+own (small) input frame.
+
+The reference is **anchored** for the batch (`asobi_lua_loader:anchor_ref/2`).
+Luerl's root set is `_G`, the stack and the live call frames, so a table Erlang
+carries between calls is reachable only while some frame happens to name it, and
+a script that ignores the argument (`function handle_input(p, i)` when three were
+passed) drops the map from its frame. A collection at that moment frees it, its
+slot returns to luerl's free list, the next input's `luerl:encode/2` recycles it,
+and the reference then aliases that input's frame: the zone's whole entity map
+silently becomes one player's input, which `asobi_zone` accepts and the
+snapshotter persists.
+
+Two things stop that, and they close different doors. `collectgarbage` is
+stripped from the sandbox, so a script cannot force a collection mid-batch. The
+anchor makes the reference survive one regardless, which is what keeps this
+correct if a collection is ever introduced on this path. `_G` is script-writable,
+so the anchor is re-checked after every call: a script that clears it loses that
+tick's inputs rather than corrupting the zone.
+
+An empty or invalid return means what it means under `handle_input/3`: leave the
+entities alone. The script holds the table itself here, so that is not free -
+see `batch_result/2`.
+""".
+-spec handle_input_batch([{binary(), map()}], map()) ->
+    {ok, map(), [asobi_world:input_outcome()]}.
+handle_input_batch([], Entities) ->
+    {ok, Entities, []};
+handle_input_batch(Inputs, Entities) ->
+    case stashed_zone_state() of
+        #{lua_state := LuaSt} = ZoneState ->
+            {EncEntities, LuaSt1} = luerl:encode(Entities, LuaSt),
+            {EncEntities1, Outcomes, LuaSt2, ZoneState1} = run_input_batch(
+                Inputs, EncEntities, LuaSt1, ZoneState, []
+            ),
+            %% Decode BEFORE unanchoring: the reference is only rooted until the
+            %% slot is cleared, and nothing should read an unrooted one.
+            Result =
+                case EncEntities1 of
+                    anchor_lost ->
+                        {ok, Entities, Outcomes};
+                    _ ->
+                        Decoded = asobi_lua_api:atomize_entities(
+                            decode_to_map(EncEntities1, LuaSt2)
+                        ),
+                        {ok, Decoded, Outcomes}
+                end,
+            LuaSt3 = asobi_lua_loader:unanchor_ref(LuaSt2),
+            erlang:put(?PD_KEY, ZoneState1#{lua_state => LuaSt3}),
+            Result;
+        _ ->
+            {ok, Entities, [ok || _ <- Inputs]}
+    end.
+
+%% `erlang:get/1` is typed `term()`, so matching a zone state straight out of the
+%% process dictionary loses the map shape and every luerl call on what comes out
+%% of it reads as untyped. Narrowing it once here keeps the callers honest
+%% without an eqwalizer suppression.
+-spec stashed_zone_state() -> map() | undefined.
+stashed_zone_state() ->
+    case erlang:get(?PD_KEY) of
+        ZoneState when is_map(ZoneState) -> ZoneState;
+        _ -> undefined
+    end.
+
+run_input_batch([], Enc, LuaSt, ZoneState, Acc) ->
+    {Enc, lists:reverse(Acc), LuaSt, ZoneState};
+run_input_batch([{PlayerId, Input} | Rest], Enc, LuaSt, ZoneState, Acc) ->
+    %% Anchor BEFORE the input encode, not after: `Enc` has to be rooted across
+    %% every allocation, not merely across the call. Re-anchored each iteration
+    %% because `Enc` changes - whatever the last script returned is what the
+    %% next one is handed.
+    LuaSt0 = asobi_lua_loader:anchor_ref(Enc, LuaSt),
+    {EncInput, LuaSt1} = luerl:encode(Input, LuaSt0),
+    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, Enc], LuaSt1) of
+        {ok, Rets, LuaSt2} ->
+            %% `_G` is script-writable, so a script can clear asobi's root with
+            %% `__asobi_ref_anchor = nil`. Nothing Erlang is holding is safe to
+            %% decode after that, so abandon the batch and hand back the map the
+            %% zone gave us rather than one that may alias a recycled slot.
+            case asobi_lua_loader:ref_anchored(Enc, LuaSt2) of
+                true ->
+                    case batch_result(Rets, ZoneState) of
+                        {keep, Enc1, Outcome} ->
+                            run_input_batch(Rest, Enc1, LuaSt2, ZoneState, [Outcome | Acc]);
+                        {revert, Outcome} ->
+                            run_input_batch(Rest, Enc, LuaSt0, ZoneState, [Outcome | Acc])
+                    end;
+                false ->
+                    log_anchor_cleared(ZoneState),
+                    %% Carry the outcomes already produced this tick rather than
+                    %% flattening them to stamps. A {consumed, Seq} replaced by
+                    %% a frame stamp is buried for good - the session ack gate
+                    %% is monotonic - and the input that cleared the anchor is
+                    %% not the input that reported. The current input and the
+                    %% un-run remainder ack by stamp, which is all asobi knows.
+                    Unrun = [ok || _ <- [dropped | Rest]],
+                    {anchor_lost, lists:reverse(Acc, Unrun), LuaSt2, ZoneState}
+            end;
+        {error, Reason} ->
+            log_lua_error(handle_input, Reason, ZoneState),
+            ZoneState1 = asobi_lua_dev_errors:maybe_notify(
+                handle_input, Reason, PlayerId, ZoneState
+            ),
+            %% `ok`, not `{error, Reason}`. A Lua exception is a bridge failure,
+            %% not a module rejection: handle_input/3 maps one to
+            %% `{ok, Entities}` after a rate-limited, shape-classified
+            %% log_lua_error/3, and reporting it as a rejection instead would
+            %% classify every throwing handler as the game refusing the input.
+            run_input_batch(Rest, Enc, LuaSt0, ZoneState1, [ok | Acc])
+    end.
+
+-doc """
+What a script's `handle_input` return means for the table the batch is carrying.
+
+`{keep, Enc1, Outcome}` takes what the script returned. `{revert, Outcome}`
+means it returned nothing usable, and `run_input_batch/5` then drops the Luerl
+state the call produced.
+
+Dropping the state is what makes an empty return mean the same thing here as it
+does under `handle_input/3` **for the entities**. It is wider than that in one
+respect worth knowing: the Luerl state is the whole VM, so anything else the
+call did - a global it wrote, randomness it consumed - goes with the revert,
+where `handle_input/3` kept it. A handler that counts strikes in a global on its
+reject path has to keep that count in `game_state` or in an entity instead. There, the module gets a fresh copy of the entity
+map per input, so a mutation it made and did not return is discarded because
+Erlang still holds the original. Here the script is handed the table itself, and
+there is no Erlang-side copy to fall back on - but the Luerl state is
+functional, so reverting to the state from before the call reverts the heap the
+mutation lives in. It costs nothing and it is the difference between "returning
+nothing rejects the input" and "returning nothing keeps whatever you touched,
+including another player's entity".
+
+The same revert runs on a Lua exception, which is why a raising handler leaves
+no input frame behind either.
+""".
+batch_result([], _ZoneState) ->
+    {revert, ok};
+%% A Luerl table reference is a tuple, so anything else is a script returning a
+%% scalar where entities belong. Stated as what is ACCEPTED rather than as a
+%% list of rejects: the accepted value is threaded onward as `Enc` and written
+%% into `_G` by anchor_ref/2, so it has to be a reference and nothing else.
+batch_result([Ents | _Rest], ZoneState) when not is_tuple(Ents) ->
+    log_invalid_input_return(ZoneState),
+    {revert, ok};
+batch_result([Ents | Rest], ZoneState) ->
+    case Rest of
+        [] ->
+            {keep, Ents, ok};
+        [Consumed | _] ->
+            case consumed_seq(Consumed) of
+                {ok, Seq} ->
+                    {keep, Ents, {consumed, Seq}};
+                none ->
+                    {keep, Ents, ok};
+                invalid ->
+                    log_invalid_input_return(ZoneState),
+                    {keep, Ents, ok}
+            end
     end.
 
 -spec post_tick(non_neg_integer(), map()) ->
@@ -789,11 +962,23 @@ input_result([Ents | Rest], LuaSt, _Entities, ZoneState) ->
             end
     end.
 
-%% Its own limiter bucket, and deliberately NOT log_lua_error/3: that keys on
-%% {Script, Callback}, so a client posting junk in the field a script echoes
-%% would exhaust the budget real handle_input exceptions are logged from, and
-%% its unconditional telemetry emit would classify a well-behaved script as
-%% throwing a Lua runtime error at input rate.
+%% Its own limiter bucket, for the same reason log_invalid_input_return/1 below
+%% has one: keying on {Script, Callback} the way log_lua_error/3 does would let
+%% script-driven noise exhaust the budget real Lua exceptions are logged from.
+log_anchor_cleared(ZoneState) ->
+    Script = maps:get(script, ZoneState, ~"<unknown>"),
+    case asobi_script_log_limiter:allow({Script, anchor_cleared}) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg =>
+                    ~"lua script cleared asobi's reference anchor; this tick's inputs were dropped",
+                script => asobi_lua_game_error:script_basename(Script),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
+
 log_invalid_input_return(ZoneState) ->
     Script = maps:get(script, ZoneState, ~"<unknown>"),
     case asobi_script_log_limiter:allow({Script, invalid_input_return}) of
