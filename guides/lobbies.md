@@ -162,7 +162,7 @@ Nothing creates the hub at boot. The first `world.find_or_create` instantiates
 it and it stays up from then on; after a restart the first player recreates it.
 
 Worlds are subject to `world_max_per_player` (5) and `world_max` (1000) - see
-[World capacity](configuration.md#world-capacity).
+[World capacity](configuration.md#instance-capacity).
 
 ### Private lobbies
 

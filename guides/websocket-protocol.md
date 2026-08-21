@@ -132,7 +132,7 @@ than the 32 field names the dictionary can index.
 The uplink is text-only on both wires. A binary frame sent to the server answers
 `error` with reason `binary_uplink_unsupported`.
 
-See [Binary `world.tick`](#binary-worldtick) for the encoding.
+See [Binary `world.tick`](#binary-world-tick) for the encoding.
 
 ### `session.heartbeat`
 
@@ -339,7 +339,7 @@ Send game input to the match server.
 {"type": "match.input", "payload": {"action": "move", "x": 10, "y": 5}}
 ```
 
-As with [`world.input`](#worldinput), the `payload` IS the input map. Two
+As with [`world.input`](#world-input), the `payload` IS the input map. Two
 **deprecated** compatibility shapes survive here and will go at the next
 protocol break: a payload whose only key is `data` mapped to an object is
 unwrapped to that object, and one whose only key is `data` mapped to a JSON
@@ -696,7 +696,7 @@ reason `invalid_payload`. It is not silently treated as empty input.
 
 For client-side prediction, add an optional `seq` *alongside* `payload` (a
 sibling, so "the payload IS the input map" stays true). The server echoes the
-highest consumed `seq` back as a [`world.ack`](#worldack-server-push); see
+highest consumed `seq` back as a [`world.ack`](#world-ack-server-push); see
 [Client-side prediction](#client-side-prediction). A `seq` that is not a
 non-negative integer below 2^53 is ignored.
 
@@ -773,7 +773,7 @@ Two frames are applied **ungated**, without the sequence check:
 - A frame with no `frame_seq` at all, which is the removal list you get for the
   zone you are leaving. Gating it would leave you holding ghosts forever.
 
-On a gap, send [`world.resync`](#worldresync) for that zone and you get a fresh
+On a gap, send [`world.resync`](#world-resync) for that zone and you get a fresh
 keyframe.
 
 ### Binary `world.tick`
@@ -884,7 +884,7 @@ authoritative state already includes - is a first-class primitive:
    of `payload`) and applies the input locally right away (the prediction).
 2. The server records the highest `seq` it consumed for that player - a rejected
    input still counts, so a dropped input never strands the client - and sends it
-   back on the next broadcast as a [`world.ack`](#worldack-server-push)
+   back on the next broadcast as a [`world.ack`](#world-ack-server-push)
    addressed to that connection alone.
 3. The client discards every predicted input up to that `seq` and replays the
    rest on top of the authoritative `world.tick` state (the reconciliation).
