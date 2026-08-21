@@ -31,9 +31,9 @@ load a specific script and pin its base directory for `require`.
 
 -export([new/1, new/2, new/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
 -export([is_defined/2]).
--export([collect_state/1, state_words/0]).
+-export([collect_state/1]).
 -ifdef(TEST).
--export([next_gc/4, gc_budget_us/1]).
+-export([next_gc/4, gc_budget_us/1, state_words/0]).
 -endif.
 
 -export_type([pre_install/0]).
@@ -465,26 +465,18 @@ collect_state(#{lua_state := St} = State) ->
 collect_state(State) ->
     State.
 
--doc """
-Size in words of the Luerl state the last bounded callback was handed, or
-`undefined` before one has run on this process.
-
-`call/4` spawns a worker and the spawn copies the state into it, so the
-worker's heap at its first instruction is that state, exactly, and reading it
-there costs nothing. Sizing the same term on the calling side would mean
-walking it. Callbacks that run inline (`call/3`, and `handle_input`, which is
-not a sandbox boundary - see `guides/security-trust-model.md`) never spawn, so
-they do not refresh this; on a bridge that ticks, the tick does.
-
-It belongs to **the last bounded call on this process, whichever state that
-was**, not necessarily to the state you are holding. A process that boots a
-throwaway VM - `asobi_lua_world:init_zone_state/2` does, to read
-`spawn_templates` - measures that one. `collect_state/1` consumes the value
-rather than reading it, so a stale measurement can be attributed at most once.
-""".
+%% Size in words of the Luerl state the last bounded callback was handed. Not
+%% public, and TEST-only: it belongs to the last bounded call on *this process*,
+%% whichever state that was, so it is only meaningful to a caller that knows
+%% the call history. `collect_state/1` does, because it runs on the bridge
+%% between that bridge's own calls, and it uses `take_state_words/0` below. A
+%% process that boots a throwaway VM (`init_zone_state/2` does, to read
+%% `spawn_templates`) measures that one instead.
+-ifdef(TEST).
 -spec state_words() -> non_neg_integer() | undefined.
 state_words() ->
     normalise_words(erlang:get(?STATE_WORDS_KEY)).
+-endif.
 
 %% Consume rather than read: a value left behind outlives the call it belongs
 %% to, and `gc_budget_us/1` acts on it, so staleness is not merely cosmetic.
@@ -557,8 +549,10 @@ warn_large_state(Words, State, Gc) ->
             false -> Words >= Threshold
         end,
     case Threshold > 0 andalso Over of
-        false ->
+        false when Warned ->
             Gc#{warned => false};
+        false ->
+            Gc;
         true ->
             case Warned of
                 true ->
@@ -578,7 +572,7 @@ warn_large_state(Words, State, Gc) ->
 
 maybe_gc(St, Anchor, Words, #{enabled := false, retry_at := At} = Gc) ->
     case erlang:monotonic_time(millisecond) >= At of
-        true -> maybe_gc(St, Anchor, Words, Gc#{enabled := true, countdown := 1});
+        true -> maybe_gc(St, Anchor, Words, Gc#{enabled := true, countdown => 1});
         false -> {St, Gc}
     end;
 maybe_gc(St, _Anchor, _Words, #{enabled := false} = Gc) ->
@@ -588,7 +582,11 @@ maybe_gc(St, _Anchor, _Words, #{countdown := N} = Gc) when N > 1 ->
 maybe_gc(St, Anchor, Words, #{interval := Interval} = Gc) ->
     case gc_disabled() of
         true ->
-            {St, Gc#{enabled := false}};
+            %% Dropping `retry_at` matters: leaving it makes the re-arm clause
+            %% above match on every tick, so a bridge with the collector
+            %% switched off pays an application:get_env per tick forever
+            %% instead of short-circuiting on `enabled := false`.
+            {St, maps:remove(retry_at, Gc#{enabled := false})};
         false ->
             {Us, St1} = timer:tc(fun() -> collect(St, Anchor) end),
             {St1, next_gc(Us, gc_budget_us(Words), Interval, Gc)}
@@ -629,31 +627,12 @@ next_gc(Us, Budget, Interval, Gc) ->
     Gc#{interval := Interval1, countdown := Interval1}.
 
 %% The anchor is asobi's bookkeeping, not the script's data, so it is written
-%% past `_G`'s metatable.
-%%
-%% `luerl:set_table_keys/3` honours `__newindex`, and `setmetatable(_G, ...)`
-%% is explicitly permitted (see `guides/security-trust-model.md`). `unanchor`
-%% clears the key each time, so the key is always absent when the next
-%% collection writes it and the metamethod fires every single time. Two
-%% consequences, both measured:
-%%
-%% - A `__newindex` that does not return runs script-authored Lua on the
-%%   bridge gen_server itself, outside `bounded_eval` - no wall-clock budget,
-%%   no reduction budget, no heap cap. `while true do end` burned 4.7 billion
-%%   reductions on the zone process and never returned, so the zone answers no
-%%   call again and never terminates for a supervisor to restart.
-%% - The likelier one: an ordinary strict-globals metatable that *raises*.
-%%   `set_table_keys/3` catches it, the anchor fails, the collection is
-%%   skipped - and because the skipped collection costs no time, the adaptive
-%%   interval reads it as cheap and drives itself to its minimum. Measured at
-%%   400 ticks: 8417 live tables against 11 for the same script without the
-%%   metatable, with `enabled => true` throughout and no log or telemetry.
-%%   That is #536 re-opened, invisibly, by one ordinary line of Lua.
-%%
-%% A raw write cannot fail and cannot run script code, so the previous
-%% "leave the state alone if the anchor failed" path has nothing left to
-%% guard. `luerl_heap` is internal to luerl, which is why the dep is pinned
-%% to a patch range - asobi already depends on `luerl_lib` the same way.
+%% raw. The metamethod-honouring setter would run a script's `_G` `__newindex`
+%% on the bridge gen_server, outside `bounded_eval`, on every collection - see
+%% `guides/security-trust-model.md`. A raw write cannot fail and cannot run
+%% script code, which is why there is no longer an "anchor failed" path.
+%% `luerl_heap` is internal to luerl, hence the patch-range pin on the dep;
+%% asobi already depends on `luerl_lib` the same way.
 collect(St, Anchor) ->
     unanchor(luerl:gc(raw_anchor(Anchor, St))).
 

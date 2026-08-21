@@ -92,10 +92,14 @@ init(Config) ->
                         game_state => GameState,
                         script => ScriptPath,
                         script_mtime => filelib:last_modified(ScriptPath),
+                        %% Read off `Config` itself, the way make_ctx/1 does:
+                        %% asobi_world_server:init/1 hands GameMod:init/1 the
+                        %% game config with `match_id` injected, so there is no
+                        %% nested `game_config` here to look inside.
                         lua_bridge => #{
                             kind => world,
                             world_id => maps:get(
-                                world_id, Config, maps:get(match_id, GameConfig, undefined)
+                                match_id, Config, maps:get(world_id, Config, undefined)
                             )
                         }
                     }};

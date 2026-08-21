@@ -1,5 +1,6 @@
 -module(asobi_lua_loader_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("luerl/include/luerl.hrl").
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -130,7 +131,8 @@ collector_test_() ->
         {"the interval adapts to measured collection cost", fun interval_adapts_to_cost/0},
         {"an uncollectable live set abandons the collector", fun huge_live_set_abandons/0},
         {"a _G metatable cannot defeat the collector", fun strict_globals_still_collects/0},
-        {"a _G metatable cannot run on the bridge process", fun hostile_globals_cannot_hang/0},
+        {"a _G metatable cannot run on the bridge process",
+            {timeout, 30, fun hostile_globals_cannot_hang/0}},
         {"the collection budget scales with the state", fun budget_scales_with_state/0},
         {"the back-off stays reachable at a huge state",
             fun backoff_stays_reachable_at_a_huge_state/0},
@@ -327,8 +329,12 @@ hostile_globals_cannot_hang() ->
     {Pid, Mon} = spawn_opt(fun() -> Self ! {done, collect(S)} end, [monitor]),
     receive
         {done, _} ->
-            erlang:demonitor(Mon, [flush])
-    after 10000 ->
+            erlang:demonitor(Mon, [flush]);
+        %% Without this a crash blocks for the whole window and then reports as
+        %% a hang, which is the wrong diagnosis and the slowest way to get it.
+        {'DOWN', Mon, process, Pid, Reason} ->
+            erlang:error({collect_crashed, Reason})
+    after 5000 ->
         exit(Pid, kill),
         erlang:error(collect_state_ran_script_code_on_the_bridge_process)
     end.
@@ -340,9 +346,11 @@ script_state(File) ->
 
 %% Reaching into luerl's table store is what the #536 reporter had to do in a
 %% remote shell, and it is the only way to assert a collection reclaimed
-%% something rather than merely returning.
+%% something rather than merely returning. Through the records rather than
+%% `element/2`, so a field reorder upstream is a compile error instead of a
+%% silently wrong count.
 live_tables(#{lua_state := St}) ->
-    maps:size(element(2, element(2, St))).
+    maps:size((St#luerl.tabs)#tstruct.data).
 
 big_state(Rows) ->
     #{lua_state := St0} = S0 = gc_zone_state(),
