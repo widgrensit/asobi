@@ -54,6 +54,26 @@ zone_test_() ->
         {"world.input without a seq produces no world.ack (#474)",
             fun world_ack_absent_without_seq/0},
         {"world.ack keeps the highest seq (#474)", fun world_ack_keeps_highest_seq/0},
+        {"a consumed seq reported by handle_input acks below the frame stamp (#532)",
+            fun world_ack_uses_reported_consumed_seq/0},
+        {"a reported seq above the frame stamp is acked too (#532)",
+            fun world_ack_reported_seq_above_stamp/0},
+        {"a report is authoritative for the rest of the tick (#532)",
+            fun world_ack_report_beats_a_later_stamp/0},
+        {"a reported seq never regresses the ack across ticks (#532)",
+            fun world_ack_reported_seq_never_regresses/0},
+        {"an invalid reported seq falls back to the frame stamp (#532)",
+            fun world_ack_invalid_reported_seq_falls_back/0},
+        {"a reported seq wider than the ack space is refused (#532)",
+            fun world_ack_reported_seq_is_bounded/0},
+        {"a report beats a stamp that arrived before it (#532)",
+            fun world_ack_report_beats_an_earlier_stamp/0},
+        {"the newest report in a tick wins, even downwards (#532)",
+            fun world_ack_newest_report_wins/0},
+        {"a rejected input's stamp does not beat a report already made (#532)",
+            fun world_ack_error_stamp_does_not_beat_a_report/0},
+        {"a spec-violating seq neither acks nor kills the zone (#532)",
+            fun world_ack_garbage_seq_does_not_kill_the_zone/0},
         {"world.ack is per-connection - p1's ack never reaches p2 (#474)",
             fun world_ack_is_per_connection/0},
         {"a straggler input re-arms the zone's ack after the entity left (#477)",
@@ -262,6 +282,169 @@ world_ack_keeps_highest_seq() ->
     asobi_zone:player_input(Pid, ~"p1", #{}, 3),
     asobi_zone:tick(Pid, 1),
     ?assertEqual(5, recv_ack()),
+    gen_server:stop(Pid).
+
+%% asobi#532: a client predicting at 60 Hz against a 12.5 Hz zone batches
+%% several simulation steps into one frame. If the zone caps how many it runs
+%% per tick and parks the rest, the frame stamp says more ran than did - the
+%% client would discard predicted steps the server has not applied and could
+%% never replay them. handle_input reporting what it consumed acks BELOW the
+%% stamp, which is the whole point: a max would let "arrived" beat "ran".
+world_ack_uses_reported_consumed_seq() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(
+        Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 42}, 100
+    ),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(42, recv_ack()),
+    gen_server:stop(Pid).
+
+%% The other stamping convention: a frame stamped with the FIRST seq in its
+%% batch, where the zone ran through the end of it. The report is above the
+%% stamp and the client must hear the higher number or it replays steps the
+%% server already applied.
+world_ack_reported_seq_above_stamp() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 9}, 5),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(9, recv_ack()),
+    gen_server:stop(Pid).
+
+%% Once a module has said what it consumed, a plain stamped input arriving
+%% later in the same tick must not raise the ack past it.
+world_ack_report_beats_a_later_stamp() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 12}, 40),
+    asobi_zone:player_input(Pid, ~"p1", #{}, 30),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(12, recv_ack()),
+    gen_server:stop(Pid).
+
+%% Cross-tick monotonicity still holds: a report is authoritative within a tick,
+%% never a licence to walk the ack backwards, which would make the client
+%% replay from a point it has already reconciled past.
+world_ack_reported_seq_never_regresses() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 50}, 50),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(50, recv_ack()),
+    %% Stamp 60 on a report of 20: the stamp must not sneak the ack up, and the
+    %% report must not walk it back. With the feature reverted this reads 60,
+    %% so the case actually discriminates.
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 20}, 60),
+    asobi_zone:tick(Pid, 2),
+    ?assertEqual(50, recv_ack()),
+    gen_server:stop(Pid).
+
+%% The mirror of world_ack_report_beats_a_later_stamp: the rule is that a report
+%% is authoritative for the tick whatever order the two arrive in, and only one
+%% of the two orders was pinned.
+world_ack_report_beats_an_earlier_stamp() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{}, 30),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 12}, 40),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(12, recv_ack()),
+    gen_server:stop(Pid).
+
+%% A module revising its watermark DOWN within a tick is the parking case this
+%% feature exists for, so the newest report has to win rather than the highest.
+world_ack_newest_report_wins() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 40}, 100),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 12}, 101),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(12, recv_ack()),
+    gen_server:stop(Pid).
+
+%% #474 says a rejected input still advances the ack to its frame stamp, and
+%% this feature says a report outranks a stamp. Both are true: refusing one
+%% input does not unrun the steps another input already consumed.
+world_ack_error_stamp_does_not_beat_a_report() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 12}, 40),
+    asobi_zone:player_input(Pid, ~"p1", #{~"action" => ~"invalid"}, 50),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(12, recv_ack()),
+    gen_server:stop(Pid).
+
+%% player_input/4 is exported, so a spec-violating seq must neither ack nor
+%% function_clause the shared zone - which would DoS every player in it. The
+%% tick-local path is total for the same reason record_ack/3 is.
+world_ack_garbage_seq_does_not_kill_the_zone() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(Pid, ~"p1", #{}, ~"garbage"),
+    asobi_zone:player_input(Pid, ~"p1", #{}, {tuple, 1}),
+    asobi_zone:player_input(Pid, ~"p1", #{}, [1, 2, 3]),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(no_ack, recv_ack()),
+    ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid).
+
+%% The documented way to write this callback derives the watermark from the
+%% client's payload, so the reported value is attacker-influenced by design.
+%% asobi_ws_handler bounds the stamped seq to a JS-safe integer for exactly this
+%% reason; the reported one is a second door into the same wire field, and an
+%% ack the session gate keeps forever - so a bignum here would silence that
+%% connection's acks from every zone, not just this one.
+world_ack_reported_seq_is_bounded() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    Huge = 16#1FFFFFFFFFFFFF + 1,
+    asobi_zone:player_input(
+        Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => Huge}, 11
+    ),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(11, recv_ack()),
+    ?assert(is_process_alive(Pid)),
+    %% The largest in-range value is still acked, so the bound is a ceiling and
+    %% not an off-by-one that costs a legitimate game its last seq.
+    asobi_zone:player_input(
+        Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => 16#1FFFFFFFFFFFFF}, 12
+    ),
+    asobi_zone:tick(Pid, 2),
+    ?assertEqual(16#1FFFFFFFFFFFFF, recv_ack()),
+    gen_server:stop(Pid).
+
+%% A game module is user code. A nonsense consumed seq must neither crash the
+%% shared zone process nor be acked: the frame stamp is the recoverable answer.
+world_ack_invalid_reported_seq_falls_back() ->
+    Pid = start_zone(#{broadcast_interval => 1}),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    timer:sleep(10),
+    flush_messages(),
+    asobi_zone:player_input(
+        Pid, ~"p1", #{~"action" => ~"consume", ~"consumed" => ~"nope"}, 7
+    ),
+    asobi_zone:tick(Pid, 1),
+    ?assertEqual(7, recv_ack()),
+    ?assert(is_process_alive(Pid)),
     gen_server:stop(Pid).
 
 %% asobi#474: the ack is per-connection - p1's seq reaches p1 only, never p2's

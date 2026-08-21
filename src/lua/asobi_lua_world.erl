@@ -11,7 +11,7 @@ function join(player_id, state, ctx)         -- ctx is the client join context
 function leave(player_id, state)             -- return updated state
 function spawn_position(player_id, state)    -- return {x, y}
 function zone_tick(entities, zone_state)     -- return entities, zone_state
-function handle_input(player_id, input, entities) -- return entities
+function handle_input(player_id, input, entities) -- return entities[, consumed_seq]
 function post_tick(tick, state)              -- return state (or state + vote/finished)
 -- Optional:
 function generate_world(seed, config)        -- return zone_states table
@@ -42,6 +42,7 @@ of hot reloads.
 -behaviour(asobi_world).
 
 -include_lib("kernel/include/logger.hrl").
+-include("asobi_ack.hrl").
 
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
@@ -267,7 +268,27 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
 zone_tick(Entities, ZoneState) ->
     {Entities, ZoneState}.
 
--spec handle_input(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+-doc """
+Delegates to the script's `handle_input`.
+
+A second Lua return value is the client sequence the script has consumed, and
+it becomes the `world.ack` for that player instead of the seq the client
+stamped on the frame - see the `asobi_world` callback for why a game that
+batches several simulation steps into one frame needs to say what it *ran*
+rather than what *arrived*:
+
+```lua
+function handle_input(player_id, input, entities)
+  local watermark = apply_steps(input.steps, entities)
+  return entities, watermark
+end
+```
+
+A non-numeric or negative second value is refused with a warning and the frame
+stamp is used, so a script cannot ack something the client will not accept.
+""".
+-spec handle_input(binary(), map(), map()) ->
+    {ok, map()} | {ok, map(), non_neg_integer()} | {error, term()}.
 handle_input(PlayerId, Input, Entities) ->
     case erlang:get(?PD_KEY) of
         #{lua_state := LuaSt} = ZoneState ->
@@ -279,9 +300,10 @@ handle_input(PlayerId, Input, Entities) ->
                     handle_input, [PlayerId, EncInput, EncEntities], LuaSt2
                 )
             of
-                {ok, [Ents1 | _], LuaSt3} ->
-                    erlang:put(?PD_KEY, ZoneState#{lua_state => LuaSt3}),
-                    {ok, asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt3))};
+                {ok, Rets, LuaSt3} ->
+                    ZoneState1 = ZoneState#{lua_state => LuaSt3},
+                    erlang:put(?PD_KEY, ZoneState1),
+                    input_result(Rets, LuaSt3, Entities, ZoneState1);
                 {error, Reason} ->
                     log_lua_error(handle_input, Reason, ZoneState),
                     ZoneState1 = asobi_lua_dev_errors:maybe_notify(
@@ -715,6 +737,77 @@ parse_coords(Bin) ->
         _ ->
             error
     end.
+
+%% `handle_input` returns entities, and optionally the client seq the script has
+%% consumed. The seq becomes that player's world.ack instead of the seq stamped
+%% on the frame, so a script that batches several simulation steps into one
+%% frame acks what it RAN rather than what ARRIVED (see the `asobi_world`
+%% callback). An empty return list is a script whose handle_input returns
+%% nothing: leave the entities alone rather than crashing the shared zone.
+input_result([], _LuaSt, Entities, _ZoneState) ->
+    {ok, Entities};
+input_result([Ents | _Rest], _LuaSt, Entities, ZoneState) when
+    not is_tuple(Ents), not is_map(Ents), not is_list(Ents)
+->
+    %% `return nil, 5` or `return "ok"`. decode_to_map/2 case_clauses on a
+    %% scalar, one line from the guard above, and this runs in the zone process
+    %% - so the same author mistake that used to kill every player in the zone
+    %% would just kill them a different way.
+    log_invalid_input_return(ZoneState),
+    {ok, Entities};
+input_result([Ents | Rest], LuaSt, _Entities, ZoneState) ->
+    Decoded = asobi_lua_api:atomize_entities(decode_to_map(Ents, LuaSt)),
+    case Rest of
+        [] ->
+            {ok, Decoded};
+        [Consumed | _] ->
+            case consumed_seq(Consumed) of
+                {ok, Seq} ->
+                    {ok, Decoded, Seq};
+                none ->
+                    {ok, Decoded};
+                invalid ->
+                    log_invalid_input_return(ZoneState),
+                    {ok, Decoded}
+            end
+    end.
+
+%% Its own limiter bucket, and deliberately NOT log_lua_error/3: that keys on
+%% {Script, Callback}, so a client posting junk in the field a script echoes
+%% would exhaust the budget real handle_input exceptions are logged from, and
+%% its unconditional telemetry emit would classify a well-behaved script as
+%% throwing a Lua runtime error at input rate.
+log_invalid_input_return(ZoneState) ->
+    Script = maps:get(script, ZoneState, ~"<unknown>"),
+    case asobi_script_log_limiter:allow({Script, invalid_input_return}) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg => ~"lua handle_input returned something that is not entities and a seq",
+                script => asobi_lua_game_error:script_basename(Script),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
+
+%% Deliberately NOT asobi_lua_phases:to_integer/1, which turns anything
+%% non-numeric into 0 - acking seq 0 would tell the client the server had
+%% consumed nothing, which is a worse answer than falling back to the frame
+%% stamp. An explicit `nil` is the ordinary "no ack for this input" case a
+%% script writes when it has nothing new to report, so it is not an error.
+%%
+%% Shape-guarded rather than decoded. luerl carries a Lua number as a plain
+%% Erlang number, so there is nothing to decode - and luerl:decode/2 raises
+%% `recursive_table` on a self-referential table, which here would be an
+%% uncaught exit in the zone process (this runs after asobi_lua_loader:call/3
+%% has returned, so nothing is guarding it any more). ?MAX_ACK_SEQ is enforced
+%% before trunc/1, which happily mints a 309-digit integer out of 1e308.
+consumed_seq(nil) ->
+    none;
+consumed_seq(N) when is_number(N), N >= 0, N =< ?MAX_ACK_SEQ ->
+    {ok, trunc(N)};
+consumed_seq(_) ->
+    invalid.
 
 decode_to_map(Term, LuaSt) ->
     asobi_lua_api:decode_to_map(Term, LuaSt).

@@ -78,6 +78,102 @@ handle_input_uses_zone_state_from_proc_dict_test() ->
     {_, _ZoneState2} = asobi_lua_world:zone_tick(Entities1, ZoneState1),
     erlang:erase({asobi_lua_world, zone_state}).
 
+%% asobi#532: a script that batches several simulation steps into one frame
+%% reports the seq it actually consumed as a second return value, and that
+%% becomes the world.ack instead of the seq stamped on the frame.
+handle_input_reports_consumed_seq_test() ->
+    _ = prime_ack_zone(),
+    ?assertEqual(
+        {ok, #{~"p1" => #{type => ~"player", x => 1, y => 2}}, 42},
+        asobi_lua_world:handle_input(
+            ~"p1", #{~"x" => 1, ~"y" => 2, ~"consumed" => 42}, #{}
+        )
+    ),
+    %% A fractional seq truncates rather than reaching the zone as a float:
+    %% Lua has one number type and every integer arrives here as one.
+    ?assertMatch(
+        {ok, _, 7},
+        asobi_lua_world:handle_input(~"p1", #{~"consumed" => 7.9}, #{})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% No second return value is the ordinary case and must stay a 2-tuple, so
+%% every script written before this existed keeps acking the frame stamp.
+handle_input_without_consumed_seq_is_unchanged_test() ->
+    _ = prime_ack_zone(),
+    ?assertMatch(
+        {ok, #{~"p1" := #{x := 3}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 3}, #{})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% A script returning something that is not a seq must not ack it: falling back
+%% to the frame stamp is recoverable, acking garbage is not.
+handle_input_invalid_consumed_seq_falls_back_test() ->
+    _ = prime_ack_zone(),
+    ?assertMatch(
+        {ok, #{~"p1" := #{x := 4}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 4, ~"consumed" => ~"nope"}, #{})
+    ),
+    ?assertMatch(
+        {ok, #{~"p1" := #{x := 5}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 5, ~"consumed" => -1}, #{})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% A script whose handle_input falls off its end returns no values at all.
+%% asobi_lua_loader:call/3 hands back {ok, [], St} for that, which used to be a
+%% case_clause in the bridge - and the bridge runs inside the zone process, so
+%% one author's missing return killed the simulation for every player in that
+%% zone. Mirrors the same guard on the match side's `join`.
+handle_input_returning_nothing_leaves_entities_alone_test() ->
+    Config = #{game_config => #{lua_script => fixture("config_silent_input_world.lua")}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_, _} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ?assertEqual(
+        {ok, #{~"p1" => #{x => 1}}},
+        asobi_lua_world:handle_input(~"p1", #{~"x" => 1}, #{~"p1" => #{x => 1}})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% The second return value reaches the bridge AFTER asobi_lua_loader:call/3 has
+%% returned, so nothing is guarding it and the zone process is what dies. Three
+%% shapes a script can hand back, none of which may take the zone with them.
+handle_input_hostile_returns_do_not_kill_the_zone_test() ->
+    _ = prime_zone("config_hostile_input_world.lua"),
+    %% luerl:decode/2 raises recursive_table on this; shape-guarding never
+    %% decodes it at all.
+    ?assertMatch(
+        {ok, _},
+        asobi_lua_world:handle_input(~"p1", #{~"kind" => ~"cyclic"}, #{~"p1" => #{x => 1}})
+    ),
+    %% trunc(1.0e308) is a 309-digit integer. The ack space is 53 bits, and the
+    %% session keeps the highest seq it has sent, so acking one would silence
+    %% that connection's ack stream for good.
+    ?assertMatch(
+        {ok, _},
+        asobi_lua_world:handle_input(~"p1", #{~"kind" => ~"huge"}, #{~"p1" => #{x => 1}})
+    ),
+    %% A scalar first return reaches decode_to_map/2, which case_clauses on it.
+    ?assertEqual(
+        {ok, #{~"p1" => #{x => 1}}},
+        asobi_lua_world:handle_input(~"p1", #{~"kind" => ~"scalar"}, #{~"p1" => #{x => 1}})
+    ),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+prime_zone(Fixture) ->
+    Config = #{game_config => #{lua_script => fixture(Fixture)}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ZoneState1.
+
+prime_ack_zone() ->
+    prime_zone("config_ack_world.lua").
+
 handle_input_without_stash_is_noop_test() ->
     erlang:erase({asobi_lua_world, zone_state}),
     ?assertEqual(

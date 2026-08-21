@@ -47,9 +47,58 @@ behind the join.
 -callback zone_tick(Entities :: map(), ZoneState :: term()) ->
     {Entities1 :: map(), ZoneState1 :: term()}.
 
--doc "Apply a player input to a zone's entities.".
+-doc """
+Apply a player input to a zone's entities.
+
+Return `{ok, Entities1, ConsumedSeq}` to tell asobi which client sequence
+this input actually advanced the simulation to. Without it the `world.ack`
+carries the `seq` the client stamped on the frame, which says the frame
+*arrived*, not how much of it *ran*. The two differ for any game that puts
+more than one simulation step in a frame: a client predicting at 60 Hz
+against a 12.5 Hz zone batches several steps per frame, and a zone that
+caps how many it runs per tick parks the rest. Acking the frame stamp then
+either overclaims (the client discards predicted steps the server has not
+run and can never replay them) or underclaims (the client replays steps the
+server already applied and overshoots).
+
+`ConsumedSeq` is in the client's own sequence space - the same numbering the
+steps inside `Input` carry - and asobi does not interpret it beyond bounding
+it: a non-negative integer no larger than `?MAX_ACK_SEQ`
+(`-include_lib("asobi/include/asobi_ack.hrl")`), the same bound the
+client-stamped `seq` is held to, because this value is echoed to that client on
+every broadcast tick and the SDKs read it into an int64. Anything else is
+refused with a warning and the frame stamp is used instead.
+
+The rules that come with it.
+
+**Report on every input or on none.** Within a tick a report always beats a
+frame stamp, whatever order they arrive in. The leak is across ticks and is
+not a race: a tick in which this module reported nothing records the frame
+stamp instead, and the ack keeps the highest value it has recorded, so one
+unreported tick pins the ack above the watermark for good.
+
+**Reporting acks a client that never stamped a `seq`.** Numbering the steps
+inside the payload and never stamping the frame is the cleanest form of the
+batching design, and a module reporting a consumed seq is asserting that its
+clients reconcile. A client that does not want acks should not be playing a
+game whose module reports them.
+
+**`{error, Reason}` still advances the ack to the frame stamp** - unless a
+report already landed this tick, which outranks it, because refusing one input
+does not unrun the steps another already consumed. A module that parks should
+model refusal as `{ok, Entities, Watermark}` rather than an error.
+
+A module that parks steps in `handle_input/3` and drains them in
+`zone_tick/2` has no channel to report the drain: the watermark rides out on
+the next input this module handles. Clients re-sending unacknowledged steps
+for redundancy produce one every tick, so this costs a tick of latency; a
+player at rest, sending nothing, leaves their final drain unacked until they
+move again.
+""".
 -callback handle_input(PlayerId :: binary(), Input :: map(), Entities :: map()) ->
-    {ok, Entities1 :: map()} | {error, Reason :: term()}.
+    {ok, Entities1 :: map()}
+    | {ok, Entities1 :: map(), ConsumedSeq :: non_neg_integer()}
+    | {error, Reason :: term()}.
 
 -doc "Global post-tick hook: continue, trigger a vote, or finish the world.".
 -callback post_tick(Tick :: non_neg_integer(), GameState :: term()) ->

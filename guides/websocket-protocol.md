@@ -891,15 +891,80 @@ authoritative state already includes - is a first-class primitive:
 
 Set [`broadcast_interval`](world-server.md) to 1 so the ack returns every tick.
 
-The ack is addressed to one connection: it is sent only to clients that opted in
-by stamping a `seq`, and never rides the shared `world.tick`, so one player's
-input stream is never broadcast to the rest of the zone.
+The ack is addressed to one connection and never rides the shared `world.tick`,
+so one player's input stream is never broadcast to the rest of the zone. It is
+sent to clients that opted in by stamping a `seq`, and to clients whose game
+module reports a consumed seq for them - see
+[Batched input and the ack](#batched-input-and-the-ack), where numbering the
+steps inside the payload replaces stamping the frame.
 
 **`seq` never goes backwards on a connection.** The high-water mark is recorded
 per zone, and a player is subscribed to their whole interest ring, so during a
 crossing more than one zone can hold a mark for them. The connection drops any
 ack that does not advance the highest `seq` it has already sent you, so you can
 prune against the value you receive without tracking a maximum yourself.
+
+#### Batched input and the ack
+
+Step 2 says "the highest `seq` it consumed", and by default that is the `seq`
+stamped on the frame: one input frame, one input, nothing to disagree about.
+
+A client predicting faster than the zone ticks changes that. At 60 Hz against a
+12.5 Hz zone there are roughly five simulation steps per tick, so a frame
+carries a *batch* of steps rather than one, and a zone that caps how many steps
+it runs per tick parks the rest for the next one. The frame stamp then no longer
+describes what ran:
+
+- Stamp the frame with the **last** seq in the batch and the ack overclaims
+  whenever steps are parked. The client discards predicted steps the server has
+  not applied yet, cannot replay them, and drifts until something resyncs it.
+- Stamp it with the **first** seq and the ack underclaims. The client replays
+  steps the server already applied and overshoots on every reconciliation.
+
+Return the seq you actually consumed and the ack carries that instead:
+
+```erlang
+handle_input(PlayerId, #{~"steps" := Steps}, Entities) ->
+    {Entities1, Watermark} = apply_steps(PlayerId, Steps, Entities),
+    {ok, Entities1, Watermark}.
+```
+
+```lua
+function handle_input(player_id, input, entities)
+  local watermark = apply_steps(input.steps, entities)
+  return entities, watermark
+end
+```
+
+The number is in your client's own sequence space - the same numbering the steps
+inside the payload carry - and must be a non-negative integer no larger than
+2^53-1, the same bound the client-stamped `seq` is held to. Anything else is
+refused with a warning and the frame stamp is used instead: the value is echoed
+to your client on every broadcast tick, so a wider one would be an encode
+amplifier and unreadable to any SDK holding it in an int64. The rules that come
+with it:
+
+- **Report on every input or on none.** Within a tick a report always beats a
+  frame stamp, whatever order they arrive in. Across ticks it does not: a tick
+  in which you reported nothing records the frame stamp instead, and the ack
+  keeps the highest value it has recorded, so one unreported tick pins the ack
+  above your watermark for good.
+- **Reporting acks a client that never stamped a `seq`.** If your client numbers
+  its steps inside the payload it never needs to stamp the frame at all. SDK
+  authors: this means `world.ack` can arrive unsolicited, so a client that never
+  opted in must drop it silently rather than log or raise per frame.
+- **Draining parked steps in `zone_tick` has no report channel.** The watermark
+  rides out on the next input you handle, which a client re-sending
+  unacknowledged steps produces every tick - so it costs a tick, except for a
+  player at rest, whose final drain stays unacked until they move.
+- **`{error, Reason}` still acks the frame stamp**, because a client must never
+  wait forever on an input the server chose to drop - unless a report already
+  landed this tick, which outranks it. Refusing one input does not unrun the
+  steps another already consumed. A game that parks should model refusal as
+  `{ok, Entities, Watermark}` instead.
+- **Deduplicate by the same watermark.** A client that re-sends unacknowledged
+  steps for redundancy (what makes an unreliable carrier safe) will hand you
+  steps you have already run; skip them, and report the watermark either way.
 
 **If your SDK does not yet surface `world.ack`**, the same reconciliation works
 in userland: write the `seq` onto the player's entity in `handle_input/3`

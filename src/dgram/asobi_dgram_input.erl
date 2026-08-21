@@ -20,6 +20,8 @@ gateway, and the engine keeping its own record is what lets this resolution
 happen without asking the untrusted end anything.
 """.
 
+-include("asobi_ack.hrl").
+
 -export([apply/2]).
 
 -doc "Resolves the player and applies the input. Silent on an unknown conn_id.".
@@ -79,5 +81,5 @@ decode_input(Body) ->
         _:_ -> error
     end.
 
-seq_of(#{~"seq" := Seq}) when is_integer(Seq), Seq >= 0 -> Seq;
+seq_of(#{~"seq" := Seq}) when is_integer(Seq), Seq >= 0, Seq =< ?MAX_ACK_SEQ -> Seq;
 seq_of(_) -> undefined.
