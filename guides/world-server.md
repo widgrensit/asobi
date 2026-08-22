@@ -475,6 +475,9 @@ The band is bounded by the zone's perimeter rather than its area, so a smaller
 `border_band` is cheaper; an empty zone pays nothing. Leave it at 0 unless the
 game reads the mirror.
 
+The decision, and the alternatives ruled out, are recorded in
+`docs/adr/0017-border-mirror-for-cross-zone-reads-and-effects.md`.
+
 **What it is not.** It is not a general cross-zone query: it answers only for
 entities inside the band, only for the eight touching zones, and only at the
 last tick's positions. A zone still owns its own entities outright, and nothing
