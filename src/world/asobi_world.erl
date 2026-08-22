@@ -199,6 +199,25 @@ dropped effect is indistinguishable from a delivery bug from the game's side.
 ) ->
     {ok, Entities1 :: map()} | Entities1 :: map().
 
+-doc """
+Optional: does this zone still have work asobi cannot see?
+
+A zone with no entities, no queued input, no live entity timer and no pending
+respawn is demoted and ticks once every `cold_tick_divisor` ticks
+(widgrensit/asobi#543). That test reads asobi's own bookkeeping, which is blind
+to work a script keeps in its zone state - a wave spawner counting down between
+waves, weather, a zone-level phase timer. Such a zone holds nothing, so it is
+demoted, and the countdown then runs at a tenth of the rate it was written for.
+
+Export this to veto that. It is consulted **only when asobi already believes the
+zone is idle**, so a zone with entities never pays for it, and a zone answering
+`true` is doing work in `zone_tick` and paying for that anyway.
+
+Fail-safe is "keep the zone hot": a raising or non-boolean answer is treated as
+`true` and logged. Demoting a zone that has work is the harmful direction.
+""".
+-callback zone_busy(ZoneState :: term()) -> boolean().
+
 -doc "Global post-tick hook: continue, trigger a vote, or finish the world.".
 -callback post_tick(Tick :: non_neg_integer(), GameState :: term()) ->
     {ok, GameState1 :: term()}
@@ -299,5 +318,6 @@ plain terms. The inverse of `init_zone_state`'s restore path.
     dump_zone_state/1,
     handle_input/3,
     handle_input_batch/2,
-    handle_effects/2
+    handle_effects/2,
+    zone_busy/1
 ]).

@@ -45,7 +45,8 @@
     | invalid_consumed_seq
     | effect_queue_full
     | no_effect_handler
-    | bad_effects_return.
+    | bad_effects_return
+    | bad_zone_busy.
 -export_type([game_error_kind/0]).
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).
