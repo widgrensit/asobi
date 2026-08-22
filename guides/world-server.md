@@ -211,6 +211,7 @@ end
 | `post_tick(tick, state)` | yes | Global tick logic. Set `_finished` and `_result` on state to end the world |
 | `zone_tick(entities, zone_state)` | no | Per-zone simulation; return both |
 | `handle_input(player_id, input, entities)` | no | Apply one player's input to that zone's entities. A second return value is the client seq you consumed - see [Batched input and the ack](websocket-protocol.md#client-side-prediction). Every input in a tick is handed the same table rather than a copy, but returning nothing still discards whatever that call mutated - see [Players in one zone](performance-tuning.md#players-in-one-zone) |
+| `handle_effects(effects, entities)` | no | This tick's cross-zone effects, batched. See [Seeing across a seam](#seeing-across-a-seam) |
 | `generate_world(seed, config)` | no | Return a table keyed by `"x,y"` strings |
 | `get_state(player_id, state)` | no | Player-visible state |
 | `spawn_templates(config)` | no | See [Spawn templates](#spawn-templates) |
@@ -323,6 +324,7 @@ post_tick(_TickN, State) ->
 | `zone_tick/2` | yes | Per-zone simulation: `(Entities, ZoneState) -> {Entities, ZoneState}` |
 | `handle_input/3` | one of | Process player input within a zone's entities. Return `{ok, Entities, ConsumedSeq}` to ack what you *ran* rather than what arrived - see [Batched input and the ack](websocket-protocol.md#client-side-prediction) |
 | `handle_input_batch/2` | one of | The whole tick's inputs in one call, returning one entity map plus one outcome per input. Export it instead of `handle_input/3` when your per-input cost is dominated by marshalling the entity map rather than by the input. Exporting it shadows `handle_input/3` entirely. asobi still owns the ack policy: you return one outcome per input - see [Players in one zone](performance-tuning.md#players-in-one-zone) |
+| `handle_effects/2` | no | This tick's cross-zone effects: `([{EntityId, Event}], Entities) -> {ok, Entities}`. Delivered after inputs, already filtered to entities this zone still owns. See [Seeing across a seam](#seeing-across-a-seam) |
 | `post_tick/2` | yes | Global post-tick: return `{ok, State}`, `{vote, Config, State}`, or `{finished, Result, State}` |
 | `generate_world/2` | no | Procedural generation: `(Seed, Config) -> {ok, #{Coords => ZoneState}}` |
 | `get_state/2` | no | Per-player state view |
@@ -390,6 +392,7 @@ Plan around them as facts of the deployment, not knobs.
 | Zone idle timeout | 30 seconds before an empty zone is released |
 | Rehome margin | 0.15 of `zone_size` (described below) |
 | Zone snapshot interval | 600 ticks, and moot - see [Snapshots](#snapshots) |
+| Border mirror | Off (`border_band = 0`) - see [Seeing across a seam](#seeing-across-a-seam) |
 
 An entity, player or NPC, must clear its zone's edge by the rehome margin (a
 fraction of `zone_size`) before re-homing to the neighbouring zone, so an
@@ -406,7 +409,83 @@ because it has not cleared the margin yet. A query issued from zone A over that
 area misses it entirely, and the gap persists - an NPC parked just past its
 zone's edge stays invisible to the neighbour's queries indefinitely, not only
 for the tick it takes to cross. Account for that if your NPC AI queries by
-position near zone edges.
+position near zone edges, or turn on the border mirror below.
+
+### Seeing across a seam
+
+`border_band` publishes each zone's edge entities where its neighbours can read
+them, which is what makes an NPC able to chase a player across a boundary and a
+projectile able to hit a target the next zone owns. Off by default:
+
+```lua
+border_band = 0.15   -- fraction of zone_size; 0 (the default) publishes nothing
+```
+
+With it on, each zone writes the entities within `border_band * zone_size` of
+any of its own edges into a shared read-only mirror once per tick, and two calls
+read the eight touching zones:
+
+```lua
+local seen = game.spatial.neighbours_radius(x, y, radius)        -- {id=, entity=, distance=}
+local seen = game.spatial.neighbours_radius(x, y, radius, opts)  -- same opts as query_radius
+local seen = game.spatial.neighbours_rect(x1, y1, x2, y2)        -- {id=, entity=}
+```
+
+They never return the calling zone's own entities: you already have those in
+`entities`, and returning both would double every in-zone result. What comes
+back is a **copy** - writing to it changes nothing, because the neighbour still
+owns the entity.
+
+To act on one, ask its owner:
+
+```lua
+local hit = game.spatial.neighbours_radius(shot.x, shot.y, 4.0, { type = "npc" })[1]
+if hit then game.zone.apply(hit.id, { kind = "damage", amount = 12 }) end
+```
+
+`game.zone.apply` returns `false` if no neighbour currently publishes that
+entity - you can only affect what you can see, which is the same rule as the
+read. The owning zone applies it in its own next tick, in order, through
+`handle_effects`:
+
+```lua
+function handle_effects(effects, entities)
+  for _, e in ipairs(effects) do
+    local target = entities[e.entity_id]           -- never nil: asobi drops
+    target.hp = target.hp - (e.event.amount or 0)  -- effects for entities it lost
+  end
+  return entities
+end
+```
+
+Default the fields you read: one `nil` arithmetic error takes the whole tick's
+batch with it, not just the effect that caused it. A script that calls
+`game.zone.apply` and has not defined `handle_effects` gets a rate-limited
+error and its effects dropped, rather than silence.
+
+An event is a verb, not a payload. asobi caps one at 4 KB and a caller at 64
+sends per tick, refusing past either with `false`, so a script cannot turn its
+own budget into a neighbour's unbounded mailbox.
+
+**What it costs.** Publishing is a filter over the zone's entities plus a copy
+of the band into shared storage, every tick, whether or not anything reads it.
+Measured on a zone holding 200 entities all inside the band, that is 10,998
+reductions per tick against 8,231 with `border_band = 0` - about a third more.
+The band is bounded by the zone's perimeter rather than its area, so a smaller
+`border_band` is cheaper; an empty zone pays nothing. Leave it at 0 unless the
+game reads the mirror.
+
+**What it is not.** It is not a general cross-zone query: it answers only for
+entities inside the band, only for the eight touching zones, and only at the
+last tick's positions. A zone still owns its own entities outright, and nothing
+here lets one zone write another's.
+
+The mirror is one table per world, owned by that world's supervisor, so it is
+reclaimed exactly when the world ends and one world can never read another's.
+The sender-side "you can only affect what you can see" check reads that table;
+the check that cannot be sidestepped is the receiving zone's, which applies an
+effect only to an entity it currently owns. Addressing an entity is gated;
+inventing one is not possible.
 
 The margin bounds this slack only for positions inside the world rectangle. An
 entity outside it entirely is clamped into the edge zone by `pos_to_zone` and

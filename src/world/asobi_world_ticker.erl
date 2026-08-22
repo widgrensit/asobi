@@ -159,13 +159,27 @@ handle_info(
 ) ->
     NextTick = Tick + 1,
     NextTickCount = TickCount + 1,
+    %% Under a zone manager the active set is the manager's, but which of those
+    %% zones are cold is still this ticker's own bookkeeping - it is fed by
+    %% asobi_zone's promote/demote casts. Before widgrensit/asobi#543 this
+    %% branch discarded `cold_zones` outright. That was not the only reason
+    %% `cold_tick_divisor` was inert: nothing anywhere called promote_zone/2 or
+    %% demote_zone/2, and `set_zones/3` (the only path that populates the static
+    %% lists) has no caller in src/ either, so no world of any shape ever had a
+    %% cold zone. This branch is what would have kept it inert for a lazy world
+    %% even after the zone side started classifying itself.
+    %%
+    %% Partitioning the manager's list also prunes the cold set: a zone that has
+    %% been reaped is absent from `AllZones` and so drops out of `cold_zones`
+    %% below without needing a `remove_zone` cast to arrive.
     {Hot, Cold} =
         case ZoneManager of
             undefined ->
                 {StaticHot, StaticCold};
             ZMPid ->
                 AllZones = asobi_zone_manager:get_active_zones(ZMPid),
-                {AllZones, []}
+                ColdSet = maps:from_keys(StaticCold, []),
+                lists:partition(fun(Z) -> not is_map_key(Z, ColdSet) end, AllZones)
         end,
     TickCold = (NextTickCount rem ColdTickDivisor) =:= 0,
     %% `uniq` because a zone dispatched twice in one tick replies twice, and
@@ -195,6 +209,8 @@ handle_info(
     State1 = State#{
         tick => NextTick,
         tick_count => NextTickCount,
+        hot_zones => Hot,
+        cold_zones => Cold,
         tick_started_at => erlang:monotonic_time(millisecond),
         tick_zone_count => length(ZonesToTick),
         pending => maps:merge(Pending0, maps:from_keys(ZonesToTick, NextTick)),

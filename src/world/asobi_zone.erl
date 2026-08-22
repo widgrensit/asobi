@@ -14,6 +14,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -export([get_entities/1, get_subscriber_count/1, sync/1]).
 -export([start_entity_timer/2, cancel_entity_timer/3]).
 -export([query_radius/3, query_rect/3]).
+-export([apply_effect/3, whereis_zone/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_continue/2, handle_info/2, terminate/2]).
 -ifdef(TEST).
 -export([shape_of/1]).
@@ -29,6 +30,32 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -define(DEFAULT_ZONE_SIZE, 200).
 -define(DEFAULT_GRID_SIZE, 10).
 -define(DEFAULT_REHOME_MARGIN, 0.15).
+%% Fraction of `zone_size` a zone mirrors into `asobi_zone_border` for its
+%% neighbours to read. **Off by default**, because publishing costs every world
+%% a filter plus a copy of the band into ETS on every tick whether or not
+%% anything reads it. `guides/world-server.md` carries the measured figure and
+%% the reasoning; it is not repeated here so there is only one copy of it to
+%% drift. ?DEFAULT_REHOME_MARGIN is the value to reach for when turning it on.
+-define(DEFAULT_BORDER_BAND, 0).
+%% A fraction, so anything outside [0, 1] is a typo rather than an intent. The
+%% Lua config path already refuses one (asobi_lua_config:maybe_add_fraction/3);
+%% an Erlang-declared game mode reaches asobi_game_modes:forward_optional/3
+%% unvalidated, and `border_band => 50` would put every entity in the zone
+%% inside the band and copy the whole map into ETS every tick.
+-define(MAX_BORDER_BAND, 1).
+%% Cross-zone effects a zone will hold for one tick, by count and by size. The
+%% queue is drained every tick, so this only bites when a neighbour is casting
+%% faster than this zone ticks - which is a script fault, not traffic.
+%%
+%% Both bounds, because a count alone bounds nothing that matters: 256 entries
+%% of an arbitrary Lua table is an arbitrary number of megabytes on this
+%% process's heap. The sender is bounded too and more tightly
+%% (`asobi_lua_api:effect_within_budget/1`), which is the bound that protects
+%% the *mailbox*; this one protects the queue behind it, and holds for an
+%% Erlang game module calling `apply_effect/3` directly, which no sender-side
+%% budget covers.
+-define(MAX_EFFECT_QUEUE, 256).
+-define(MAX_EFFECT_BYTES_QUEUED, 1_048_576).
 %% Bound on the per-tick zone-manager call an NPC crossing into an unloaded
 %% neighbour makes (widgrensit/asobi#271). The manager's own work there is
 %% an ETS lookup plus a supervisor:start_child (the new zone's snapshot load
@@ -167,6 +194,35 @@ despawn_entity(Pid, EntityId) ->
 query_radius(Pid, Center, Radius) ->
     narrow_id_pos_list(gen_server:call(Pid, {query_radius, Center, Radius})).
 
+-doc """
+The pid currently serving `Coords` in `WorldId`, if one is running.
+
+Deliberately never creates the zone, unlike the crossing path's
+`target_zone_pid/2`: this answers "who owns what I can already see", and a
+coordinate with no live zone has nothing in the border mirror to have seen.
+""".
+-spec whereis_zone(binary(), {integer(), integer()}) -> {ok, pid()} | error.
+whereis_zone(WorldId, Coords) ->
+    case pg:get_members(?PG_SCOPE, {asobi_zone, WorldId, Coords}) of
+        [Pid | _] when is_pid(Pid) -> {ok, Pid};
+        _ -> error
+    end.
+
+-doc """
+Deliver `Event` to `EntityId`, which this zone owns.
+
+The point of it is what it does *not* do: the caller never touches the entity.
+A zone that can see a neighbour's entity through `asobi_zone_border` can ask
+the owning zone to act on it, and the owning zone applies it in its own tick,
+in order, under its own script. That keeps single-writer ownership intact
+while still letting a projectile resolved in one zone hit a target in the
+next - the case `guides/world-server.md` documents as impossible today
+(widgrensit/asobi#544).
+""".
+-spec apply_effect(pid(), binary(), map()) -> ok.
+apply_effect(Pid, EntityId, Event) when is_binary(EntityId), is_map(Event) ->
+    gen_server:cast(Pid, {entity_effect, EntityId, Event}).
+
 -spec query_rect(pid(), {number(), number()}, {number(), number()}) ->
     [{binary(), {number(), number()}}].
 query_rect(Pid, TopLeft, BottomRight) ->
@@ -196,7 +252,24 @@ init(Config) ->
     ZoneSize = maps:get(zone_size, Config, ?DEFAULT_ZONE_SIZE),
     GridSize = maps:get(grid_size, Config, ?DEFAULT_GRID_SIZE),
     RehomeMargin = maps:get(rehome_margin, Config, ?DEFAULT_REHOME_MARGIN),
+    BorderBand = clamp_border_band(maps:get(border_band, Config, ?DEFAULT_BORDER_BAND)),
+    BorderTab = maps:get(border_tab, Config, undefined),
+    %% terminate/2 is where this zone writes its final snapshot, clears its ETS
+    %% crash backup, forgets its rate-limiter keys and drops its border row.
+    %% None of that ran on a supervisor shutdown - which is to say on world
+    %% teardown, the one time a final snapshot is the whole point - because a
+    %% gen_server that does not trap exits is killed outright by the shutdown
+    %% signal. Paired with `shutdown => 5000` on the child spec in
+    %% asobi_zone_sup, without which the supervisor would brutal-kill it anyway.
+    process_flag(trap_exit, true),
     pg:join(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
+    %% Reclaim whatever the previous incarnation of this zone left behind. This
+    %% gen_server does not trap exits, so `terminate/2` does not run on a
+    %% supervisor shutdown, a linked crash or a `one_for_all` sibling restart -
+    %% and `border_live => false` below means the restarted zone would otherwise
+    %% never delete the row it inherited, leaving neighbours seeing a dead entity
+    %% at its death position for as long as the world lasts.
+    asobi_zone_border:clear(maps:get(border_tab, Config, undefined), Coords),
     %% Recover entity state from ETS backup if available (zone crash recovery)
     RecoveredEntities = recover_zone_state(WorldId, Coords),
     Templates = maps:get(spawn_templates, Config, #{}),
@@ -231,6 +304,33 @@ init(Config) ->
             zone_size => ZoneSize,
             grid_size => GridSize,
             rehome_margin => RehomeMargin,
+            %% In world units, resolved once here rather than per tick, so a
+            %% zone publishes the same band for its whole life even if the
+            %% config map is rebuilt under it.
+            border_band => BorderBand * ZoneSize,
+            border_tab => BorderTab,
+            %% Whether this zone currently has a row in asobi_zone_border, so a
+            %% zone that has published nothing never pays a delete.
+            border_live => false,
+            %% Effects other zones have addressed at entities this zone owns,
+            %% newest-first like input_queue and reversed at drain.
+            effect_queue => [],
+            %% Counted rather than measured with length/1: the cap is checked on
+            %% every inbound effect cast, so an O(n) check would be O(n^2) per
+            %% tick exactly when the queue is under pressure.
+            effect_count => 0,
+            effect_bytes => 0,
+            %% Counted rather than reported per message: unlike every other
+            %% game_error kind, this one's rate is set by another process's send
+            %% loop, so a telemetry fan-out per dropped cast would make the
+            %% drop path more expensive for the victim than the accept path -
+            %% which inverts the point of a cap. Emitted once per tick instead.
+            effect_dropped => 0,
+            %% A zone with nothing to simulate is demoted to the ticker's cold
+            %% set, which runs it once every `cold_tick_divisor` ticks instead
+            %% of every tick (widgrensit/asobi#543). Starts hot: the zone has
+            %% not ticked yet, so it has not established that it is idle.
+            cold => false,
             entities => RecoveredEntities,
             prev_entities => #{},
             broadcast_entities => #{},
@@ -328,7 +428,13 @@ handle_continue(init_zone_state, State0) ->
         coords => Coords,
         game_module => GameMod,
         game_config => GameConfig,
-        world_server_pid => WorldServerPid
+        world_server_pid => WorldServerPid,
+        %% The neighbour-facing game.* calls need the same grid geometry the
+        %% zone itself decides crossings with, or a script's idea of which
+        %% zones touch it disagrees with asobi's (widgrensit/asobi#544).
+        zone_size => maps:get(zone_size, State),
+        grid_size => maps:get(grid_size, State),
+        border_tab => maps:get(border_tab, State, undefined)
     },
     ZoneState1 = call_optional(GameMod, init_zone_state, [ZoneConfig, ZoneState], ZoneState),
     {noreply, State#{zone_state => ZoneState1}}.
@@ -473,28 +579,47 @@ handle_cast(reap, #{zone_manager_pid := ZMPid, coords := Coords} = State) ->
     {noreply, State};
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
-    State2 = resolve_zone_crossings(State1),
-    #{subscribers := Subs, entities := Ents, zone_manager_pid := ZMPid, coords := Coords} = State2,
+    State2 = publish_border(resolve_zone_crossings(State1)),
+    State3 = reclassify(State2),
+    #{subscribers := Subs, entities := Ents, zone_manager_pid := ZMPid, coords := Coords} = State3,
     case map_size(Subs) of
         0 ->
             case has_tickable_entities(Ents) of
-                false -> {noreply, State2, hibernate};
-                true -> {noreply, State2}
+                false -> {noreply, State3, hibernate};
+                true -> {noreply, State3}
             end;
         _ ->
             case ZMPid of
                 undefined -> ok;
                 _ -> asobi_zone_manager:touch_zone(ZMPid, Coords)
             end,
-            {noreply, State2}
+            {noreply, State3}
     end;
 handle_cast({input, PlayerId, Input, Seq}, #{input_queue := Queue} = State) ->
-    {noreply, State#{input_queue => [{PlayerId, Seq, Input} | Queue]}};
+    {noreply, warm_up(State#{input_queue => [{PlayerId, Seq, Input} | Queue]})};
+%% Dropped rather than queued once the queue is full: see ?MAX_EFFECT_QUEUE.
+handle_cast(
+    {entity_effect, EntityId, Event},
+    #{effect_queue := Q, effect_count := N, effect_bytes := B} = State
+) when is_binary(EntityId), is_map(Event) ->
+    Size = erts_debug:size(Event) * erlang:system_info(wordsize),
+    case N >= ?MAX_EFFECT_QUEUE orelse B + Size > ?MAX_EFFECT_BYTES_QUEUED of
+        true ->
+            {noreply, State#{effect_dropped => maps:get(effect_dropped, State, 0) + 1}};
+        false ->
+            {noreply,
+                warm_up(State#{
+                    effect_queue => [{EntityId, Event} | Q],
+                    effect_count => N + 1,
+                    effect_bytes => B + Size
+                })}
+    end;
 handle_cast(
     {add_entity, EntityId, EntityState}, #{entities := Entities, spatial_grid := Grid} = State
 ) when is_binary(EntityId) ->
     Grid1 = spatial_grid_insert(EntityId, EntityState, Grid),
-    {noreply, State#{entities => Entities#{EntityId => EntityState}, spatial_grid => Grid1}};
+    {noreply,
+        warm_up(State#{entities => Entities#{EntityId => EntityState}, spatial_grid => Grid1})};
 %% Every other id-bearing cast in this module guards, and this one did not. A Lua
 %% table that mixes named and numeric keys hands the zone a non-binary entity id
 %% (`asobi_lua_api:ensure_pairs/1` does not normalise them), which then reached
@@ -568,7 +693,7 @@ handle_cast(
         end,
     {noreply, owe_rebind(KeyframeResult, State)};
 handle_cast({start_entity_timer, Config}, #{entity_timers := ET} = State) when is_map(Config) ->
-    {noreply, State#{entity_timers => asobi_entity_timer:start_timer(Config, ET)}};
+    {noreply, warm_up(State#{entity_timers => asobi_entity_timer:start_timer(Config, ET)})};
 handle_cast({cancel_entity_timer, EntityId, TimerId}, #{entity_timers := ET} = State) when
     is_binary(EntityId), is_binary(TimerId)
 ->
@@ -580,17 +705,18 @@ handle_cast(
     case asobi_zone_spawner:spawn_entity(TemplateId, Pos, Overrides, Spawner) of
         {ok, {EntityId, Entity}, Spawner1} ->
             Grid1 = spatial_grid_insert(EntityId, Entity, Grid),
-            {noreply, State#{
-                entities => Entities#{EntityId => Entity},
-                spawner => Spawner1,
-                spatial_grid => Grid1
-            }};
+            {noreply,
+                warm_up(State#{
+                    entities => Entities#{EntityId => Entity},
+                    spawner => Spawner1,
+                    spatial_grid => Grid1
+                })};
         {error, Reason} ->
             log_spawn_failed(TemplateId, Reason, State),
             {noreply, State}
     end;
 handle_cast({spawn_entities, Spawns}, State) when is_list(Spawns) ->
-    {noreply, apply_spawns(Spawns, State)};
+    {noreply, warm_up(apply_spawns(Spawns, State))};
 handle_cast(
     {despawn_entity, EntityId},
     #{entities := Entities, spawner := Spawner, spatial_grid := Grid} = State
@@ -604,13 +730,35 @@ handle_cast(
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
--spec handle_info(term(), map()) -> {noreply, map()}.
+-spec handle_info(term(), map()) -> {noreply, map()} | {stop, term(), map()}.
 handle_info({'DOWN', _Ref, process, DownPid, _Reason}, #{subscribers := Subs} = State) ->
     Subs1 = maps:filter(
         fun(_PlayerId, {Pid, _MonRef}) -> Pid =/= DownPid end,
         Subs
     ),
     {noreply, State#{subscribers => Subs1}};
+%% The zone traps exits so terminate/2 runs on shutdown (see init/1), and
+%% trapping must not quietly change what a *linked crash* means. gen_server
+%% handles the parent's own EXIT; anything else reaching here is a process this
+%% zone's runtime is linked to - under ADR 0015's `owned` mode that is its
+%% `asobi_lua_vm`, the process now holding the Lua state - so the zone dies with
+%% it exactly as it would have before, and its `transient` child spec brings it
+%% back.
+%%
+%% The final snapshot is deliberately skipped on this path. The zone's
+%% `game_state` is a reference into the VM that just died, so dumping it would
+%% decode nothing and overwrite the last good row with an empty one. Leaving the
+%% stored snapshot alone is what lets the replacement zone restore into it,
+%% which is ADR 0015 decision 5.
+handle_info({'EXIT', Pid, Reason}, State) ->
+    ?LOG_ERROR(#{
+        event => zone_linked_process_died,
+        coords => maps:get(coords, State, undefined),
+        from => Pid,
+        reason => Reason,
+        msg => ~"a process this zone is linked to died; restarting into the last snapshot"
+    }),
+    {stop, Reason, State#{skip_final_snapshot => true}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -622,6 +770,20 @@ terminate(normal, #{world_id := WorldId, coords := Coords} = State) ->
     %% asobi#252 review: a zone that ever suppressed a log line leaves a
     %% permanent drop-count row otherwise - these Keys' lifetime ends here.
     forget_log_keys(WorldId, Coords),
+    asobi_zone_border:clear(maps:get(border_tab, State, undefined), Coords),
+    pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
+    ok;
+%% Bare `shutdown` is what a supervisor sends, and until the zone started
+%% trapping exits it could never be observed here at all - so it fell to the
+%% abnormal clause below and would now leave an ETS crash-backup row behind on
+%% an orderly world teardown. An orderly stop is an orderly stop however it is
+%% spelled.
+terminate(shutdown, #{world_id := WorldId, coords := Coords} = State) ->
+    maybe_final_snapshot(State),
+    clear_zone_backup(WorldId, Coords),
+    notify_zone_manager_terminated(State),
+    forget_log_keys(WorldId, Coords),
+    asobi_zone_border:clear(maps:get(border_tab, State, undefined), Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate({shutdown, _}, #{world_id := WorldId, coords := Coords} = State) ->
@@ -629,6 +791,7 @@ terminate({shutdown, _}, #{world_id := WorldId, coords := Coords} = State) ->
     clear_zone_backup(WorldId, Coords),
     notify_zone_manager_terminated(State),
     forget_log_keys(WorldId, Coords),
+    asobi_zone_border:clear(maps:get(border_tab, State, undefined), Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok;
 terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities} = State) ->
@@ -637,6 +800,7 @@ terminate(_Reason, #{world_id := WorldId, coords := Coords, entities := Entities
     backup_zone_state(WorldId, Coords, Entities),
     notify_zone_manager_terminated(State),
     forget_log_keys(WorldId, Coords),
+    asobi_zone_border:clear(maps:get(border_tab, State, undefined), Coords),
     pg:leave(?PG_SCOPE, {asobi_zone, WorldId, Coords}, self()),
     ok.
 
@@ -798,6 +962,7 @@ do_tick(
         wire_seq := WireSeq,
         zone_state := ZoneState,
         input_queue := Queue,
+        effect_queue := EffectQueue,
         subscribers := Subs,
         ticker_pid := TickerPid,
         entity_timers := ET
@@ -822,9 +987,19 @@ do_tick(
         GameMod, lists:reverse(Queue), Entities0, {WorldId, Coords}
     ),
     PlayerAck1 = maps:fold(fun record_ack/3, maps:get(player_ack, State, #{}), TickAcks),
+    %% After inputs, so an effect a neighbour addressed at an entity lands on
+    %% the same tick's post-input state rather than one the player has already
+    %% moved away from.
+    report_effects_dropped(State),
+    %% The sender-side per-tick send budget lives in the process dictionary and
+    %% is scoped to a tick, so this zone's own handle_input callers get a fresh
+    %% one each tick. A zone_tick caller runs in a throwaway eval worker whose
+    %% dictionary dies with it, so that half needs no reset.
+    _ = asobi_lua_api:reset_effect_sends(),
+    Entities2a = apply_effects(GameMod, drain_effects(EffectQueue), Entities2, State),
     Now = erlang:system_time(millisecond),
     {TimerEvents, ET1} = asobi_entity_timer:tick(Now, ET),
-    Entities3 = apply_timer_events(TimerEvents, Entities2),
+    Entities3 = apply_timer_events(TimerEvents, Entities2a),
     %% Tick spawner — process respawn queue. asobi#253: pick up a live
     %% template update (e.g. a script hot-reload) before ticking, so a
     %% just-renamed/added template doesn't have to wait for the next respawn
@@ -903,6 +1078,10 @@ do_tick(
         prev_entities => Entities4,
         zone_state => ZoneState1,
         input_queue => [],
+        effect_queue => [],
+        effect_count => 0,
+        effect_bytes => 0,
+        effect_dropped => 0,
         %% Bound player_ack to currently-subscribed players so it does not grow
         %% with everyone who ever sent an input (asobi#474).
         player_ack => maps:with(maps:keys(Subs), PlayerAck1),
@@ -1235,6 +1414,65 @@ reject_log_key({WorldId, Coords}) -> {WorldId, Coords, input_rejected}.
 bad_batch_log_key({WorldId, Coords}) -> {WorldId, Coords, batch_contract}.
 unknown_outcome_log_key({WorldId, Coords}) -> {WorldId, Coords, unknown_outcome}.
 no_input_handler_log_key({WorldId, Coords}) -> {WorldId, Coords, no_input_handler}.
+effect_log_key({WorldId, Coords}, Kind) -> {WorldId, Coords, Kind}.
+
+%% Same split as log_no_input_handler/2: the telemetry is unconditional and only
+%% the log line is limited, so a zone under a flood still shows up as a rate.
+%% One telemetry event and at most one log line per tick, carrying the tick's
+%% count - see `effect_dropped` in init/1 for why this is not per message.
+report_effects_dropped(#{effect_dropped := 0}) ->
+    ok;
+report_effects_dropped(#{effect_dropped := Dropped} = State) ->
+    asobi_telemetry:game_error(effect_queue_full, #{
+        game_module => maps:get(game_module, State, undefined),
+        dropped => Dropped
+    }),
+    case asobi_script_log_limiter:allow(effect_log_key(log_zone(State), effect_queue_full)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_ERROR(#{
+                msg => ~"cross-zone effect queue full; effects dropped",
+                coords => maps:get(coords, State, undefined),
+                dropped => Dropped,
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end;
+report_effects_dropped(_State) ->
+    ok.
+
+log_no_effect_handler(State) ->
+    log_effect_issue(
+        State,
+        no_effect_handler,
+        ~"game module does not export handle_effects/2; cross-zone effects dropped"
+    ).
+
+log_bad_effects_return(State) ->
+    log_effect_issue(
+        State,
+        bad_effects_return,
+        ~"handle_effects/2 did not return an entity map; this tick's effects are dropped"
+    ).
+
+log_zone(State) ->
+    {maps:get(world_id, State, undefined), maps:get(coords, State, undefined)}.
+
+log_effect_issue(State, Kind, Msg) ->
+    Zone = log_zone(State),
+    asobi_telemetry:game_error(Kind, #{
+        game_module => maps:get(game_module, State, undefined)
+    }),
+    case asobi_script_log_limiter:allow(effect_log_key(Zone, Kind)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_ERROR(#{
+                msg => Msg,
+                coords => maps:get(coords, State, undefined),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
 
 %% Keep the highest seq per player. world.input carries a monotonic client seq;
 %% out-of-order or duplicate delivery must never regress the ack. Inputs with no
@@ -2117,6 +2355,10 @@ snapshot_entities(Entities) ->
         Entities
     ).
 
+%% See handle_info({'EXIT', ...}): the state this would dump is unreadable, and
+%% writing it would destroy the snapshot the replacement zone needs.
+maybe_final_snapshot(#{skip_final_snapshot := true}) ->
+    ok;
 maybe_final_snapshot(#{persistence := true} = State) ->
     #{
         world_id := WorldId,
@@ -2155,7 +2397,10 @@ forget_log_keys(WorldId, Coords) ->
     asobi_script_log_limiter:forget(reject_log_key(Zone)),
     asobi_script_log_limiter:forget(bad_batch_log_key(Zone)),
     asobi_script_log_limiter:forget(unknown_outcome_log_key(Zone)),
-    asobi_script_log_limiter:forget(no_input_handler_log_key(Zone)).
+    asobi_script_log_limiter:forget(no_input_handler_log_key(Zone)),
+    asobi_script_log_limiter:forget(effect_log_key(Zone, effect_queue_full)),
+    asobi_script_log_limiter:forget(effect_log_key(Zone, no_effect_handler)),
+    asobi_script_log_limiter:forget(effect_log_key(Zone, bad_effects_return)).
 
 backup_zone_state(WorldId, Coords, Entities) ->
     case ets:info(asobi_world_state) of
@@ -2186,6 +2431,174 @@ clear_zone_backup(WorldId, Coords) ->
 notify_zone_manager_terminated(#{zone_manager_pid := ZMPid, coords := Coords}) when is_pid(ZMPid) ->
     asobi_zone_manager:zone_terminated(ZMPid, Coords, self());
 notify_zone_manager_terminated(_) ->
+    ok.
+
+%% --- Cross-zone border mirror (widgrensit/asobi#544) ---
+
+%% Runs after resolve_zone_crossings/1, not before: an entity that crossed this
+%% tick is published by the zone that now owns it rather than by the one handing
+%% it over. A reader can still see it under both owners for at most one tick,
+%% because the old owner's row is only refreshed on its own next tick -
+%% apply_effects/4's ownership filter is what makes that harmless, not this
+%% ordering.
+publish_border(#{border_band := Band} = State) when Band =< 0 ->
+    State;
+publish_border(
+    #{
+        coords := Coords,
+        zone_size := ZoneSize,
+        border_band := Band,
+        border_live := Live,
+        border_tab := Tab,
+        entities := Entities
+    } = State
+) ->
+    InBand = asobi_zone_border:band_entities(Coords, ZoneSize, Band, Entities),
+    case {map_size(InBand), Live} of
+        {0, false} ->
+            %% The common case on a large grid: an empty zone with no row to
+            %% delete. Deleting an absent row every tick was measurably the
+            %% whole cost of this feature for a zone with nothing in it.
+            State;
+        {0, true} ->
+            asobi_zone_border:clear(Tab, Coords),
+            State#{border_live => false};
+        {_, _} ->
+            asobi_zone_border:write_band(Tab, Coords, InBand),
+            State#{border_live => true}
+    end.
+
+%% Narrows the queue back to its element type on the way out. The zone's state
+%% is a plain map, so everything read from it is `term()` as far as the type
+%% checker is concerned; only the cast that fills the queue guards the shape,
+%% and this is where that guarantee is restated rather than asserted.
+-spec drain_effects(term()) -> [{binary(), map()}].
+drain_effects(Queue) when is_list(Queue) ->
+    narrow_effects(Queue, []);
+drain_effects(_) ->
+    [].
+
+%% Reverses as it narrows: the queue is built newest-first.
+-spec narrow_effects([term()], [{binary(), map()}]) -> [{binary(), map()}].
+narrow_effects([], Acc) ->
+    Acc;
+narrow_effects([{Id, Event} | Rest], Acc) when is_binary(Id), is_map(Event) ->
+    narrow_effects(Rest, [{Id, Event} | Acc]);
+narrow_effects([_ | Rest], Acc) ->
+    narrow_effects(Rest, Acc).
+
+%% Effects naming an entity this zone no longer owns are dropped silently: the
+%% target died, or crossed into a third zone, between the neighbour reading the
+%% band and this tick draining the queue. Both are ordinary, and handing the
+%% script an effect for an id it cannot look up would make every game write the
+%% same guard.
+-spec apply_effects(module(), [{binary(), map()}], map(), map()) -> map().
+apply_effects(_GameMod, [], Entities, _State) ->
+    Entities;
+apply_effects(GameMod, Effects, Entities, State) ->
+    case [E || {Id, _} = E <- Effects, is_map_key(Id, Entities)] of
+        [] ->
+            Entities;
+        Live ->
+            case erlang:function_exported(GameMod, handle_effects, 2) of
+                true ->
+                    effects_result(GameMod:handle_effects(Live, Entities), Entities, State);
+                false ->
+                    log_no_effect_handler(State),
+                    Entities
+            end
+    end.
+
+effects_result({ok, Entities1}, _Prev, _State) when is_map(Entities1) -> Entities1;
+effects_result(Entities1, _Prev, _State) when is_map(Entities1) -> Entities1;
+effects_result(_Other, Prev, State) ->
+    log_bad_effects_return(State),
+    Prev.
+
+%% --- Cold/hot classification (widgrensit/asobi#543) ---
+
+%% A zone with no entities, no queued input, no live entity timer and no
+%% pending respawn has nothing to simulate, and on a Lua world its tick is
+%% almost entirely the bridge's fixed per-callback cost rather than game logic.
+%% Ticking it at `cold_tick_divisor` is what `cold_tick_divisor` has always
+%% promised; until #543 nothing ever demoted a zone, so no zone was ever cold.
+%%
+%% Subscribers deliberately do not count. A player watching a neighbouring
+%% empty zone creates no work in it: there are no entities to move and no
+%% deltas to send. That is exactly the "watched but empty" case #543 asks about.
+-spec zone_idle(map()) -> boolean().
+%% `input_queue` and `effect_queue` are always `[]` where reclassify/1 calls
+%% this - do_tick/2 empties both before it runs - so those two conditions never
+%% decide anything at that call site. They are kept because this states what
+%% "idle" means for a zone rather than what happens to be true at one caller,
+%% and warm_up/1 is what actually handles a queue filling between ticks.
+zone_idle(#{
+    entities := Entities,
+    input_queue := Queue,
+    effect_queue := Effects,
+    entity_timers := ET,
+    spawner := Spawner
+}) ->
+    map_size(Entities) =:= 0 andalso
+        Queue =:= [] andalso
+        Effects =:= [] andalso
+        asobi_entity_timer:active_count(ET) =:= 0 andalso
+        not asobi_zone_spawner:has_pending(Spawner).
+
+-spec clamp_border_band(term()) -> number().
+clamp_border_band(Band) when is_number(Band), Band >= 0, Band =< ?MAX_BORDER_BAND ->
+    Band;
+clamp_border_band(Band) ->
+    ?LOG_WARNING(#{
+        msg => ~"border_band must be a fraction of zone_size between 0 and 1; ignoring",
+        value => Band
+    }),
+    ?DEFAULT_BORDER_BAND.
+
+%% Demotion is decided on the tick, where the cost is. Promotion is not: see
+%% warm_up/1.
+-spec reclassify(map()) -> map().
+reclassify(#{cold := Cold, ticker_pid := TickerPid} = State) ->
+    case zone_idle(State) of
+        Cold ->
+            State;
+        true ->
+            asobi_world_ticker:demote_zone(TickerPid, self()),
+            announce(cold, State),
+            State#{cold => true};
+        false ->
+            warm(State)
+    end.
+
+%% Promote from the message that created the work rather than from the next
+%% tick. A cold zone only ticks once every `cold_tick_divisor` ticks, so
+%% waiting for its own tick to notice a player arrived would put that whole
+%% divisor of latency on the first frame of every zone entry.
+-spec warm_up(map()) -> map().
+warm_up(#{cold := true} = State) ->
+    warm(State);
+warm_up(State) ->
+    State.
+
+%% Emitted on the transition only, never per tick: a zone that is merely busy is
+%% the normal case and says nothing an operator can act on.
+-spec warm(map()) -> map().
+warm(#{ticker_pid := TickerPid} = State) ->
+    asobi_world_ticker:promote_zone(TickerPid, self()),
+    announce(hot, State),
+    State#{cold => false}.
+
+%% Both events carry the same identity, and both are emitted from a plain state
+%% map, so the narrowing lives in one place rather than at each call.
+-spec announce(cold | hot, map()) -> ok.
+announce(Which, #{world_id := WorldId, coords := {CX, CY} = Coords}) when
+    is_binary(WorldId), is_integer(CX), is_integer(CY)
+->
+    case Which of
+        cold -> asobi_telemetry:zone_cold(WorldId, Coords);
+        hot -> asobi_telemetry:zone_hot(WorldId, Coords)
+    end;
+announce(_Which, _State) ->
     ok.
 
 has_tickable_entities(Entities) ->

@@ -81,7 +81,7 @@ init(Config) ->
     PreInstall = fun(St) -> asobi_lua_api:install(Ctx, St) end,
     case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
         {ok, LuaSt0} ->
-            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0),
+            {EncConfig, LuaSt1} = asobi_lua_loader:encode(GameConfig, LuaSt0),
             case asobi_lua_loader:call(init, [EncConfig], LuaSt1, ?INIT_TIMEOUT) of
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{
@@ -156,20 +156,28 @@ in `details` and never becomes an asobi error code (see `m:asobi_error`).
 join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map(Ctx) ->
     %% Erlang maps must be encoded before they cross into Luerl - GS is
     %% already a Lua value, but Ctx arrives raw from the client.
-    {EncCtx, LuaSt0} = luerl:encode(Ctx, LuaSt),
+    {EncCtx, LuaSt0} = asobi_lua_loader:encode(Ctx, LuaSt),
     case asobi_lua_loader:call(join, [PlayerId, GS, EncCtx], LuaSt0, ?JOIN_TIMEOUT) of
         {ok, [Falsey | Rest], LuaSt1} when Falsey =:= nil; Falsey =:= false ->
-            {error, {join_refused, refusal_reason(Rest, LuaSt1)}};
+            Reason = refusal_reason(Rest, LuaSt1),
+            %% A refused join must not advance the game state, or a client can
+            %% drive a script by being turned away over and over. Discarding
+            %% LuaSt1 is that revert under `copy`; under `owned` the state lives
+            %% in the VM and the revert has to be asked for. Read after the
+            %% reason, which is decoded out of the state being undone.
+            _ = asobi_lua_loader:revert(LuaSt1),
+            {error, {join_refused, Reason}};
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         %% A `join` that falls off its end returns no values at all. Before
         %% refusal existed this was a case_clause that killed the match
         %% server and with it every player already in the roster; a script
         %% bug must cost the author their own join, not the whole match.
-        {ok, [], _LuaSt1} ->
+        {ok, [], LuaSt1} ->
             log_match_lua_error(
                 warning, join, join_returned_no_state, State, #{player_id => PlayerId}
             ),
+            _ = asobi_lua_loader:revert(LuaSt1),
             {error, {join_refused, undefined}};
         {error, Reason} ->
             log_match_lua_error(warning, join, Reason, State, #{player_id => PlayerId}),
@@ -184,7 +192,7 @@ join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map
 
 -spec refusal_reason([dynamic()], dynamic()) -> binary() | undefined.
 refusal_reason([Value | _], LuaSt) ->
-    case luerl:decode(Value, LuaSt) of
+    case asobi_lua_loader:decode(Value, LuaSt) of
         Reason when is_binary(Reason), byte_size(Reason) =< ?MAX_REFUSAL_REASON, Reason =/= <<>> ->
             case is_printable_ascii(Reason) of
                 true -> Reason;
@@ -212,7 +220,7 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec handle_input(binary(), map(), map()) -> {ok, map()}.
 handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) ->
-    {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
+    {EncInput, LuaSt1} = asobi_lua_loader:encode(Input, LuaSt),
     %% No bounded_eval: the per-input spawn dominates real Lua work at
     %% high input rates. tick/1 still spawn-isolates. See
     %% guides/security-trust-model.md.
@@ -341,7 +349,7 @@ atomise_keys([Key | Rest], Map) ->
 
 -spec vote_resolved(binary(), map(), map()) -> {ok, map()}.
 vote_resolved(Template, Result, #{lua_state := LuaSt, game_state := GS} = State) ->
-    {EncResult, LuaSt1} = luerl:encode(Result, LuaSt),
+    {EncResult, LuaSt1} = asobi_lua_loader:encode(Result, LuaSt),
     case asobi_lua_loader:call(vote_resolved, [Template, EncResult, GS], LuaSt1, ?VOTE_TIMEOUT) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
@@ -450,10 +458,10 @@ log_match_lua_error(Level, Callback, Reason, State, ExtraMeta) ->
 
 is_finished(GS, LuaSt) ->
     try
-        {ok, FinVal, LuaSt1} = luerl:get_table_key(GS, ~"_finished", LuaSt),
+        {ok, FinVal, LuaSt1} = asobi_lua_loader:get_table_key(GS, ~"_finished", LuaSt),
         case FinVal of
             true ->
-                case luerl:get_table_key(GS, ~"_result", LuaSt1) of
+                case asobi_lua_loader:get_table_key(GS, ~"_result", LuaSt1) of
                     {ok, ResRef, LuaSt2} -> {true, decode_to_map(ResRef, LuaSt2)};
                     _ -> {true, #{}}
                 end;
@@ -491,7 +499,9 @@ boot_throwaway_lua_state(Config, Caller) ->
                 probe => true
             },
             PreInstall = fun(St) -> asobi_lua_api:install(Ctx, St) end,
-            case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
+            %% Copied, never owned: this state answers one question and is
+            %% dropped, so an ADR 0015 VM here would be a process nothing stops.
+            case asobi_lua_loader:new_copied(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
                 {ok, LuaSt} ->
                     {ok, #{lua_state => LuaSt, script => ScriptPath}};
                 {error, Reason} ->

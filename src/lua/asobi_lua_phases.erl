@@ -15,7 +15,7 @@ module holds that decode logic once so neither bridge forks it.
 
 -spec decode_phases(term(), dynamic()) -> [map()].
 decode_phases(PhasesRef, LuaSt) ->
-    case luerl:decode(PhasesRef, LuaSt) of
+    case asobi_lua_loader:decode(PhasesRef, LuaSt) of
         Decoded when is_list(Decoded) ->
             lists:filtermap(
                 fun

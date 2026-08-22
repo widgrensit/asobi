@@ -423,9 +423,9 @@ load_bot_names(#{names := Names}) when is_list(Names) ->
 load_bot_names(#{script := Script}) when is_binary(Script); is_list(Script) ->
     case asobi_lua_loader:new(Script) of
         {ok, St} ->
-            case luerl:get_table_keys([~"names"], St) of
+            case asobi_lua_loader:get_table_keys([~"names"], St) of
                 {ok, Val, St1} when Val =/= nil, Val =/= false ->
-                    case luerl:decode(Val, St1) of
+                    case asobi_lua_loader:decode(Val, St1) of
                         Props when is_list(Props) ->
                             [V || {_, V} <- Props, is_binary(V)];
                         _ ->

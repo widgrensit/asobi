@@ -43,8 +43,116 @@ ticker_test_() ->
             {"a healthy world emits no skip events", fun healthy_world_emits_no_skips/0},
             {"post_tick never runs backwards", fun post_tick_is_monotonic/0},
             {"the world keeps posting while saturated", fun post_tick_survives_saturation/0},
-            {"set_zones twice arms one timer", fun set_zones_twice_arms_one_timer/0}
+            {"set_zones twice arms one timer", fun set_zones_twice_arms_one_timer/0},
+            {"a demoted zone stays cold under a zone manager", fun manager_honours_cold_zones/0},
+            {"a cold zone is skipped on an off-divisor tick", fun cold_zone_skipped/0},
+            {"a reaped cold zone drops out of the cold set", fun cold_set_prunes_dead_zones/0}
         ]}.
+
+%% widgrensit/asobi#543: with a zone manager the ticker used to overwrite its
+%% own hot/cold split with "every active zone is hot", which made
+%% cold_tick_divisor inert for every world running lazy zones.
+manager_honours_cold_zones() ->
+    Z1 = idle_proc(),
+    Z2 = idle_proc(),
+    Manager = fake_manager([Z1, Z2]),
+    Pid = start_ticker(#{tick_rate => 20}),
+    asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
+    asobi_world_ticker:demote_zone(Pid, Z1),
+    timer:sleep(80),
+    State = get_state_map(Pid),
+    ?assertEqual([Z1], maps:get(cold_zones, State)),
+    ?assertEqual([Z2], maps:get(hot_zones, State)).
+
+cold_zone_skipped() ->
+    Z1 = counting_proc(),
+    Z2 = counting_proc(),
+    Manager = fake_manager([Z1, Z2]),
+    Pid = start_ticker(#{tick_rate => 10, cold_tick_divisor => 100}),
+    %% Each stand-in must retire its tick, or the ticker's saturation guard
+    %% skips it from the second tick onwards and both counts stay at 1.
+    Z1 ! {ticker, Pid},
+    Z2 ! {ticker, Pid},
+    asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
+    asobi_world_ticker:demote_zone(Pid, Z1),
+    timer:sleep(150),
+    Hot = tick_count(Z2),
+    %% Exact rather than "fewer": with a divisor of 100 and at most ~15 world
+    %% ticks in the window, the cold zone should not have been reached once.
+    ?assertEqual(0, tick_count(Z1)),
+    %% Deliberately loose: this box runs eunit modules in parallel, so a 10ms
+    %% ticker's dispatch count over 150ms is not something to assert tightly.
+    ?assert(Hot >= 3).
+
+cold_set_prunes_dead_zones() ->
+    Z1 = idle_proc(),
+    Manager = fake_manager([Z1]),
+    Pid = start_ticker(#{tick_rate => 20}),
+    asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
+    asobi_world_ticker:demote_zone(Pid, Z1),
+    timer:sleep(60),
+    ?assertEqual([Z1], maps:get(cold_zones, get_state_map(Pid))),
+    %% The manager stops listing it (the zone was reaped). Nothing sends
+    %% remove_zone, so the cold set has to prune itself or it grows for the
+    %% life of the world.
+    set_manager_zones(Manager, []),
+    timer:sleep(80),
+    ?assertEqual([], maps:get(cold_zones, get_state_map(Pid))).
+
+idle_proc() ->
+    spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end).
+
+%% Answers get_active_zones and counts nothing else; the zone list is
+%% swappable so a test can simulate a reap.
+fake_manager(Zones) ->
+    spawn(fun() -> manager_loop(Zones) end).
+
+manager_loop(Zones) ->
+    receive
+        {'$gen_call', {From, Tag}, get_active_zones} ->
+            From ! {Tag, Zones},
+            manager_loop(Zones);
+        {set_zones, New} ->
+            manager_loop(New);
+        stop ->
+            ok
+    end.
+
+set_manager_zones(Manager, Zones) ->
+    Manager ! {set_zones, Zones},
+    ok.
+
+%% A zone stand-in that counts the ticks it is sent.
+counting_proc() ->
+    spawn(fun() -> counting_loop(0, undefined) end).
+
+counting_loop(N, Ticker) ->
+    receive
+        {ticker, Pid} ->
+            counting_loop(N, Pid);
+        {'$gen_cast', {tick, T}} ->
+            case Ticker of
+                undefined -> ok;
+                _ -> asobi_world_ticker:tick_done(Ticker, self(), T)
+            end,
+            counting_loop(N + 1, Ticker);
+        {count, From} ->
+            From ! {count, N},
+            counting_loop(N, Ticker);
+        stop ->
+            ok
+    end.
+
+tick_count(Pid) ->
+    Pid ! {count, self()},
+    receive
+        {count, N} -> N
+    after 1000 -> error(no_count)
+    end.
 
 get_tick_starts_at_zero() ->
     Pid = start_ticker(),

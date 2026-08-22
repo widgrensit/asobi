@@ -151,7 +151,7 @@ send_input(#{lua_state := undefined, bot_id := BotId, match_pid := MatchPid, gam
 send_input(
     #{lua_state := LuaSt, bot_id := BotId, match_pid := MatchPid, game_state := GS} = State
 ) ->
-    {EncGS, LuaSt1} = luerl:encode(GS, LuaSt),
+    {EncGS, LuaSt1} = asobi_lua_loader:encode(GS, LuaSt),
     Input =
         case asobi_lua_loader:call(think, [BotId, EncGS], LuaSt1, 50) of
             {ok, [Result | _], LuaSt2} ->
@@ -302,7 +302,7 @@ pick_random_option(Options) ->
 decode_result(Result, _LuaSt) when is_map(Result) ->
     Result;
 decode_result(Result, LuaSt) ->
-    case luerl:decode(Result, LuaSt) of
+    case asobi_lua_loader:decode(Result, LuaSt) of
         L when is_list(L) -> props_to_map(L, #{});
         M when is_map(M) -> M;
         _ -> #{}

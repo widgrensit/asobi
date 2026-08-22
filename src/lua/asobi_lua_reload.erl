@@ -52,10 +52,17 @@ Operators running self-hosted with high zone counts who want to suppress
 per-tick stat overhead can set `asobi_lua.reload_mode` (or the
 `ASOBI_LUA_RELOAD` env var the release script reads) to:
 
-- `auto` (default) — mtime-poll every tick. Suitable for dev and
-  self-hosted volume-mount setups.
+- `auto` (default) — mtime-poll, at most once per
+  `asobi_lua.reload_poll_interval_ms` (default 200) per bridge. Suitable for
+  dev and self-hosted volume-mount setups.
 - `off` — never reload. Suitable for sealed-bundle prod where code
-  changes are container restarts. The per-tick `stat()` is skipped.
+  changes are container restarts. The `stat()` is skipped entirely.
+
+The poll interval is what decouples reload cost from tick rate. At 80 Hz the
+per-tick stat was 80 `stat()` calls per second **per zone**, which on a 225-zone
+grid is 18,000 a second to notice an edit a developer makes every few minutes;
+the interval makes that 5 per zone with reload latency no human can perceive
+(widgrensit/asobi#543). Set it to 0 for the old per-tick behaviour.
 """.
 
 -include_lib("kernel/include/logger.hrl").
@@ -67,6 +74,9 @@ per-tick stat overhead can set `asobi_lua.reload_mode` (or the
 %% the moment its mtime ticked.
 -define(RELOAD_TIMEOUT_MS, 5000).
 
+%% Smallest gap between two `stat()` calls on one bridge's script.
+-define(DEFAULT_POLL_INTERVAL_MS, 200).
+
 -spec maybe_hot_reload(map()) -> map().
 maybe_hot_reload(State) ->
     %% just_reloaded is a one-tick signal, not a state field - clear it
@@ -76,7 +86,33 @@ maybe_hot_reload(State) ->
     State0 = maps:remove(just_reloaded, State),
     case reload_mode() of
         off -> State0;
-        auto -> do_maybe_reload(State0)
+        auto -> maybe_poll(State0)
+    end.
+
+%% The stamp lives in the bridge's own state map rather than in the process
+%% dictionary because a match bridge and a zone bridge can share a process in
+%% tests, and a per-process stamp would have one starve the other.
+-spec maybe_poll(map()) -> map().
+maybe_poll(State) ->
+    case poll_interval_ms() of
+        0 ->
+            do_maybe_reload(State);
+        Interval ->
+            Now = erlang:monotonic_time(millisecond),
+            %% Defaulting the deadline to `Now` makes the first call poll:
+            %% monotonic time has an arbitrary origin and is routinely
+            %% negative, so 0 would be a deadline in the future on a fresh node.
+            case Now >= maps:get(reload_poll_at, State, Now) of
+                true -> do_maybe_reload(State#{reload_poll_at => Now + Interval});
+                false -> State
+            end
+    end.
+
+-spec poll_interval_ms() -> non_neg_integer().
+poll_interval_ms() ->
+    case asobi_lua_env:get_env(reload_poll_interval_ms) of
+        {ok, N} when is_integer(N), N >= 0 -> N;
+        _ -> ?DEFAULT_POLL_INTERVAL_MS
     end.
 
 -spec do_maybe_reload(map()) -> map().
@@ -142,6 +178,6 @@ reload_script(Path, LuaSt) ->
 
 -spec clear_require_cache(dynamic()) -> dynamic().
 clear_require_cache(LuaSt) ->
-    {Empty, LuaSt1} = luerl:encode(#{}, LuaSt),
-    {ok, LuaSt2} = luerl:set_table_keys([~"_ASOBI_LOADED"], Empty, LuaSt1),
+    {Empty, LuaSt1} = asobi_lua_loader:encode(#{}, LuaSt),
+    {ok, LuaSt2} = asobi_lua_loader:set_table_keys([~"_ASOBI_LOADED"], Empty, LuaSt1),
     LuaSt2.

@@ -53,6 +53,10 @@ game.spatial.query_radius(entities, x, y, radius)
 game.spatial.query_radius(entities, x, y, radius, opts)
 game.spatial.query_radius(x, y, radius)              -- zone-based (requires zone_pid)
 game.spatial.query_rect(x1, y1, x2, y2)              -- zone-based (requires zone_pid)
+game.spatial.neighbours_radius(x, y, radius)        -- read-only copies from the 8 touching zones
+game.spatial.neighbours_radius(x, y, radius, opts)
+game.spatial.neighbours_rect(x1, y1, x2, y2)
+game.spatial.neighbours_rect(x1, y1, x2, y2, opts)
 game.spatial.nearest(entities, x, y, n)
 game.spatial.nearest(entities, x, y, n, opts)
 game.spatial.in_range(entity_a, entity_b, range)
@@ -62,6 +66,7 @@ game.spatial.distance(entity_a, entity_b)
 game.zone.spawn(template_id, x, y)              -- false if template_id is unknown
 game.zone.spawn(template_id, x, y, overrides)   -- false if template_id is unknown
 game.zone.despawn(entity_id)
+game.zone.apply(entity_id, event)               -- ask the owning neighbour zone to act; false if unseen
 
 -- Terrain (world mode only, requires terrain_store_pid in context)
 game.terrain.get_chunk(cx, cy)                   -- get compressed chunk data
@@ -101,6 +106,7 @@ through the same `{ ok = ... }` / `{ error = "..." }` envelope.
 -export([deep_decode/1, decode_to_map/2]).
 -export([to_storage_value/1]).
 -export([atomize_entities/1, atomize_keys/1]).
+-export([reset_effect_sends/0]).
 
 -spec install(map(), dynamic()) -> dynamic().
 install(#{probe := true} = Ctx, St0) ->
@@ -198,12 +204,15 @@ core_surface(Ctx) ->
         %% Spatial
         {[~"game", ~"spatial", ~"query_radius"], none, fun_spatial_query_radius(Ctx)},
         {[~"game", ~"spatial", ~"query_rect"], none, fun_spatial_query_rect(Ctx)},
+        {[~"game", ~"spatial", ~"neighbours_radius"], none, fun_spatial_neighbours(Ctx, radius)},
+        {[~"game", ~"spatial", ~"neighbours_rect"], none, fun_spatial_neighbours(Ctx, rect)},
         {[~"game", ~"spatial", ~"nearest"], none, fun_spatial_nearest()},
         {[~"game", ~"spatial", ~"in_range"], none, fun_spatial_in_range()},
         {[~"game", ~"spatial", ~"distance"], none, fun_spatial_distance()},
         %% Zone spawning
         {[~"game", ~"zone", ~"spawn"], zone_effect(Ctx), fun_zone_spawn(Ctx)},
         {[~"game", ~"zone", ~"despawn"], zone_effect(Ctx), fun_zone_despawn(Ctx)},
+        {[~"game", ~"zone", ~"apply"], zone_effect(Ctx), fun_zone_apply(Ctx)},
         %% Terrain
         {[~"game", ~"terrain", ~"get_chunk"], none, fun_terrain_get_chunk(Ctx)},
         {[~"game", ~"terrain", ~"preload"], terrain_effect(Ctx), fun_terrain_preload(Ctx)}
@@ -969,6 +978,75 @@ fun_spatial_query_rect(#{zone_pid := ZonePid}) ->
 fun_spatial_query_rect(_) ->
     fun(_, St) -> error_result(~"query_rect requires zone context", St) end.
 
+%% --- Neighbour-zone reads (widgrensit/asobi#544) ---
+
+%% Both shapes are one closure because they differ only in how many numbers
+%% they take: the geometry check, the read and the encoding are identical, and
+%% splitting them duplicated the part that is easy to get subtly different.
+fun_spatial_neighbours(Ctx, Kind) ->
+    fun(Args, St) ->
+        case {zone_grid(Ctx), decode_args(Args, St)} of
+            {error, _} ->
+                error_result(no_grid_message(Kind), St);
+            {{ok, Grid}, Decoded} ->
+                neighbours_query(Kind, Grid, Decoded, St)
+        end
+    end.
+
+no_grid_message(radius) -> ~"neighbours_radius requires zone context";
+no_grid_message(rect) -> ~"neighbours_rect requires zone context".
+
+bad_args_message(radius) -> ~"neighbours_radius requires (x, y, radius[, opts])";
+bad_args_message(rect) -> ~"neighbours_rect requires (x1, y1, x2, y2[, opts])".
+
+neighbours_query(radius, {_WorldId, Tab, Coords, GridSize}, [X, Y, R], St) when
+    is_number(X), is_number(Y), is_number(R)
+->
+    encode_spatial_results(asobi_zone_border:query_radius(Tab, Coords, GridSize, {X, Y}, R), St);
+neighbours_query(radius, {_WorldId, Tab, Coords, GridSize}, [X, Y, R, OptsRaw], St) when
+    is_number(X), is_number(Y), is_number(R)
+->
+    encode_spatial_results(
+        asobi_zone_border:query_radius(
+            Tab, Coords, GridSize, {X, Y}, R, decode_spatial_opts(OptsRaw)
+        ),
+        St
+    );
+neighbours_query(rect, {_WorldId, Tab, Coords, GridSize}, [X1, Y1, X2, Y2], St) when
+    is_number(X1), is_number(Y1), is_number(X2), is_number(Y2)
+->
+    encode_rect_results(
+        asobi_zone_border:query_rect(Tab, Coords, GridSize, {X1, Y1}, {X2, Y2}), St
+    );
+neighbours_query(rect, {_WorldId, Tab, Coords, GridSize}, [X1, Y1, X2, Y2, OptsRaw], St) when
+    is_number(X1), is_number(Y1), is_number(X2), is_number(Y2)
+->
+    encode_rect_results(
+        asobi_zone_border:query_rect(
+            Tab, Coords, GridSize, {X1, Y1}, {X2, Y2}, decode_spatial_opts(OptsRaw)
+        ),
+        St
+    );
+neighbours_query(Kind, _Grid, _Args, St) ->
+    error_result(bad_args_message(Kind), St).
+
+%% One place that decides whether a Ctx can answer a neighbour question at all,
+%% so a probe VM (no zone identity) and a match VM (no grid) both fail with the
+%% same message rather than crashing on a missing key.
+zone_grid(
+    #{
+        world_id := WorldId,
+        coords := {CX, CY} = Coords,
+        grid_size := GridSize,
+        border_tab := Tab
+    }
+) when
+    is_binary(WorldId), is_integer(CX), is_integer(CY), is_integer(GridSize), GridSize > 0
+->
+    {ok, {WorldId, Tab, Coords, GridSize}};
+zone_grid(_Ctx) ->
+    error.
+
 fun_spatial_nearest() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
@@ -1036,6 +1114,13 @@ encode_spatial_results(Results, St) ->
         #{~"id" => Id, ~"entity" => Entity, ~"distance" => Dist}
      || {Id, Entity, Dist} <- Results
     ],
+    {Enc, St1} = luerl:encode(Encoded, St),
+    {[Enc], St1}.
+
+%% asobi_spatial:query_rect/4 has no distance to report, so the rect shape is
+%% the radius one minus that field rather than a different shape.
+encode_rect_results(Results, St) ->
+    Encoded = [#{~"id" => Id, ~"entity" => Entity} || {Id, Entity} <- Results],
     {Enc, St1} = luerl:encode(Encoded, St),
     {[Enc], St1}.
 
@@ -1162,6 +1247,107 @@ known_template(_TemplateId, _Ctx) ->
     %% never populate one) stays unrestricted. Only a genuine per-zone Ctx
     %% (built by zone_ctx/2) ever enforces the known-template allowlist.
     true.
+
+%% Ceiling on one cross-zone event, and on how many a caller may send in a tick.
+%% See effect_within_budget/1 for why both are spent on the sender.
+-define(MAX_EFFECT_BYTES, 4096).
+-define(MAX_EFFECT_SENDS, 64).
+-define(EFFECT_SENDS_KEY, {?MODULE, effect_sends}).
+
+-doc """
+Clear the calling process's per-tick `game.zone.apply` send budget.
+
+Called by `asobi_zone` at the top of each tick. Only the inline callbacks need
+it: a bounded callback runs in a throwaway worker whose process dictionary goes
+with it.
+""".
+-spec reset_effect_sends() -> ok.
+reset_effect_sends() ->
+    _ = erlang:erase(?EFFECT_SENDS_KEY),
+    ok.
+
+%% Only an entity currently published in the border mirror can be addressed,
+%% which makes "what a zone may affect" the same set as "what a zone can see"
+%% rather than two sets that drift apart. It also means `false` has one
+%% meaning a script can act on: you cannot see that entity from here.
+fun_zone_apply(Ctx) ->
+    fun(Args, St) ->
+        case {zone_grid(Ctx), decode_args(Args, St)} of
+            {error, _} ->
+                error_result(~"zone.apply requires zone context", St);
+            {{ok, Grid}, [EntityId, EventRaw]} when is_binary(EntityId) ->
+                case event_map(EventRaw) of
+                    {ok, Event} ->
+                        {[deliver_effect(Grid, EntityId, Event)], St};
+                    error ->
+                        error_result(~"zone.apply requires (entity_id, event_table)", St)
+                end;
+            _ ->
+                error_result(~"zone.apply requires (entity_id, event_table)", St)
+        end
+    end.
+
+%% An empty Lua table decodes to [], not #{} - see fun_spatial_query_radius/1's
+%% note on the same shape.
+event_map(Event) when is_map(Event) -> {ok, Event};
+event_map([]) -> {ok, #{}};
+event_map(_) -> error.
+
+deliver_effect({WorldId, Tab, Coords, GridSize}, EntityId, Event) ->
+    case effect_within_budget(Event) of
+        false ->
+            false;
+        true ->
+            case asobi_zone_border:owner(Tab, Coords, GridSize, EntityId) of
+                {ok, OwnerCoords} -> cast_effect(WorldId, OwnerCoords, EntityId, Event);
+                error -> false
+            end
+    end.
+
+cast_effect(WorldId, OwnerCoords, EntityId, Event) ->
+    case asobi_zone:whereis_zone(WorldId, OwnerCoords) of
+        {ok, Pid} ->
+            asobi_zone:apply_effect(Pid, EntityId, Event),
+            true;
+        error ->
+            false
+    end.
+
+%% Both halves of the bound are spent here, on the *calling* zone, because this
+%% is the last point at which refusing is free. Past it the term has been copied
+%% onto another process's heap and into its mailbox, which nothing downstream
+%% can un-send: `asobi_zone`'s own queue cap is only consulted once the message
+%% has already arrived.
+%%
+%% A cross-zone event is a verb, not a payload - `{kind = "damage", amount =
+%% 12}`, not a copy of the world - so a small size ceiling costs nothing real,
+%% and a per-tick send count keeps a script that loops on `apply` from turning
+%% its own budget into a neighbour's unbounded mailbox. `handle_input` makes
+%% this necessary rather than merely tidy: it runs inline with no wall-clock,
+%% heap or reduction budget at all (guides/security-trust-model.md), so it is
+%% the one caller that cannot be stopped by anything else.
+effect_within_budget(Event) ->
+    erts_debug:flat_size(Event) * erlang:system_info(wordsize) =< ?MAX_EFFECT_BYTES andalso
+        spend_effect_send().
+
+%% The process dictionary rather than Ctx: the closure's `self()` is the eval
+%% worker under `zone_tick` and the zone itself under `handle_input`, and both
+%% want one budget for the tick they are part of. A worker's dictionary dies
+%% with it, which is the reset for the first; asobi_zone:do_tick/2 erases the
+%% key for the second.
+spend_effect_send() ->
+    Spent =
+        case erlang:get(?EFFECT_SENDS_KEY) of
+            N when is_integer(N), N >= 0 -> N;
+            _ -> 0
+        end,
+    case Spent >= ?MAX_EFFECT_SENDS of
+        true ->
+            false;
+        false ->
+            _ = erlang:put(?EFFECT_SENDS_KEY, Spent + 1),
+            true
+    end.
 
 fun_zone_despawn(#{zone_pid := ZonePid}) ->
     fun(Args, St) ->
@@ -1368,9 +1554,19 @@ deep_decode(L, D) when is_list(L) ->
 deep_decode(V, _D) ->
     V.
 
+-doc """
+Decode a Luerl reference to a plain map.
+
+Goes through `asobi_lua_loader:decode/2` rather than `luerl:decode/2` because,
+unlike every other `luerl:*` call in this module, this one is reached from a
+*bridge* holding whatever `new/3` gave it - which under ADR 0015's `owned` mode
+is a handle to the process that owns the state, not the state. The rest of this
+module's Luerl calls live inside installed closures, which by construction run
+in the process that owns the state and are handed the real thing.
+""".
 -spec decode_to_map(term(), dynamic()) -> map().
 decode_to_map(Term, LuaSt) ->
-    case deep_decode(luerl:decode(Term, LuaSt)) of
+    case deep_decode(asobi_lua_loader:decode(Term, LuaSt)) of
         M when is_map(M) ->
             M;
         [] ->

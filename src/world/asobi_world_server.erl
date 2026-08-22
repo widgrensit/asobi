@@ -643,7 +643,13 @@ configure_zone_manager(
     } = State
 ) ->
     Templates = get_spawn_templates(GameMod, Config),
-    Persistence = maps:get(persistence, Config, false),
+    %% `persistent` is the public global a game declares
+    %% (guides/configuration.md); `persistence` is the internal zone-config key
+    %% every zone-side reader wants. Nothing translated between them, so
+    %% `persistence` was never set anywhere and the zone snapshot path was dead
+    %% for every world - a world declaring `persistent = true` kept its
+    %% snapshots on finish and restored from a set that was never written.
+    Persistence = maps:get(persistent, Config, false),
     TerrainStorePid = start_terrain_store(GameMod, Config),
     BaseZoneConfig = #{
         world_id => WorldId,
@@ -664,7 +670,17 @@ configure_zone_manager(
         %% resolve_zone_crossings/1 in asobi_zone.
         zone_size => ZoneSize,
         grid_size => GridSize,
-        rehome_margin => RehomeMargin
+        rehome_margin => RehomeMargin,
+        %% Fraction of zone_size each zone mirrors for its neighbours to read.
+        %% Off unless the game asks: see asobi_zone's ?DEFAULT_BORDER_BAND for
+        %% the measured cost (widgrensit/asobi#544).
+        border_band => maps:get(border_band, Config, 0),
+        %% This world's border mirror, owned by its instance supervisor. Absent
+        %% for a world started outside one, and then publishing is a no-op.
+        border_tab => maps:get(border_tab, Config, undefined),
+        %% Read by asobi_zone:init/1 and, before #543, never put anywhere the
+        %% zone could read it from.
+        spatial_grid_cell_size => maps:get(spatial_grid_cell_size, Config, undefined)
     },
     asobi_zone_manager:set_zone_config(ZoneManagerPid, BaseZoneConfig),
     State#{terrain_store_pid => TerrainStorePid}.
@@ -696,12 +712,13 @@ spawn_zones(
         game_state := GS
     } = State
 ) ->
-    Persistence = maps:get(persistence, Config, false),
+    %% See configure_zone_manager/1 for why this reads `persistent`.
+    Persistence = maps:get(persistent, Config, false),
     AllCoords = [{X, Y} || X <- lists:seq(0, GridSize - 1), Y <- lists:seq(0, GridSize - 1)],
     {ZoneStates, Entities, _SpawnerStates, GS1} =
         case Persistence of
             true ->
-                case asobi_zone_snapshotter:load_snapshots(WorldId) of
+                case safe_load_snapshots(WorldId) of
                     {ok, Snapshots} when map_size(Snapshots) > 0 ->
                         ZS = maps:map(fun(_, #{zone_state := V}) -> V end, Snapshots),
                         Ents = maps:map(fun(_, #{entities := V}) -> V end, Snapshots),
@@ -731,6 +748,26 @@ spawn_zones(
     %% Add recovered entities to zones
     restore_entities(AllCoords, Entities, ZoneManagerPid, WorldId),
     State#{game_state => GS1}.
+
+%% Mirrors asobi_zone:safe_load_snapshot/2. Until #543 nothing ever set
+%% `persistence`, so this call could not run and an unreachable database at
+%% world start could not be reached either. Now that it can, a raise here would
+%% take down the world server rather than starting the world un-restored, which
+%% is strictly worse: the snapshots are still on disk for the next attempt.
+-spec safe_load_snapshots(binary()) -> {ok, map()} | {error, term()}.
+safe_load_snapshots(WorldId) ->
+    try asobi_zone_snapshotter:load_snapshots(WorldId) of
+        {ok, _} = Ok -> Ok;
+        {error, _} = Err -> Err
+    catch
+        Class:Reason ->
+            ?LOG_ERROR(#{
+                event => world_snapshot_load_failed,
+                world_id => WorldId,
+                reason => {Class, Reason}
+            }),
+            {error, {Class, Reason}}
+    end.
 
 -spec restore_entities([term()], map(), pid() | atom(), binary()) -> ok.
 restore_entities([], _Entities, _ZoneManagerPid, _WorldId) ->

@@ -92,14 +92,34 @@ in a shared file - see [Configuration](configuration.md).
 
 ## Zone tick, hibernation and reaping
 
-Every active zone in a world ticks at the world's `tick_rate`. There is no hot
-and cold split and nothing promotes or demotes a zone; if the zone is active,
-it ticks.
+Every active zone in a world ticks at the world's `tick_rate`, except in two
+cases.
 
-The one exception is a zone that has not finished its previous tick: it is
-skipped rather than sent another one, so `tick_rate` is a ceiling on how often
-a zone ticks, not a promise. A zone consistently missing ticks is a zone whose
-`zone_tick` is over budget, and `[asobi, zone, tick_skipped]` counts it.
+A zone that has not finished its previous tick is skipped rather than sent
+another one, so `tick_rate` is a ceiling on how often a zone ticks, not a
+promise. A zone consistently missing ticks is a zone whose `zone_tick` is over
+budget, and `[asobi, zone, tick_skipped]` counts it.
+
+A zone with **nothing to simulate** ticks once every `cold_tick_divisor` ticks
+(default 10) instead of every tick. "Nothing to simulate" means no entities, no
+queued input, no live entity timer and no pending respawn - subscribers
+deliberately do not count, because a player watching an empty neighbouring zone
+creates no work in it. The zone goes back to full rate on the message that
+creates the work, not on its own next tick, so entering a zone costs no extra
+latency.
+
+This matters most on a Lua world, and the reason is in [Lua memory](#lua-memory)
+below: an empty zone's tick is almost entirely the fixed per-callback cost of
+the bridge rather than anything the game asked for. Measured on one machine, a
+zone with no entities and an inert `zone_tick` costs about 2,400 reductions a
+tick, of which roughly 90% is the bridge and most of that is the state copy. At
+`tick_rate = 80` on a 225-zone grid that is the difference between a world
+spending most of a core on empty space and spending a tenth of it.
+
+Set `cold_tick_divisor = 1` if your game drives spawning from `zone_tick` on
+zones that hold nothing - that is the one shape this changes, because such a
+zone's `zone_tick` now runs at a tenth of the rate until something appears in
+it.
 
 What does happen automatically:
 
@@ -133,6 +153,48 @@ runs at: roughly 7 ms per MB of state. A callback that does nothing at all
 measures 1.8 ms against a 0.4 MB state, 41 ms against 6 MB and 418 ms against
 62 MB. A zone whose state reaches tens of MB is over its tick budget before
 its script has run a single line.
+
+A second, smaller fixed cost sits alongside it. With `reload_mode = auto`
+(the default) each bridge polls its script's mtime so an edit reloads without a
+restart. That poll is throttled to once per `reload_poll_interval_ms` (default
+200) rather than once per tick: at 80 Hz across 225 zones the per-tick version
+was 18,000 `stat()` calls a second to notice an edit made every few minutes.
+Set it to 0 for the old per-tick behaviour, or `reload_mode = off` in a sealed
+deployment where scripts never change under a running node.
+
+**`lua_vm_mode = owned` removes that copy entirely** (ADR 0015). The state
+moves into a process of its own, the bridge holds a handle, and every Luerl
+operation becomes a small message to the process that owns it. The cost of a
+callback stops tracking the size of the state:
+
+| state | `copy` us/tick | `owned` us/tick |
+|---|---|---|
+| 0.1 MB | 151 | 16 |
+| 3.2 MB | 3,733 | 18 |
+| 15.7 MB | 20,385 | 16 |
+| 62.6 MB | 111,444 | 19 |
+
+Flat, not merely faster. Set it in `sys.config`:
+
+```erlang
+{asobi, [{lua_vm_mode, owned}]}
+```
+
+It is **off by default**, because the two modes differ in what a runaway
+callback costs. Under `copy` the process killed on a timeout or heap overrun is
+a throwaway holding a copy, so a bad callback costs one tick and the zone
+carries on. Under `owned` the only killable thing is the process holding the
+state, so an overrun kills the state: the zone dies with its VM and its
+supervisor restarts it into the last snapshot. That is a better trade for a
+large-state game and a worse one for a game whose scripts are unreliable and
+whose state is small. `vm_max_heap_words` puts an absolute ceiling on the state
+under `owned` - the first time that number can mean what it says, because the
+capped process is the one holding it.
+
+The win is smaller when the per-tick work itself grows with the state: a zone
+holding 8,000 entities and encoding all of them every tick measured 1.4x, not
+1,000x. `owned` removes a term that is O(state); it does not make encoding
+cheaper.
 
 asobi collects each Lua state periodically to keep that flat, immediately
 before the tick's own callback so the copy is of the collected state. The

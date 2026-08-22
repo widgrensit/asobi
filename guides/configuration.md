@@ -43,8 +43,9 @@ bots = { script = "bots/arena_bot.lua" }
 World-mode games (`game_type = "world"`) read a further set of globals -
 `tick_rate`, `grid_size`, `zone_size`, `view_radius`, `persistent`,
 `lazy_zones`, `zone_idle_timeout`, `max_active_zones`,
-`spatial_grid_cell_size`, `cold_tick_divisor`, `empty_grace_ms`,
-`player_ttl_ms`. [World server](world-server.md) documents those.
+`spatial_grid_cell_size`, `cold_tick_divisor`, `border_band`,
+`empty_grace_ms`, `player_ttl_ms`. [World server](world-server.md) documents
+those.
 
 **Where you put `guest_auth` and `registration` matters.** They are read from
 `match.lua` in single-mode and from `config.lua` in multi-mode. A game with a
@@ -98,6 +99,7 @@ Everything below goes under `{asobi, [...]}`.
 
 The Lua runtime used to be its own OTP application, so the keys it owns -
 `max_heap_words`, `max_reductions_per_ms`, `reload_mode`,
+`reload_poll_interval_ms`, `lua_vm_mode`, `vm_max_heap_words`,
 `config_watch_interval`, `dev_errors`, `terrain_providers`, `lua_gc`,
 `state_warn_words`, `state_sample_interval_ms` and `rate_limits` -
 are still read from `asobi_lua` first and `asobi` second

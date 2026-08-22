@@ -32,10 +32,16 @@ attached (e.g. for evaluating a `config.lua` manifest); use `new/1` to
 load a specific script and pin its base directory for `require`.
 """.
 
--export([new/1, new/2, new/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
+-export([new/1, new/2, new/3, new_copied/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
 -export([is_defined/2]).
 -export([collect_state/1]).
 -export([anchor_ref/2, unanchor_ref/1, ref_anchored/2]).
+%% ADR 0015: the five luerl operations the bridges use, behind one door so a
+%% bridge does not care whether it is holding a Luerl state or a pid.
+-export([encode/2, decode/2, get_table_key/3, get_table_keys/2, set_table_keys/3]).
+-export([vm_mode/0, vm_max_heap_words/0, release/1, revert/1]).
+%% Called back by asobi_lua_vm, which runs these against the state it owns.
+-export([do_inline/2, gc_now/2]).
 -ifdef(TEST).
 -export([next_gc/4, gc_budget_us/1, state_words/0]).
 -endif.
@@ -178,13 +184,102 @@ load a specific script and pin its base directory for `require`.
 %% side can size the state without walking it.
 -define(STATE_WORDS_KEY, {?MODULE, state_words}).
 
+%% Ceiling on one un-budgeted VM operation. An encode or a table read is
+%% microseconds; anything reaching this is a VM wedged by something the caller
+%% cannot see, and waiting forever on it would hang the zone.
+-define(VM_OP_TIMEOUT, 5_000).
+
+-doc """
+Whether a bridge holds the Luerl state itself or a process that owns it.
+
+`copy` (the default) is the original path: the state lives in the bridge's own
+map and `call/4` spawns a worker per callback, which copies it in and back.
+`owned` is ADR 0015: an `asobi_lua_vm` process holds the state and the bridge
+holds a handle.
+
+Defaulting to `copy` for at least one release is ADR 0015's own decision item 6.
+The two paths differ in what a runaway callback costs - a tick under `copy`, the
+state under `owned` - and that is not a difference to flip on under an operator
+without warning.
+""".
+-spec vm_mode() -> copy | owned.
+vm_mode() ->
+    case asobi_lua_env:get_env(lua_vm_mode) of
+        {ok, owned} -> owned;
+        {ok, copy} -> copy;
+        _ -> copy
+    end.
+
+-doc """
+Absolute heap ceiling for an `asobi_lua_vm`, in words. 0 disables it.
+
+Meaningful only under `owned`: this is the first time an absolute cap bounds the
+persistent state rather than a copy of it, because the capped process is the one
+holding it. Under `copy` the equivalent knob (`max_heap_words`) has to be
+relative to the state, which is why it cannot be a ceiling on the state.
+""".
+-spec vm_max_heap_words() -> non_neg_integer().
+vm_max_heap_words() ->
+    case asobi_lua_env:get_env(vm_max_heap_words) of
+        {ok, N} when is_integer(N), N >= 0 -> N;
+        _ -> 0
+    end.
+
+-doc """
+Undo the last `call/3,4` against this state.
+
+Under `copy` this is a no-op, because a caller reverts simply by carrying on
+with the state variable it had before the call - a Luerl state is immutable and
+the mutated one is dropped. Under `owned` the mutation has already happened
+inside the VM, so the same intent has to be said out loud.
+
+Callers that rely on it are the ones where a *successful* call is rejected on
+its answer rather than on an error: a refused `join`, and an input in a batch
+that returned nothing usable. Both are load-bearing - a refused join that could
+still advance the game state lets a client drive a script by being turned away
+over and over, and an input that keeps what it touched without returning it can
+mutate another player's entity. An error needs no revert: the VM keeps the
+pre-call state on a raise, exactly as the copying path did by dropping the
+state the failed call produced.
+""".
+-spec revert(dynamic()) -> dynamic().
+revert(St) ->
+    case asobi_lua_vm:is_handle(St) of
+        true ->
+            _ = asobi_lua_vm:op(St, revert, ?VM_OP_TIMEOUT),
+            St;
+        false ->
+            St
+    end.
+
+-doc """
+Release whatever `new/3` returned. A no-op for a copied state; stops the VM for
+an owned one.
+""".
+-spec release(dynamic()) -> ok.
+release(St) ->
+    case asobi_lua_vm:is_handle(St) of
+        true -> asobi_lua_vm:stop(St);
+        false -> ok
+    end.
+
+-doc """
+Load a script into a plain copied state, with no `game.*` API installed.
+
+`new/1` and `new/2` are always the copying path, whatever `lua_vm_mode` says.
+ADR 0015 is about the bridges whose state is ticked thousands of times - zones
+and matches, which come through `new/3` - and its callers here are either
+one-shot (`asobi_lua_config`, `asobi_lua_validate`) or a separate lifecycle
+(bots). Moving those is a later step, not a wider blast radius for the first
+release of a default-off flag.
+""".
 -spec new(binary() | string()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath) ->
-    new(ScriptPath, ?DEFAULT_INIT_TIMEOUT_MS, fun(St) -> St end).
+    new_copied(ScriptPath, ?DEFAULT_INIT_TIMEOUT_MS, fun(St) -> St end).
 
 -spec new(binary() | string(), non_neg_integer()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath, TimeoutMs) ->
-    new(ScriptPath, TimeoutMs, fun(St) -> St end).
+    new_copied(ScriptPath, TimeoutMs, fun(St) -> St end).
 
 %% Lua closures capture `_ENV` at compile time, so any global installed
 %% AFTER the script chunk is evaluated is invisible to functions the
@@ -197,6 +292,9 @@ new(ScriptPath, TimeoutMs) ->
 -spec new(binary() | string(), non_neg_integer(), pre_install()) ->
     {ok, dynamic()} | {error, term()}.
 new(ScriptPath, TimeoutMs, PreInstall) when is_function(PreInstall, 1) ->
+    new_1(ScriptPath, TimeoutMs, PreInstall, vm_mode()).
+
+new_1(ScriptPath, TimeoutMs, PreInstall, Mode) when is_function(PreInstall, 1) ->
     BaseDir = filename:dirname(to_string(ScriptPath)),
     FileName = filename:basename(to_string(ScriptPath)),
     St0 = sandboxed_state(BaseDir),
@@ -205,31 +303,78 @@ new(ScriptPath, TimeoutMs, PreInstall) when is_function(PreInstall, 1) ->
     case file:read_file(FullPath) of
         {ok, Code} ->
             CodeStr = binary_to_list(Code),
-            do_with_timeout(CodeStr, St1, TimeoutMs);
+            %% The script body is evaluated the copying way whatever the mode:
+            %% it is script-author code with no state worth preserving if it
+            %% runs away, and a VM is only worth starting around a state that
+            %% loaded. Under `owned` the loaded state is then handed to a VM and
+            %% never copied again.
+            own(do_with_timeout(CodeStr, St1, TimeoutMs), Mode);
         {error, Reason} ->
             {error, {file_error, FullPath, Reason}}
     end.
+
+-doc """
+Like `new/3`, but always a plain copied state, never an owned VM.
+
+For the throwaway probe states a bridge boots to ask a script one question and
+then drops (`spawn_templates`, `phases`, `terrain_provider`, `generate_world`
+from a raw config). Under `owned` those would each start a process that nothing
+ever stops, and they would gain nothing by it: the whole point of an owned VM is
+to amortise a state across many callbacks, and these see exactly one.
+""".
+-spec new_copied(binary() | string(), non_neg_integer(), pre_install()) ->
+    {ok, dynamic()} | {error, term()}.
+new_copied(ScriptPath, TimeoutMs, PreInstall) ->
+    new_1(ScriptPath, TimeoutMs, PreInstall, copy).
+
+-spec own({ok, dynamic()} | {error, term()}, copy | owned) ->
+    {ok, dynamic()} | {error, term()}.
+own({ok, St}, copy) -> {ok, St};
+own({ok, St}, owned) -> asobi_lua_vm:start_link(St);
+own({error, _} = Err, _Mode) -> Err.
 
 %% M-2/M-3/H-1: spawn-and-kill wrapper around `luerl:do/2`. Required
 %% any time the input is script-author-controlled — that includes the
 %% top-level body of the loaded script, hot-reload code, and config
 %% manifests evaluated during app start.
+-doc """
+Evaluate `Code` against the state, in the calling process.
+
+Public only for `asobi_lua_vm`. Under `copy` the spawn-and-kill wrapper in
+`do_with_timeout/3` is what bounds script-author code; under `owned` the VM
+process is itself the killable thing, so the wrapper would be a copy of the
+state for no guard that the VM does not already have.
+""".
+-spec do_inline(string() | binary(), dynamic()) -> {ok, dynamic()} | {error, term()}.
+do_inline(Code, St) ->
+    try luerl:do(ensure_string(Code), St) of
+        {ok, _Results, St1} -> {ok, St1};
+        {error, Errors, _} -> {error, {lua_error, Errors}};
+        {lua_error, Reason, _} -> {error, {lua_error, Reason}}
+    catch
+        error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
+        error:Reason -> {error, Reason}
+    end.
+
 -spec do_with_timeout(string() | binary(), dynamic(), non_neg_integer()) ->
     {ok, dynamic()} | {error, term()}.
 do_with_timeout(Code, St, TimeoutMs) ->
-    bounded_eval(
-        fun() ->
-            try luerl:do(ensure_string(Code), St) of
-                {ok, _Results, St1} -> {ok, St1};
-                {error, Errors, _} -> {error, {lua_error, Errors}};
-                {lua_error, Reason, _} -> {error, {lua_error, Reason}}
-            catch
-                error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
-                error:Reason -> {error, Reason}
-            end
-        end,
-        TimeoutMs
-    ).
+    case asobi_lua_vm:is_handle(St) of
+        true ->
+            %% Hot reload re-runs the script body against the live state, so
+            %% under `owned` it has to happen where the state is. The VM is the
+            %% killable thing here, which is the same guard the spawn gave -
+            %% except that overrunning now costs the state rather than a copy of
+            %% it, so a reload that hangs takes the zone's VM with it and the
+            %% bridge rebuilds. That is ADR 0015's stated price, paid on the one
+            %% path where the code being run is definitely new.
+            case asobi_lua_vm:op(St, {do, Code}, TimeoutMs) of
+                ok -> {ok, St};
+                {error, _} = Err -> Err
+            end;
+        false ->
+            bounded_eval(fun() -> do_inline(Code, St) end, TimeoutMs)
+    end.
 
 -spec init_sandboxed() -> dynamic().
 init_sandboxed() ->
@@ -246,6 +391,12 @@ init_sandboxed() ->
 %% surface as the same {error, {lua_error, _}} shape.
 -spec is_defined(atom(), dynamic()) -> boolean().
 is_defined(FuncName, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        true -> asobi_lua_vm:op(St, {is_defined, FuncName}, ?VM_OP_TIMEOUT) =:= true;
+        false -> inline_is_defined(FuncName, St)
+    end.
+
+inline_is_defined(FuncName, St) ->
     try luerl:get_table_keys([atom_to_binary(FuncName)], St) of
         {ok, nil, _} -> false;
         {ok, _, _} -> true;
@@ -254,11 +405,102 @@ is_defined(FuncName, St) ->
         _:_ -> false
     end.
 
+%% --- ADR 0015 facade -------------------------------------------------------
+%%
+%% Each of these takes whatever `new/3` handed the bridge and threads it back,
+%% so a bridge reads the same either way. Under `copy` that value is the Luerl
+%% state and these are thin wrappers; under `owned` it is a handle and the work
+%% happens in the process that owns the state.
+%%
+%% The returned "state" is deliberately the same value that went in under
+%% `owned`: a handle does not change when the state behind it does, which is the
+%% entire point - nothing is copied back.
+
+-doc "Encode an Erlang term into the Lua heap, returning an opaque reference.".
+-spec encode(term(), dynamic()) -> {term(), dynamic()}.
+encode(Term, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        false ->
+            luerl:encode(Term, St);
+        true ->
+            case asobi_lua_vm:op(St, {encode, Term}, ?VM_OP_TIMEOUT) of
+                {ok, Ref} -> {Ref, St};
+                {error, _} -> {nil, St}
+            end
+    end.
+
+-doc "Decode an opaque Lua reference back to an Erlang term.".
+-spec decode(dynamic(), dynamic()) -> term().
+decode(Ref, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        false ->
+            luerl:decode(Ref, St);
+        true ->
+            case asobi_lua_vm:op(St, {decode, Ref}, ?VM_OP_TIMEOUT) of
+                {ok, Term} -> Term;
+                {error, _} -> nil
+            end
+    end.
+
+-spec get_table_key(dynamic(), dynamic(), dynamic()) -> {ok, term(), dynamic()} | term().
+get_table_key(Tab, Key, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        false ->
+            luerl:get_table_key(Tab, Key, St);
+        true ->
+            case asobi_lua_vm:op(St, {get_table_key, Tab, Key}, ?VM_OP_TIMEOUT) of
+                {ok, Value} -> {ok, Value, St};
+                Other -> Other
+            end
+    end.
+
+-spec get_table_keys([dynamic()], dynamic()) -> {ok, term(), dynamic()} | term().
+get_table_keys(Path, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        false ->
+            luerl:get_table_keys(Path, St);
+        true ->
+            case asobi_lua_vm:op(St, {get_table_keys, Path}, ?VM_OP_TIMEOUT) of
+                {ok, Value} -> {ok, Value, St};
+                Other -> Other
+            end
+    end.
+
+-spec set_table_keys([dynamic()], dynamic(), dynamic()) -> {ok, dynamic()} | term().
+set_table_keys(Path, Value, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        false ->
+            luerl:set_table_keys(Path, Value, St);
+        true ->
+            case asobi_lua_vm:op(St, {set_table_keys, Path, Value}, ?VM_OP_TIMEOUT) of
+                ok -> {ok, St};
+                Other -> Other
+            end
+    end.
+
 -spec call(atom() | [atom() | binary()], [term()], dynamic()) ->
     {ok, [term()], dynamic()} | {error, term()}.
 call(FuncName, Args, St) when is_atom(FuncName) ->
     call([atom_to_binary(FuncName)], Args, St);
 call(FuncPath, Args, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        true -> vm_call(FuncPath, Args, St, ?VM_OP_TIMEOUT);
+        false -> inline_call(FuncPath, Args, St)
+    end.
+
+%% Under `owned` the wall-clock budget IS the gen_server:call timeout, and a
+%% timeout kills the VM - see asobi_lua_vm:op/3. `call/3` has no budget of its
+%% own by design (it is the unbounded path, used where the caller already has
+%% one), so it gets the default rather than none: an unbounded call into another
+%% process would hang the zone forever on a script that spins, which is strictly
+%% worse than the copying path it replaces.
+vm_call(FuncPath, Args, St, Timeout) ->
+    case asobi_lua_vm:op(St, {call, FuncPath, Args}, Timeout) of
+        {ok, Result} -> {ok, Result, St};
+        {error, _} = Err -> Err
+    end.
+
+inline_call(FuncPath, Args, St) ->
     BinPath = [ensure_binary(P) || P <- FuncPath],
     try
         case luerl:call_function(BinPath, Args, St) of
@@ -280,7 +522,10 @@ call(FuncPath, Args, St) ->
 -spec call(atom() | [atom() | binary()], [term()], dynamic(), non_neg_integer()) ->
     {ok, [term()], dynamic()} | {error, timeout | heap_exhausted | term()}.
 call(FuncPath, Args, St, TimeoutMs) ->
-    bounded_eval(fun() -> call(FuncPath, Args, St) end, TimeoutMs).
+    case asobi_lua_vm:is_handle(St) of
+        true -> vm_call(FuncPath, Args, St, TimeoutMs);
+        false -> bounded_eval(fun() -> call(FuncPath, Args, St) end, TimeoutMs)
+    end.
 
 %% Spawn the work in a child with a bounded wall-clock budget, a bounded
 %% heap AND a bounded reduction count, monitor it, and translate the four
@@ -466,7 +711,7 @@ Bookkeeping is kept under `lua_gc` in the same map. Set
 -spec collect_state(map()) -> map().
 collect_state(#{lua_state := St} = State) ->
     Gc0 = maps:get(lua_gc, State, new_gc()),
-    Words = take_state_words(),
+    Words = state_size(St),
     Gc1 = report_state_size(Words, State, Gc0),
     Anchor = maps:get(game_state, State, nil),
     {St1, Gc2} = maybe_gc(St, Anchor, Words, Gc1),
@@ -486,6 +731,22 @@ collect_state(State) ->
 state_words() ->
     normalise_words(erlang:get(?STATE_WORDS_KEY)).
 -endif.
+
+%% Under `copy` the eval worker's heap immediately after the spawn *is* the
+%% copied state, so bounded_eval measures it exactly and for free. Under `owned`
+%% there is no copy to measure, and the process that holds the state can size
+%% itself for the same price - which is the one measurement that got cheaper
+%% rather than harder under ADR 0015.
+state_size(St) ->
+    case asobi_lua_vm:is_handle(St) of
+        false ->
+            take_state_words();
+        true ->
+            case asobi_lua_vm:op(St, state_words, ?VM_OP_TIMEOUT) of
+                {ok, Words} -> Words;
+                {error, _} -> undefined
+            end
+    end.
 
 %% Consume rather than read: a value left behind outlives the call it belongs
 %% to, and `gc_budget_us/1` acts on it, so staleness is not merely cosmetic.
@@ -597,8 +858,19 @@ maybe_gc(St, Anchor, Words, #{interval := Interval} = Gc) ->
             %% instead of short-circuiting on `enabled := false`.
             {St, maps:remove(retry_at, Gc#{enabled := false})};
         false ->
-            {Us, St1} = timer:tc(fun() -> collect(St, Anchor) end),
+            {Us, St1} = timer:tc(fun() -> do_collect(St, Anchor) end),
             {St1, next_gc(Us, gc_budget_us(Words), Interval, Gc)}
+    end.
+
+%% The scheduling decision stays here on the bridge; only the collection itself
+%% has to move, because under `owned` the state is not here to collect.
+do_collect(St, Anchor) ->
+    case asobi_lua_vm:is_handle(St) of
+        true ->
+            _ = asobi_lua_vm:op(St, {gc, Anchor}, ?VM_OP_TIMEOUT),
+            St;
+        false ->
+            collect(St, Anchor)
     end.
 
 %% What one collection may cost, in us. Scales with the state so that the
@@ -645,6 +917,18 @@ next_gc(Us, Budget, Interval, Gc) ->
 collect(St, Anchor) ->
     unanchor(luerl:gc(raw_anchor(Anchor, St))).
 
+-doc """
+Collect now, rooting `Anchor` across it.
+
+Public only for `asobi_lua_vm`, which owns the state under ADR 0015 and so is
+the only process that can run a collection on it. The adaptive scheduling that
+decides *whether* to collect stays with the bridge in `collect_state/1`; this is
+just the collection.
+""".
+-spec gc_now(term(), dynamic()) -> dynamic().
+gc_now(Anchor, St) ->
+    collect(St, Anchor).
+
 unanchor(St) ->
     raw_anchor(nil, St).
 
@@ -680,12 +964,24 @@ reachable and no collection can reclaim it.
 """.
 -spec anchor_ref(term(), dynamic()) -> dynamic().
 anchor_ref(Value, St) ->
-    raw_anchor_key(?REF_ANCHOR, Value, St).
+    case asobi_lua_vm:is_handle(St) of
+        true ->
+            _ = asobi_lua_vm:op(St, {anchor_ref, Value}, ?VM_OP_TIMEOUT),
+            St;
+        false ->
+            raw_anchor_key(?REF_ANCHOR, Value, St)
+    end.
 
 -doc "Drop the `anchor_ref/2` root.".
 -spec unanchor_ref(dynamic()) -> dynamic().
 unanchor_ref(St) ->
-    raw_anchor_key(?REF_ANCHOR, nil, St).
+    case asobi_lua_vm:is_handle(St) of
+        true ->
+            _ = asobi_lua_vm:op(St, unanchor_ref, ?VM_OP_TIMEOUT),
+            St;
+        false ->
+            raw_anchor_key(?REF_ANCHOR, nil, St)
+    end.
 
 -doc """
 Is `Value` still the value `anchor_ref/2` rooted?
@@ -698,7 +994,13 @@ across `call/3` therefore has to re-check rather than assume, and treat `false`
 as "nothing I am holding is safe to decode".
 """.
 -spec ref_anchored(term(), dynamic()) -> boolean().
-ref_anchored(Value, #luerl{g = G} = St) ->
+ref_anchored(Value, St) ->
+    case asobi_lua_vm:is_handle(St) of
+        true -> asobi_lua_vm:op(St, {ref_anchored, Value}, ?VM_OP_TIMEOUT) =:= true;
+        false -> inline_ref_anchored(Value, St)
+    end.
+
+inline_ref_anchored(Value, #luerl{g = G} = St) ->
     luerl_heap:raw_get_table_key(G, ?REF_ANCHOR, St) =:= Value.
 
 gc_disabled() ->

@@ -6,7 +6,7 @@
 -export([new/1, new/0]).
 -export([spawn_entity/3, spawn_entity/4, spawn_entity/5]).
 -export([entity_removed/3, tick/2]).
--export([get_templates/1, get_spawn_count/2, info/1]).
+-export([get_templates/1, get_spawn_count/2, info/1, has_pending/1]).
 -export([set_templates/2]).
 -export([serialise/1, deserialise/1]).
 
@@ -200,6 +200,18 @@ set_templates(Templates, State) ->
 -spec get_spawn_count(binary(), state()) -> non_neg_integer().
 get_spawn_count(TemplateId, #{spawn_counts := C}) ->
     maps:get(TemplateId, C, 0).
+
+-doc """
+Whether any respawn is waiting to fire.
+
+A boolean rather than a count, and separate from `info/1`, because it is read on
+the hot path: `asobi_zone` asks every tick whether the zone has anything to do,
+and neither building the whole info map nor walking the queue with `length/1` is
+work worth doing to decide not to do work.
+""".
+-spec has_pending(state()) -> boolean().
+has_pending(#{respawn_queue := []}) -> false;
+has_pending(#{respawn_queue := _}) -> true.
 
 -spec info(state()) -> map().
 info(#{respawn_queue := Q, spawn_counts := C, entity_templates := ET}) ->

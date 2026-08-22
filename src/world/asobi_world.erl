@@ -174,6 +174,31 @@ and the only cross-check on `batch_result/3` goes with it.
 ) ->
     {ok, Entities1 :: map(), Outcomes :: [input_outcome()]}.
 
+-doc """
+Optional: apply this tick's cross-zone effects.
+
+An effect arrives from a *neighbouring* zone that could see one of this zone's
+entities in the border mirror and asked for something to happen to it -
+`game.zone.apply` in Lua, `asobi_zone:apply_effect/3` in Erlang. The neighbour
+never writes the entity; this zone does, in its own tick, which is what keeps a
+single writer per entity while still letting a shot fired in one zone land in
+the next (widgrensit/asobi#544).
+
+Delivered after the tick's inputs, batched, and already filtered to effects
+naming an entity this zone still owns - a target that died or crossed away
+between the read and the tick is dropped rather than handed over as a nil
+lookup. Returning something that is not a map drops the tick's effects.
+
+A world that never calls `game.zone.apply` never needs this callback. One that
+does and has not defined it gets a rate-limited error rather than silence: a
+dropped effect is indistinguishable from a delivery bug from the game's side.
+""".
+-callback handle_effects(
+    Effects :: [{EntityId :: binary(), Event :: map()}],
+    Entities :: map()
+) ->
+    {ok, Entities1 :: map()} | Entities1 :: map().
+
 -doc "Global post-tick hook: continue, trigger a vote, or finish the world.".
 -callback post_tick(Tick :: non_neg_integer(), GameState :: term()) ->
     {ok, GameState1 :: term()}
@@ -273,5 +298,6 @@ plain terms. The inverse of `init_zone_state`'s restore path.
     init_zone_state/2,
     dump_zone_state/1,
     handle_input/3,
-    handle_input_batch/2
+    handle_input_batch/2,
+    handle_effects/2
 ]).

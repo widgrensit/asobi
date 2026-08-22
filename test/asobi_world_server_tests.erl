@@ -775,3 +775,38 @@ ensure_vote_sup() ->
         _ ->
             ok
     end.
+
+%% widgrensit/asobi#543 review: `persistent` is the public global a game
+%% declares and `persistence` is the key every zone-side reader wants. Nothing
+%% translated between them, so no zone ever had persistence on and the whole
+%% snapshot path was dead - while `persistent = true` still made the world keep
+%% the snapshots it had never written.
+persistent_reaches_the_zone_config_test() ->
+    setup(),
+    try
+        #{instance_pid := InstancePid} = start_world(#{persistent => true}),
+        try
+            ZoneManager = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
+            #{zone_config := ZoneConfig} = sys:get_state(ZoneManager),
+            ?assertEqual(true, maps:get(persistence, ZoneConfig))
+        after
+            exit(InstancePid, shutdown)
+        end
+    after
+        cleanup(ok)
+    end.
+
+a_world_that_did_not_ask_is_not_persistent_test() ->
+    setup(),
+    try
+        #{instance_pid := InstancePid} = start_world(),
+        try
+            ZoneManager = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
+            #{zone_config := ZoneConfig} = sys:get_state(ZoneManager),
+            ?assertEqual(false, maps:get(persistence, ZoneConfig))
+        after
+            exit(InstancePid, shutdown)
+        end
+    after
+        cleanup(ok)
+    end.

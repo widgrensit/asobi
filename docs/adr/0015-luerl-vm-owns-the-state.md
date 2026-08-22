@@ -4,12 +4,36 @@ Date: 2026-08-21
 
 ## Status
 
-**Proposed. Nothing implemented.** This records a decision to be taken, not one
-taken. The evidence is a test-only spike
-(`test/asobi_lua_vm_spike.erl`, `test/asobi_lua_vm_spike_bench.erl` on branch
-`spike/lua-vm-process`, which is deliberately not merged - the bench asserts
-nothing and would add eight seconds to every CI eunit run); no `src/` module
-has been moved onto this shape.
+**Accepted and implemented behind a flag, default off.** `asobi_lua_vm` owns
+the state; `asobi_lua_loader` dispatches every operation on whether the bridge
+holds a state or a handle; `asobi_lua_world` and `asobi_lua_match` are on the
+new shape. Selected by `lua_vm_mode` (`copy` | `owned`), which is decision
+item 6 below and defaults to `copy`.
+
+Measured on the shipped code rather than the spike - `asobi_lua_world:zone_tick/2`,
+an inert callback, two entities, a `game_state` grown to the size shown:
+
+| state | `copy` us/tick | `owned` us/tick | speedup |
+|---|---|---|---|
+| 0.1 MB | 151.0 | 16.2 | 9x |
+| 3.2 MB | 3,733.2 | 17.8 | 210x |
+| 15.7 MB | 20,385.3 | 15.8 | 1,288x |
+| 62.6 MB | 111,443.5 | 18.7 | 5,956x |
+
+The shape is the point, not the multiplier: `copy` grows with the state,
+`owned` is **flat**. A 62 MB state costs 111 ms per callback under `copy` and
+19 us under `owned`. The reporter on asobi#536 measured 400-690 MB.
+
+The win is much smaller when the per-tick work grows with the state - a zone
+holding 8,000 entities and encoding all of them every tick measured 1.4x,
+because there the encode is genuine work and the copy is a minority of it.
+`owned` removes a term that is O(state); it does not make encoding cheaper.
+
+What is **not** done: `new/1` and `new/2` still always copy, so
+`asobi_lua_config`, `asobi_lua_validate` and the bot runtime are unchanged.
+The throwaway probe states a bridge boots to ask a script one question are
+copied on purpose (`asobi_lua_loader:new_copied/3`) - an owned VM there would
+be a process nothing stops.
 
 asobi#536 shipped separately and is not this ADR. That change made the eval
 heap budget mean what it says and made the state size observable. It did not

@@ -13,7 +13,10 @@ world_config_test_() ->
         {"a match mode is refused, not built into a world (#480)", fun match_mode_refused/0},
         {"a mode with no type is a match, so it is refused too (#480)", fun untyped_mode_refused/0},
         {"an unknown mode is still not_found, not wrong_mode_type (#480)",
-            fun unknown_mode_still_not_found/0}
+            fun unknown_mode_still_not_found/0},
+        {"the zone-lifecycle knobs reach the world server config (#543)",
+            fun zone_knobs_forwarded/0},
+        {"a mode that declares none of them forwards none", fun zone_knobs_absent/0}
     ]}.
 
 setup() ->
@@ -26,6 +29,17 @@ setup() ->
         },
         ~"arena" => #{type => world, module => some_game, chat => #{global => [~"trade"]}},
         ~"quiet" => #{type => world, module => some_game},
+        ~"tuned" => #{
+            type => world,
+            module => some_game,
+            lazy_zones => true,
+            zone_idle_timeout => 20000,
+            max_active_zones => 64,
+            spatial_grid_cell_size => 32,
+            cold_tick_divisor => 20,
+            rehome_margin => 0.25,
+            border_band => 0.15
+        },
         ~"duel" => #{type => match, module => some_game},
         ~"untyped" => #{module => some_game}
     }),
@@ -43,6 +57,33 @@ chat_forwarded() ->
 chat_absent() ->
     {ok, Config} = asobi_game_modes:world_config(~"quiet"),
     ?assertNot(maps:is_key(chat, Config)).
+
+%% widgrensit/asobi#543: every one of these is read downstream and was
+%% silently dropped here, so a world declaring `lazy_zones = true` pre-spawned
+%% its whole grid anyway and `cold_tick_divisor` never reached the ticker.
+zone_knobs_forwarded() ->
+    {ok, Config} = asobi_game_modes:world_config(~"tuned"),
+    ?assertEqual(true, maps:get(lazy_zones, Config)),
+    ?assertEqual(20000, maps:get(zone_idle_timeout, Config)),
+    ?assertEqual(64, maps:get(max_active_zones, Config)),
+    ?assertEqual(32, maps:get(spatial_grid_cell_size, Config)),
+    ?assertEqual(20, maps:get(cold_tick_divisor, Config)),
+    ?assertEqual(0.25, maps:get(rehome_margin, Config)),
+    ?assertEqual(0.15, maps:get(border_band, Config)).
+
+zone_knobs_absent() ->
+    {ok, Config} = asobi_game_modes:world_config(~"quiet"),
+    lists:foreach(
+        fun(Key) -> ?assertNot(maps:is_key(Key, Config)) end,
+        [
+            lazy_zones,
+            zone_idle_timeout,
+            max_active_zones,
+            spatial_grid_cell_size,
+            cold_tick_divisor,
+            border_band
+        ]
+    ).
 
 global_union() ->
     ?assertEqual([~"general", ~"trade"], asobi_game_modes:global_chat_channels()).

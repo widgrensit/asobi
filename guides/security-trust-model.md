@@ -126,6 +126,14 @@ zone process indefinitely: the tick stops, no supervisor restart happens, and
 every later call against that process times out in its own caller. Blast radius
 is one match or one zone. Recovery is manual.
 
+`game.zone.apply` is the one call that can send from inside `handle_input` into
+a *different* process, so it carries its own bound rather than relying on the
+caller having one: an event is capped at 4 KB and a caller at 64 sends per tick,
+both spent on the sender before the term is copied. The receiving zone caps what
+it queues as well (by count and by bytes), but that cap is only consulted once
+the message has already arrived, so the sender-side one is what keeps the blast
+radius at one zone. See [World server](world-server.md#seeing-across-a-seam).
+
 So treat `handle_input/3` as a hot path for trusted-author scripts, not as a
 boundary. Audit the inputs your script accepts, avoid dispatching on
 attacker-controlled strings, and treat it the way you would an Erlang
