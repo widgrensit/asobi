@@ -738,6 +738,13 @@ hot_reload_post_tick_survives_syntax_error_test() ->
     end.
 
 hot_reload_zone_tick_picks_up_global_change_test() ->
+    %% asobi#543 throttles the mtime stat to once per
+    %% `reload_poll_interval_ms`, and this test writes v2 and ticks again
+    %% inside that window. 0 is the documented "poll every call" setting; the
+    %% throttle itself is covered in asobi_lua_reload_tests.
+    with_every_tick_polling(fun hot_reload_zone_tick_picks_up_global_change_test_body/0).
+
+hot_reload_zone_tick_picks_up_global_change_test_body() ->
     %% Per-zone reload: each zone holds its own lua_state + script + mtime,
     %% and zone_tick checks the file at the start of every tick. We observe
     %% the reload by having zone_tick stamp a global value into the entities
@@ -822,6 +829,13 @@ hot_reload_zone_tick_survives_syntax_error_test() ->
     end.
 
 hot_reload_zone_tick_signals_spawn_templates_hint_test() ->
+    %% asobi#543 throttles the mtime stat to once per
+    %% `reload_poll_interval_ms`, and this test writes v2 and ticks again
+    %% inside that window. 0 is the documented "poll every call" setting; the
+    %% throttle itself is covered in asobi_lua_reload_tests.
+    with_every_tick_polling(fun hot_reload_zone_tick_signals_spawn_templates_hint_test_body/0).
+
+hot_reload_zone_tick_signals_spawn_templates_hint_test_body() ->
     %% asobi#253: a script edited on disk can add spawn templates that
     %% weren't present when the zone was created. spawn_templates_hint/1
     %% is how asobi_zone finds out, without polling every tick itself.
@@ -1094,3 +1108,50 @@ zone_bridge_identity() ->
         #{kind => zone, world_id => ~"w1", coords => {2, 3}},
         maps:get(lua_bridge, ZoneState)
     ).
+
+%% widgrensit/asobi#544: cross-zone effects reach the script batched, and the
+%% map it returns is what the zone keeps.
+handle_effects_applies_events_test() ->
+    Script = fixture("effects_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    ZoneState = asobi_lua_world:init_zone_state(Config, #{}),
+    erlang:erase({asobi_lua_world, zone_state}),
+    Entities = #{~"npc" => #{type => ~"npc", x => 1.0, y => 1.0, hp => 100}},
+    {_, _} = asobi_lua_world:zone_tick(Entities, ZoneState),
+    {ok, Out} = asobi_lua_world:handle_effects(
+        [{~"npc", #{~"hp_delta" => -30}}, {~"npc", #{~"hp_delta" => -5}}], Entities
+    ),
+    ?assertMatch(#{~"npc" := #{hp := 65}}, Out),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% A script with no handle_effects must not be reported as a crashing one, and
+%% must leave the entities exactly as they were.
+handle_effects_without_a_handler_is_a_noop_test() ->
+    Script = fixture("config_move_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_, _} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    Entities = #{~"npc" => #{type => ~"npc", x => 1.0, y => 1.0, hp => 100}},
+    ?assertEqual({ok, Entities}, asobi_lua_world:handle_effects([{~"npc", #{}}], Entities)),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% No zone_tick has run, so there is no stashed lua_state: the bridge must hand
+%% the entities straight back rather than crash the zone.
+handle_effects_without_a_bridge_state_test() ->
+    erlang:erase({asobi_lua_world, zone_state}),
+    Entities = #{~"npc" => #{type => ~"npc"}},
+    ?assertEqual({ok, Entities}, asobi_lua_world:handle_effects([{~"npc", #{}}], Entities)).
+
+with_every_tick_polling(Fun) ->
+    Old = application:get_env(asobi_lua, reload_poll_interval_ms),
+    application:set_env(asobi_lua, reload_poll_interval_ms, 0),
+    try
+        Fun()
+    after
+        case Old of
+            {ok, V} -> application:set_env(asobi_lua, reload_poll_interval_ms, V);
+            undefined -> application:unset_env(asobi_lua, reload_poll_interval_ms)
+        end
+    end.

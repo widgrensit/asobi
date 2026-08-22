@@ -6,6 +6,7 @@
 -export([world_started/2, world_finished/3, world_player_joined/2, world_player_left/2]).
 -export([world_phase_changed/3, world_tick/4]).
 -export([zone_opened/2, zone_closed/2, zone_tick_skipped/2]).
+-export([zone_cold/2, zone_hot/2]).
 -export([lua_state_size/2]).
 -export([
     matchmaker_queued/2,
@@ -41,7 +42,10 @@
     | batch_contract
     | unknown_outcome
     | input_rejected
-    | invalid_consumed_seq.
+    | invalid_consumed_seq
+    | effect_queue_full
+    | no_effect_handler
+    | bad_effects_return.
 -export_type([game_error_kind/0]).
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).
@@ -80,6 +84,8 @@ events() ->
         [asobi, zone, opened],
         [asobi, zone, closed],
         [asobi, zone, tick_skipped],
+        [asobi, zone, cold],
+        [asobi, zone, hot],
         [asobi, lua, state],
         [asobi, matchmaker, queued],
         [asobi, matchmaker, deduped],
@@ -223,6 +229,32 @@ zone_opened(WorldId, Coords) ->
 -spec zone_closed(binary() | undefined, {integer(), integer()}) -> ok.
 zone_closed(WorldId, Coords) ->
     telemetry:execute([asobi, zone, closed], #{count => 1}, #{
+        world_id => WorldId, coords => Coords
+    }).
+
+-doc """
+asobi#543: a zone stopped simulating at full rate, because it has no entities,
+no queued input, no live entity timer and no pending respawn. It now ticks once
+every `cold_tick_divisor` ticks until something gives it work.
+
+Pair with `zone_hot/2` and track the difference as a gauge: on a large lazy
+world most zones should be cold most of the time, and a world where none are is
+a world paying the full per-callback cost for empty space. The direction that
+needs an alert is the other one - a zone that goes cold and never comes back is
+a zone that has stopped responding to the players in it.
+
+Both metadata keys are unbounded - never a label, same as `zone_opened/2`.
+""".
+-spec zone_cold(binary() | undefined, {integer(), integer()}) -> ok.
+zone_cold(WorldId, Coords) ->
+    telemetry:execute([asobi, zone, cold], #{count => 1}, #{
+        world_id => WorldId, coords => Coords
+    }).
+
+-doc "asobi#543: a cold zone was given work and is back at full tick rate. See `zone_cold/2`.".
+-spec zone_hot(binary() | undefined, {integer(), integer()}) -> ok.
+zone_hot(WorldId, Coords) ->
+    telemetry:execute([asobi, zone, hot], #{count => 1}, #{
         world_id => WorldId, coords => Coords
     }).
 

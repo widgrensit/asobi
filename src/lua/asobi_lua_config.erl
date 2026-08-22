@@ -49,7 +49,8 @@ lazy_zones              = true            -- optional, on-demand zone loading
 zone_idle_timeout       = 30000           -- optional, ms before idle zone is reaped
 max_active_zones        = 10000           -- optional, cap on concurrent zones
 spatial_grid_cell_size  = 64              -- optional, cell size for spatial grid indexing
-cold_tick_divisor       = 10              -- optional, tick rate divisor for cold (unoccupied) zones
+cold_tick_divisor       = 10              -- optional, tick rate divisor for cold (idle) zones
+border_band             = 0.15            -- optional, fraction of zone_size mirrored to neighbours (default 0 = off)
 empty_grace_ms          = 60000           -- optional, ms to keep an empty world alive before finishing
 player_ttl_ms           = 0               -- optional, 0=remove on disconnect, -1=keep forever, N=grace ms
 ```
@@ -341,6 +342,7 @@ read_match_globals(ScriptPath, St) ->
     MaxActiveZones = read_global_int(~"max_active_zones", St),
     SpatialGridCellSize = read_global_int(~"spatial_grid_cell_size", St),
     ColdTickDivisor = read_global_int(~"cold_tick_divisor", St),
+    BorderBand = read_global_number(~"border_band", St),
     EmptyGraceMs = read_global_int(~"empty_grace_ms", St),
     PlayerTtlMs = read_global_int(~"player_ttl_ms", St),
     case MatchSize of
@@ -363,7 +365,8 @@ read_match_globals(ScriptPath, St) ->
             Config4 = maybe_add_zone_config(Config3, LazyZones, ZoneIdleTimeout, MaxActiveZones),
             Config5 = maybe_add_int(Config4, spatial_grid_cell_size, SpatialGridCellSize),
             Config6 = maybe_add_int(Config5, cold_tick_divisor, ColdTickDivisor),
-            Config7 = maybe_add_int(Config6, empty_grace_ms, EmptyGraceMs),
+            Config6a = maybe_add_fraction(Config6, border_band, BorderBand),
+            Config7 = maybe_add_int(Config6a, empty_grace_ms, EmptyGraceMs),
             Config8 = maybe_add_player_ttl(Config7, PlayerTtlMs),
             Config9 = maybe_add_int(Config8, tick_rate, TickRate),
             Config10 = maybe_add_int(Config9, grid_size, GridSize),
@@ -429,6 +432,16 @@ maybe_add_int(Config, _Key, undefined) ->
 maybe_add_int(Config, Key, Val) when is_integer(Val), Val > 0 ->
     Config#{Key => Val};
 maybe_add_int(Config, _Key, _Val) ->
+    Config.
+
+%% A fraction of zone_size. 0 is meaningful (publish nothing) and 1.0 is the
+%% whole zone; anything outside that is a typo rather than an intent, and
+%% dropping it leaves the documented default in place.
+maybe_add_fraction(Config, _Key, undefined) ->
+    Config;
+maybe_add_fraction(Config, Key, Val) when is_number(Val), Val >= 0, Val =< 1 ->
+    Config#{Key => Val};
+maybe_add_fraction(Config, _Key, _Val) ->
     Config.
 
 %% Like maybe_add_int/3 but accepts 0 — used for view_radius, where 0 is a
@@ -642,6 +655,12 @@ do_with_timeout_results(Code, St, TimeoutMs) ->
 read_global_int(Name, St) ->
     case luerl:get_table_keys([Name], St) of
         {ok, Val, _} when is_number(Val) -> trunc(Val);
+        _ -> undefined
+    end.
+
+read_global_number(Name, St) ->
+    case luerl:get_table_keys([Name], St) of
+        {ok, Val, _} when is_number(Val) -> Val;
         _ -> undefined
     end.
 

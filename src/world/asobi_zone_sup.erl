@@ -19,9 +19,14 @@ init([]) ->
         intensity => 50,
         period => 60
     },
+    %% Explicit rather than defaulted: a zone traps exits so its terminate/2 can
+    %% write a final snapshot, and the shutdown budget is what gives it time to.
+    %% simple_one_for_one terminates its children concurrently, so this is the
+    %% wall-clock ceiling for the whole grid, not per zone.
     ChildSpec = #{
         id => asobi_zone,
         start => {asobi_zone, start_link, []},
-        restart => transient
+        restart => transient,
+        shutdown => 5_000
     },
     {ok, {SupFlags, [ChildSpec]}}.

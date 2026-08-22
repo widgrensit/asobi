@@ -140,7 +140,29 @@ world_config_1(Mode, ModeConfig) ->
             },
             {ok,
                 forward_optional(
-                    ModeConfig, [empty_grace_ms, player_ttl_ms, chat, broadcast_interval], Base
+                    ModeConfig,
+                    [
+                        empty_grace_ms,
+                        player_ttl_ms,
+                        chat,
+                        broadcast_interval,
+                        %% widgrensit/asobi#543: every one of these is read
+                        %% downstream and documented as a game-config global,
+                        %% and none of them was forwarded - so a world
+                        %% declaring `lazy_zones = true` pre-spawned its whole
+                        %% grid anyway, and `cold_tick_divisor` never reached
+                        %% the ticker that reads it. They fail silently: the
+                        %% world starts and plays, it just ignores what the
+                        %% script asked for.
+                        lazy_zones,
+                        zone_idle_timeout,
+                        max_active_zones,
+                        spatial_grid_cell_size,
+                        cold_tick_divisor,
+                        rehome_margin,
+                        border_band
+                    ],
+                    Base
                 )};
         {error, _} = Err ->
             Err

@@ -36,6 +36,11 @@ init(Config) ->
     },
     GridSize = maps:get(grid_size, Config, 10),
     ZoneSize = maps:get(zone_size, Config, 200),
+    %% Owned by this supervisor so it dies exactly when the world does. No asobi
+    %% process traps exits, so nothing's terminate/2 runs on a supervisor
+    %% shutdown - hanging the mirror's cleanup off one would strand a whole grid
+    %% of rows on every world teardown. See asobi_zone_border.
+    BorderTab = asobi_zone_border:new(),
     ZoneManagerConfig = #{
         world_id => maps:get(world_id, Config, undefined),
         instance_sup => self(),
@@ -47,11 +52,15 @@ init(Config) ->
     },
     TickerConfig = #{
         tick_rate => maps:get(tick_rate, Config, 50),
+        %% Was never threaded through, so a world declaring `cold_tick_divisor`
+        %% silently got the ticker's own default (widgrensit/asobi#543).
+        cold_tick_divisor => maps:get(cold_tick_divisor, Config, 10),
         world_id => maps:get(world_id, Config, undefined),
         world_pid => self()
     },
     WorldConfig = Config#{
-        instance_sup => self()
+        instance_sup => self(),
+        border_tab => BorderTab
     },
     Children = [
         #{

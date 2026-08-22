@@ -85,6 +85,19 @@ api_test_() ->
         {"game.spatial.query_radius zone-based", fun spatial_zone_query_radius/0},
         {"game.spatial.query_rect zone-based", fun spatial_zone_query_rect/0},
         {"game.spatial.query_rect errors without zone", fun spatial_query_rect_no_zone/0},
+        {"game.spatial.neighbours_radius reads the touching zones",
+            fun spatial_neighbours_radius/0},
+        {"game.spatial.neighbours_radius honours opts", fun spatial_neighbours_radius_opts/0},
+        {"game.spatial.neighbours_rect reads the touching zones", fun spatial_neighbours_rect/0},
+        {"game.spatial.neighbours_* error without grid context", fun spatial_neighbours_no_grid/0},
+        {"game.zone.apply reaches the owning zone", fun zone_apply_delivers/0},
+        {"game.zone.apply refuses an entity no neighbour publishes",
+            fun zone_apply_refuses_unseen/0},
+        {"game.zone.apply errors without grid context", fun zone_apply_no_grid/0},
+        {"game.zone.apply refuses a non-table event", fun zone_apply_bad_event/0},
+        {"game.zone.apply refuses an oversized event", fun zone_apply_oversized_event/0},
+        {"game.zone.apply is bounded per tick", fun zone_apply_send_budget/0},
+        {"game.spatial.neighbours_* reject bad arity", fun spatial_neighbours_bad_args/0},
         {"game.terrain.get_chunk returns data", fun terrain_get_chunk/0},
         {"game.terrain.get_chunk errors without store", fun terrain_get_chunk_no_store/0},
         {"game.terrain.preload forwards coords", fun terrain_preload/0},
@@ -118,6 +131,14 @@ api_test_() ->
     ]}.
 
 setup() ->
+    %% Created here rather than in the test body: an ETS table dies with the
+    %% process that made it, and a eunit test body is a throwaway process, so a
+    %% table made there is already going away by the next test. In production
+    %% the owner is the world's instance supervisor.
+    case persistent_term:get({?MODULE, border_tab}, undefined) of
+        undefined -> persistent_term:put({?MODULE, border_tab}, asobi_zone_border:new());
+        Tab -> ets:delete_all_objects(Tab)
+    end,
     meck:new(asobi_id, [no_link]),
     meck:expect(asobi_id, generate, fun() -> ~"test-uuid-v7" end),
     meck:new(asobi_match_server, [no_link]),
@@ -172,6 +193,8 @@ setup() ->
     meck:expect(asobi_zone, query_rect, fun(_, _, _) ->
         [{~"e1", {5.0, 5.0}}]
     end),
+    meck:expect(asobi_zone, whereis_zone, fun(_, Coords) -> {ok, spawn_zone_stub(Coords)} end),
+    meck:expect(asobi_zone, apply_effect, fun(_, _, _) -> ok end),
     meck:new(asobi_terrain_store, [no_link]),
     meck:expect(asobi_terrain_store, get_chunk, fun(_, _) ->
         {ok, #{~"tiles" => [1, 2, 3]}}
@@ -656,6 +679,153 @@ zone_despawn() ->
     {ok, [true | _], _} = eval(Code, St),
     ?assert(meck:called(asobi_zone, despawn_entity, '_')).
 
+%% widgrensit/asobi#544. The caller is zone (1,1) of a 5x5 grid of 100-unit
+%% zones; (2,1) touches it and publishes a pirate just past the seam.
+install_api_with_grid() ->
+    {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
+    Ctx = #{
+        vm => zone,
+        match_id => ~"nb-world",
+        match_pid => self(),
+        zone_pid => self(),
+        world_id => ~"nb-world",
+        coords => {1, 1},
+        zone_size => 100,
+        grid_size => 5,
+        border_tab => border_tab()
+    },
+    asobi_lua_api:install(Ctx, St0).
+
+border_tab() -> persistent_term:get({?MODULE, border_tab}).
+
+publish_pirate() ->
+    asobi_zone_border:write_band(border_tab(), {2, 1}, #{
+        ~"pirate" => #{type => ~"npc", x => 205.0, y => 150.0},
+        ~"rock" => #{type => ~"debris", x => 206.0, y => 150.0}
+    }).
+
+spatial_neighbours_radius() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Code =
+        "local r = game.spatial.neighbours_radius(195.0, 150.0, 30.0)\n"
+        "local ids = {}\n"
+        "for _, h in ipairs(r) do ids[#ids + 1] = h.id end\n"
+        "table.sort(ids)\n"
+        "return #r, ids[1], ids[2]",
+    {ok, [N, First, Second | _], _} = eval(Code, St),
+    ?assertEqual(2, trunc(N)),
+    %% Sorted in Lua: asobi_spatial:query_radius/4 with no `sort` opt returns
+    %% maps:fold order, so asserting on r[1] alone would be asserting on a
+    %% nondeterminism.
+    ?assertEqual(~"pirate", First),
+    ?assertEqual(~"rock", Second).
+
+spatial_neighbours_radius_opts() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Code =
+        "local r = game.spatial.neighbours_radius(195.0, 150.0, 30.0, { type = 'npc' })\n"
+        "return #r, r[1].id",
+    {ok, [N, Id | _], _} = eval(Code, St),
+    ?assertEqual(1, trunc(N)),
+    ?assertEqual(~"pirate", Id).
+
+spatial_neighbours_rect() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Code = "return #game.spatial.neighbours_rect(190.0, 140.0, 210.0, 160.0)",
+    {ok, [N | _], _} = eval(Code, St),
+    ?assertEqual(2, trunc(N)).
+
+spatial_neighbours_no_grid() ->
+    St = install_api_with_zone(),
+    {ok, [Err | _], _} = eval("return game.spatial.neighbours_radius(0.0, 0.0, 1.0).error", St),
+    ?assertNotEqual(nomatch, binary:match(Err, ~"zone context")).
+
+%% Stands in for the zone that owns the addressed entity; `whereis_zone` is
+%% mecked to hand it back so this test stays about the API rather than about pg.
+spawn_zone_stub(_Coords) ->
+    spawn(fun() ->
+        receive
+            _ -> ok
+        end
+    end).
+
+zone_apply_delivers() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    asobi_lua_api:reset_effect_sends(),
+    %% Lua numbers are floats: `12` on the Lua side is 12.0 by the time it is a
+    %% decoded Erlang term, and asserting on the integer would be asserting on
+    %% something the wire cannot produce.
+    {ok, [true | _], _} = eval("return game.zone.apply('pirate', { damage = 12.0 })", St),
+    ?assert(meck:called(asobi_zone, whereis_zone, [~"nb-world", {2, 1}])),
+    [{_, {_, _, [_, ~"pirate", Event]}, ok} | _] = lists:filter(
+        fun
+            ({_, {asobi_zone, apply_effect, _}, _}) -> true;
+            (_) -> false
+        end,
+        meck:history(asobi_zone)
+    ),
+    ?assertEqual(#{~"damage" => 12.0}, Event).
+
+zone_apply_refuses_unseen() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    %% `false`, not an error: "I cannot see that entity from here" is an
+    %% ordinary outcome a script branches on, and it is also the authorisation
+    %% rule - see asobi_zone_border:owner/4.
+    {ok, [Result | _], _} = eval("return game.zone.apply('nobody', {})", St),
+    ?assertEqual(false, Result).
+
+zone_apply_bad_event() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    {ok, [Err | _], _} = eval("return game.zone.apply('pirate', 7).error", St),
+    ?assertNotEqual(nomatch, binary:match(Err, ~"event_table")).
+
+%% A cross-zone event is a verb, not a payload, and the size bound is spent on
+%% the caller because past that point the term is already on another process's
+%% heap and in its mailbox.
+zone_apply_oversized_event() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Code =
+        "local big = {}\n"
+        "for i = 1, 5000 do big['k' .. i] = i end\n"
+        "return game.zone.apply('pirate', big)",
+    {ok, [Result | _], _} = eval(Code, St),
+    ?assertEqual(false, Result),
+    ?assertNot(meck:called(asobi_zone, apply_effect, '_')).
+
+zone_apply_send_budget() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    asobi_lua_api:reset_effect_sends(),
+    Code =
+        "local sent = 0\n"
+        "for _ = 1, 500 do if game.zone.apply('pirate', { d = 1 }) then sent = sent + 1 end end\n"
+        "return sent",
+    try
+        {ok, [Sent | _], _} = eval(Code, St),
+        ?assertEqual(64, trunc(Sent))
+    after
+        asobi_lua_api:reset_effect_sends()
+    end.
+
+spatial_neighbours_bad_args() ->
+    St = install_api_with_grid(),
+    {ok, [E1 | _], _} = eval("return game.spatial.neighbours_radius(1.0).error", St),
+    ?assertNotEqual(nomatch, binary:match(E1, ~"x, y, radius")),
+    {ok, [E2 | _], _} = eval("return game.spatial.neighbours_rect(1.0, 2.0).error", St),
+    ?assertNotEqual(nomatch, binary:match(E2, ~"x1, y1, x2, y2")).
+
+zone_apply_no_grid() ->
+    St = install_api_with_zone(),
+    {ok, [Err | _], _} = eval("return game.zone.apply('x', {}).error", St),
+    ?assertNotEqual(nomatch, binary:match(Err, ~"zone context")).
+
 spatial_zone_query_radius() ->
     St = install_api_with_zone(),
     Code =
@@ -689,22 +859,39 @@ spatial_query_radius_with_opts() ->
     St = install_api(),
     %% A regression that drops the opts arg would break entity-type
     %% filtering — meck_history confirms the 4-arg variant fires.
+    %%
+    %% Unloaded in an `after`: meck:expect/3 on a module nothing called
+    %% meck:new/2 for mecks it implicitly, and the foreach setup/cleanup here
+    %% does not know about it - so without this the stub outlives this test and
+    %% answers every later one that reaches asobi_spatial (it did, for
+    %% game.spatial.neighbours_radius).
     meck:expect(asobi_spatial, query_radius, fun(_, _, _, _) ->
         [{~"e1", #{type => ~"npc"}, 4.0}]
     end),
-    Code =
-        "local entities = { a = { x = 0.0, y = 0.0, type = 'npc' } }\n"
-        "local r = game.spatial.query_radius(entities, 0.0, 0.0, 10.0, { type = 'npc' })\n"
-        "return #r",
-    {ok, [Count | _], _} = eval(Code, St),
-    ?assertEqual(1, trunc(Count)),
-    ?assert(meck:called(asobi_spatial, query_radius, '_')).
+    try
+        Code =
+            "local entities = { a = { x = 0.0, y = 0.0, type = 'npc' } }\n"
+            "local r = game.spatial.query_radius(entities, 0.0, 0.0, 10.0, { type = 'npc' })\n"
+            "return #r",
+        {ok, [Count | _], _} = eval(Code, St),
+        ?assertEqual(1, trunc(Count)),
+        ?assert(meck:called(asobi_spatial, query_radius, '_'))
+    after
+        meck:unload(asobi_spatial)
+    end.
 
 spatial_nearest_with_opts() ->
     St = install_api(),
     meck:expect(asobi_spatial, nearest, fun(_, _, _, _) ->
         [{~"e1", #{type => ~"npc"}, 1.0}]
     end),
+    try
+        spatial_nearest_with_opts_body(St)
+    after
+        meck:unload(asobi_spatial)
+    end.
+
+spatial_nearest_with_opts_body(St) ->
     Code =
         "local entities = { a = { x = 0.0, y = 0.0, type = 'npc' } }\n"
         "local r = game.spatial.nearest(entities, 0.0, 0.0, 1, { max_results = 1 })\n"

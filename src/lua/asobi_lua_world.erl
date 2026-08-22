@@ -45,7 +45,7 @@ of hot reloads.
 -include("asobi_ack.hrl").
 
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
--export([zone_tick/2, handle_input/3, handle_input_batch/2, post_tick/2]).
+-export([zone_tick/2, handle_input/3, handle_input_batch/2, handle_effects/2, post_tick/2]).
 -ifdef(TEST).
 -export([zone_ctx/2, make_ctx/1]).
 -endif.
@@ -84,7 +84,7 @@ init(Config) ->
     PreInstall = fun(St) -> asobi_lua_api:install(make_ctx(Config), St) end,
     case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
         {ok, LuaSt0} ->
-            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0),
+            {EncConfig, LuaSt1} = asobi_lua_loader:encode(GameConfig, LuaSt0),
             case asobi_lua_loader:call(init, [EncConfig], LuaSt1, ?INIT_TIMEOUT) of
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{
@@ -141,7 +141,7 @@ state)` keeps working (Lua discards extra arguments) and
 join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map(Ctx) ->
     %% Erlang maps must be encoded before they cross into Luerl - GS is
     %% already a Lua value, but Ctx arrives raw from the client.
-    {EncCtx, LuaSt0} = luerl:encode(Ctx, LuaSt),
+    {EncCtx, LuaSt0} = asobi_lua_loader:encode(Ctx, LuaSt),
     case asobi_lua_loader:call(join, [PlayerId, GS, EncCtx], LuaSt0, ?JOIN_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
@@ -258,7 +258,7 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
             undefined ->
                 {Entities, ZoneState};
             LuaSt ->
-                {EncEntities, LuaSt1} = luerl:encode(Entities, LuaSt),
+                {EncEntities, LuaSt1} = asobi_lua_loader:encode(Entities, LuaSt),
                 GS = maps:get(game_state, ZoneState, nil),
                 case
                     asobi_lua_loader:call(
@@ -306,8 +306,8 @@ stamp is used, so a script cannot ack something the client will not accept.
 handle_input(PlayerId, Input, Entities) ->
     case stashed_zone_state() of
         #{lua_state := LuaSt} = ZoneState ->
-            {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
-            {EncEntities, LuaSt2} = luerl:encode(Entities, LuaSt1),
+            {EncInput, LuaSt1} = asobi_lua_loader:encode(Input, LuaSt),
+            {EncEntities, LuaSt2} = asobi_lua_loader:encode(Entities, LuaSt1),
             %% No bounded_eval: handle_input is not a sandbox boundary, see
             %% guides/security-trust-model.md.
             case
@@ -330,6 +330,68 @@ handle_input(PlayerId, Input, Entities) ->
         _ ->
             {ok, Entities}
     end.
+
+-doc """
+Delegates a tick's cross-zone effects to the script's `handle_effects`.
+
+```lua
+function handle_effects(effects, entities)
+  for _, e in ipairs(effects) do
+    local target = entities[e.entity_id]
+    target.hp = target.hp - (e.event.damage or 0)
+  end
+  return entities
+end
+```
+
+Batched, and inline on the zone process for the same reason
+`handle_input_batch/2` is: the entity map is encoded once for the whole tick's
+effects, and the copy a bounded call would make is the cost
+`widgrensit/asobi#543` is about. asobi has already filtered the list to effects
+naming an entity this zone still owns, so `entities[e.entity_id]` is never nil.
+
+A script with no `handle_effects` gets an error logged once per limiter window
+and its effects dropped - silently ignoring them would make a missing handler
+look like a delivery bug.
+""".
+-spec handle_effects([{binary(), map()}], map()) -> {ok, map()}.
+handle_effects(Effects, Entities) ->
+    case stashed_zone_state() of
+        #{lua_state := LuaSt} = ZoneState ->
+            %% asobi_zone cannot make this call for us: the bridge module always
+            %% exports handle_effects/2, so `function_exported` there says
+            %% nothing about whether the *script* defines one. Luerl cannot tell
+            %% an undefined global apart from a raising one either (see
+            %% asobi_lua_loader:is_defined/2), so the check has to be explicit or
+            %% a missing handler is reported as a script crash.
+            case asobi_lua_loader:is_defined(handle_effects, LuaSt) of
+                false ->
+                    log_lua_error(handle_effects, no_handler, ZoneState),
+                    {ok, Entities};
+                true ->
+                    call_handle_effects(Effects, Entities, LuaSt, ZoneState)
+            end;
+        _ ->
+            {ok, Entities}
+    end.
+
+call_handle_effects(Effects, Entities, LuaSt, ZoneState) ->
+    {EncEffects, LuaSt1} = asobi_lua_loader:encode(encode_effects(Effects), LuaSt),
+    {EncEntities, LuaSt2} = asobi_lua_loader:encode(Entities, LuaSt1),
+    case asobi_lua_loader:call(handle_effects, [EncEffects, EncEntities], LuaSt2) of
+        {ok, [Ents1 | _], LuaSt3} ->
+            erlang:put(?PD_KEY, ZoneState#{lua_state => LuaSt3}),
+            {ok, asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt3))};
+        {ok, [], LuaSt3} ->
+            erlang:put(?PD_KEY, ZoneState#{lua_state => LuaSt3}),
+            {ok, Entities};
+        {error, Reason} ->
+            log_lua_error(handle_effects, Reason, ZoneState),
+            {ok, Entities}
+    end.
+
+encode_effects(Effects) ->
+    [#{~"entity_id" => Id, ~"event" => Event} || {Id, Event} <- Effects].
 
 -doc """
 Apply a tick's whole input queue with one encode of the entity map.
@@ -374,7 +436,7 @@ handle_input_batch([], Entities) ->
 handle_input_batch(Inputs, Entities) ->
     case stashed_zone_state() of
         #{lua_state := LuaSt} = ZoneState ->
-            {EncEntities, LuaSt1} = luerl:encode(Entities, LuaSt),
+            {EncEntities, LuaSt1} = asobi_lua_loader:encode(Entities, LuaSt),
             {EncEntities1, Outcomes, LuaSt2, ZoneState1} = run_input_batch(
                 Inputs, EncEntities, LuaSt1, ZoneState, []
             ),
@@ -416,7 +478,7 @@ run_input_batch([{PlayerId, Input} | Rest], Enc, LuaSt, ZoneState, Acc) ->
     %% because `Enc` changes - whatever the last script returned is what the
     %% next one is handed.
     LuaSt0 = asobi_lua_loader:anchor_ref(Enc, LuaSt),
-    {EncInput, LuaSt1} = luerl:encode(Input, LuaSt0),
+    {EncInput, LuaSt1} = asobi_lua_loader:encode(Input, LuaSt0),
     case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, Enc], LuaSt1) of
         {ok, Rets, LuaSt2} ->
             %% `_G` is script-writable, so a script can clear asobi's root with
@@ -429,7 +491,18 @@ run_input_batch([{PlayerId, Input} | Rest], Enc, LuaSt, ZoneState, Acc) ->
                         {keep, Enc1, Outcome} ->
                             run_input_batch(Rest, Enc1, LuaSt2, ZoneState, [Outcome | Acc]);
                         {revert, Outcome} ->
-                            run_input_batch(Rest, Enc, LuaSt0, ZoneState, [Outcome | Acc])
+                            %% Carrying LuaSt0 onward is the revert under
+                            %% `copy`; under `owned` the mutation already
+                            %% happened in the VM, so it has to be undone
+                            %% explicitly. Same intent, said twice because the
+                            %% two modes disagree about who holds the state.
+                            run_input_batch(
+                                Rest,
+                                Enc,
+                                asobi_lua_loader:revert(LuaSt0),
+                                ZoneState,
+                                [Outcome | Acc]
+                            )
                     end;
                 false ->
                     log_anchor_cleared(ZoneState),
@@ -474,7 +547,9 @@ there is no Erlang-side copy to fall back on - but the Luerl state is
 functional, so reverting to the state from before the call reverts the heap the
 mutation lives in. It costs nothing and it is the difference between "returning
 nothing rejects the input" and "returning nothing keeps whatever you touched,
-including another player's entity".
+including another player's entity". Under ADR 0015's `owned` mode the state is
+not the caller's to drop, so the same revert is asked of the VM explicitly -
+see `asobi_lua_loader:revert/1`.
 
 The same revert runs on a Lua exception, which is why a raising handler leaves
 no input frame behind either.
@@ -699,7 +774,7 @@ put_known_templates(_State, _Templates) ->
 
 -spec on_world_recovered(map(), map()) -> {ok, map()}.
 on_world_recovered(Snapshots, #{lua_state := LuaSt, game_state := GS} = State) ->
-    {EncSnap, LuaSt1} = luerl:encode(Snapshots, LuaSt),
+    {EncSnap, LuaSt1} = asobi_lua_loader:encode(Snapshots, LuaSt),
     case asobi_lua_loader:call(on_world_recovered, [EncSnap, GS], LuaSt1, ?INIT_TIMEOUT) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
@@ -770,7 +845,7 @@ on_zone_unloaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
 ]).
 
 decode_terrain_provider(Result, LuaSt) ->
-    Decoded = luerl:decode(Result, LuaSt),
+    Decoded = asobi_lua_loader:decode(Result, LuaSt),
     case Decoded of
         nil ->
             none;
@@ -865,7 +940,7 @@ log_lua_error(Callback, Reason, StateOrZoneState) ->
     asobi_lua_game_error:emit(Callback, Reason, Script).
 
 decode_position(PosTable, LuaSt) ->
-    case luerl:decode(PosTable, LuaSt) of
+    case asobi_lua_loader:decode(PosTable, LuaSt) of
         Decoded when is_list(Decoded) ->
             X = proplists:get_value(~"x", Decoded, 0.0),
             Y = proplists:get_value(~"y", Decoded, 0.0),
@@ -876,14 +951,14 @@ decode_position(PosTable, LuaSt) ->
 
 check_post_tick_result(GS, LuaSt) ->
     try
-        case luerl:get_table_key(GS, ~"_finished", LuaSt) of
+        case asobi_lua_loader:get_table_key(GS, ~"_finished", LuaSt) of
             {ok, true, LuaSt1} ->
-                case luerl:get_table_key(GS, ~"_result", LuaSt1) of
+                case asobi_lua_loader:get_table_key(GS, ~"_result", LuaSt1) of
                     {ok, ResRef, LuaSt2} -> {finished, decode_to_map(ResRef, LuaSt2)};
                     _ -> {finished, #{}}
                 end;
             _ ->
-                case luerl:get_table_key(GS, ~"_vote", LuaSt) of
+                case asobi_lua_loader:get_table_key(GS, ~"_vote", LuaSt) of
                     {ok, VoteRef, LuaSt1} when VoteRef =/= nil, VoteRef =/= false ->
                         {vote, decode_to_map(VoteRef, LuaSt1)};
                     _ ->
@@ -895,7 +970,7 @@ check_post_tick_result(GS, LuaSt) ->
     end.
 
 decode_zone_states(ZoneStatesRef, LuaSt) ->
-    case luerl:decode(ZoneStatesRef, LuaSt) of
+    case asobi_lua_loader:decode(ZoneStatesRef, LuaSt) of
         Decoded when is_list(Decoded) -> decode_zone_states_acc(Decoded, #{});
         _ -> #{}
     end.
@@ -1024,7 +1099,7 @@ to_integer(N) ->
     asobi_lua_phases:to_integer(N).
 
 decode_spawn_templates(TemplatesRef, LuaSt) ->
-    case luerl:decode(TemplatesRef, LuaSt) of
+    case asobi_lua_loader:decode(TemplatesRef, LuaSt) of
         Decoded when is_list(Decoded) -> decode_spawn_templates_acc(Decoded, #{});
         _ -> #{}
     end.
@@ -1165,7 +1240,7 @@ dump_zone_state(ZoneState) ->
 -spec restore_game_state(map(), dynamic()) -> {dynamic(), dynamic()}.
 restore_game_state(ZoneState0, LuaSt) ->
     case maps:get(~"game_state", ZoneState0, undefined) of
-        Map when is_map(Map) -> luerl:encode(Map, LuaSt);
+        Map when is_map(Map) -> asobi_lua_loader:encode(Map, LuaSt);
         _ -> {nil, LuaSt}
     end.
 
@@ -1177,6 +1252,14 @@ zone_ctx(Config, TemplatesTab) ->
         zone_pid => self(),
         match_pid => maps:get(world_server_pid, Config, self()),
         match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined)),
+        %% The zone's own identity in the grid, for the neighbour-facing calls.
+        %% Fixed for the zone's life, so a Ctx snapshot is correct here in a way
+        %% it is not for the template set above.
+        world_id => maps:get(world_id, Config, undefined),
+        coords => maps:get(coords, Config, undefined),
+        zone_size => maps:get(zone_size, Config, undefined),
+        grid_size => maps:get(grid_size, Config, undefined),
+        border_tab => maps:get(border_tab, Config, undefined),
         script => maps:get(lua_script, GameConfig, undefined),
         %% asobi_lua#110 + asobi#253: NOT a known_templates snapshot here -
         %% a table reference, not the map value. asobi_lua_api:known_template/2
@@ -1228,7 +1311,9 @@ boot_throwaway_lua_state(Config, Caller) ->
         ScriptPath when is_binary(ScriptPath); is_list(ScriptPath) ->
             ProbeCtx = Ctx#{probe => true},
             PreInstall = fun(St) -> asobi_lua_api:install(ProbeCtx, St) end,
-            case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
+            % Copied, never owned: this state answers one question and is
+            % dropped, so an ADR 0015 VM here would be a process nothing stops.
+            case asobi_lua_loader:new_copied(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
                 {ok, LuaSt} ->
                     {ok, #{lua_state => LuaSt, script => ScriptPath}};
                 {error, Reason} ->

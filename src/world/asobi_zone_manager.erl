@@ -369,6 +369,14 @@ cleanup_zone(
         true -> asobi_telemetry:zone_closed(WorldId, Coords);
         false -> ok
     end,
+    %% The zone's own terminate/2 clears this too, but it does not run when the
+    %% zone is killed rather than stopped - and a stale band row keeps a dead
+    %% entity visible to every neighbour until the coords are next occupied.
+    %% Clearing it here covers the reaped and the crashed alike, and it is
+    %% idempotent.
+    asobi_zone_border:clear(
+        maps:get(border_tab, maps:get(zone_config, State, #{}), undefined), Coords
+    ),
     ets:delete(Tab, Coords),
     Monitors1 =
         case maps:get(Coords, Monitors, undefined) of

@@ -247,7 +247,7 @@ disk.
 
 ## Spatial
 
-Three shapes, and mixing them up is the usual mistake.
+Four shapes, and mixing them up is the usual mistake.
 
 **Entity-list and zone forms.** `query_radius` takes either:
 
@@ -267,6 +267,24 @@ The entity-list forms return `{ id = ..., entity = ..., distance = ... }` per
 hit. The zone forms return `{ id = ..., x = ..., y = ... }` per hit - no
 `entity` and no `distance`. Without zone context the zone forms return
 `{ error = "... requires zone context" }`.
+
+**Neighbour forms.** These read the eight zones touching the caller's, and
+nothing else - not the caller's own zone, which is already in `entities`:
+
+```lua
+game.spatial.neighbours_radius(x, y, radius)          -- zone context required
+game.spatial.neighbours_radius(x, y, radius, opts)
+game.spatial.neighbours_rect(x1, y1, x2, y2)          -- zone context required
+game.spatial.neighbours_rect(x1, y1, x2, y2, opts)
+```
+
+`neighbours_radius` returns `{ id = ..., entity = ..., distance = ... }` per
+hit and `neighbours_rect` the same without `distance`. The entities are
+**copies**: the neighbour still owns them, and writing to what comes back
+changes nothing. They return nothing at all unless the world sets
+`border_band`, which is off by default - see
+[World server](world-server.md#seeing-across-a-seam) for what it costs and how
+to act on what you find.
 
 **Entity-list only.**
 
@@ -299,6 +317,7 @@ Anything else in `opts` is ignored.
 game.zone.spawn(template_id, x, y)                    -- true | false
 game.zone.spawn(template_id, x, y, overrides)         -- true | false
 game.zone.despawn(entity_id)                          -- true
+game.zone.apply(entity_id, event)                     -- true | false
 game.terrain.get_chunk(cx, cy)                        -- { ok = data }
 game.terrain.preload(coords_list)                     -- true
 ```
@@ -307,6 +326,13 @@ game.terrain.preload(coords_list)                     -- true
 itself is asynchronous, so the return says "the template resolved", not
 "something exists now". It reads the zone's live template set, so a hot reload
 that adds a template takes effect without a restart.
+
+`apply` asks the *neighbouring* zone that owns `entity_id` to act on it, and
+returns `false` when no neighbour currently publishes that entity - you can
+only affect what `neighbours_radius`/`neighbours_rect` would have shown you.
+The owning zone runs the event through its own `handle_effects(effects,
+entities)` on its next tick. A script that calls `apply` without defining
+`handle_effects` gets a rate-limited error and dropped effects.
 
 `terrain.preload` takes a list of tables carrying `cx`/`cy` (or `x`/`y`).
 Entries it cannot read are skipped rather than raising.
