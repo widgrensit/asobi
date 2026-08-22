@@ -122,26 +122,35 @@ says what it deliberately does not solve.
 **If your game drives work from `zone_tick` on a zone that holds nothing** - a
 wave spawner counting down between waves, weather, a zone-level timer - asobi
 cannot see it, and such a zone is demoted to a tenth of the rate it was written
-for. Say so and it stays hot:
+for. Say so with a third return value:
 
 ```lua
 function zone_tick(entities, zone_state)
-  zone_state.next_wave = zone_state.next_wave - 1
-  zone_state._keep_hot = zone_state.next_wave > 0
-  return entities, zone_state
+  zone_state.next_wave = (zone_state.next_wave or 30) - 1
+  return entities, zone_state, zone_state.next_wave > 0
 end
 ```
 
-An Erlang game module exports `zone_busy/1` instead. Either way it is consulted
-**only when asobi already believes the zone is idle**, so a zone with entities
-never pays for it, and it fails safe: a raise or a non-boolean keeps the zone
-hot and is logged.
+An Erlang game module returns `{Entities, ZoneState, Busy}` from `zone_tick/2`.
+Returning the ordinary two-tuple means "not busy", so this is additive and a
+game that never uses it behaves exactly as before.
 
-`_keep_hot` is a field rather than a Lua callback on purpose. asobi asks on every
-idle tick, so a callback would put one extra marshalled call per tick on exactly
-the zones this section is about, to decide whether to skip a call. It joins
-`_finished`, `_result` and `_vote` as fields a script sets on its state to tell
-asobi something.
+Lua truthiness decides: `nil` and `false` are not busy, everything else is - so
+returning the countdown itself works as well as returning a comparison.
+
+While a zone says it is busy it keeps its full tick rate, is **not** hibernated
+between ticks, and is **not** reaped by the idle sweep. A non-boolean from an
+Erlang module keeps the zone hot and is logged; demoting a zone that has work is
+the harmful direction.
+
+It rides on `zone_tick`'s return rather than being a separate callback or a
+field on the zone state, and that is not only about tidiness: asobi wants the
+answer at exactly the instant `zone_tick` returns, a second callback would cost
+a marshalled crossing on every idle tick, and a field would cost a Luerl read -
+which is *not* raw, so an absent key on a table with an `__index` runs the
+metamethod inline on the zone process with no timeout and no heap cap. A
+returned value reads nothing. See
+`docs/adr/0019-zone-tick-returns-whether-it-is-busy.md`.
 
 `cold_tick_divisor = 1` disables the whole thing world-wide if you would rather
 not think about it.

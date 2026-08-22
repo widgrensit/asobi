@@ -8,10 +8,16 @@ function generate_world(seed, config) return { ["0,0"] = {} } end
 function spawn_position(player_id, state) return { x = 10, y = 10 } end
 function handle_input(player_id, input, entities) return entities end
 
--- A wave spawner: no entities between waves, and a countdown asobi cannot see.
--- The third return value is what keeps the zone at full tick rate.
+-- Ordinary OOP Lua. Under the field design this __index ran inline on the zone
+-- process for every absent-key read, with no timeout and no heap cap.
+local Zone = {}
+Zone.__index = function(_t, _k)
+  local n = 0
+  for i = 1, 2000000 do n = n + i end
+  return n
+end
+
 function zone_tick(entities, zone_state)
-  zone_state = zone_state or {}
-  zone_state.next_wave = (zone_state.next_wave or 3) - 1
-  return entities, zone_state, zone_state.next_wave > 0
+  zone_state = zone_state or setmetatable({}, Zone)
+  return entities, zone_state
 end

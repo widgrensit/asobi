@@ -72,8 +72,11 @@ independent breaks, none of which produced an error:
   it is world-wide rather than per-zone. Both reviewers on asobi#545 asked for an
   optional `zone_busy/1` veto instead; that is a later decision, deliberately not
   taken here. **Taken since, in
-  `docs/adr/0018-zone-busy-vetoes-demotion.md`**, which closes this gap without
-  changing anything above.
+  `docs/adr/0019-zone-tick-returns-whether-it-is-busy.md`** (via
+  `docs/adr/0018-zone-busy-vetoes-demotion.md`, superseded). Note that 0019 does
+  redefine `zone_idle/1`, which decision item 1 above names: what is described
+  there is now `asobi_idle/1`, and `zone_idle/1` is that plus the game's own
+  answer. The line references above are from before those changes.
 - Fixing the forwarding turns on five other knobs that games have been declaring
   and not getting, `lazy_zones` most consequentially. A world that has been
   pre-spawning its whole grid will start loading zones on demand.
