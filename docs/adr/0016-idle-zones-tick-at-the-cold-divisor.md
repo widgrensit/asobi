@@ -71,7 +71,9 @@ independent breaks, none of which produced an error:
   weather, a zone-level timer. The escape hatch is `cold_tick_divisor = 1`, and
   it is world-wide rather than per-zone. Both reviewers on asobi#545 asked for an
   optional `zone_busy/1` veto instead; that is a later decision, deliberately not
-  taken here.
+  taken here. **Taken since, in
+  `docs/adr/0018-zone-busy-vetoes-demotion.md`**, which closes this gap without
+  changing anything above.
 - Fixing the forwarding turns on five other knobs that games have been declaring
   and not getting, `lazy_zones` most consequentially. A world that has been
   pre-spawning its whole grid will start loading zones on demand.

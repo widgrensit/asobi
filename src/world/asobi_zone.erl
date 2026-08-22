@@ -2400,7 +2400,8 @@ forget_log_keys(WorldId, Coords) ->
     asobi_script_log_limiter:forget(no_input_handler_log_key(Zone)),
     asobi_script_log_limiter:forget(effect_log_key(Zone, effect_queue_full)),
     asobi_script_log_limiter:forget(effect_log_key(Zone, no_effect_handler)),
-    asobi_script_log_limiter:forget(effect_log_key(Zone, bad_effects_return)).
+    asobi_script_log_limiter:forget(effect_log_key(Zone, bad_effects_return)),
+    asobi_script_log_limiter:forget(effect_log_key(Zone, bad_zone_busy)).
 
 backup_zone_state(WorldId, Coords, Entities) ->
     case ets:info(asobi_world_state) of
@@ -2527,12 +2528,20 @@ effects_result(_Other, Prev, State) ->
 %% empty zone creates no work in it: there are no entities to move and no
 %% deltas to send. That is exactly the "watched but empty" case #543 asks about.
 -spec zone_idle(map()) -> boolean().
+-spec asobi_idle(map()) -> boolean().
+zone_idle(#{game_module := GameMod, zone_state := ZoneState} = State) ->
+    asobi_idle(State) andalso not script_busy(GameMod, ZoneState, State).
+
+%% Everything asobi can see for itself. Kept separate from the script's own
+%% answer because this half is free and that half is not, and the order matters:
+%% a zone holding entities never reaches `zone_busy/1` at all.
+%%
 %% `input_queue` and `effect_queue` are always `[]` where reclassify/1 calls
 %% this - do_tick/2 empties both before it runs - so those two conditions never
 %% decide anything at that call site. They are kept because this states what
 %% "idle" means for a zone rather than what happens to be true at one caller,
 %% and warm_up/1 is what actually handles a queue filling between ticks.
-zone_idle(#{
+asobi_idle(#{
     entities := Entities,
     input_queue := Queue,
     effect_queue := Effects,
@@ -2554,6 +2563,60 @@ clamp_border_band(Band) ->
         value => Band
     }),
     ?DEFAULT_BORDER_BAND.
+
+-doc """
+Whether the game says this zone still has work asobi cannot see.
+
+`asobi_idle/1` reads entities, queues, timers and the respawn queue - asobi's
+own bookkeeping - and that is blind to work a script keeps in its zone state: a
+wave spawner counting down, weather, a zone-level phase timer. Such a zone holds
+nothing, so asobi calls it idle and ticks it at `cold_tick_divisor`, and the
+countdown runs at a tenth of the rate it was written for.
+
+Consulted **only when asobi already believes the zone is idle**, which is what
+keeps it affordable: a zone with entities never reaches it, and a zone that
+answers `true` is by definition doing work in `zone_tick` and paying for that
+anyway.
+
+Fail-safe is `true` - a raising or out-of-shape answer keeps the zone hot.
+Demoting a zone that might have work is the harmful direction; the cost of
+getting it wrong the other way is one zone ticking at full rate.
+""".
+-spec script_busy(module(), term(), map()) -> boolean().
+script_busy(GameMod, ZoneState, State) ->
+    case erlang:function_exported(GameMod, zone_busy, 1) of
+        false ->
+            false;
+        true ->
+            try GameMod:zone_busy(ZoneState) of
+                Busy when is_boolean(Busy) ->
+                    Busy;
+                Other ->
+                    log_bad_zone_busy(State, Other),
+                    true
+            catch
+                Class:Reason ->
+                    log_bad_zone_busy(State, {Class, Reason}),
+                    true
+            end
+    end.
+
+log_bad_zone_busy(State, Detail) ->
+    Zone = log_zone(State),
+    asobi_telemetry:game_error(bad_zone_busy, #{
+        game_module => maps:get(game_module, State, undefined)
+    }),
+    case asobi_script_log_limiter:allow(effect_log_key(Zone, bad_zone_busy)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_ERROR(#{
+                msg => ~"zone_busy/1 did not return a boolean; keeping the zone hot",
+                coords => maps:get(coords, State, undefined),
+                detail => io_lib:format("~0p", [Detail]),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
 
 %% Demotion is decided on the tick, where the cost is. Promotion is not: see
 %% warm_up/1.

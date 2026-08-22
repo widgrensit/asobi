@@ -119,10 +119,32 @@ spending most of a core on empty space and spending a tenth of it.
 Recorded in `docs/adr/0016-idle-zones-tick-at-the-cold-divisor.md`, which also
 says what it deliberately does not solve.
 
-Set `cold_tick_divisor = 1` if your game drives spawning from `zone_tick` on
-zones that hold nothing - that is the one shape this changes, because such a
-zone's `zone_tick` now runs at a tenth of the rate until something appears in
-it.
+**If your game drives work from `zone_tick` on a zone that holds nothing** - a
+wave spawner counting down between waves, weather, a zone-level timer - asobi
+cannot see it, and such a zone is demoted to a tenth of the rate it was written
+for. Say so and it stays hot:
+
+```lua
+function zone_tick(entities, zone_state)
+  zone_state.next_wave = zone_state.next_wave - 1
+  zone_state._keep_hot = zone_state.next_wave > 0
+  return entities, zone_state
+end
+```
+
+An Erlang game module exports `zone_busy/1` instead. Either way it is consulted
+**only when asobi already believes the zone is idle**, so a zone with entities
+never pays for it, and it fails safe: a raise or a non-boolean keeps the zone
+hot and is logged.
+
+`_keep_hot` is a field rather than a Lua callback on purpose. asobi asks on every
+idle tick, so a callback would put one extra marshalled call per tick on exactly
+the zones this section is about, to decide whether to skip a call. It joins
+`_finished`, `_result` and `_vote` as fields a script sets on its state to tell
+asobi something.
+
+`cold_tick_divisor = 1` disables the whole thing world-wide if you would rather
+not think about it.
 
 What does happen automatically:
 

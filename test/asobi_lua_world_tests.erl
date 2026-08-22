@@ -1155,3 +1155,39 @@ with_every_tick_polling(Fun) ->
             undefined -> application:unset_env(asobi_lua, reload_poll_interval_ms)
         end
     end.
+
+%% widgrensit/asobi#543 follow-up: a script counting down between waves holds no
+%% entities, so asobi's own bookkeeping calls the zone idle and demotes it to a
+%% tenth of the tick rate. `_keep_hot` is how the script says otherwise - a field
+%% rather than a callback, because asobi asks on every idle tick.
+keep_hot_vetoes_demotion_test() ->
+    Script = fixture("keep_hot_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    ZoneState = asobi_lua_world:init_zone_state(Config, #{}),
+    erlang:erase({asobi_lua_world, zone_state}),
+    %% next_wave: 3 -> 2 -> 1 -> 0, so the veto holds for two ticks and lifts.
+    {_, ZS1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ?assert(asobi_lua_world:zone_busy(ZS1)),
+    {_, ZS2} = asobi_lua_world:zone_tick(#{}, ZS1),
+    ?assert(asobi_lua_world:zone_busy(ZS2)),
+    {_, ZS3} = asobi_lua_world:zone_tick(#{}, ZS2),
+    ?assertNot(asobi_lua_world:zone_busy(ZS3)),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% A script that never sets the field demotes exactly as it did before.
+no_keep_hot_field_is_not_busy_test() ->
+    Script = fixture("config_move_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_, ZS1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ?assertNot(asobi_lua_world:zone_busy(ZS1)),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% No lua_state and no game_state: the bridge must answer, not raise, because
+%% asobi_zone treats a raise as "keep hot" and would latch the zone to full rate.
+zone_busy_without_a_bridge_state_test() ->
+    ?assertNot(asobi_lua_world:zone_busy(#{})),
+    ?assertNot(asobi_lua_world:zone_busy(#{lua_state => undefined, game_state => nil})),
+    ?assertNot(asobi_lua_world:zone_busy(not_a_map)).

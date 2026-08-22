@@ -62,8 +62,68 @@ cold_test_() ->
         {"an effect warms the zone", fun effect_warms/0},
         {"an occupied zone stays hot", fun occupied_stays_hot/0},
         {"a subscriber alone does not keep a zone hot", fun subscriber_does_not_warm/0},
-        {"going cold and warming again are each announced once", fun transitions_emit_telemetry/0}
+        {"going cold and warming again are each announced once", fun transitions_emit_telemetry/0},
+        {"zone_busy vetoes demotion", fun zone_busy_keeps_a_zone_hot/0},
+        {"a zone that stops being busy is demoted", fun zone_busy_released/0},
+        {"zone_busy is not consulted while entities are present",
+            fun zone_busy_skipped_when_occupied/0},
+        {"a non-boolean zone_busy keeps the zone hot", fun bad_zone_busy_fails_safe/0},
+        {"a raising zone_busy keeps the zone hot", fun raising_zone_busy_fails_safe/0}
     ]}.
+
+start_busy_zone(ZoneState) ->
+    {ok, Pid} = asobi_zone:start_link(#{
+        world_id => ~"cold-world",
+        coords => {1, 1},
+        ticker_pid => self(),
+        zone_size => 100,
+        grid_size => 5,
+        zone_state => ZoneState,
+        game_module => asobi_zone_busy_game
+    }),
+    Pid.
+
+%% The gap ADR 0016 recorded and did not close: a script counting down between
+%% waves holds no entities, so asobi's own bookkeeping calls the zone idle.
+zone_busy_keeps_a_zone_hot() ->
+    Pid = start_busy_zone(#{busy => true}),
+    tick(Pid, 1),
+    tick(Pid, 2),
+    ?assertNot(is_cold(Pid)),
+    ?assertEqual([], drain_ticker_casts()),
+    gen_server:stop(Pid).
+
+zone_busy_released() ->
+    Pid = start_busy_zone(#{busy => true}),
+    tick(Pid, 1),
+    ?assertNot(is_cold(Pid)),
+    sys:replace_state(Pid, fun(S) -> S#{zone_state => #{busy => false}} end),
+    tick(Pid, 2),
+    ?assert(is_cold(Pid)),
+    gen_server:stop(Pid).
+
+%% Order matters for cost, not just for correctness: a zone holding entities must
+%% never reach the callback at all.
+zone_busy_skipped_when_occupied() ->
+    Pid = start_busy_zone(#{busy => raises}),
+    asobi_zone:add_entity(Pid, ~"npc", #{type => ~"npc", x => 150.0, y => 150.0}),
+    tick(Pid, 1),
+    ?assert(is_process_alive(Pid)),
+    ?assertNot(is_cold(Pid)),
+    gen_server:stop(Pid).
+
+bad_zone_busy_fails_safe() ->
+    Pid = start_busy_zone(#{busy => bad_return}),
+    tick(Pid, 1),
+    ?assertNot(is_cold(Pid)),
+    gen_server:stop(Pid).
+
+raising_zone_busy_fails_safe() ->
+    Pid = start_busy_zone(#{busy => raises}),
+    tick(Pid, 1),
+    ?assert(is_process_alive(Pid)),
+    ?assertNot(is_cold(Pid)),
+    gen_server:stop(Pid).
 
 %% An operator watching a world needs to see a zone stop simulating - a zone
 %% that goes cold and never comes back is one that has stopped responding to the
