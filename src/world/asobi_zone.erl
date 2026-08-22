@@ -326,6 +326,9 @@ init(Config) ->
             %% drop path more expensive for the victim than the accept path -
             %% which inverts the point of a cap. Emitted once per tick instead.
             effect_dropped => 0,
+            %% zone_tick/2's last third return value. Starts false: the zone has
+            %% not ticked, so the game has not claimed anything.
+            script_busy => false,
             %% A zone with nothing to simulate is demoted to the ticker's cold
             %% set, which runs it once every `cold_tick_divisor` ticks instead
             %% of every tick (widgrensit/asobi#543). Starts hot: the zone has
@@ -559,6 +562,18 @@ handle_call(_Request, _From, State) ->
 
 -spec handle_cast(term(), map()) ->
     {noreply, map()} | {noreply, map(), hibernate} | {stop, normal, map()}.
+handle_cast(reap, #{entities := Entities, script_busy := true} = State) when
+    map_size(Entities) =:= 0
+->
+    %% "This zone has work" has to mean it is not torn down, or a wave spawner
+    %% counting down between waves is reaped mid-countdown at
+    %% `zone_idle_timeout` and the wave never comes. Declined the same way an
+    %% occupied zone declines below.
+    case maps:get(zone_manager_pid, State, undefined) of
+        undefined -> ok;
+        ZMPid -> asobi_zone_manager:touch_zone(ZMPid, maps:get(coords, State))
+    end,
+    {noreply, State};
 handle_cast(reap, #{entities := Entities} = State) when map_size(Entities) =:= 0 ->
     %% Graceful stop so terminate/2 writes a final snapshot. Transient restart
     %% means a normal stop is not respawned.
@@ -584,7 +599,10 @@ handle_cast({tick, TickN}, State) ->
     #{subscribers := Subs, entities := Ents, zone_manager_pid := ZMPid, coords := Coords} = State3,
     case map_size(Subs) of
         0 ->
-            case has_tickable_entities(Ents) of
+            %% A zone that says it is busy is not idle between its ticks, so
+            %% hibernating it would pay a full-sweep GC of the whole Luerl state
+            %% at tick rate - more per tick than an occupied zone costs.
+            case has_tickable_entities(Ents) orelse maps:get(script_busy, State3, false) of
                 false -> {noreply, State3, hibernate};
                 true -> {noreply, State3}
             end;
@@ -977,7 +995,9 @@ do_tick(
     %% the previous order; broadcasts still reflect this tick's input because
     %% the broadcast step runs after both.
     ZoneStateWithTick = ZoneState#{tick => TickN},
-    {Entities0, ZoneState1} = GameMod:zone_tick(Entities, ZoneStateWithTick),
+    {Entities0, ZoneState1, ScriptBusy} = zone_tick_result(
+        GameMod:zone_tick(Entities, ZoneStateWithTick), State
+    ),
     %% input_queue is built newest-first via [Input | Queue], so reverse it
     %% before applying so handle_input sees inputs in arrival order. Without
     %% this, a burst of moves arriving in one tick window collapses to the
@@ -1088,8 +1108,43 @@ do_tick(
         entity_timers => ET1,
         spawner => Spawner1,
         spatial_grid => Grid1,
+        script_busy => ScriptBusy,
         tick => TickN
     }.
+
+-doc """
+Reads `zone_tick/2`'s optional third return value: does the game say this zone
+still has work asobi cannot see?
+
+A return value rather than a callback or a state field, and that is the whole
+design. `reclassify/1` runs immediately after `zone_tick/2` in the same
+`handle_cast`, so the answer is wanted at exactly the instant the callback
+already returns - which makes any *separate* way of asking strictly worse:
+
+- a second callback costs a marshalled crossing per idle tick, on the zones
+  widgrensit/asobi#543 exists to make cheaper;
+- a field on the zone state costs a table read, and a Luerl table read is not
+  raw - an absent key on a table with an `__index` runs the metamethod inline on
+  this process, with no timeout, no heap cap and no reduction budget. `_keep_hot`
+  was absent from almost every zone state, so that was the ordinary path, and
+  ordinary OOP Lua (`setmetatable(zone_state, Zone)`) was enough to hang a zone
+  forever. That is what this replaced, in v0.98.0.
+
+A value cannot do either: it is already here, and nothing is read to get it.
+
+Fail-safe is `true`. Demoting a zone that has work is silent and harmful;
+keeping one hot is loud and costs one zone.
+""".
+-spec zone_tick_result(term(), map()) -> {map(), term(), boolean()}.
+zone_tick_result({Entities, ZoneState}, _State) when is_map(Entities) ->
+    {Entities, ZoneState, false};
+zone_tick_result({Entities, ZoneState, Busy}, _State) when
+    is_map(Entities), is_boolean(Busy)
+->
+    {Entities, ZoneState, Busy};
+zone_tick_result({Entities, ZoneState, Other}, State) when is_map(Entities) ->
+    log_bad_zone_busy(State, Other),
+    {Entities, ZoneState, true}.
 
 apply_timer_events([], Entities) ->
     Entities;
@@ -2529,12 +2584,12 @@ effects_result(_Other, Prev, State) ->
 %% deltas to send. That is exactly the "watched but empty" case #543 asks about.
 -spec zone_idle(map()) -> boolean().
 -spec asobi_idle(map()) -> boolean().
-zone_idle(#{game_module := GameMod, zone_state := ZoneState} = State) ->
-    asobi_idle(State) andalso not script_busy(GameMod, ZoneState, State).
+zone_idle(State) ->
+    asobi_idle(State) andalso not maps:get(script_busy, State, false).
 
-%% Everything asobi can see for itself. Kept separate from the script's own
-%% answer because this half is free and that half is not, and the order matters:
-%% a zone holding entities never reaches `zone_busy/1` at all.
+%% Everything asobi can see for itself. `script_busy` - the game's own answer,
+%% from zone_tick_result/2 - is the other half, and it is a stored value rather
+%% than a question asked here, so neither half costs anything to consult.
 %%
 %% `input_queue` and `effect_queue` are always `[]` where reclassify/1 calls
 %% this - do_tick/2 empties both before it runs - so those two conditions never
@@ -2564,54 +2619,24 @@ clamp_border_band(Band) ->
     }),
     ?DEFAULT_BORDER_BAND.
 
--doc """
-Whether the game says this zone still has work asobi cannot see.
-
-`asobi_idle/1` reads entities, queues, timers and the respawn queue - asobi's
-own bookkeeping - and that is blind to work a script keeps in its zone state: a
-wave spawner counting down, weather, a zone-level phase timer. Such a zone holds
-nothing, so asobi calls it idle and ticks it at `cold_tick_divisor`, and the
-countdown runs at a tenth of the rate it was written for.
-
-Consulted **only when asobi already believes the zone is idle**, which is what
-keeps it affordable: a zone with entities never reaches it, and a zone that
-answers `true` is by definition doing work in `zone_tick` and paying for that
-anyway.
-
-Fail-safe is `true` - a raising or out-of-shape answer keeps the zone hot.
-Demoting a zone that might have work is the harmful direction; the cost of
-getting it wrong the other way is one zone ticking at full rate.
-""".
--spec script_busy(module(), term(), map()) -> boolean().
-script_busy(GameMod, ZoneState, State) ->
-    case erlang:function_exported(GameMod, zone_busy, 1) of
-        false ->
-            false;
-        true ->
-            try GameMod:zone_busy(ZoneState) of
-                Busy when is_boolean(Busy) ->
-                    Busy;
-                Other ->
-                    log_bad_zone_busy(State, Other),
-                    true
-            catch
-                Class:Reason ->
-                    log_bad_zone_busy(State, {Class, Reason}),
-                    true
-            end
-    end.
-
+%% `Detail` is whatever the game returned, so it is bounded and binarised the
+%% way every other game-supplied term in this module is - an unbounded `~0p` of
+%% a zone state is both a 200KB log line and a way to print a secret the game
+%% keeps in it.
 log_bad_zone_busy(State, Detail) ->
     Zone = log_zone(State),
     asobi_telemetry:game_error(bad_zone_busy, #{
-        game_module => maps:get(game_module, State, undefined)
+        game_module => maps:get(game_module, State, undefined),
+        world_id => maps:get(world_id, State, undefined),
+        coords => maps:get(coords, State, undefined)
     }),
     case asobi_script_log_limiter:allow(effect_log_key(Zone, bad_zone_busy)) of
         {true, SuppressedSinceLast} ->
             ?LOG_ERROR(#{
-                msg => ~"zone_busy/1 did not return a boolean; keeping the zone hot",
+                msg =>
+                    ~"zone_tick/2's third return value was not a boolean; keeping the zone hot",
                 coords => maps:get(coords, State, undefined),
-                detail => io_lib:format("~0p", [Detail]),
+                detail => bound_debug_term(Detail),
                 suppressed_since_last => SuppressedSinceLast
             });
         false ->

@@ -63,12 +63,12 @@ cold_test_() ->
         {"an occupied zone stays hot", fun occupied_stays_hot/0},
         {"a subscriber alone does not keep a zone hot", fun subscriber_does_not_warm/0},
         {"going cold and warming again are each announced once", fun transitions_emit_telemetry/0},
-        {"zone_busy vetoes demotion", fun zone_busy_keeps_a_zone_hot/0},
+        {"a busy third return value vetoes demotion", fun zone_busy_keeps_a_zone_hot/0},
         {"a zone that stops being busy is demoted", fun zone_busy_released/0},
-        {"zone_busy is not consulted while entities are present",
-            fun zone_busy_skipped_when_occupied/0},
-        {"a non-boolean zone_busy keeps the zone hot", fun bad_zone_busy_fails_safe/0},
-        {"a raising zone_busy keeps the zone hot", fun raising_zone_busy_fails_safe/0}
+        {"a two-tuple return still means not busy", fun two_tuple_is_not_busy/0},
+        {"a non-boolean third element keeps the zone hot", fun bad_zone_busy_fails_safe/0},
+        {"a busy zone is not reaped", fun busy_zone_declines_reap/0},
+        {"a busy zone is not hibernated", fun busy_zone_does_not_hibernate/0}
     ]}.
 
 start_busy_zone(ZoneState) ->
@@ -85,82 +85,6 @@ start_busy_zone(ZoneState) ->
 
 %% The gap ADR 0016 recorded and did not close: a script counting down between
 %% waves holds no entities, so asobi's own bookkeeping calls the zone idle.
-zone_busy_keeps_a_zone_hot() ->
-    Pid = start_busy_zone(#{busy => true}),
-    tick(Pid, 1),
-    tick(Pid, 2),
-    ?assertNot(is_cold(Pid)),
-    ?assertEqual([], drain_ticker_casts()),
-    gen_server:stop(Pid).
-
-zone_busy_released() ->
-    Pid = start_busy_zone(#{busy => true}),
-    tick(Pid, 1),
-    ?assertNot(is_cold(Pid)),
-    sys:replace_state(Pid, fun(S) -> S#{zone_state => #{busy => false}} end),
-    tick(Pid, 2),
-    ?assert(is_cold(Pid)),
-    gen_server:stop(Pid).
-
-%% Order matters for cost, not just for correctness: a zone holding entities must
-%% never reach the callback at all.
-zone_busy_skipped_when_occupied() ->
-    Pid = start_busy_zone(#{busy => raises}),
-    asobi_zone:add_entity(Pid, ~"npc", #{type => ~"npc", x => 150.0, y => 150.0}),
-    tick(Pid, 1),
-    ?assert(is_process_alive(Pid)),
-    ?assertNot(is_cold(Pid)),
-    gen_server:stop(Pid).
-
-bad_zone_busy_fails_safe() ->
-    Pid = start_busy_zone(#{busy => bad_return}),
-    tick(Pid, 1),
-    ?assertNot(is_cold(Pid)),
-    gen_server:stop(Pid).
-
-raising_zone_busy_fails_safe() ->
-    Pid = start_busy_zone(#{busy => raises}),
-    tick(Pid, 1),
-    ?assert(is_process_alive(Pid)),
-    ?assertNot(is_cold(Pid)),
-    gen_server:stop(Pid).
-
-%% An operator watching a world needs to see a zone stop simulating - a zone
-%% that goes cold and never comes back is one that has stopped responding to the
-%% players in it, and before this there was no signal for it at all.
-transitions_emit_telemetry() ->
-    {ok, _} = application:ensure_all_started(telemetry),
-    Ref = make_ref(),
-    Self = self(),
-    ok = telemetry:attach_many(
-        {?MODULE, Ref},
-        [[asobi, zone, cold], [asobi, zone, hot]],
-        fun(Event, _Measure, Meta, _) -> Self ! {telemetry, Event, Meta} end,
-        []
-    ),
-    try
-        Pid = start_zone(),
-        tick(Pid, 1),
-        ?assertEqual(
-            {[asobi, zone, cold], {1, 1}}, next_event()
-        ),
-        %% A second idle tick must not re-announce: this is a transition, not a
-        %% state, or a large empty world emits one event per zone per tick.
-        tick(Pid, 2),
-        asobi_zone:add_entity(Pid, ~"npc", #{type => ~"npc", x => 150.0, y => 150.0}),
-        _ = sys:get_state(Pid),
-        ?assertEqual({[asobi, zone, hot], {1, 1}}, next_event()),
-        gen_server:stop(Pid)
-    after
-        telemetry:detach({?MODULE, Ref})
-    end.
-
-next_event() ->
-    receive
-        {telemetry, Event, #{coords := Coords}} -> {Event, Coords}
-    after 1000 -> timeout
-    end.
-
 starts_hot() ->
     Pid = start_zone(),
     ?assertNot(is_cold(Pid)),
@@ -243,3 +167,99 @@ subscriber_does_not_warm() ->
     ?assert(is_cold(Pid)),
     Player ! stop,
     gen_server:stop(Pid).
+
+%% An operator watching a world needs to see a zone stop simulating - a zone
+%% that goes cold and never comes back is one that has stopped responding to the
+%% players in it, and before this there was no signal for it at all.
+transitions_emit_telemetry() ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    Ref = make_ref(),
+    Self = self(),
+    ok = telemetry:attach_many(
+        {?MODULE, Ref},
+        [[asobi, zone, cold], [asobi, zone, hot]],
+        fun(Event, _Measure, Meta, _) -> Self ! {telemetry, Event, Meta} end,
+        []
+    ),
+    try
+        Pid = start_zone(),
+        tick(Pid, 1),
+        ?assertEqual({[asobi, zone, cold], {1, 1}}, next_event()),
+        %% A second idle tick must not re-announce: this is a transition, not a
+        %% state, or a large empty world emits one event per zone per tick.
+        tick(Pid, 2),
+        asobi_zone:add_entity(Pid, ~"npc", #{type => ~"npc", x => 150.0, y => 150.0}),
+        _ = sys:get_state(Pid),
+        ?assertEqual({[asobi, zone, hot], {1, 1}}, next_event()),
+        gen_server:stop(Pid)
+    after
+        telemetry:detach({?MODULE, Ref})
+    end.
+
+next_event() ->
+    receive
+        {telemetry, Event, #{coords := Coords}} -> {Event, Coords}
+    after 1000 -> timeout
+    end.
+
+zone_busy_keeps_a_zone_hot() ->
+    Pid = start_busy_zone(#{busy => true}),
+    tick(Pid, 1),
+    tick(Pid, 2),
+    ?assertNot(is_cold(Pid)),
+    ?assertEqual([], drain_ticker_casts()),
+    gen_server:stop(Pid).
+
+zone_busy_released() ->
+    Pid = start_busy_zone(#{busy => true}),
+    tick(Pid, 1),
+    ?assertNot(is_cold(Pid)),
+    sys:replace_state(Pid, fun(S) -> S#{zone_state => #{busy => false}} end),
+    tick(Pid, 2),
+    ?assert(is_cold(Pid)),
+    gen_server:stop(Pid).
+
+%% The two-tuple is the whole pre-existing contract, so this is what makes the
+%% third element additive rather than a change.
+two_tuple_is_not_busy() ->
+    Pid = start_busy_zone(#{busy => quiet}),
+    tick(Pid, 1),
+    ?assert(is_cold(Pid)),
+    gen_server:stop(Pid).
+
+bad_zone_busy_fails_safe() ->
+    Pid = start_busy_zone(#{busy => not_a_boolean}),
+    tick(Pid, 1),
+    ?assertNot(is_cold(Pid)),
+    gen_server:stop(Pid).
+
+%% "This zone has work" has to keep it alive, or a wave spawner is torn down
+%% mid-countdown at zone_idle_timeout and the wave never comes.
+busy_zone_declines_reap() ->
+    Pid = start_busy_zone(#{busy => true}),
+    tick(Pid, 1),
+    asobi_zone:reap(Pid),
+    _ = sys:get_state(Pid),
+    ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid).
+
+%% An entity-less zone normally hibernates between ticks. A busy one must not:
+%% at full tick rate that is a full-sweep GC of the whole Luerl state per tick,
+%% which costs more than an occupied zone does.
+busy_zone_does_not_hibernate() ->
+    Quiet = start_busy_zone(#{busy => quiet}),
+    asobi_zone:tick(Quiet, 1),
+    _ = sys:get_state(Quiet),
+    ?assertMatch(
+        {current_function, {gen_server, loop_hibernate, 4}},
+        process_info(Quiet, current_function)
+    ),
+    gen_server:stop(Quiet),
+    Busy = start_busy_zone(#{busy => true}),
+    asobi_zone:tick(Busy, 1),
+    _ = sys:get_state(Busy),
+    ?assertNotMatch(
+        {current_function, {gen_server, loop_hibernate, 4}},
+        process_info(Busy, current_function)
+    ),
+    gen_server:stop(Busy).
