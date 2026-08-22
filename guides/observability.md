@@ -259,11 +259,21 @@ asobi.world.player_joined        asobi.world.player_left
 asobi.world.phase_changed        asobi.world.tick
 asobi.zone.opened                asobi.zone.closed
 asobi.zone.tick_skipped          asobi.join.rate_limited
+asobi.zone.cold                  asobi.zone.hot
 asobi.rehome.rate_limited        asobi.lua.state
 ```
 
 `asobi.world.tick` is sampled rather than emitted every tick - at 20 Hz per
 world an unsampled event is a metrics pipeline of its own.
+
+`asobi.zone.cold` and `asobi.zone.hot` are the two halves of one gauge: a zone
+with nothing to simulate ticks at `cold_tick_divisor` instead of every tick, and
+these fire on the transition rather than per tick. On a large lazy world most
+zones should be cold most of the time, and a world where none are is a world
+paying the full per-callback cost for empty space. The direction worth an alert
+is the other one - a zone that goes cold and never comes back is a zone that has
+stopped responding to the players in it. See
+[Performance tuning](performance-tuning.md#zone-tick-hibernation-and-reaping).
 
 `asobi.zone.tick_skipped` is the one to alert on. It counts zones the world
 tick skipped because they had not finished the previous one, so a healthy
