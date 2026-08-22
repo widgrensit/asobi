@@ -116,6 +116,9 @@ tick, of which roughly 90% is the bridge and most of that is the state copy. At
 `tick_rate = 80` on a 225-zone grid that is the difference between a world
 spending most of a core on empty space and spending a tenth of it.
 
+Recorded in `docs/adr/0016-idle-zones-tick-at-the-cold-divisor.md`, which also
+says what it deliberately does not solve.
+
 Set `cold_tick_divisor = 1` if your game drives spawning from `zone_tick` on
 zones that hold nothing - that is the one shape this changes, because such a
 zone's `zone_tick` now runs at a tenth of the rate until something appears in
