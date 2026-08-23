@@ -93,6 +93,11 @@ api_test_() ->
         {"game.spatial.* name the opt they cannot use", fun spatial_opts_are_validated/0},
         {"every opt asobi_spatial honours decodes", fun spatial_honoured_opts_all_decode/0},
         {"game.spatial decodes the opts it honours", fun spatial_opts_are_decoded/0},
+        {"an unknown opt key is length-bounded in the error",
+            fun spatial_unknown_opt_key_is_bounded/0},
+        {"an unknown opt key is neutralised in the error",
+            fun spatial_unknown_opt_key_is_neutralised/0},
+        {"an opts id list is capped", fun spatial_id_set_is_capped/0},
         {"game.spatial.neighbours_rect reads the touching zones", fun spatial_neighbours_rect/0},
         {"game.spatial.neighbours_* error without grid context", fun spatial_neighbours_no_grid/0},
         {"game.zone.apply reaches the owning zone", fun zone_apply_delivers/0},
@@ -778,6 +783,55 @@ spatial_neighbours_radius_opts_binary_keys() ->
     {ok, [N, Id | _], _} = eval(Code, St),
     ?assertEqual(1, trunc(N)),
     ?assertEqual(~"pirate", Id).
+
+%% widgrensit/asobi#550 security review: echoing the key whole put a full copy
+%% of it in a fresh binary per rejected call - 804 MB from 200 calls with a 4 MB
+%% key. The copies are refc binaries, so max_heap_size (which excludes shared
+%% binaries by default) never fires and the zone never looks like it needs a GC.
+spatial_unknown_opt_key_is_bounded() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Code =
+        "local big = string.rep('A', 200000)\n"
+        "local o = {}\n"
+        "o[big] = 1\n"
+        "return game.spatial.neighbours_radius(195.0, 150.0, 30.0, o).error",
+    {ok, [Err | _], _} = eval(Code, St),
+    ?assert(is_binary(Err)),
+    ?assert(byte_size(Err) < 1024),
+    ?assertNotEqual(nomatch, binary:match(Err, ~"unknown spatial opt")).
+
+%% Same site: the key is arbitrary bytes, so it is neutralised where it is
+%% built rather than trusted to be re-bounded by whatever sink it reaches.
+spatial_unknown_opt_key_is_neutralised() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Code =
+        "local o = {}\n"
+        "o['\\27[31mPWNED\\27[0m\\nlevel=critical'] = 1\n"
+        "return game.spatial.neighbours_radius(195.0, 150.0, 30.0, o).error",
+    {ok, [Err | _], _} = eval(Code, St),
+    ?assertEqual(nomatch, binary:match(Err, ~"\e")),
+    ?assertEqual(nomatch, binary:match(Err, ~"\n")),
+    %% Invalid UTF-8 must not reach a JSON sink as a hard error.
+    Code2 =
+        "local o = {}\n"
+        "o['\\255\\254bad'] = 1\n"
+        "return game.spatial.neighbours_radius(195.0, 150.0, 30.0, o).error",
+    {ok, [Err2 | _], _} = eval(Code2, St),
+    ?assertMatch(Bin when is_binary(Bin), iolist_to_binary(json:encode(Err2))).
+
+%% A list this long is rebuilt by asobi_spatial with maps:from_keys/2 on every
+%% query; at 100k entries one query measured 45 ms.
+spatial_id_set_is_capped() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Code =
+        "local t = {}\n"
+        "for i = 1, 300 do t[i] = 'id' .. i end\n"
+        "return game.spatial.neighbours_radius(195.0, 150.0, 30.0, { exclude = t }).error",
+    {ok, [Err | _], _} = eval(Code, St),
+    ?assertEqual(~"opts.exclude list is capped at 256 entries", Err).
 
 %% The honoured paths, which nothing exercised: `sort` decodes to an atom, and a
 %% `type` list is a multi-type filter rather than a filter nothing satisfies.

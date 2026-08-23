@@ -905,6 +905,11 @@ fun_chat_send() ->
 
 %% --- Spatial ---
 
+%% Both bound a game-supplied value that would otherwise be echoed or rebuilt
+%% per query; see as_key_name/1 and with_id_set/4.
+-define(MAX_KEY_NAME_BYTES, 128).
+-define(MAX_ID_SET, 256).
+
 fun_spatial_query_radius(Ctx) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
@@ -1224,18 +1229,35 @@ with_id_set(Key, V, Rest, Opts) when is_binary(V) ->
     build_spatial_opts(Rest, Opts#{Key => V});
 with_id_set(Key, V, Rest, Opts) when is_list(V) ->
     case [B || B <- V, is_binary(B)] of
-        [] -> {error, <<"opts.", (atom_to_binary(Key))/binary, " list has no strings in it">>};
-        Bins -> build_spatial_opts(Rest, Opts#{Key => Bins})
+        [] ->
+            {error, <<"opts.", (atom_to_binary(Key))/binary, " list has no strings in it">>};
+        Bins when length(Bins) > ?MAX_ID_SET ->
+            %% asobi_spatial rebuilds this set with maps:from_keys/2 on every
+            %% query: at 100k entries one query against a single-entity zone
+            %% measured 45 ms, over half a tick at 12.5 Hz.
+            {error, <<"opts.", (atom_to_binary(Key))/binary, " list is capped at 256 entries">>};
+        Bins ->
+            build_spatial_opts(Rest, Opts#{Key => Bins})
     end;
 with_id_set(Key, _V, _Rest, _Opts) ->
     {error, <<"opts.", (atom_to_binary(Key))/binary, " must be a string or a list of strings">>}.
 
-%% Depth-bounded: a non-binary key is a raw luerl term rather than anything
-%% deep_decode/1 has flattened, `~p` on it has no depth or width limit, and this
-%% string is handed straight back to the script that supplied the key.
+%% The key is a Lua string, so it is unbounded, arbitrary bytes, and echoing it
+%% whole put a full copy of it in a fresh binary on every rejected call - 804 MB
+%% from 200 calls with a 4 MB key, off-heap, so neither `max_heap_size` (which
+%% excludes shared binaries by default) nor the reduction budget ever fires.
+%%
+%% Slice before bounding rather than after: bound/1 rebuilds the whole binary in
+%% strip_controls/1, so handing it 4 MB trades the memory amplifier for a 24 ms
+%% CPU one. binary:copy/1 because a bare binary:part/3 sub-binary keeps the
+%% whole parent alive.
 -spec as_key_name(term()) -> binary().
-as_key_name(K) when is_binary(K) -> K;
-as_key_name(K) -> iolist_to_binary(io_lib:format("~P", [K, 5])).
+as_key_name(K) when is_binary(K) ->
+    asobi_lua_game_error:bound(
+        binary:copy(binary:part(K, 0, min(byte_size(K), ?MAX_KEY_NAME_BYTES)))
+    );
+as_key_name(K) ->
+    asobi_lua_game_error:bound(iolist_to_binary(io_lib:format("~P", [K, 5]))).
 
 %% --- Zone spawning ---
 
