@@ -69,6 +69,25 @@ validator silently eats the case the validator was there to log:
 [N || N <- Names, valid_global_name(N), is_binary(N)]
 ```
 
+## `maybe ... end` needs an explicit `else`
+
+Without one, eqwalizer cannot type the short circuit and reports the *first*
+`?=` as returning the wrong type. Adding the clause the block already implies
+fixes it, and is behaviour-identical when every `?=` answers
+`{ok, _} | {error, _}` - which is the only shape that can reach it:
+
+```erlang
+maybe
+    {ok, Raw} ?= read_manifest(Dir),
+    ...
+else
+    {error, _} = Error -> Error
+end.
+```
+
+Verified with a probe: the same block without `else` fails, with `else` is
+clean.
+
 ## The `?LOG_*` macros return `term()`
 
 They expand to `erlang:apply(logger, macro_log, ...)`, so a function spec'd
@@ -78,6 +97,18 @@ They expand to `erlang:apply(logger, macro_log, ...)`, so a function spec'd
 log_it(V) ->
     ?LOG_ERROR(#{msg => ~"...", value => describe(V)}),
     ok.
+```
+
+## `lists:keyfind/3` cannot narrow, a comprehension can
+
+`keyfind/3` wants `[tuple()]`, and the term lists it is usually pointed at -
+`file:consult/1` output, a decoded Lua table, a literal config table - are
+`[term()]`. A tuple pattern in a generator narrows both the list and the value
+in one step:
+
+```erlang
+%% was: {profiles, Profiles} = lists:keyfind(profiles, 1, Terms)
+[Profiles] = [V || {K, V} <- Terms, K =:= profiles, is_list(V)],
 ```
 
 ## `dynamic()` is for boundaries, and only for boundaries

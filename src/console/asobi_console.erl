@@ -96,8 +96,14 @@ bundle() ->
             persistent_term:put(?KEY, Result),
             Result;
         Result ->
-            Result
+            narrow_bundle(Result)
     end.
+
+%% persistent_term:get/2 answers persistent_term:value(). What went in is
+%% resolve/0's own result, put one clause up, so this is a boundary rather than
+%% a shape worth re-deriving. See docs/eqwalizer-idioms.md.
+-spec narrow_bundle(dynamic()) -> {ok, bundle()} | {error, problem()}.
+narrow_bundle(Result) -> Result.
 
 -doc """
 One asset by basename, or `error` for anything not in the bundle.
@@ -129,6 +135,12 @@ load(Dir) ->
         {ok, Served} ?= names(declared(Manifest)),
         {ok, Assets} ?= read_assets(Dir, Served),
         {ok, #{script => Script, styles => stylesheets(Served), assets => Assets}}
+    else
+        %% Behaviour-identical to the implicit short circuit - every `?=` above
+        %% answers `{ok, _} | {error, problem()}`, so this is the only shape
+        %% that can reach here. Written out because eqwalizer cannot type a
+        %% `maybe` block without it.
+        {error, _} = Error -> Error
     end.
 
 %% Everything the manifest names, and nothing else. Deriving the served set
@@ -137,7 +149,7 @@ load(Dir) ->
 %% only ever a map key.
 -spec declared(map()) -> [binary()].
 declared(Manifest) ->
-    lists:usort(
+    usort_binaries(
         lists:append([
             [
                 maps:get(~"file", Chunk)
@@ -150,7 +162,17 @@ declared(Manifest) ->
 
 -spec collect(binary(), map()) -> [binary()].
 collect(Key, Manifest) ->
-    lists:append([maps:get(Key, Chunk, []) || Chunk <- maps:values(Manifest), is_map(Chunk)]).
+    binaries(
+        lists:append([maps:get(Key, Chunk, []) || Chunk <- maps:values(Manifest), is_map(Chunk)])
+    ).
+
+%% lists:usort/1 and lists:append/1 both widen to [term()]; re-narrowing keeps
+%% the real call. See docs/eqwalizer-idioms.md.
+-spec usort_binaries([term()]) -> [binary()].
+usort_binaries(L) -> [B || B <- lists:usort(L), is_binary(B)].
+
+-spec binaries([term()]) -> [binary()].
+binaries(L) -> [B || B <- L, is_binary(B)].
 
 %% Which of the served names are stylesheets the shell has to link. Vite emits
 %% the entry's CSS as its own manifest chunk when code splitting is off, so
@@ -226,15 +248,16 @@ is_entry(_Chunk) -> false.
 
 -spec names([term()]) -> {ok, [binary()]} | {error, problem()}.
 names(Paths) ->
-    lists:foldr(fun accumulate_name/2, {ok, []}, Paths).
+    names(Paths, []).
 
--spec accumulate_name(term(), {ok, [binary()]} | {error, problem()}) ->
-    {ok, [binary()]} | {error, problem()}.
-accumulate_name(_Path, {error, _} = Error) ->
-    Error;
-accumulate_name(Path, {ok, Acc}) ->
+%% Explicit recursion: see docs/eqwalizer-idioms.md. Order is preserved, as
+%% lists:foldr/3 did.
+-spec names([term()], [binary()]) -> {ok, [binary()]} | {error, problem()}.
+names([], Acc) ->
+    {ok, binaries(lists:reverse(Acc))};
+names([Path | Rest], Acc) ->
     case name(Path) of
-        {ok, Name} -> {ok, [Name | Acc]};
+        {ok, Name} -> names(Rest, [Name | Acc]);
         {error, _} = Error -> Error
     end.
 
@@ -280,15 +303,26 @@ is_name_char(_Char) -> false.
 -spec mime(binary()) -> binary() | error.
 mime(Name) ->
     Ext = string:lowercase(filename:extension(Name)),
-    case lists:keyfind(Ext, 1, ?MIME) of
-        {_, Mime} -> Mime;
-        false -> error
+    case [M || {E, M} <- ?MIME, E =:= Ext, is_binary(M)] of
+        [Mime | _] -> Mime;
+        [] -> error
     end.
 
 -spec read_assets(file:filename_all(), [binary()]) ->
     {ok, #{binary() => asset()}} | {error, problem()}.
 read_assets(Dir, Names) ->
-    lists:foldr(fun(Name, Acc) -> read_asset(Dir, Name, Acc) end, {ok, #{}}, Names).
+    read_assets(Dir, Names, #{}).
+
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
+-spec read_assets(file:filename_all(), [binary()], #{binary() => asset()}) ->
+    {ok, #{binary() => asset()}} | {error, problem()}.
+read_assets(_Dir, [], Acc) ->
+    {ok, Acc};
+read_assets(Dir, [Name | Rest], Acc) ->
+    case read_asset(Dir, Name, {ok, Acc}) of
+        {ok, Next} -> read_assets(Dir, Rest, Next);
+        {error, _} = Error -> Error
+    end.
 
 -spec read_asset(file:filename_all(), binary(), {ok, map()} | {error, problem()}) ->
     {ok, map()} | {error, problem()}.
@@ -319,12 +353,14 @@ log({ok, #{script := Script, assets := Assets}}) ->
         msg => ~"console bundle loaded",
         script => Script,
         assets => map_size(Assets)
-    });
+    }),
+    ok;
 log({error, Problem}) ->
     ?LOG_WARNING(#{
         msg => ~"console bundle unavailable; /console answers 503",
         problem => Problem
-    }).
+    }),
+    ok.
 
 -ifdef(TEST).
 -spec reset() -> ok.
