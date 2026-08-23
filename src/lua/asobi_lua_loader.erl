@@ -666,9 +666,7 @@ reduction_budget(TimeoutMs) ->
         Rate -> Rate * at_least_one(TimeoutMs)
     end.
 
-%% `erlang:max/2` is specced term() -> term() regardless of its arguments, so
-%% the budget it produced could not be typed as the pos_integer() the spec
-%% promises.
+%% See docs/eqwalizer-idioms.md.
 -spec at_least_one(non_neg_integer()) -> pos_integer().
 at_least_one(N) when N >= 1 -> N;
 at_least_one(_N) -> 1.
@@ -1063,9 +1061,7 @@ strip_dangerous_globals(St) ->
     ],
     clear_globals(Paths, St).
 
-%% Explicit recursion rather than lists:foldl/3: the fold erases the
-%% accumulator's type, so neither the state nor the key path could be typed
-%% against luerl:set_table_keys/3.
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
 -spec clear_globals([[binary()]], dynamic()) -> dynamic().
 clear_globals([], St) ->
     St;

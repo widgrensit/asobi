@@ -152,8 +152,7 @@ consults, so a name is auto-joined here exactly when it is authorised there.
 Malformed names are dropped loudly rather than silently minting a channel
 nothing can join.
 """.
-%% Explicit recursion rather than lists:foreach/2, which erases the element
-%% type just as the folds do - the channel name arrived as term().
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
 -spec join_globals([binary()], pid()) -> ok.
 join_globals([], _PlayerPid) ->
     ok;
@@ -168,10 +167,8 @@ leave_globals([Name | Rest], PlayerPid) ->
     asobi_chat_channel:leave(global_channel_id(Name), PlayerPid),
     leave_globals(Rest, PlayerPid).
 
-%% lists:usort/1 widens its result to [term()] under eqwalizer; re-narrowing it
-%% keeps the real usort rather than hand-rolling a quadratic dedupe, and keeps
-%% the sorted order asobi_world_chat_tests asserts. Nothing is dropped: the
-%% input is already binaries.
+%% Re-narrowed rather than replaced: see docs/eqwalizer-idioms.md. The sorted
+%% order is asserted by asobi_world_chat_tests.
 -spec usort_binaries([binary()]) -> [binary()].
 usort_binaries(Names) -> [N || N <- lists:usort(Names), is_binary(N)].
 

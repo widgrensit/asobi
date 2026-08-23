@@ -57,8 +57,7 @@ is_reserved(Namespace) ->
 name(Path) ->
     dot_join(Path).
 
-%% lists:join/2 widens to [term()] under eqwalizer, which then defeats
-%% iolist_to_binary/1.
+%% See docs/eqwalizer-idioms.md.
 -spec dot_join([binary()]) -> binary().
 dot_join([]) -> ~"";
 dot_join([B]) -> B;

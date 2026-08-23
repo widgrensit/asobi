@@ -434,8 +434,7 @@ reap_idle_zones(
     ),
     reap_expired(Expired, Tab, State).
 
-%% Explicit recursion rather than lists:foldl/3: the fold erases the
-%% accumulator's type, and the pid read back out of ETS then had none either.
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
 -spec reap_expired([{integer(), integer()}], ets:table(), map()) -> map().
 reap_expired([], _Tab, State) ->
     State;

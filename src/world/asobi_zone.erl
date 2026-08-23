@@ -2347,9 +2347,8 @@ fold_crossing(_Id, _Entity, Acc, _Cfg) ->
 %% binary-keyed maps, so every entity field the zone reads has to accept
 %% both shapes - otherwise re-homing, NPC transfer, snapshotting and grid
 %% indexing are all silently inert for a Lua world. See widgrensit/asobi#269.
-%% Named rather than nested min/max: `erlang:min/2` and `max/2` are specced
-%% term() -> term() whatever they are handed, so the nested form had no type
-%% eqwalizer could carry into entity_with_pos/3 - and this says what it does.
+%% Named rather than nested min/max, which says what it does and has a type
+%% the nested form could not carry into entity_with_pos/3.
 -spec clamp(number(), number(), number()) -> number().
 clamp(V, Lo, _Hi) when V < Lo -> Lo;
 clamp(V, _Lo, Hi) when V > Hi -> Hi;

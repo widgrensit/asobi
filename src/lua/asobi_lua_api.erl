@@ -250,9 +250,8 @@ extension_bindings(Ctx) ->
 extension_namespaces(Ctx) ->
     usort_paths([[~"game", namespace_of(Binding)] || Binding <- extension_bindings(Ctx)]).
 
-%% lists:usort/1 widens its result to [term()] under eqwalizer; re-narrowing it
-%% on the exact `[~"game", Namespace]` shape built above keeps the real usort
-%% rather than a hand-rolled quadratic dedupe.
+%% Re-narrowed on the exact `[~"game", Namespace]` shape built above: see
+%% docs/eqwalizer-idioms.md.
 -spec usort_paths([[binary(), ...]]) -> [[binary(), ...]].
 usort_paths(Paths) -> [[A, B] || [A, B] <- lists:usort(Paths), is_binary(A), is_binary(B)].
 
@@ -398,9 +397,7 @@ inert(Name) ->
         {[false], St}
     end.
 
-%% Explicit recursion rather than lists:foldl/3: the fold erases the
-%% accumulator's type, so the Lua state could not be typed against
-%% luerl:encode/2 and set_table_keys/3.
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
 -spec install_fns([{[binary(), ...], function()}], dynamic()) -> dynamic().
 install_fns([], St) ->
     St;
@@ -559,8 +556,7 @@ fun_broadcast(_) ->
 reserved_names_list() ->
     comma_join(asobi_ws_handler:reserved_event_names()).
 
-%% lists:join/2 widens to [term()] under eqwalizer, which then defeats
-%% iolist_to_binary/1.
+%% See docs/eqwalizer-idioms.md.
 -spec comma_join([binary()]) -> binary().
 comma_join([]) -> ~"";
 comma_join([B]) -> B;
