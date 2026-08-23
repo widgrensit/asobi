@@ -93,6 +93,10 @@ api_test_() ->
         {"game.spatial.* name the opt they cannot use", fun spatial_opts_are_validated/0},
         {"every opt asobi_spatial honours decodes", fun spatial_honoured_opts_all_decode/0},
         {"game.spatial decodes the opts it honours", fun spatial_opts_are_decoded/0},
+        {"game.spatial.in_range answers false, not a truthy table, with no position",
+            fun spatial_in_range_no_position/0},
+        {"game.spatial.distance names the entity with no position",
+            fun spatial_distance_no_position/0},
         {"an unknown opt key is length-bounded in the error",
             fun spatial_unknown_opt_key_is_bounded/0},
         {"an unknown opt key is neutralised in the error",
@@ -783,6 +787,32 @@ spatial_neighbours_radius_opts_binary_keys() ->
     {ok, [N, Id | _], _} = eval(Code, St),
     ?assertEqual(1, trunc(N)),
     ?assertEqual(~"pirate", Id).
+
+%% The regression this pins: `error_result/2` encodes a Lua TABLE, and every
+%% Lua table is truthy - so answering a boolean question with an error table
+%% made `if game.spatial.in_range(a, b, r) then` take the success branch on an
+%% entity that has no position. `{}` is not usable here: an empty Lua table
+%% decodes to `[]`, which fails the is_map argument guard before it ever
+%% reaches the code under test.
+spatial_in_range_no_position() ->
+    St = install_api(),
+    Code =
+        "local a = { id = 'a' }\n"
+        "local b = { id = 'b' }\n"
+        "if game.spatial.in_range(a, b, 5.0) then return 'IN' else return 'OUT' end",
+    {ok, [Branch | _], _} = eval(Code, St),
+    ?assertEqual(~"OUT", Branch).
+
+%% distance/2 keeps the error table: there is no safe number to answer with,
+%% and arithmetic on a table raises rather than quietly continuing.
+spatial_distance_no_position() ->
+    St = install_api(),
+    Code =
+        "local a = { x = 1.0, y = 1.0 }\n"
+        "local b = { id = 'b' }\n"
+        "return game.spatial.distance(a, b).error",
+    {ok, [Err | _], _} = eval(Code, St),
+    ?assertEqual(~"entity_b needs numeric x and y", Err).
 
 %% widgrensit/asobi#550 security review: echoing the key whole put a full copy
 %% of it in a fresh binary per rejected call - 804 MB from 200 calls with a 4 MB

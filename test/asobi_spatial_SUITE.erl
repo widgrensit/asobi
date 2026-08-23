@@ -18,6 +18,7 @@
     nearest_fewer_than_n/1,
     in_range_true/1,
     in_range_false/1,
+    no_position_is_reported/1,
     distance_entities/1,
     distance_pos/1,
     entities_without_coords_skipped/1,
@@ -40,6 +41,7 @@ all() ->
         nearest_fewer_than_n,
         in_range_true,
         in_range_false,
+        no_position_is_reported,
         distance_entities,
         distance_pos,
         entities_without_coords_skipped,
@@ -172,20 +174,37 @@ nearest_fewer_than_n(_Config) ->
 in_range_true(_Config) ->
     A = #{x => 0.0, y => 0.0},
     B = #{x => 3.0, y => 4.0},
-    ?assert(asobi_spatial:in_range(A, B, 5.0)),
-    ?assert(asobi_spatial:in_range(A, B, 6.0)),
+    ?assertEqual({ok, true}, asobi_spatial:in_range(A, B, 5.0)),
+    ?assertEqual({ok, true}, asobi_spatial:in_range(A, B, 6.0)),
     ok.
 
 in_range_false(_Config) ->
     A = #{x => 0.0, y => 0.0},
     B = #{x => 3.0, y => 4.0},
-    ?assertNot(asobi_spatial:in_range(A, B, 4.9)),
+    ?assertEqual({ok, false}, asobi_spatial:in_range(A, B, 4.9)),
     ok.
 
 distance_entities(_Config) ->
     A = #{x => 0.0, y => 0.0},
     B = #{x => 3.0, y => 4.0},
-    ?assert(abs(asobi_spatial:distance(A, B) - 5.0) < 0.001),
+    {ok, D} = asobi_spatial:distance(A, B),
+    ?assert(abs(D - 5.0) < 0.001),
+    ok.
+
+%% widgrensit/asobi#435 tranche 1: both used to feed pos/1's `undefined`
+%% straight into a {X, Y} pattern, so a missing field was a badmatch that took
+%% the calling Lua callback down. The tag names which entity is at fault.
+no_position_is_reported(_Config) ->
+    WithPos = #{x => 0.0, y => 0.0},
+    NoPos = #{id => ~"a"},
+    HalfPos = #{x => 1.0},
+    ?assertEqual({error, {no_position, a}}, asobi_spatial:in_range(NoPos, WithPos, 5.0)),
+    ?assertEqual({error, {no_position, b}}, asobi_spatial:in_range(WithPos, NoPos, 5.0)),
+    ?assertEqual({error, {no_position, a}}, asobi_spatial:in_range(HalfPos, WithPos, 5.0)),
+    ?assertEqual({error, {no_position, a}}, asobi_spatial:distance(NoPos, WithPos)),
+    ?assertEqual({error, {no_position, b}}, asobi_spatial:distance(WithPos, NoPos)),
+    %% A binary-keyed entity is still a position (asobi#269).
+    ?assertEqual({ok, true}, asobi_spatial:in_range(#{~"x" => 0.0, ~"y" => 0.0}, WithPos, 1.0)),
     ok.
 
 distance_pos(_Config) ->
@@ -217,6 +236,7 @@ binary_keyed_entities_queryable(_Config) ->
     ?assertEqual(~"b", Nearest),
     A = maps:get(~"a", E),
     B = maps:get(~"b", E),
-    ?assert(asobi_spatial:in_range(A, B, 5.0)),
-    ?assert(abs(asobi_spatial:distance(A, B) - 5.0) < 0.001),
+    ?assertEqual({ok, true}, asobi_spatial:in_range(A, B, 5.0)),
+    {ok, D} = asobi_spatial:distance(A, B),
+    ?assert(abs(D - 5.0) < 0.001),
     ok.

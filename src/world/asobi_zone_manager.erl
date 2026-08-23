@@ -105,7 +105,7 @@ release_zone(Ref, Coords) ->
 -doc "Return all active zone pids. For the ticker.".
 -spec get_active_zones(pid() | atom()) -> [pid()].
 get_active_zones(Ref) when is_atom(Ref) ->
-    narrow_pid_list([Pid || {_Coords, Pid} <- ets:tab2list(Ref)]);
+    [Pid || {_Coords, Pid} <- ets:tab2list(Ref), is_pid(Pid)];
 get_active_zones(Ref) when is_pid(Ref) ->
     narrow_pid_list(gen_server:call(Ref, get_active_zones)).
 

@@ -303,6 +303,17 @@ game.spatial.in_range(entity_a, entity_b, range)      -- boolean
 game.spatial.distance(entity_a, entity_b)             -- number
 ```
 
+An entity with no numeric `x` and `y` is not a position, and the two answer it
+differently on purpose. `in_range` returns **`false`** - something with no
+position is not in range, and returning an error table instead would be
+*truthy*, so `if game.spatial.in_range(a, b, r) then` would take the success
+branch. `distance` returns `{ error = "entity_a needs numeric x and y" }`,
+naming which of the two, because there is no number it could honestly answer
+with. Both also log, rate-limited, so the mistake is findable.
+
+```lua
+```
+
 `opts` accepts four keys, and not every entry point honours all four. The
 zone-context form `query_radius(x, y, radius)` takes no options at all - pass an
 entity map to use them.

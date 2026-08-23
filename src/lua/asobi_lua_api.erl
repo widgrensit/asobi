@@ -248,21 +248,13 @@ extension_bindings(Ctx) ->
 
 -spec extension_namespaces(map()) -> [[binary(), ...]].
 extension_namespaces(Ctx) ->
-    dedupe_paths(
-        sorted_paths([[~"game", namespace_of(Binding)] || Binding <- extension_bindings(Ctx)])
-    ).
+    usort_paths([[~"game", namespace_of(Binding)] || Binding <- extension_bindings(Ctx)]).
 
-%% lists:sort/1 widens its result to [term()] under eqwalizer; the comprehension
-%% re-narrows it, matching the exact `[~"game", Namespace]` shape the
-%% comprehension above builds. Kept sorted because lists:usort/1 was: no test
-%% pins the order, but an unobserved behaviour change is not one worth making.
--spec sorted_paths([[binary(), ...]]) -> [[binary(), ...]].
-sorted_paths(Paths) -> [[A, B] || [A, B] <- lists:sort(Paths), is_binary(A), is_binary(B)].
-
-%% Was the dedupe half of lists:usort/1.
--spec dedupe_paths([[binary(), ...]]) -> [[binary(), ...]].
-dedupe_paths([]) -> [];
-dedupe_paths([P | Rest]) -> [P | dedupe_paths([Q || Q <- Rest, Q =/= P])].
+%% lists:usort/1 widens its result to [term()] under eqwalizer; re-narrowing it
+%% on the exact `[~"game", Namespace]` shape built above keeps the real usort
+%% rather than a hand-rolled quadratic dedupe.
+-spec usort_paths([[binary(), ...]]) -> [[binary(), ...]].
+usort_paths(Paths) -> [[A, B] || [A, B] <- lists:usort(Paths), is_binary(A), is_binary(B)].
 
 %% A typed accessor rather than a map pattern in the generator: eqwalizer does
 %% not carry binding()'s field types through a comprehension pattern, so the
@@ -946,9 +938,6 @@ fun_chat_send() ->
 
 %% Both bound a game-supplied value that would otherwise be echoed or rebuilt
 %% per query; see as_key_name/1 and with_id_set/4.
-%% Both entity-pair calls need it, and returning nil to Lua would only move the
-%% failure to the arithmetic the script does next.
--define(NO_POSITION, ~"both entities need numeric x and y").
 -define(MAX_KEY_NAME_BYTES, 128).
 -define(MAX_ID_SET, 256).
 
@@ -1140,13 +1129,42 @@ fun_spatial_nearest() ->
         end
     end.
 
+%% Names which of the two, per ADR 0020: "an error naming the offending
+%% option" is the same rule as naming the offending entity.
+-spec no_position_msg(a | b) -> binary().
+no_position_msg(a) -> ~"entity_a needs numeric x and y";
+no_position_msg(b) -> ~"entity_b needs numeric x and y".
+
+-spec log_no_position(binary(), a | b) -> ok.
+log_no_position(Fn, Which) ->
+    case log_allowed(self()) of
+        true ->
+            ?LOG_WARNING(#{
+                msg => ~"asobi_lua: spatial call given an entity with no position",
+                fn => Fn,
+                entity => Which
+            }),
+            ok;
+        false ->
+            ok
+    end.
+
 fun_spatial_in_range() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [A, B, Range] when is_map(A), is_map(B), is_number(Range) ->
+                %% `false`, NOT an error table. Every Lua table is truthy, so
+                %% `if game.spatial.in_range(a, b, r) then` would take the
+                %% success branch on an entity with no position - silently
+                %% wrong hit/aggro logic where the old code was at least a loud
+                %% badmatch. Something with no position is not in range; the
+                %% author still hears about it through the rate-limited log.
                 case asobi_spatial:in_range(atomize_keys(A), atomize_keys(B), Range) of
-                    undefined -> error_result(?NO_POSITION, St);
-                    Result -> {[Result], St}
+                    {ok, Result} ->
+                        {[Result], St};
+                    {error, {no_position, Which}} ->
+                        log_no_position(~"in_range", Which),
+                        {[false], St}
                 end;
             _ ->
                 error_result(~"in_range requires (entity_a, entity_b, range)", St)
@@ -1157,9 +1175,12 @@ fun_spatial_distance() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [A, B] when is_map(A), is_map(B) ->
+                %% An error table is right here, unlike in_range/3: there is no
+                %% safe scalar to answer with, and arithmetic on the table
+                %% raises rather than quietly continuing.
                 case asobi_spatial:distance(atomize_keys(A), atomize_keys(B)) of
-                    undefined -> error_result(?NO_POSITION, St);
-                    D -> {[D], St}
+                    {ok, D} -> {[D], St};
+                    {error, {no_position, Which}} -> error_result(no_position_msg(Which), St)
                 end;
             _ ->
                 error_result(~"distance requires (entity_a, entity_b)", St)

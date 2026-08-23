@@ -55,7 +55,10 @@ remove_zone(TickerPid, ZonePid) ->
 
 -spec init(map()) -> {ok, map()}.
 init(Config) ->
-    TickRate = maps:get(tick_rate, Config, 50),
+    %% Hardened here, not at each reader: start_ticking/1 feeds this straight
+    %% to erlang:send_after/3, and sample_every/2 divides by it. Reading it raw
+    %% let the two disagree about the same field.
+    TickRate = pos_int(maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE), ?DEFAULT_TICK_RATE),
     WorldPid = maps:get(world_pid, Config, undefined),
     ZoneManager = maps:get(zone_manager, Config, undefined),
     ColdTickDivisor = maps:get(cold_tick_divisor, Config, 10),
@@ -80,17 +83,16 @@ init(Config) ->
         sample_every => sample_every(TickRate, Config)
     }}.
 
+-spec sample_every(pos_integer(), map()) -> pos_integer().
 sample_every(TickRate, Config) ->
-    IntervalMs = pos_int(
-        maps:get(tick_sample_interval_ms, Config, ?DEFAULT_TICK_SAMPLE_INTERVAL_MS),
-        ?DEFAULT_TICK_SAMPLE_INTERVAL_MS
+    IntervalMs = non_neg_int(
+        maps:get(tick_sample_interval_ms, Config, ?DEFAULT_TICK_SAMPLE_INTERVAL_MS)
     ),
-    pos_int(IntervalMs div pos_int(TickRate, ?DEFAULT_TICK_RATE), 1).
+    pos_int(IntervalMs div TickRate, 1).
 
-%% Config reaches here from a game's own globals, so a non-integer tick_rate is
-%% a bad script rather than an impossible state - fall back rather than crash
-%% the ticker. This also gives eqwalizer the integer that `erlang:max/2` cannot:
-%% its spec is term() -> term() whatever it is handed.
+%% A Lua game cannot deliver a bad tick_rate - asobi_lua_config guards
+%% is_integer and > 0 upstream - but a hand-written Erlang `game_modes` map
+%% can, and that used to be a badarith inside the tick loop.
 -spec pos_int(term(), pos_integer()) -> pos_integer().
 pos_int(V, _Default) when is_integer(V), V > 0 -> V;
 pos_int(_V, Default) -> Default.

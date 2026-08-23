@@ -357,6 +357,13 @@ running(cast, {zone_created, {ZX, ZY} = Coords, ZonePid}, #{player_zones := Play
 ->
     backfill_zone_subscribers(Coords, ZonePid, undefined, PlayerZones),
     keep_state_and_data;
+%% Mirrors the resync drop-clause below. running/3 has no catch-all, and this
+%% instance is one_for_all, so a cast that misses the guards above would be a
+%% function_clause that takes the ticker, the zone manager and every zone with
+%% it. loading/3 postpones this same cast unguarded, so a malformed one is
+%% buffered and only detonates on entry to running.
+running(cast, {zone_created, _Coords, _ZonePid}, _State) ->
+    keep_state_and_data;
 %% Guards narrow both cast arguments rather than trusting the sender. The ws
 %% handler validates the frame before it gets here, so this is defence in depth,
 %% and it is also what lets the call sites below be typed: a gen_statem cast

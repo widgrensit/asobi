@@ -197,30 +197,38 @@ format_nearest([{D2, Id, E} | Rest]) ->
 %% -------------------------------------------------------------------
 
 -doc """
-`undefined` when either entity has no usable `x`/`y`, rather than a crash.
+`{error, {no_position, a | b}}` when that entity has no usable `x`/`y`.
 
 `pos/1` already answers `undefined` for an entity a game never gave a position,
 and both of these fed that straight into a `{X, Y}` pattern. The only callers
 are `game.spatial.in_range/distance`, so a missing field took the calling Lua
-callback down with a `badmatch` rather than telling the script what was wrong.
+callback down with a `badmatch` rather than saying what was wrong.
+
+Tagged rather than a bare `undefined`: `in_range/3` answers a boolean, and an
+untagged `undefined` sitting in that position reads as truthy to a caller and
+turns a `badmatch` into a `case_clause`. Naming which of the two entities is at
+fault follows `docs/adr/0020-spatial-opts-are-validated-per-query.md`.
 """.
--spec in_range(map(), map(), number()) -> boolean() | undefined.
+-spec in_range(map(), map(), number()) -> {ok, boolean()} | {error, {no_position, a | b}}.
 in_range(A, B, Range) ->
     case {pos(A), pos(B)} of
         {{X1, Y1}, {X2, Y2}} ->
             DX = X2 - X1,
             DY = Y2 - Y1,
-            DX * DX + DY * DY =< Range * Range;
+            {ok, DX * DX + DY * DY =< Range * Range};
+        {undefined, _} ->
+            {error, {no_position, a}};
         _ ->
-            undefined
+            {error, {no_position, b}}
     end.
 
--doc "`undefined` when either entity has no usable `x`/`y`. See `in_range/3`.".
--spec distance(map(), map()) -> float() | undefined.
+-doc "`{error, {no_position, a | b}}` when that entity has no usable `x`/`y`. See `in_range/3`.".
+-spec distance(map(), map()) -> {ok, float()} | {error, {no_position, a | b}}.
 distance(A, B) ->
     case {pos(A), pos(B)} of
-        {{_, _} = PA, {_, _} = PB} -> distance_pos(PA, PB);
-        _ -> undefined
+        {{_, _} = PA, {_, _} = PB} -> {ok, distance_pos(PA, PB)};
+        {undefined, _} -> {error, {no_position, a}};
+        _ -> {error, {no_position, b}}
     end.
 
 -spec distance_pos({number(), number()}, {number(), number()}) -> float().

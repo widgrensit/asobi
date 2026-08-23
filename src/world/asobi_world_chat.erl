@@ -168,24 +168,20 @@ leave_globals([Name | Rest], PlayerPid) ->
     asobi_chat_channel:leave(global_channel_id(Name), PlayerPid),
     leave_globals(Rest, PlayerPid).
 
-%% lists:sort/1 widens its result to [term()] under eqwalizer; the comprehension
-%% re-narrows it, and never drops anything because the input is already
-%% binaries. The sorted order is asserted by asobi_world_chat_tests - usort/1
-%% sorted as well as deduped, and splitting the two has to keep both halves.
--spec sorted([binary()]) -> [binary()].
-sorted(Names) -> [N || N <- lists:sort(Names), is_binary(N)].
-
-%% Was the dedupe half of lists:usort/1.
--spec dedupe_names([binary()]) -> [binary()].
-dedupe_names([]) -> [];
-dedupe_names([N | Rest]) -> [N | dedupe_names([M || M <- Rest, M =/= N])].
+%% lists:usort/1 widens its result to [term()] under eqwalizer; re-narrowing it
+%% keeps the real usort rather than hand-rolling a quadratic dedupe, and keeps
+%% the sorted order asobi_world_chat_tests asserts. Nothing is dropped: the
+%% input is already binaries.
+-spec usort_binaries([binary()]) -> [binary()].
+usort_binaries(Names) -> [N || N <- lists:usort(Names), is_binary(N)].
 
 -spec global_channels(term()) -> [binary()].
 global_channels(#{global := Names}) when is_list(Names) ->
-    %% is_binary inline as well as inside valid_global_name/1: eqwalizer cannot
-    %% narrow through a call, so without it the list stays [term()] and every
-    %% caller of this function widens with it.
-    dedupe_names(sorted([Name || Name <- Names, is_binary(Name), valid_global_name(Name)]));
+    %% valid_global_name/1 FIRST: it is what logs a malformed name, and this
+    %% module promises they are dropped loudly. The inline is_binary/1 is only
+    %% there to narrow - eqwalizer cannot see through the call - so it has to
+    %% run second or it silently eats the case the warning exists for.
+    usort_binaries([Name || Name <- Names, valid_global_name(Name), is_binary(Name)]);
 global_channels(#{global := Other}) ->
     ?LOG_WARNING(#{event => invalid_global_chat_config, value => Other}),
     [];
