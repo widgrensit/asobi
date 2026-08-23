@@ -284,7 +284,10 @@ hit and `neighbours_rect` the same without `distance`. The entities are
 changes nothing. They return nothing at all unless the world sets
 `border_band`, which is off by default - see
 [World server](world-server.md#seeing-across-a-seam) for what it costs and how
-to act on what you find.
+to act on what you find. They see only the band along each zone's edges, so
+size the radius against the ring rather than the zone: from your own centre the
+far corner of a diagonal neighbour is 2.12 zones away, and `zone_size * 2.2`
+is the radius that covers all eight.
 
 **Entity-list only.**
 
@@ -300,16 +303,37 @@ game.spatial.in_range(entity_a, entity_b, range)      -- boolean
 game.spatial.distance(entity_a, entity_b)             -- number
 ```
 
-`opts` on `query_radius` and `nearest` accepts:
+`opts` accepts four keys, and not every entry point honours all four. The
+zone-context form `query_radius(x, y, radius)` takes no options at all - pass an
+entity map to use them.
 
-| Key | Value |
-| --- | --- |
-| `type` | A type string, or a list of them, to include |
-| `exclude` | An entity id, or a list of them, to drop |
-| `max_results` | Cap on hits returned |
-| `sort` | `"nearest"` or `"farthest"` |
+| Key | Value | entity-list `query_radius` / `neighbours_radius` | `neighbours_rect` | `nearest` |
+| --- | --- | --- | --- | --- |
+| `type` | A type string, or a list of them, to include | yes | yes | yes |
+| `exclude` | An entity id, or a list of them, to drop | yes | yes | yes |
+| `max_results` | Cap on hits returned | yes | yes | no, `n` is the cap |
+| `sort` | `"nearest"` or `"farthest"` | yes | no distance to sort by | yes |
 
-Anything else in `opts` is ignored.
+`nearest` with `sort = "farthest"` returns the `n` *farthest* matches, which is
+the query for disengaging from a threat or pruning the most distant node.
+
+**Upgrading.** Before v0.99.0 an option a query did not read was ignored, so a
+script passing `{ types = "npc" }` got unfiltered results and a script passing
+`sort` to `nearest` got the nearest anyway. Both are now errors that name the
+option. If you are upgrading, grep your scripts for `game.spatial` calls with an
+`opts` table and check the keys against the table above. The reasoning is in
+`docs/adr/0020-spatial-opts-are-validated-per-query.md`.
+
+A `no` is an error, not a silent no-op: `neighbours_rect(x1, y1, x2, y2, { sort
+= "nearest" })` returns `{ error = ... }` rather than an arbitrary order. Omit
+`opts` entirely, or pass `nil` or `{}`, to use none of them.
+
+Anything else is an error: an unknown key, a value of the wrong shape, or a
+`type` list holding no strings all return `{ error = ... }` naming the option.
+A misspelled filter has two silent failures otherwise - it either drops the
+filter and returns everything, or it matches nothing and reads exactly like an
+empty result - and neither is distinguishable from a correct query at the call
+site. An empty table means no options.
 
 ## World mode only
 

@@ -905,6 +905,11 @@ fun_chat_send() ->
 
 %% --- Spatial ---
 
+%% Both bound a game-supplied value that would otherwise be echoed or rebuilt
+%% per query; see as_key_name/1 and with_id_set/4.
+-define(MAX_KEY_NAME_BYTES, 128).
+-define(MAX_ID_SET, 256).
+
 fun_spatial_query_radius(Ctx) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
@@ -940,14 +945,15 @@ fun_spatial_query_radius(Ctx) ->
             [Entities0, X, Y, Radius, OptsRaw] when
                 is_number(X), is_number(Y), is_number(Radius)
             ->
-                Opts = decode_spatial_opts(OptsRaw),
-                case Entities0 of
-                    Entities when is_map(Entities) ->
+                case {decode_spatial_opts(radius, OptsRaw), Entities0} of
+                    {{error, Why}, _} ->
+                        error_result(Why, St);
+                    {{ok, Opts}, Entities} when is_map(Entities) ->
                         Results = asobi_spatial:query_radius(
                             atomize_entities(Entities), {X, Y}, Radius, Opts
                         ),
                         encode_spatial_results(Results, St);
-                    [] ->
+                    {{ok, Opts}, []} ->
                         Results = asobi_spatial:query_radius(#{}, {X, Y}, Radius, Opts),
                         encode_spatial_results(Results, St);
                     _ ->
@@ -1006,12 +1012,14 @@ neighbours_query(radius, {_WorldId, Tab, Coords, GridSize}, [X, Y, R], St) when
 neighbours_query(radius, {_WorldId, Tab, Coords, GridSize}, [X, Y, R, OptsRaw], St) when
     is_number(X), is_number(Y), is_number(R)
 ->
-    encode_spatial_results(
-        asobi_zone_border:query_radius(
-            Tab, Coords, GridSize, {X, Y}, R, decode_spatial_opts(OptsRaw)
-        ),
-        St
-    );
+    case decode_spatial_opts(radius, OptsRaw) of
+        {error, Why} ->
+            error_result(Why, St);
+        {ok, Opts} ->
+            encode_spatial_results(
+                asobi_zone_border:query_radius(Tab, Coords, GridSize, {X, Y}, R, Opts), St
+            )
+    end;
 neighbours_query(rect, {_WorldId, Tab, Coords, GridSize}, [X1, Y1, X2, Y2], St) when
     is_number(X1), is_number(Y1), is_number(X2), is_number(Y2)
 ->
@@ -1021,12 +1029,14 @@ neighbours_query(rect, {_WorldId, Tab, Coords, GridSize}, [X1, Y1, X2, Y2], St) 
 neighbours_query(rect, {_WorldId, Tab, Coords, GridSize}, [X1, Y1, X2, Y2, OptsRaw], St) when
     is_number(X1), is_number(Y1), is_number(X2), is_number(Y2)
 ->
-    encode_rect_results(
-        asobi_zone_border:query_rect(
-            Tab, Coords, GridSize, {X1, Y1}, {X2, Y2}, decode_spatial_opts(OptsRaw)
-        ),
-        St
-    );
+    case decode_spatial_opts(rect, OptsRaw) of
+        {error, Why} ->
+            error_result(Why, St);
+        {ok, Opts} ->
+            encode_rect_results(
+                asobi_zone_border:query_rect(Tab, Coords, GridSize, {X1, Y1}, {X2, Y2}, Opts), St
+            )
+    end;
 neighbours_query(Kind, _Grid, _Args, St) ->
     error_result(bad_args_message(Kind), St).
 
@@ -1069,14 +1079,15 @@ fun_spatial_nearest() ->
             [Entities0, X, Y, N, OptsRaw] when
                 is_number(X), is_number(Y), is_number(N)
             ->
-                Opts = decode_spatial_opts(OptsRaw),
-                case Entities0 of
-                    Entities when is_map(Entities) ->
+                case {decode_spatial_opts(nearest, OptsRaw), Entities0} of
+                    {{error, Why}, _} ->
+                        error_result(Why, St);
+                    {{ok, Opts}, Entities} when is_map(Entities) ->
                         Results = asobi_spatial:nearest(
                             atomize_entities(Entities), {X, Y}, trunc(N), Opts
                         ),
                         encode_spatial_results(Results, St);
-                    [] ->
+                    {{ok, Opts}, []} ->
                         Results = asobi_spatial:nearest(#{}, {X, Y}, trunc(N), Opts),
                         encode_spatial_results(Results, St);
                     _ ->
@@ -1132,32 +1143,121 @@ encode_zone_spatial_results(Results, St) ->
     {Enc, St1} = luerl:encode(Encoded, St),
     {[Enc], St1}.
 
-decode_spatial_opts(OptsRaw) when is_map(OptsRaw) ->
-    Opts0 = #{},
-    Opts1 =
-        case maps:find(~"type", OptsRaw) of
-            {ok, T} when is_binary(T) -> Opts0#{type => T};
-            {ok, T} when is_list(T) -> Opts0#{type => [B || B <- T, is_binary(B)]};
-            _ -> Opts0
-        end,
-    Opts2 =
-        case maps:find(~"exclude", OptsRaw) of
-            {ok, E} when is_binary(E) -> Opts1#{exclude => E};
-            {ok, E} when is_list(E) -> Opts1#{exclude => [B || B <- E, is_binary(B)]};
-            _ -> Opts1
-        end,
-    Opts3 =
-        case maps:find(~"max_results", OptsRaw) of
-            {ok, N} when is_number(N) -> Opts2#{max_results => trunc(N)};
-            _ -> Opts2
-        end,
-    case maps:find(~"sort", OptsRaw) of
-        {ok, ~"nearest"} -> Opts3#{sort => nearest};
-        {ok, ~"farthest"} -> Opts3#{sort => farthest};
-        _ -> Opts3
+%% widgrensit/asobi#544: ignoring a bad opt gave two failures a script cannot
+%% tell apart - a dropped filter returns everything, an empty `type` list
+%% returns nothing.
+%%
+%% Both shapes of "no options" pass: luerl hands a trailing `nil` through as an
+%% argument, so a call whose `opts` variable is unset still reaches the arity-4
+%% clause, and an empty table arrives as `[]` because deep_decode/1 has no pairs
+%% to infer a map from.
+-spec decode_spatial_opts(asobi_spatial:query_kind(), term()) ->
+    {ok, asobi_spatial:query_opts()} | {error, binary()}.
+decode_spatial_opts(_Kind, nil) ->
+    {ok, #{}};
+decode_spatial_opts(_Kind, []) ->
+    {ok, #{}};
+decode_spatial_opts(Kind, OptsRaw) when is_map(OptsRaw) ->
+    case unusable_key(Kind, maps:keys(OptsRaw)) of
+        ok -> build_spatial_opts(maps:to_list(OptsRaw), #{});
+        {error, _} = Err -> Err
     end;
-decode_spatial_opts(_) ->
-    #{}.
+decode_spatial_opts(_Kind, _) ->
+    {error, ~"opts must be a table of named options"}.
+
+%% Whether a query honours a key is `asobi_spatial`'s fact, asked rather than
+%% copied: a table kept here would drift the moment one of those queries grew a
+%% capability, and it would drift silently, because nothing would fail.
+unusable_key(_Kind, []) ->
+    ok;
+unusable_key(Kind, [K | Rest]) ->
+    case opt_key(K) of
+        error ->
+            {error, <<"unknown spatial opt '", (as_key_name(K))/binary, "'">>};
+        {ok, Key} ->
+            case asobi_spatial:honours_opt(Kind, Key) of
+                true -> unusable_key(Kind, Rest);
+                false -> {error, unsupported_here(Kind, Key)}
+            end
+    end.
+
+%% Written out rather than derived: these four are the only atoms a Lua opts
+%% table may name, so a key off the wire never reaches binary_to_atom at all.
+-spec opt_key(term()) -> {ok, asobi_spatial:opt_key()} | error.
+opt_key(~"type") -> {ok, type};
+opt_key(~"exclude") -> {ok, exclude};
+opt_key(~"max_results") -> {ok, max_results};
+opt_key(~"sort") -> {ok, sort};
+opt_key(_) -> error.
+
+-spec unsupported_here(asobi_spatial:query_kind(), asobi_spatial:opt_key()) -> binary().
+unsupported_here(nearest, max_results) ->
+    ~"opts.max_results does not apply to nearest, whose n argument is the cap";
+unsupported_here(rect, sort) ->
+    ~"opts.sort does not apply to a rect query, which has no distance to sort by";
+unsupported_here(_Kind, Key) ->
+    <<"opts.", (atom_to_binary(Key))/binary, " does not apply to this query">>.
+
+-spec build_spatial_opts([{term(), term()}], asobi_spatial:query_opts()) ->
+    {ok, asobi_spatial:query_opts()} | {error, binary()}.
+build_spatial_opts([], Opts) ->
+    {ok, Opts};
+build_spatial_opts([{~"type", T} | Rest], Opts) ->
+    with_id_set(type, T, Rest, Opts);
+build_spatial_opts([{~"exclude", E} | Rest], Opts) ->
+    with_id_set(exclude, E, Rest, Opts);
+%% Strictly positive: `lists:sublist(L, 0)` is `[]`, so a computed off-by-one
+%% reaching 0 would return nothing and say nothing, which is the silent empty
+%% result this path exists to abolish.
+build_spatial_opts([{~"max_results", N} | Rest], Opts) when is_number(N), N >= 1 ->
+    build_spatial_opts(Rest, Opts#{max_results => trunc(N)});
+build_spatial_opts([{~"max_results", _} | _], _Opts) ->
+    {error, ~"opts.max_results must be a positive number"};
+build_spatial_opts([{~"sort", ~"nearest"} | Rest], Opts) ->
+    build_spatial_opts(Rest, Opts#{sort => nearest});
+build_spatial_opts([{~"sort", ~"farthest"} | Rest], Opts) ->
+    build_spatial_opts(Rest, Opts#{sort => farthest});
+build_spatial_opts([{~"sort", _} | _], _Opts) ->
+    {error, ~"opts.sort must be 'nearest' or 'farthest'"}.
+
+%% `type` and `exclude` take the same shape - one string or a list of them -
+%% and share the failure that matters: a list holding no usable string is not
+%% "no filter", it is a filter nothing can satisfy.
+-spec with_id_set(type | exclude, term(), [{term(), term()}], asobi_spatial:query_opts()) ->
+    {ok, asobi_spatial:query_opts()} | {error, binary()}.
+with_id_set(Key, V, Rest, Opts) when is_binary(V) ->
+    build_spatial_opts(Rest, Opts#{Key => V});
+with_id_set(Key, V, Rest, Opts) when is_list(V) ->
+    case [B || B <- V, is_binary(B)] of
+        [] ->
+            {error, <<"opts.", (atom_to_binary(Key))/binary, " list has no strings in it">>};
+        Bins when length(Bins) > ?MAX_ID_SET ->
+            %% asobi_spatial rebuilds this set with maps:from_keys/2 on every
+            %% query: at 100k entries one query against a single-entity zone
+            %% measured 45 ms, over half a tick at 12.5 Hz.
+            {error, <<"opts.", (atom_to_binary(Key))/binary, " list is capped at 256 entries">>};
+        Bins ->
+            build_spatial_opts(Rest, Opts#{Key => Bins})
+    end;
+with_id_set(Key, _V, _Rest, _Opts) ->
+    {error, <<"opts.", (atom_to_binary(Key))/binary, " must be a string or a list of strings">>}.
+
+%% The key is a Lua string, so it is unbounded, arbitrary bytes, and echoing it
+%% whole put a full copy of it in a fresh binary on every rejected call - 804 MB
+%% from 200 calls with a 4 MB key, off-heap, so neither `max_heap_size` (which
+%% excludes shared binaries by default) nor the reduction budget ever fires.
+%%
+%% Slice before bounding rather than after: bound/1 rebuilds the whole binary in
+%% strip_controls/1, so handing it 4 MB trades the memory amplifier for a 24 ms
+%% CPU one. binary:copy/1 because a bare binary:part/3 sub-binary keeps the
+%% whole parent alive.
+-spec as_key_name(term()) -> binary().
+as_key_name(K) when is_binary(K) ->
+    asobi_lua_game_error:bound(
+        binary:copy(binary:part(K, 0, min(byte_size(K), ?MAX_KEY_NAME_BYTES)))
+    );
+as_key_name(K) ->
+    asobi_lua_game_error:bound(iolist_to_binary(io_lib:format("~P", [K, 5]))).
 
 %% --- Zone spawning ---
 

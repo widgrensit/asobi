@@ -382,19 +382,31 @@ Register your world mode in `sys.config`:
 
 Using a world as a persistent hub is covered in [Lobbies](lobbies.md).
 
-### Four values you cannot set
+### Zone options
 
-These four look like mode options and are not: the mode config never reaches
-the process that would read them, so every world runs on the built-in value.
-Plan around them as facts of the deployment, not knobs.
+These are set the same way as the options above and were, until v0.96.0,
+silently dropped on the way to the process that reads them - a world declaring
+`lazy_zones = true` pre-spawned its whole grid anyway. If you are on an earlier
+version they are facts of the deployment rather than knobs.
+
+| Option | Default | Description |
+|---|---|---|
+| `lazy_zones` | `grid_size > 100` | Spawn a zone on first use rather than pre-spawning the grid |
+| `max_active_zones` | 10,000 | See [Large worlds](large-worlds.md) for what happens at that ceiling |
+| `zone_idle_timeout` | 30,000 | Milliseconds an empty zone lingers before it is released |
+| `spatial_grid_cell_size` | unset | Cell side for the in-zone spatial index. Unset means no index is built |
+| `cold_tick_divisor` | 10 | Ticks between ticks of a zone with nothing to simulate - see [Performance tuning](performance-tuning.md) |
+| `border_band` | 0 | Fraction of `zone_size` published to neighbours - see [Seeing across a seam](#seeing-across-a-seam) |
+
+`rehome_margin` (default 0.15 of `zone_size`, described below) is settable the
+same way from an Erlang `game_modes` config, but no Lua global reads it, so a
+Lua world gets the default.
+
+### One value you cannot set
 
 | Value | What every world gets |
 |---|---|
-| Active zones per world | 10,000. See [Large worlds](large-worlds.md) for what happens at that ceiling |
-| Zone idle timeout | 30 seconds before an empty zone is released |
-| Rehome margin | 0.15 of `zone_size` (described below) |
 | Zone snapshot interval | 600 ticks, and moot - see [Snapshots](#snapshots) |
-| Border mirror | Off (`border_band = 0`) - see [Seeing across a seam](#seeing-across-a-seam) |
 
 An entity, player or NPC, must clear its zone's edge by the rehome margin (a
 fraction of `zone_size`) before re-homing to the neighbouring zone, so an
@@ -416,8 +428,10 @@ position near zone edges, or turn on the border mirror below.
 ### Seeing across a seam
 
 `border_band` publishes each zone's edge entities where its neighbours can read
-them, which is what makes an NPC able to chase a player across a boundary and a
-projectile able to hit a target the next zone owns. Off by default:
+them, which is what lets a projectile hit a target the next zone owns and an NPC
+already at the seam keep chasing across it. It publishes a strip along the
+edges, not the whole zone - see [How far the band reaches](#how-far-the-band-reaches)
+before sizing it against an aggro radius. Off by default:
 
 ```lua
 border_band = 0.15   -- fraction of zone_size; 0 (the default) publishes nothing
@@ -441,9 +455,13 @@ owns the entity.
 To act on one, ask its owner:
 
 ```lua
-local hit = game.spatial.neighbours_radius(shot.x, shot.y, 4.0, { type = "npc" })[1]
+local opts = { type = "npc", sort = "nearest", max_results = 1 }
+local hit = game.spatial.neighbours_radius(shot.x, shot.y, 4.0, opts)[1]
 if hit then game.zone.apply(hit.id, { kind = "damage", amount = 12 }) end
 ```
+
+Without `sort`, results come back in an arbitrary order, so `[1]` is any NPC in
+radius rather than the one the shot reached first.
 
 `game.zone.apply` returns `false` if no neighbour currently publishes that
 entity - you can only affect what you can see, which is the same rule as the
@@ -468,6 +486,34 @@ error and its effects dropped, rather than silence.
 An event is a verb, not a payload. asobi caps one at 4 KB and a caller at 64
 sends per tick, refusing past either with `false`, so a script cannot turn its
 own budget into a neighbour's unbounded mailbox.
+
+If an option is misspelled or has a value the query cannot use, the call returns
+`{ error = ... }` naming the option rather than an empty result - `{ types =
+"npc" }` is an error, not a silently unfiltered query.
+
+### How far the band reaches
+
+The band is a strip along each edge, `border_band * zone_size` wide. Two
+consequences worth sizing against before you adopt it:
+
+**Reading, from a zone centre.** The neighbour ring is further away than it
+looks: the far corner of a diagonal neighbour is 2.12 zones from your own
+centre, so a query meant to sweep the whole ring wants a radius of about
+`zone_size * 2.2`. A radius of `zone_size * 1.5` only just reaches the
+midpoint of a cardinal neighbour's far edge and misses everything off-axis, and
+the mirror then looks empty rather than out of range.
+
+**Writing, when sizing the band.** A zone publishes only what is within the band
+of its own edges, so an entity parked mid-zone is in nobody's band and no
+neighbour can see it at any radius. That is the right shape for a projectile,
+which only ever needs the strip it is crossing. It is the wrong shape for aggro:
+covering an NPC acquisition radius `R` from anywhere in the zone means
+`border_band >= R / zone_size`, which for a half-zone aggro radius is
+`border_band = 0.5` - publishing half of every zone's entities every tick,
+whether or not anything reads them. If that is the cost you are looking at, a
+game-side interest list that publishes a few positions per second is cheaper
+than widening the band, and the two can coexist: the band for the bolt, your own
+structure for the chase.
 
 **What it costs.** Publishing is a filter over the zone's entities plus a copy
 of the band into shared storage, every tick, whether or not anything reads it.

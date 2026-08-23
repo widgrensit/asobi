@@ -10,8 +10,9 @@ can call it directly.
 -export([query_rect/3, query_rect/4]).
 -export([nearest/3, nearest/4]).
 -export([in_range/3, distance/2, distance_pos/2]).
+-export([honours_opt/2, opt_keys/0]).
 
--export_type([query_opts/0]).
+-export_type([query_opts/0, query_kind/0, opt_key/0]).
 
 -type query_opts() :: #{
     type => binary() | [binary()],
@@ -20,6 +21,28 @@ can call it directly.
     sort => nearest | farthest | none,
     filter => fun((binary(), map()) -> boolean())
 }.
+
+-type query_kind() :: radius | rect | nearest.
+-type opt_key() :: type | exclude | max_results | sort.
+
+-doc "Every option name this module understands, honoured or not.".
+-spec opt_keys() -> [opt_key()].
+opt_keys() -> [type, exclude, max_results, sort].
+
+-doc """
+Whether a query actually reads an option, which is not uniform across the
+three: a rect result carries no distance to sort by, and `nearest/4` takes its
+cap from `n` rather than from `max_results`.
+
+Exported because the Lua bridge has to reject an option the query would
+otherwise accept and ignore (widgrensit/asobi#544), and a copy of this table
+kept over there would drift the moment one of these grows a capability - in the
+silent direction, since nothing would fail.
+""".
+-spec honours_opt(query_kind(), opt_key()) -> boolean().
+honours_opt(radius, _Key) -> true;
+honours_opt(rect, Key) -> Key =/= sort;
+honours_opt(nearest, Key) -> Key =/= max_results.
 
 %% -------------------------------------------------------------------
 %% Radius queries
@@ -116,8 +139,14 @@ nearest(Entities, {CX, CY}, N, Opts) ->
     All = collect_with_distance(
         maps:to_list(Entities), CX, CY, TypeFilter, Exclude, CustomFilter, []
     ),
-    Sorted = keysort_by_distance(All),
+    Sorted = order_by(maps:get(sort, Opts, nearest), keysort_by_distance(All)),
     format_nearest(take(Sorted, N)).
+
+%% "the n farthest" is a query games want - disengage from the farthest threat,
+%% prune the farthest node - and the sorted list is already built, so it is a
+%% reverse rather than a second sort.
+order_by(farthest, Sorted) -> lists:reverse(Sorted);
+order_by(_, Sorted) -> Sorted.
 
 -spec keysort_by_distance([T]) -> [T] when T :: {float(), binary(), map()}.
 keysort_by_distance(L) -> lists:keysort(1, L).
