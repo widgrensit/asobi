@@ -22,17 +22,34 @@ reset() ->
 -doc "Every `export_player/1` call, in the order core made them.".
 -spec calls() -> [{atom(), binary()}].
 calls() ->
-    lists:reverse(persistent_term:get(?CALLS, [])).
+    %% persistent_term is a boundary; narrowed at the read, and lists:reverse/1
+    %% widens on the way back. See docs/eqwalizer-idioms.md.
+    case persistent_term:get(?CALLS, []) of
+        Calls when is_list(Calls) ->
+            [{N, P} || {N, P} <- lists:reverse(Calls), is_atom(N), is_binary(P)]
+    end.
 
 -doc "What this extension's export path does: `{ok, Data}`, `{error, R}` or `{raise, R}`.".
 -spec outcome(atom(), term()) -> ok.
 outcome(Name, Outcome) ->
-    persistent_term:put(?OUTCOMES, maps:put(Name, Outcome, persistent_term:get(?OUTCOMES, #{}))).
+    Current =
+        case persistent_term:get(?OUTCOMES, #{}) of
+            M when is_map(M) -> M
+        end,
+    persistent_term:put(?OUTCOMES, maps:put(Name, Outcome, Current)).
 
 -spec run(atom(), binary()) -> term().
 run(Name, PlayerId) ->
-    persistent_term:put(?CALLS, [{Name, PlayerId} | persistent_term:get(?CALLS, [])]),
-    case maps:get(Name, persistent_term:get(?OUTCOMES, #{}), {ok, #{~"rows" => [PlayerId]}}) of
+    Calls =
+        case persistent_term:get(?CALLS, []) of
+            L when is_list(L) -> L
+        end,
+    persistent_term:put(?CALLS, [{Name, PlayerId} | Calls]),
+    Outcomes =
+        case persistent_term:get(?OUTCOMES, #{}) of
+            M when is_map(M) -> M
+        end,
+    case maps:get(Name, Outcomes, {ok, #{~"rows" => [PlayerId]}}) of
         {raise, Reason} -> error(Reason);
         Outcome -> Outcome
     end.

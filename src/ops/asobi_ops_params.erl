@@ -97,9 +97,9 @@ the tie-breaker is named by the endpoint rather than assumed.
 sort(Params, Allowed, Default, TieBreak) ->
     case maps:get(~"sort", Params, undefined) of
         Field when is_binary(Field), Field =/= ~"" ->
-            case lists:keyfind(Field, 1, Allowed) of
-                {_, Column} -> sorted_by(Column, Params, TieBreak);
-                false -> {error, {unknown_sort, Field}}
+            case [C || {F, C} <- Allowed, F =:= Field, is_atom(C)] of
+                [Column | _] -> sorted_by(Column, Params, TieBreak);
+                [] -> {error, {unknown_sort, Field}}
             end;
         _ ->
             {ok, deterministic(Default, TieBreak)}
