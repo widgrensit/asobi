@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.2.0
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.2.1
     permissions:
       contents: write
       pull-requests: write
