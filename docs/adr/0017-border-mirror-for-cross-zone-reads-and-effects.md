@@ -79,13 +79,23 @@ per-world mirror. Neighbours read copies. To act on one, address its owner.**
   `src/lua/asobi_lua_api.erl:1253-1254`) and on the receiver (256 entries, 1 MB,
   `asobi_zone.erl:57-58`). The sender-side bound is the load-bearing one: past it
   the term is already on another process's heap and in its mailbox, and
-  `handle_input` - the one callback with no wall-clock, heap or reduction budget -
+  `handle_input` - a callback with no wall-clock, heap or reduction budget -
   can call `apply` in a loop.
 - A reader can see an entity under two owners for at most one tick, because the
   old owner's row is refreshed on its own next tick. The receiver's ownership
   filter is what makes that harmless.
 - One more thing a game can get wrong: a `handle_effects` that raises on a `nil`
   field drops the whole tick's batch, not one effect.
+- **`handle_effects/2` is itself unbudgeted, and this ADR is what made it so.**
+  It goes through `asobi_lua_loader:call/3` rather than `call/4`
+  (`asobi_lua_world.erl:395`), deliberately, for the batching reason above: one
+  spawn per effect would pay the marshalling cost of asobi#543 per projectile.
+  So under the default `lua_vm_mode = copy` it has no wall-clock, heap or
+  reduction bound, and unlike `handle_input/3` the work it runs was sent by a
+  *neighbouring* zone. `guides/security-trust-model.md` was not amended when this
+  shipped and kept naming `handle_input/3` as the only such callback until
+  widgrensit/asobi#550 corrected it. Recorded here because this ADR owns the
+  callback.
 
 ## Alternatives considered
 
