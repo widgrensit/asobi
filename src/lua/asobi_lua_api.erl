@@ -905,8 +905,6 @@ fun_chat_send() ->
 
 %% --- Spatial ---
 
--define(SPATIAL_OPT_KEYS, [~"type", ~"exclude", ~"max_results", ~"sort"]).
-
 fun_spatial_query_radius(Ctx) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
@@ -942,7 +940,7 @@ fun_spatial_query_radius(Ctx) ->
             [Entities0, X, Y, Radius, OptsRaw] when
                 is_number(X), is_number(Y), is_number(Radius)
             ->
-                case {decode_spatial_opts(OptsRaw), Entities0} of
+                case {decode_spatial_opts(radius, OptsRaw), Entities0} of
                     {{error, Why}, _} ->
                         error_result(Why, St);
                     {{ok, Opts}, Entities} when is_map(Entities) ->
@@ -1009,7 +1007,7 @@ neighbours_query(radius, {_WorldId, Tab, Coords, GridSize}, [X, Y, R], St) when
 neighbours_query(radius, {_WorldId, Tab, Coords, GridSize}, [X, Y, R, OptsRaw], St) when
     is_number(X), is_number(Y), is_number(R)
 ->
-    case decode_spatial_opts(OptsRaw) of
+    case decode_spatial_opts(radius, OptsRaw) of
         {error, Why} ->
             error_result(Why, St);
         {ok, Opts} ->
@@ -1026,7 +1024,7 @@ neighbours_query(rect, {_WorldId, Tab, Coords, GridSize}, [X1, Y1, X2, Y2], St) 
 neighbours_query(rect, {_WorldId, Tab, Coords, GridSize}, [X1, Y1, X2, Y2, OptsRaw], St) when
     is_number(X1), is_number(Y1), is_number(X2), is_number(Y2)
 ->
-    case decode_spatial_opts(OptsRaw) of
+    case decode_spatial_opts(rect, OptsRaw) of
         {error, Why} ->
             error_result(Why, St);
         {ok, Opts} ->
@@ -1076,7 +1074,7 @@ fun_spatial_nearest() ->
             [Entities0, X, Y, N, OptsRaw] when
                 is_number(X), is_number(Y), is_number(N)
             ->
-                case {decode_spatial_opts(OptsRaw), Entities0} of
+                case {decode_spatial_opts(nearest, OptsRaw), Entities0} of
                     {{error, Why}, _} ->
                         error_result(Why, St);
                     {{ok, Opts}, Entities} when is_map(Entities) ->
@@ -1145,37 +1143,65 @@ encode_zone_spatial_results(Results, St) ->
 %% filter returns *everything*, and a `type` list that survives filtering empty
 %% matches *nothing*. Both look to a script exactly like an empty mirror, so a
 %% typo'd key cost a reporter a day. Say which key is wrong instead.
--spec decode_spatial_opts(term()) -> {ok, asobi_spatial:query_opts()} | {error, binary()}.
+-spec decode_spatial_opts(radius | rect | nearest, term()) ->
+    {ok, asobi_spatial:query_opts()} | {error, binary()}.
 %% An empty Lua table `{}` decodes to `[]`, not `#{}` - deep_decode/1 has no
 %% pairs to infer a map from. That is a caller passing no options, not a
 %% malformed one.
-decode_spatial_opts([]) ->
+decode_spatial_opts(_Kind, []) ->
     {ok, #{}};
-decode_spatial_opts(OptsRaw) when is_map(OptsRaw) ->
-    case maps:keys(maps:without(?SPATIAL_OPT_KEYS, OptsRaw)) of
-        [] -> decode_spatial_opts(maps:to_list(OptsRaw), #{});
-        [K | _] -> {error, <<"unknown spatial opt '", (as_key_name(K))/binary, "'">>}
+decode_spatial_opts(Kind, OptsRaw) when is_map(OptsRaw) ->
+    case unusable_key(Kind, maps:keys(OptsRaw)) of
+        ok -> decode_spatial_pairs(maps:to_list(OptsRaw), #{});
+        {error, _} = Err -> Err
     end;
-decode_spatial_opts(_) ->
+decode_spatial_opts(_Kind, _) ->
     {error, ~"opts must be a table of named options"}.
 
--spec decode_spatial_opts([{term(), term()}], asobi_spatial:query_opts()) ->
+%% Which keys each entry point actually honours downstream, which is not the
+%% same set for all four: `asobi_spatial:nearest/4` reads neither `sort` nor
+%% `max_results` (the `n` argument is both), and `query_rect/4` has no distance
+%% to sort by. Accepting a key the query then ignores is the same silent
+%% nothing this validator exists to remove, one layer down.
+supported_opts(radius) -> [~"type", ~"exclude", ~"max_results", ~"sort"];
+supported_opts(rect) -> [~"type", ~"exclude", ~"max_results"];
+supported_opts(nearest) -> [~"type", ~"exclude"].
+
+unusable_key(_Kind, []) ->
+    ok;
+unusable_key(Kind, [K | Rest]) ->
+    case {lists:member(K, supported_opts(Kind)), lists:member(K, supported_opts(radius))} of
+        {true, _} -> unusable_key(Kind, Rest);
+        {false, true} -> {error, unsupported_here(Kind, K)};
+        {false, false} -> {error, <<"unknown spatial opt '", (as_key_name(K))/binary, "'">>}
+    end.
+
+unsupported_here(nearest, ~"sort") ->
+    ~"opts.sort does not apply to nearest, which always returns the n closest";
+unsupported_here(nearest, ~"max_results") ->
+    ~"opts.max_results does not apply to nearest, whose n argument is the cap";
+unsupported_here(rect, ~"sort") ->
+    ~"opts.sort does not apply to a rect query, which has no distance to sort by";
+unsupported_here(_Kind, K) ->
+    <<"opts.", (as_key_name(K))/binary, " does not apply to this query">>.
+
+-spec decode_spatial_pairs([{term(), term()}], asobi_spatial:query_opts()) ->
     {ok, asobi_spatial:query_opts()} | {error, binary()}.
-decode_spatial_opts([], Opts) ->
+decode_spatial_pairs([], Opts) ->
     {ok, Opts};
-decode_spatial_opts([{~"type", T} | Rest], Opts) ->
+decode_spatial_pairs([{~"type", T} | Rest], Opts) ->
     with_id_set(type, T, Rest, Opts);
-decode_spatial_opts([{~"exclude", E} | Rest], Opts) ->
+decode_spatial_pairs([{~"exclude", E} | Rest], Opts) ->
     with_id_set(exclude, E, Rest, Opts);
-decode_spatial_opts([{~"max_results", N} | Rest], Opts) when is_number(N), N >= 0 ->
-    decode_spatial_opts(Rest, Opts#{max_results => trunc(N)});
-decode_spatial_opts([{~"max_results", _} | _], _Opts) ->
+decode_spatial_pairs([{~"max_results", N} | Rest], Opts) when is_number(N), N >= 0 ->
+    decode_spatial_pairs(Rest, Opts#{max_results => trunc(N)});
+decode_spatial_pairs([{~"max_results", _} | _], _Opts) ->
     {error, ~"opts.max_results must be a non-negative number"};
-decode_spatial_opts([{~"sort", ~"nearest"} | Rest], Opts) ->
-    decode_spatial_opts(Rest, Opts#{sort => nearest});
-decode_spatial_opts([{~"sort", ~"farthest"} | Rest], Opts) ->
-    decode_spatial_opts(Rest, Opts#{sort => farthest});
-decode_spatial_opts([{~"sort", _} | _], _Opts) ->
+decode_spatial_pairs([{~"sort", ~"nearest"} | Rest], Opts) ->
+    decode_spatial_pairs(Rest, Opts#{sort => nearest});
+decode_spatial_pairs([{~"sort", ~"farthest"} | Rest], Opts) ->
+    decode_spatial_pairs(Rest, Opts#{sort => farthest});
+decode_spatial_pairs([{~"sort", _} | _], _Opts) ->
     {error, ~"opts.sort must be 'nearest' or 'farthest'"}.
 
 %% `type` and `exclude` take the same shape - one string or a list of them -
@@ -1184,11 +1210,11 @@ decode_spatial_opts([{~"sort", _} | _], _Opts) ->
 -spec with_id_set(type | exclude, term(), [{term(), term()}], asobi_spatial:query_opts()) ->
     {ok, asobi_spatial:query_opts()} | {error, binary()}.
 with_id_set(Key, V, Rest, Opts) when is_binary(V) ->
-    decode_spatial_opts(Rest, Opts#{Key => V});
+    decode_spatial_pairs(Rest, Opts#{Key => V});
 with_id_set(Key, V, Rest, Opts) when is_list(V) ->
     case [B || B <- V, is_binary(B)] of
         [] -> {error, <<"opts.", (atom_to_binary(Key))/binary, " list has no strings in it">>};
-        Bins -> decode_spatial_opts(Rest, Opts#{Key => Bins})
+        Bins -> decode_spatial_pairs(Rest, Opts#{Key => Bins})
     end;
 with_id_set(Key, _V, _Rest, _Opts) ->
     {error, <<"opts.", (atom_to_binary(Key))/binary, " must be a string or a list of strings">>}.

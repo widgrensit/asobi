@@ -68,6 +68,7 @@ reductions_exhausted}`, and the match or zone continues on its previous state.
 | `terrain_provider/1` | world | yes | 2000 ms |
 | bot `think/2` | bot | yes | 50 ms |
 | `handle_input/3` | match, world | **no** | see below |
+| `handle_effects/2` | world | **no** | see below |
 
 The macros are not all in one place. Match budgets are `?*_TIMEOUT` in
 `asobi_lua_match.erl` and world budgets are `?*_TIMEOUT` in
@@ -108,9 +109,10 @@ be intercepted - and a batch whose anchor has gone abandons the tick's inputs
 and hands the zone back the entity map it started with. The cost of tampering
 falls on the script that tampered.
 
-## handle-input is not a sandbox boundary
+## handle-input and handle-effects are not sandbox boundaries
 
-`handle_input/3` is the one callback that does not spawn-isolate. At realistic
+`handle_input/3` and `handle_effects/2` are the two callbacks that do not
+spawn-isolate. At realistic
 input rates - one tick times N players times the message rate - the per-call
 spawn cost dominated the actual Lua work: roughly 30 to 50 microseconds of
 spawn, monitor and heap-cap setup against 50 to 200 microseconds of input
@@ -125,6 +127,21 @@ by `apply_inputs/3` in `asobi_match_server` and in `asobi_zone`. There is no
 zone process indefinitely: the tick stops, no supervisor restart happens, and
 every later call against that process times out in its own caller. Blast radius
 is one match or one zone. Recovery is manual.
+
+`handle_effects/2` is unbudgeted for the same reason and is batched for it: one
+spawn per effect would pay the marshalling cost on every projectile. It matters
+more than `handle_input/3` does, because the work it runs arrives from a
+*neighbouring zone* rather than from a player of its own. The bound that makes
+that safe is on the sending side, not here - an event is capped at 4 KB and a
+caller at 64 sends per tick, and the receiving zone caps its queue by count and
+by bytes. A `while true do end` in `handle_effects` still hangs the zone that
+owns it.
+
+Both are unbudgeted only under the default `lua_vm_mode = copy`. Under
+`lua_vm_mode = owned` the callback runs in the VM process behind a
+`gen_server:call`, so its timeout is a wall-clock bound - one that kills the VM
+and takes the zone's Lua state with it. See
+[Performance tuning](performance-tuning.md) for that trade.
 
 `game.zone.apply` is the one call that can send from inside `handle_input` into
 a *different* process, so it carries its own bound rather than relying on the

@@ -382,19 +382,31 @@ Register your world mode in `sys.config`:
 
 Using a world as a persistent hub is covered in [Lobbies](lobbies.md).
 
-### Four values you cannot set
+### Zone options
 
-These four look like mode options and are not: the mode config never reaches
-the process that would read them, so every world runs on the built-in value.
-Plan around them as facts of the deployment, not knobs.
+These are set the same way as the options above and were, until v0.96.0,
+silently dropped on the way to the process that reads them - a world declaring
+`lazy_zones = true` pre-spawned its whole grid anyway. If you are on an earlier
+version they are facts of the deployment rather than knobs.
+
+| Option | Default | Description |
+|---|---|---|
+| `lazy_zones` | `grid_size > 100` | Spawn a zone on first use rather than pre-spawning the grid |
+| `max_active_zones` | 10,000 | See [Large worlds](large-worlds.md) for what happens at that ceiling |
+| `zone_idle_timeout` | 30,000 | Milliseconds an empty zone lingers before it is released |
+| `spatial_grid_cell_size` | unset | Cell side for the in-zone spatial index. Unset means no index is built |
+| `cold_tick_divisor` | 10 | Ticks between ticks of a zone with nothing to simulate - see [Performance tuning](performance-tuning.md) |
+| `border_band` | 0 | Fraction of `zone_size` published to neighbours - see [Seeing across a seam](#seeing-across-a-seam) |
+
+`rehome_margin` (default 0.15 of `zone_size`, described below) is settable the
+same way from an Erlang `game_modes` config, but no Lua global reads it, so a
+Lua world gets the default.
+
+### One value you cannot set
 
 | Value | What every world gets |
 |---|---|
-| Active zones per world | 10,000. See [Large worlds](large-worlds.md) for what happens at that ceiling |
-| Zone idle timeout | 30 seconds before an empty zone is released |
-| Rehome margin | 0.15 of `zone_size` (described below) |
 | Zone snapshot interval | 600 ticks, and moot - see [Snapshots](#snapshots) |
-| Border mirror | Off (`border_band = 0`) - see [Seeing across a seam](#seeing-across-a-seam) |
 
 An entity, player or NPC, must clear its zone's edge by the rehome margin (a
 fraction of `zone_size`) before re-homing to the neighbouring zone, so an
@@ -443,9 +455,13 @@ owns the entity.
 To act on one, ask its owner:
 
 ```lua
-local hit = game.spatial.neighbours_radius(shot.x, shot.y, 4.0, { type = "npc" })[1]
+local opts = { type = "npc", sort = "nearest", max_results = 1 }
+local hit = game.spatial.neighbours_radius(shot.x, shot.y, 4.0, opts)[1]
 if hit then game.zone.apply(hit.id, { kind = "damage", amount = 12 }) end
 ```
+
+Without `sort`, results come back in an arbitrary order, so `[1]` is any NPC in
+radius rather than the one the shot reached first.
 
 `game.zone.apply` returns `false` if no neighbour currently publishes that
 entity - you can only affect what you can see, which is the same rule as the

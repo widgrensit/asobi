@@ -67,7 +67,7 @@ api_test_() ->
         {"game.spatial.query_radius returns results", fun spatial_query_radius/0},
         {"game.spatial.query_radius opts filter by type", fun spatial_query_radius_with_opts/0},
         {"game.spatial.nearest returns closest", fun spatial_nearest/0},
-        {"game.spatial.nearest opts forwards max_results", fun spatial_nearest_with_opts/0},
+        {"game.spatial.nearest forwards the opts it honours", fun spatial_nearest_with_opts/0},
         {"game.spatial.query_radius accepts an empty entities table",
             fun spatial_query_radius_empty_entities/0},
         {"game.spatial.nearest accepts an empty entities table",
@@ -774,6 +774,29 @@ spatial_opts_are_validated() ->
         end,
         Cases
     ),
+    %% An entry point that would not honour the key rejects it rather than
+    %% accepting it and quietly doing nothing with it: `nearest` reads neither
+    %% `sort` nor `max_results`, and a rect query has no distance to sort by.
+    Unsupported = [
+        {"return game.spatial.nearest({}, 1.0, 1.0, 3.0, { sort = 'nearest' }).error",
+            ~"opts.sort does not apply to nearest, which always returns the n closest"},
+        {"return game.spatial.nearest({}, 1.0, 1.0, 3.0, { max_results = 2 }).error",
+            ~"opts.max_results does not apply to nearest, whose n argument is the cap"},
+        {"return game.spatial.neighbours_rect(0.0, 0.0, 1.0, 1.0, { sort = 'nearest' }).error",
+            ~"opts.sort does not apply to a rect query, which has no distance to sort by"}
+    ],
+    lists:foreach(
+        fun({Code, Expected}) ->
+            {ok, [Err | _], _} = eval(Code, St),
+            ?assertEqual(Expected, Err)
+        end,
+        Unsupported
+    ),
+    %% ... and still honours the ones it does read.
+    {ok, [K | _], _} = eval(
+        "return #game.spatial.neighbours_rect(190.0, 140.0, 210.0, 160.0, { max_results = 1 })", St
+    ),
+    ?assertEqual(1, trunc(K)),
     %% An empty table is a caller passing no options, not a malformed one.
     {ok, [N | _], _} = eval("return #game.spatial.neighbours_radius(195.0, 150.0, 30.0, {})", St),
     ?assertEqual(2, trunc(N)).
@@ -927,9 +950,16 @@ spatial_query_radius_with_opts() ->
         meck:unload(asobi_spatial)
     end.
 
+%% This test used to be called "forwards max_results" and asserted a promise
+%% `asobi_spatial:nearest/4` never kept - it reads neither `max_results` nor
+%% `sort`, since `n` is both the cap and the order. The meck returned one row
+%% whatever it was handed, so nothing could fail. It now pins the opts that are
+%% actually read, and the rejection of the two that are not lives in
+%% spatial_opts_are_validated/0.
 spatial_nearest_with_opts() ->
     St = install_api(),
-    meck:expect(asobi_spatial, nearest, fun(_, _, _, _) ->
+    meck:expect(asobi_spatial, nearest, fun(_, _, _, Opts) ->
+        persistent_term:put({?MODULE, nearest_opts}, Opts),
         [{~"e1", #{type => ~"npc"}, 1.0}]
     end),
     try
@@ -941,11 +971,15 @@ spatial_nearest_with_opts() ->
 spatial_nearest_with_opts_body(St) ->
     Code =
         "local entities = { a = { x = 0.0, y = 0.0, type = 'npc' } }\n"
-        "local r = game.spatial.nearest(entities, 0.0, 0.0, 1, { max_results = 1 })\n"
+        "local r = game.spatial.nearest(entities, 0.0, 0.0, 1, "
+        "{ type = 'npc', exclude = 'b' })\n"
         "return #r",
     {ok, [Count | _], _} = eval(Code, St),
     ?assertEqual(1, trunc(Count)),
-    ?assert(meck:called(asobi_spatial, nearest, '_')).
+    ?assert(meck:called(asobi_spatial, nearest, '_')),
+    ?assertEqual(
+        #{type => ~"npc", exclude => ~"b"}, persistent_term:get({?MODULE, nearest_opts})
+    ).
 
 %% asobi#108: an empty Lua table `{}` decodes to `[]`, not `#{}` - a zone
 %% with no entities yet must not be rejected outright.

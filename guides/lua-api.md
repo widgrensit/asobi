@@ -303,15 +303,17 @@ game.spatial.in_range(entity_a, entity_b, range)      -- boolean
 game.spatial.distance(entity_a, entity_b)             -- number
 ```
 
-`opts` on `query_radius`, `nearest`, `neighbours_radius` and `neighbours_rect`
-accepts:
+`opts` accepts four keys, and not every entry point honours all four:
 
-| Key | Value |
-| --- | --- |
-| `type` | A type string, or a list of them, to include |
-| `exclude` | An entity id, or a list of them, to drop |
-| `max_results` | Cap on hits returned |
-| `sort` | `"nearest"` or `"farthest"` |
+| Key | Value | `query_radius` / `neighbours_radius` | `neighbours_rect` | `nearest` |
+| --- | --- | --- | --- | --- |
+| `type` | A type string, or a list of them, to include | yes | yes | yes |
+| `exclude` | An entity id, or a list of them, to drop | yes | yes | yes |
+| `max_results` | Cap on hits returned | yes | yes | no, `n` is the cap |
+| `sort` | `"nearest"` or `"farthest"` | yes | no distance to sort by | no, always the `n` closest |
+
+A `no` is an error, not a silent no-op: `nearest(entities, x, y, 5, { sort =
+"farthest" })` returns `{ error = ... }` rather than the five nearest.
 
 Anything else is an error: an unknown key, a value of the wrong shape, or a
 `type` list holding no strings all return `{ error = ... }` naming the option.
