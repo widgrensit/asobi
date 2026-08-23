@@ -52,10 +52,7 @@ player_joined(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatCo
                 false ->
                     ok
             end,
-            lists:foreach(
-                fun(Name) -> asobi_chat_channel:join(global_channel_id(Name), PlayerPid) end,
-                global_channels(ChatConfig)
-            ),
+            join_globals(global_channels(ChatConfig), PlayerPid),
             join_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
     end.
@@ -76,10 +73,7 @@ player_left(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatConf
                 false ->
                     ok
             end,
-            lists:foreach(
-                fun(Name) -> asobi_chat_channel:leave(global_channel_id(Name), PlayerPid) end,
-                global_channels(ChatConfig)
-            ),
+            leave_globals(global_channels(ChatConfig), PlayerPid),
             leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
     end.
@@ -158,9 +152,33 @@ consults, so a name is auto-joined here exactly when it is authorised there.
 Malformed names are dropped loudly rather than silently minting a channel
 nothing can join.
 """.
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
+-spec join_globals([binary()], pid()) -> ok.
+join_globals([], _PlayerPid) ->
+    ok;
+join_globals([Name | Rest], PlayerPid) ->
+    asobi_chat_channel:join(global_channel_id(Name), PlayerPid),
+    join_globals(Rest, PlayerPid).
+
+-spec leave_globals([binary()], pid()) -> ok.
+leave_globals([], _PlayerPid) ->
+    ok;
+leave_globals([Name | Rest], PlayerPid) ->
+    asobi_chat_channel:leave(global_channel_id(Name), PlayerPid),
+    leave_globals(Rest, PlayerPid).
+
+%% Re-narrowed rather than replaced: see docs/eqwalizer-idioms.md. The sorted
+%% order is asserted by asobi_world_chat_tests.
+-spec usort_binaries([binary()]) -> [binary()].
+usort_binaries(Names) -> [N || N <- lists:usort(Names), is_binary(N)].
+
 -spec global_channels(term()) -> [binary()].
 global_channels(#{global := Names}) when is_list(Names) ->
-    lists:usort([Name || Name <- Names, valid_global_name(Name)]);
+    %% valid_global_name/1 FIRST: it is what logs a malformed name, and this
+    %% module promises they are dropped loudly. The inline is_binary/1 is only
+    %% there to narrow - eqwalizer cannot see through the call - so it has to
+    %% run second or it silently eats the case the warning exists for.
+    usort_binaries([Name || Name <- Names, valid_global_name(Name), is_binary(Name)]);
 global_channels(#{global := Other}) ->
     ?LOG_WARNING(#{event => invalid_global_chat_config, value => Other}),
     [];

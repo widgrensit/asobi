@@ -13,6 +13,7 @@
 %% and carry the window's worst tick alongside the sampled one. Override with
 %% `tick_sample_interval_ms` in the ticker config.
 -define(DEFAULT_TICK_SAMPLE_INTERVAL_MS, 1000).
+-define(DEFAULT_TICK_RATE, 50).
 
 %% --- Public API ---
 
@@ -54,7 +55,10 @@ remove_zone(TickerPid, ZonePid) ->
 
 -spec init(map()) -> {ok, map()}.
 init(Config) ->
-    TickRate = maps:get(tick_rate, Config, 50),
+    %% Hardened here, not at each reader: start_ticking/1 feeds this straight
+    %% to erlang:send_after/3, and sample_every/2 divides by it. Reading it raw
+    %% let the two disagree about the same field.
+    TickRate = pos_int(maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE), ?DEFAULT_TICK_RATE),
     WorldPid = maps:get(world_pid, Config, undefined),
     ZoneManager = maps:get(zone_manager, Config, undefined),
     ColdTickDivisor = maps:get(cold_tick_divisor, Config, 10),
@@ -79,11 +83,29 @@ init(Config) ->
         sample_every => sample_every(TickRate, Config)
     }}.
 
+-spec sample_every(pos_integer(), map()) -> pos_integer().
 sample_every(TickRate, Config) ->
-    IntervalMs = maps:get(
-        tick_sample_interval_ms, Config, ?DEFAULT_TICK_SAMPLE_INTERVAL_MS
+    IntervalMs = non_neg_int(
+        maps:get(tick_sample_interval_ms, Config, ?DEFAULT_TICK_SAMPLE_INTERVAL_MS)
     ),
-    max(1, IntervalMs div max(TickRate, 1)).
+    pos_int(IntervalMs div TickRate, 1).
+
+%% A Lua game cannot deliver a bad tick_rate - asobi_lua_config guards
+%% is_integer and > 0 upstream - but a hand-written Erlang `game_modes` map
+%% can, and that used to be a badarith inside the tick loop.
+-spec pos_int(term(), pos_integer()) -> pos_integer().
+pos_int(V, _Default) when is_integer(V), V > 0 -> V;
+pos_int(_V, Default) -> Default.
+
+%% max_duration_ms is reset to 0 every sample, so it is non-negative rather
+%% than positive - pos_int/2 would be the wrong shape here.
+-spec non_neg_int(term()) -> non_neg_integer().
+non_neg_int(V) when is_integer(V), V >= 0 -> V;
+non_neg_int(_V) -> 0.
+
+-spec larger(integer(), integer()) -> integer().
+larger(A, B) when A >= B -> A;
+larger(_A, B) -> B.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call(get_tick, _From, #{tick := Tick} = State) ->
@@ -268,7 +290,7 @@ complete_tick(
     } = State
 ) ->
     DurationMs = erlang:monotonic_time(millisecond) - StartedAt,
-    MaxDurationMs = max(MaxSoFar, DurationMs),
+    MaxDurationMs = larger(non_neg_int(MaxSoFar), DurationMs),
     case Sampled + 1 >= SampleEvery of
         true ->
             asobi_telemetry:world_tick(WorldId, DurationMs, MaxDurationMs, ZoneCount),

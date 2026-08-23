@@ -148,7 +148,10 @@ nearest(Entities, {CX, CY}, N, Opts) ->
 order_by(farthest, Sorted) -> lists:reverse(Sorted);
 order_by(_, Sorted) -> Sorted.
 
--spec keysort_by_distance([T]) -> [T] when T :: {float(), binary(), map()}.
+%% The first element is a *squared* distance, and squaring integer
+%% coordinates gives an integer - only format_nearest/1 takes the sqrt that
+%% makes it a float.
+-spec keysort_by_distance([T]) -> [T] when T :: {number(), binary(), map()}.
 keysort_by_distance(L) -> lists:keysort(1, L).
 
 -spec take([T], non_neg_integer()) -> [T].
@@ -163,8 +166,8 @@ take([H | T], N) -> [H | take(T, N - 1)].
     fun((map()) -> boolean()),
     map(),
     fun((binary(), map()) -> boolean()),
-    [{float(), binary(), map()}]
-) -> [{float(), binary(), map()}].
+    [{number(), binary(), map()}]
+) -> [{number(), binary(), map()}].
 collect_with_distance([], _, _, _, _, _, Acc) ->
     Acc;
 collect_with_distance([{Id, Entity} | Rest], CX, CY, TF, Excl, CF, Acc) when is_map(Entity) ->
@@ -183,7 +186,7 @@ collect_with_distance([{Id, Entity} | Rest], CX, CY, TF, Excl, CF, Acc) when is_
 collect_with_distance([_ | Rest], CX, CY, TF, Excl, CF, Acc) ->
     collect_with_distance(Rest, CX, CY, TF, Excl, CF, Acc).
 
--spec format_nearest([{float(), binary(), map()}]) -> [{binary(), map(), float()}].
+-spec format_nearest([{number(), binary(), map()}]) -> [{binary(), map(), float()}].
 format_nearest([]) ->
     [];
 format_nearest([{D2, Id, E} | Rest]) ->
@@ -193,17 +196,40 @@ format_nearest([{D2, Id, E} | Rest]) ->
 %% Point utilities
 %% -------------------------------------------------------------------
 
--spec in_range(map(), map(), number()) -> boolean().
-in_range(A, B, Range) ->
-    {X1, Y1} = pos(A),
-    {X2, Y2} = pos(B),
-    DX = X2 - X1,
-    DY = Y2 - Y1,
-    DX * DX + DY * DY =< Range * Range.
+-doc """
+`{error, {no_position, a | b}}` when that entity has no usable `x`/`y`.
 
--spec distance(map(), map()) -> float().
+`pos/1` already answers `undefined` for an entity a game never gave a position,
+and both of these fed that straight into a `{X, Y}` pattern. The only callers
+are `game.spatial.in_range/distance`, so a missing field took the calling Lua
+callback down with a `badmatch` rather than saying what was wrong.
+
+Tagged rather than a bare `undefined`: `in_range/3` answers a boolean, and an
+untagged `undefined` sitting in that position reads as truthy to a caller and
+turns a `badmatch` into a `case_clause`. Naming which of the two entities is at
+fault follows `docs/adr/0020-spatial-opts-are-validated-per-query.md`.
+""".
+-spec in_range(map(), map(), number()) -> {ok, boolean()} | {error, {no_position, a | b}}.
+in_range(A, B, Range) ->
+    case {pos(A), pos(B)} of
+        {{X1, Y1}, {X2, Y2}} ->
+            DX = X2 - X1,
+            DY = Y2 - Y1,
+            {ok, DX * DX + DY * DY =< Range * Range};
+        {undefined, _} ->
+            {error, {no_position, a}};
+        _ ->
+            {error, {no_position, b}}
+    end.
+
+-doc "`{error, {no_position, a | b}}` when that entity has no usable `x`/`y`. See `in_range/3`.".
+-spec distance(map(), map()) -> {ok, float()} | {error, {no_position, a | b}}.
 distance(A, B) ->
-    distance_pos(pos(A), pos(B)).
+    case {pos(A), pos(B)} of
+        {{_, _} = PA, {_, _} = PB} -> {ok, distance_pos(PA, PB)};
+        {undefined, _} -> {error, {no_position, a}};
+        _ -> {error, {no_position, b}}
+    end.
 
 -spec distance_pos({number(), number()}, {number(), number()}) -> float().
 distance_pos({X1, Y1}, {X2, Y2}) ->

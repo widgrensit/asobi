@@ -353,7 +353,12 @@ clamp_fill_target(Target) ->
 %% fill, the walk gives up on the two taken ids before reaching a free one.
 fill_until(Mode, Count, Target, Names) ->
     Needed = Target - Count,
-    fill_until_loop(Mode, 1, 0, Needed + min(Count, ?MAX_BOT_FILL), Needed, Names).
+    fill_until_loop(Mode, 1, 0, Needed + capped(Count), Needed, Names).
+
+%% See docs/eqwalizer-idioms.md.
+-spec capped(integer()) -> integer().
+capped(N) when N < ?MAX_BOT_FILL -> N;
+capped(_N) -> ?MAX_BOT_FILL.
 
 fill_until_loop(_Mode, _Index, Added, _Limit, Needed, _Names) when Added >= Needed ->
     ok;

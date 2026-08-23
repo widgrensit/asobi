@@ -211,7 +211,8 @@ log_invalid_registration(Value) ->
         msg => ~"invalid registration global, keeping the configured mode",
         value => describe(Value),
         expected => [~"open", ~"oauth_only", ~"closed"]
-    }).
+    }),
+    ok.
 
 %% Every value passed here comes out of the game's own script, so its size is
 %% chosen by whoever wrote the bundle. `listed = string.rep("A", 4000000)` is a

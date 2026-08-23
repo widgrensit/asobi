@@ -154,7 +154,12 @@ create_namespaces([], St) ->
 create_namespaces([Namespace | Rest], St) ->
     create_namespaces(Rest, create_table(Namespace, St)).
 
+%% `live` installs the real function; `probe` swaps every effectful one for a
+%% stub. Not a vm_kind() - a probe VM has a kind of its own.
+-type install_mode() :: live | probe.
+
 %% Builds the {LuaPath, Fun} table install/2 and install_pure/2 both wire up.
+-spec api_fns(map(), install_mode()) -> [{[binary(), ...], function()}].
 api_fns(Ctx, Mode) ->
     [{Path, pick(Mode, Effect, Path, Fn)} || {Path, Effect, Fn} <- api_surface(Ctx)].
 
@@ -243,7 +248,18 @@ extension_bindings(Ctx) ->
 
 -spec extension_namespaces(map()) -> [[binary(), ...]].
 extension_namespaces(Ctx) ->
-    lists:usort([[~"game", Namespace] || #{namespace := Namespace} <- extension_bindings(Ctx)]).
+    usort_paths([[~"game", namespace_of(Binding)] || Binding <- extension_bindings(Ctx)]).
+
+%% Re-narrowed on the exact `[~"game", Namespace]` shape built above: see
+%% docs/eqwalizer-idioms.md.
+-spec usort_paths([[binary(), ...]]) -> [[binary(), ...]].
+usort_paths(Paths) -> [[A, B] || [A, B] <- lists:usort(Paths), is_binary(A), is_binary(B)].
+
+%% A typed accessor rather than a map pattern in the generator: eqwalizer does
+%% not carry binding()'s field types through a comprehension pattern, so the
+%% namespace arrived as term() and the whole list widened with it.
+-spec namespace_of(asobi_extensions:binding()) -> binary().
+namespace_of(#{namespace := Namespace}) -> Namespace.
 
 -spec extension_surface(map()) -> [{[binary(), ...], asobi_lua_surface:effect(), function()}].
 extension_surface(Ctx) ->
@@ -381,16 +397,14 @@ inert(Name) ->
         {[false], St}
     end.
 
-install_fns(Fns, St0) ->
-    lists:foldl(
-        fun({Path, Fn}, St) ->
-            {Enc, StA} = luerl:encode(Fn, St),
-            {ok, StB} = luerl:set_table_keys(Path, Enc, StA),
-            StB
-        end,
-        St0,
-        Fns
-    ).
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
+-spec install_fns([{[binary(), ...], function()}], dynamic()) -> dynamic().
+install_fns([], St) ->
+    St;
+install_fns([{Path, Fn} | Rest], St) ->
+    {Enc, St1} = luerl:encode(Fn, St),
+    {ok, St2} = luerl:set_table_keys(Path, Enc, St1),
+    install_fns(Rest, St2).
 
 %% --- Core ---
 
@@ -536,6 +550,19 @@ fun_broadcast(_) ->
 %% owner (asobi_ws_handler:event_name_binary/1) before the fan-out so the
 %% author gets `{ error = "..." }` at the game.broadcast call site - the rules
 %% themselves stay in one place.
+%% Flattened here rather than left as a nested list inside an iolist: an
+%% iolist's recursive type defeats eqwalizer, and one binary reads no worse.
+-spec reserved_names_list() -> binary().
+reserved_names_list() ->
+    comma_join(asobi_ws_handler:reserved_event_names()).
+
+%% See docs/eqwalizer-idioms.md.
+-spec comma_join([binary()]) -> binary().
+comma_join([]) -> ~"";
+comma_join([B]) -> B;
+comma_join([B | Rest]) -> <<B/binary, ", ", (comma_join(Rest))/binary>>.
+
+-spec do_broadcast(pid(), binary(), map(), dynamic()) -> {[term()], dynamic()}.
 do_broadcast(MatchPid, Event, Payload, St) ->
     case asobi_ws_handler:event_name_binary(Event) of
         {ok, _} ->
@@ -543,13 +570,13 @@ do_broadcast(MatchPid, Event, Payload, St) ->
             {[true], St};
         {error, reserved_event_name} ->
             error_result(
-                iolist_to_binary([
-                    ~"broadcast event name \"",
-                    Event,
-                    ~"\" is reserved by asobi (",
-                    lists:join(~", ", asobi_ws_handler:reserved_event_names()),
-                    ~")"
-                ]),
+                <<
+                    "broadcast event name \"",
+                    Event/binary,
+                    "\" is reserved by asobi (",
+                    (reserved_names_list())/binary,
+                    ")"
+                >>,
                 St
             );
         {error, invalid_event_name} ->
@@ -1098,12 +1125,43 @@ fun_spatial_nearest() ->
         end
     end.
 
+%% Names which of the two, per ADR 0020: "an error naming the offending
+%% option" is the same rule as naming the offending entity.
+-spec no_position_msg(a | b) -> binary().
+no_position_msg(a) -> ~"entity_a needs numeric x and y";
+no_position_msg(b) -> ~"entity_b needs numeric x and y".
+
+-spec log_no_position(binary(), a | b) -> ok.
+log_no_position(Fn, Which) ->
+    case log_allowed(self()) of
+        true ->
+            ?LOG_WARNING(#{
+                msg => ~"asobi_lua: spatial call given an entity with no position",
+                fn => Fn,
+                entity => Which
+            }),
+            ok;
+        false ->
+            ok
+    end.
+
 fun_spatial_in_range() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [A, B, Range] when is_map(A), is_map(B), is_number(Range) ->
-                Result = asobi_spatial:in_range(atomize_keys(A), atomize_keys(B), Range),
-                {[Result], St};
+                %% `false`, NOT an error table. Every Lua table is truthy, so
+                %% `if game.spatial.in_range(a, b, r) then` would take the
+                %% success branch on an entity with no position - silently
+                %% wrong hit/aggro logic where the old code was at least a loud
+                %% badmatch. Something with no position is not in range; the
+                %% author still hears about it through the rate-limited log.
+                case asobi_spatial:in_range(atomize_keys(A), atomize_keys(B), Range) of
+                    {ok, Result} ->
+                        {[Result], St};
+                    {error, {no_position, Which}} ->
+                        log_no_position(~"in_range", Which),
+                        {[false], St}
+                end;
             _ ->
                 error_result(~"in_range requires (entity_a, entity_b, range)", St)
         end
@@ -1113,8 +1171,13 @@ fun_spatial_distance() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [A, B] when is_map(A), is_map(B) ->
-                D = asobi_spatial:distance(atomize_keys(A), atomize_keys(B)),
-                {[D], St};
+                %% An error table is right here, unlike in_range/3: there is no
+                %% safe scalar to answer with, and arithmetic on the table
+                %% raises rather than quietly continuing.
+                case asobi_spatial:distance(atomize_keys(A), atomize_keys(B)) of
+                    {ok, D} -> {[D], St};
+                    {error, {no_position, Which}} -> error_result(no_position_msg(Which), St)
+                end;
             _ ->
                 error_result(~"distance requires (entity_a, entity_b)", St)
         end
@@ -1608,7 +1671,9 @@ wrap_result({error, Reason}, St) -> error_result(Reason, St).
 
 %% --- Argument decoding ---
 
--spec decode_args([term()], dynamic()) -> [term()].
+%% Args are whatever Luerl passed the closure, so they are Lua values rather
+%% than anything asobi typed: a boundary, not a missing narrowing.
+-spec decode_args([dynamic()], dynamic()) -> [term()].
 decode_args(Args, St) ->
     [deep_decode(luerl:decode(A, St)) || A <- Args].
 

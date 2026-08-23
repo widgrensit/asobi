@@ -2291,8 +2291,8 @@ clamp_to_zone(Entity, {ZX, ZY}, ZoneSize) ->
             YLo = ZY * ZoneSize * 1.0,
             entity_with_pos(
                 Entity,
-                min(max(X, XLo), XLo + ZoneSize - Eps),
-                min(max(Y, YLo), YLo + ZoneSize - Eps)
+                clamp(X, XLo, XLo + ZoneSize - Eps),
+                clamp(Y, YLo, YLo + ZoneSize - Eps)
             )
     end.
 
@@ -2347,6 +2347,13 @@ fold_crossing(_Id, _Entity, Acc, _Cfg) ->
 %% binary-keyed maps, so every entity field the zone reads has to accept
 %% both shapes - otherwise re-homing, NPC transfer, snapshotting and grid
 %% indexing are all silently inert for a Lua world. See widgrensit/asobi#269.
+%% Named rather than nested min/max, which says what it does and has a type
+%% the nested form could not carry into entity_with_pos/3.
+-spec clamp(number(), number(), number()) -> number().
+clamp(V, Lo, _Hi) when V < Lo -> Lo;
+clamp(V, _Lo, Hi) when V > Hi -> Hi;
+clamp(V, _Lo, _Hi) -> V.
+
 -spec entity_pos(map()) -> {number(), number()} | undefined.
 entity_pos(#{x := X, y := Y}) when is_number(X), is_number(Y) ->
     {X, Y};

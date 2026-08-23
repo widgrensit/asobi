@@ -663,8 +663,13 @@ kill_and_settle(Pid, Ref, MonRef, Reason) ->
 reduction_budget(TimeoutMs) ->
     case max_reductions_per_ms() of
         0 -> infinity;
-        Rate -> Rate * max(TimeoutMs, 1)
+        Rate -> Rate * at_least_one(TimeoutMs)
     end.
+
+%% See docs/eqwalizer-idioms.md.
+-spec at_least_one(non_neg_integer()) -> pos_integer().
+at_least_one(N) when N >= 1 -> N;
+at_least_one(_N) -> 1.
 
 -spec max_reductions_per_ms() -> non_neg_integer().
 max_reductions_per_ms() ->
@@ -1054,14 +1059,15 @@ strip_dangerous_globals(St) ->
         [~"print"],
         [~"eprint"]
     ],
-    lists:foldl(
-        fun(Path, Acc) ->
-            {ok, Next} = luerl:set_table_keys(Path, nil, Acc),
-            Next
-        end,
-        St,
-        Paths
-    ).
+    clear_globals(Paths, St).
+
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
+-spec clear_globals([[binary()]], dynamic()) -> dynamic().
+clear_globals([], St) ->
+    St;
+clear_globals([Path | Rest], St) ->
+    {ok, Next} = luerl:set_table_keys(Path, nil, St),
+    clear_globals(Rest, Next).
 
 %% --- require: validation & resolution ---
 
@@ -1188,7 +1194,7 @@ truncate_errors(L) when is_list(L) ->
         false -> L
     end.
 
--spec cache_and_return(binary(), term(), dynamic()) -> {[term()], dynamic()}.
+-spec cache_and_return(binary(), dynamic(), dynamic()) -> {[term()], dynamic()}.
 cache_and_return(Name, Module, St) ->
     {ok, St1} = luerl:set_table_keys([?LOADED_TABLE, Name], Module, St),
     {[Module], St1}.
