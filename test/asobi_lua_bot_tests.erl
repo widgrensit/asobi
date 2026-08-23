@@ -103,11 +103,19 @@ think_returning_map_works_test() ->
     try
         {ok, St} = asobi_lua_loader:new(Path),
         {ok, [Result | _], St1} = asobi_lua_loader:call(think, [~"bot1", #{}], St, 50),
-        Decoded = luerl:decode(Result, St1),
+        Decoded = decode(Result, St1),
         ?assert(is_list(Decoded)),
-        ?assertEqual(true, proplists:get_value(~"right", Decoded))
+        ?assertEqual([true], [V || {K, V} <- Decoded, K =:= ~"right"])
     after
         file:delete(Path)
+    end.
+
+%% luerl:decode/2 takes and answers Lua values, so both sides are a boundary.
+%% See docs/eqwalizer-idioms.md.
+-spec decode(dynamic(), dynamic()) -> [{term(), term()}].
+decode(Value, St) ->
+    case luerl:decode(Value, St) of
+        Decoded when is_list(Decoded) -> [{K, V} || {K, V} <- Decoded]
     end.
 
 %% --- bot_names global ---
@@ -115,8 +123,7 @@ think_returning_map_works_test() ->
 names_global_decodes_test() ->
     {ok, St} = asobi_lua_loader:new(fixture("bots/named_bot.lua")),
     {ok, Val, St1} = luerl:get_table_keys([~"names"], St),
-    Names = luerl:decode(Val, St1),
-    NameList = [V || {_, V} <- Names, is_binary(V)],
+    NameList = [V || {_, V} <- decode(Val, St1), is_binary(V)],
     ?assertEqual([~"Spark", ~"Blitz", ~"Volt", ~"Neon", ~"Pulse"], NameList).
 
 names_absent_returns_nil_or_false_test() ->

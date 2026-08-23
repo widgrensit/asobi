@@ -147,14 +147,13 @@ axial_covers_everything() ->
     Entities = maps:from_keys(Ids, pos(1.0, 2.0)),
     {ok, Slots} = asobi_wire_slots:sync(Entities, asobi_wire_slots:new()),
     #{period_ticks := Period} = M,
-    Seen = lists:foldl(
-        fun(Tick, Acc) ->
-            {Records, 0} = asobi_dgram_pose:records(#{}, Entities, Slots, M, Tick),
-            lists:foldl(fun(#{slot := S}, A) -> sets:add_element(S, A) end, Acc, Records)
-        end,
-        sets:new([{version, 2}]),
-        lists:seq(0, Period - 1)
-    ),
+    Slotted = [
+        S
+     || Tick <- lists:seq(0, Period - 1),
+        {Records, 0} <- [asobi_dgram_pose:records(#{}, Entities, Slots, M, Tick)],
+        #{slot := S} <- Records
+    ],
+    Seen = sets:from_list(Slotted, [{version, 2}]),
     ?assertEqual(40, sets:size(Seen)).
 
 %% --- Edges ---

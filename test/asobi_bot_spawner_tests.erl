@@ -87,7 +87,11 @@ bot_id_test_() ->
 bot_ids_are_distinct() ->
     Ids = [asobi_bot_spawner:bot_id(~"Spark") || _ <- lists:seq(1, 50)],
     ?assertEqual(50, length(lists:usort(Ids))),
-    ?assert(lists:all(fun(Id) -> asobi_bot_spawner:name_part(Id) =:= ~"Spark" end, Ids)).
+    ?assertEqual([], [Id || Id <- Ids, asobi_bot_spawner:name_part(Id) =/= ~"Spark"]).
+
+%% tl/1 erases the element type. See docs/eqwalizer-idioms.md.
+-spec all_but_first([binary()]) -> [binary()].
+all_but_first([_ | Rest]) -> Rest.
 
 name_round_trips() ->
     ?assertEqual(~"Spark", asobi_bot_spawner:name_part(asobi_bot_spawner:bot_id(~"Spark"))).
@@ -114,7 +118,7 @@ ceiling_boundary() ->
     ),
     ?assertEqual(
         ok,
-        asobi_bot_spawner:add_bot_refusal(~"TheLastOne", tl(Bots), 1000)
+        asobi_bot_spawner:add_bot_refusal(~"TheLastOne", all_but_first(Bots), 1000)
     ).
 
 second_match_bot_gets_an_ai() ->
