@@ -491,7 +491,7 @@ If an option is misspelled or has a value the query cannot use, the call returns
 `{ error = ... }` naming the option rather than an empty result - `{ types =
 "npc" }` is an error, not a silently unfiltered query.
 
-#### How far the band reaches
+### How far the band reaches
 
 The band is a strip along each edge, `border_band * zone_size` wide. Two
 consequences worth sizing against before you adopt it:
