@@ -303,17 +303,30 @@ game.spatial.in_range(entity_a, entity_b, range)      -- boolean
 game.spatial.distance(entity_a, entity_b)             -- number
 ```
 
-`opts` accepts four keys, and not every entry point honours all four:
+`opts` accepts four keys, and not every entry point honours all four. The
+zone-context form `query_radius(x, y, radius)` takes no options at all - pass an
+entity map to use them.
 
-| Key | Value | `query_radius` / `neighbours_radius` | `neighbours_rect` | `nearest` |
+| Key | Value | entity-list `query_radius` / `neighbours_radius` | `neighbours_rect` | `nearest` |
 | --- | --- | --- | --- | --- |
 | `type` | A type string, or a list of them, to include | yes | yes | yes |
 | `exclude` | An entity id, or a list of them, to drop | yes | yes | yes |
 | `max_results` | Cap on hits returned | yes | yes | no, `n` is the cap |
-| `sort` | `"nearest"` or `"farthest"` | yes | no distance to sort by | no, always the `n` closest |
+| `sort` | `"nearest"` or `"farthest"` | yes | no distance to sort by | yes |
 
-A `no` is an error, not a silent no-op: `nearest(entities, x, y, 5, { sort =
-"farthest" })` returns `{ error = ... }` rather than the five nearest.
+`nearest` with `sort = "farthest"` returns the `n` *farthest* matches, which is
+the query for disengaging from a threat or pruning the most distant node.
+
+**Upgrading.** Before v0.99.0 an option a query did not read was ignored, so a
+script passing `{ types = "npc" }` got unfiltered results and a script passing
+`sort` to `nearest` got the nearest anyway. Both are now errors that name the
+option. If you are upgrading, grep your scripts for `game.spatial` calls with an
+`opts` table and check the keys against the table above. The reasoning is in
+`docs/adr/0020-spatial-opts-are-validated-per-query.md`.
+
+A `no` is an error, not a silent no-op: `neighbours_rect(x1, y1, x2, y2, { sort
+= "nearest" })` returns `{ error = ... }` rather than an arbitrary order. Omit
+`opts` entirely, or pass `nil` or `{}`, to use none of them.
 
 Anything else is an error: an unknown key, a value of the wrong shape, or a
 `type` list holding no strings all return `{ error = ... }` naming the option.

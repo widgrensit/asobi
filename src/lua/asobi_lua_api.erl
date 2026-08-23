@@ -1138,70 +1138,81 @@ encode_zone_spatial_results(Results, St) ->
     {Enc, St1} = luerl:encode(Encoded, St),
     {[Enc], St1}.
 
-%% widgrensit/asobi#544: every clause here used to fall through to "ignore it",
-%% which gave a malformed opts table two indistinguishable failures - a dropped
-%% filter returns *everything*, and a `type` list that survives filtering empty
-%% matches *nothing*. Both look to a script exactly like an empty mirror, so a
-%% typo'd key cost a reporter a day. Say which key is wrong instead.
--spec decode_spatial_opts(radius | rect | nearest, term()) ->
+%% widgrensit/asobi#544: ignoring a bad opt gave two failures a script cannot
+%% tell apart - a dropped filter returns everything, an empty `type` list
+%% returns nothing.
+%%
+%% Both shapes of "no options" pass: luerl hands a trailing `nil` through as an
+%% argument, so a call whose `opts` variable is unset still reaches the arity-4
+%% clause, and an empty table arrives as `[]` because deep_decode/1 has no pairs
+%% to infer a map from.
+-spec decode_spatial_opts(asobi_spatial:query_kind(), term()) ->
     {ok, asobi_spatial:query_opts()} | {error, binary()}.
-%% An empty Lua table `{}` decodes to `[]`, not `#{}` - deep_decode/1 has no
-%% pairs to infer a map from. That is a caller passing no options, not a
-%% malformed one.
+decode_spatial_opts(_Kind, nil) ->
+    {ok, #{}};
 decode_spatial_opts(_Kind, []) ->
     {ok, #{}};
 decode_spatial_opts(Kind, OptsRaw) when is_map(OptsRaw) ->
     case unusable_key(Kind, maps:keys(OptsRaw)) of
-        ok -> decode_spatial_pairs(maps:to_list(OptsRaw), #{});
+        ok -> build_spatial_opts(maps:to_list(OptsRaw), #{});
         {error, _} = Err -> Err
     end;
 decode_spatial_opts(_Kind, _) ->
     {error, ~"opts must be a table of named options"}.
 
-%% Which keys each entry point actually honours downstream, which is not the
-%% same set for all four: `asobi_spatial:nearest/4` reads neither `sort` nor
-%% `max_results` (the `n` argument is both), and `query_rect/4` has no distance
-%% to sort by. Accepting a key the query then ignores is the same silent
-%% nothing this validator exists to remove, one layer down.
-supported_opts(radius) -> [~"type", ~"exclude", ~"max_results", ~"sort"];
-supported_opts(rect) -> [~"type", ~"exclude", ~"max_results"];
-supported_opts(nearest) -> [~"type", ~"exclude"].
-
+%% Whether a query honours a key is `asobi_spatial`'s fact, asked rather than
+%% copied: a table kept here would drift the moment one of those queries grew a
+%% capability, and it would drift silently, because nothing would fail.
 unusable_key(_Kind, []) ->
     ok;
 unusable_key(Kind, [K | Rest]) ->
-    case {lists:member(K, supported_opts(Kind)), lists:member(K, supported_opts(radius))} of
-        {true, _} -> unusable_key(Kind, Rest);
-        {false, true} -> {error, unsupported_here(Kind, K)};
-        {false, false} -> {error, <<"unknown spatial opt '", (as_key_name(K))/binary, "'">>}
+    case opt_key(K) of
+        error ->
+            {error, <<"unknown spatial opt '", (as_key_name(K))/binary, "'">>};
+        {ok, Key} ->
+            case asobi_spatial:honours_opt(Kind, Key) of
+                true -> unusable_key(Kind, Rest);
+                false -> {error, unsupported_here(Kind, Key)}
+            end
     end.
 
-unsupported_here(nearest, ~"sort") ->
-    ~"opts.sort does not apply to nearest, which always returns the n closest";
-unsupported_here(nearest, ~"max_results") ->
-    ~"opts.max_results does not apply to nearest, whose n argument is the cap";
-unsupported_here(rect, ~"sort") ->
-    ~"opts.sort does not apply to a rect query, which has no distance to sort by";
-unsupported_here(_Kind, K) ->
-    <<"opts.", (as_key_name(K))/binary, " does not apply to this query">>.
+%% Written out rather than derived: these four are the only atoms a Lua opts
+%% table may name, so a key off the wire never reaches binary_to_atom at all.
+-spec opt_key(term()) -> {ok, asobi_spatial:opt_key()} | error.
+opt_key(~"type") -> {ok, type};
+opt_key(~"exclude") -> {ok, exclude};
+opt_key(~"max_results") -> {ok, max_results};
+opt_key(~"sort") -> {ok, sort};
+opt_key(_) -> error.
 
--spec decode_spatial_pairs([{term(), term()}], asobi_spatial:query_opts()) ->
+-spec unsupported_here(asobi_spatial:query_kind(), asobi_spatial:opt_key()) -> binary().
+unsupported_here(nearest, max_results) ->
+    ~"opts.max_results does not apply to nearest, whose n argument is the cap";
+unsupported_here(rect, sort) ->
+    ~"opts.sort does not apply to a rect query, which has no distance to sort by";
+unsupported_here(_Kind, Key) ->
+    <<"opts.", (atom_to_binary(Key))/binary, " does not apply to this query">>.
+
+-spec build_spatial_opts([{term(), term()}], asobi_spatial:query_opts()) ->
     {ok, asobi_spatial:query_opts()} | {error, binary()}.
-decode_spatial_pairs([], Opts) ->
+build_spatial_opts([], Opts) ->
     {ok, Opts};
-decode_spatial_pairs([{~"type", T} | Rest], Opts) ->
+build_spatial_opts([{~"type", T} | Rest], Opts) ->
     with_id_set(type, T, Rest, Opts);
-decode_spatial_pairs([{~"exclude", E} | Rest], Opts) ->
+build_spatial_opts([{~"exclude", E} | Rest], Opts) ->
     with_id_set(exclude, E, Rest, Opts);
-decode_spatial_pairs([{~"max_results", N} | Rest], Opts) when is_number(N), N >= 0 ->
-    decode_spatial_pairs(Rest, Opts#{max_results => trunc(N)});
-decode_spatial_pairs([{~"max_results", _} | _], _Opts) ->
-    {error, ~"opts.max_results must be a non-negative number"};
-decode_spatial_pairs([{~"sort", ~"nearest"} | Rest], Opts) ->
-    decode_spatial_pairs(Rest, Opts#{sort => nearest});
-decode_spatial_pairs([{~"sort", ~"farthest"} | Rest], Opts) ->
-    decode_spatial_pairs(Rest, Opts#{sort => farthest});
-decode_spatial_pairs([{~"sort", _} | _], _Opts) ->
+%% Strictly positive: `lists:sublist(L, 0)` is `[]`, so a computed off-by-one
+%% reaching 0 would return nothing and say nothing, which is the silent empty
+%% result this path exists to abolish.
+build_spatial_opts([{~"max_results", N} | Rest], Opts) when is_number(N), N >= 1 ->
+    build_spatial_opts(Rest, Opts#{max_results => trunc(N)});
+build_spatial_opts([{~"max_results", _} | _], _Opts) ->
+    {error, ~"opts.max_results must be a positive number"};
+build_spatial_opts([{~"sort", ~"nearest"} | Rest], Opts) ->
+    build_spatial_opts(Rest, Opts#{sort => nearest});
+build_spatial_opts([{~"sort", ~"farthest"} | Rest], Opts) ->
+    build_spatial_opts(Rest, Opts#{sort => farthest});
+build_spatial_opts([{~"sort", _} | _], _Opts) ->
     {error, ~"opts.sort must be 'nearest' or 'farthest'"}.
 
 %% `type` and `exclude` take the same shape - one string or a list of them -
@@ -1210,20 +1221,21 @@ decode_spatial_pairs([{~"sort", _} | _], _Opts) ->
 -spec with_id_set(type | exclude, term(), [{term(), term()}], asobi_spatial:query_opts()) ->
     {ok, asobi_spatial:query_opts()} | {error, binary()}.
 with_id_set(Key, V, Rest, Opts) when is_binary(V) ->
-    decode_spatial_pairs(Rest, Opts#{Key => V});
+    build_spatial_opts(Rest, Opts#{Key => V});
 with_id_set(Key, V, Rest, Opts) when is_list(V) ->
     case [B || B <- V, is_binary(B)] of
         [] -> {error, <<"opts.", (atom_to_binary(Key))/binary, " list has no strings in it">>};
-        Bins -> decode_spatial_pairs(Rest, Opts#{Key => Bins})
+        Bins -> build_spatial_opts(Rest, Opts#{Key => Bins})
     end;
 with_id_set(Key, _V, _Rest, _Opts) ->
     {error, <<"opts.", (atom_to_binary(Key))/binary, " must be a string or a list of strings">>}.
 
-%% A Lua table key reaches here as a binary; anything else is a script indexing
-%% the opts table with a number or a bool, and printing it beats crashing on it.
+%% Depth-bounded: a non-binary key is a raw luerl term rather than anything
+%% deep_decode/1 has flattened, `~p` on it has no depth or width limit, and this
+%% string is handed straight back to the script that supplied the key.
 -spec as_key_name(term()) -> binary().
 as_key_name(K) when is_binary(K) -> K;
-as_key_name(K) -> iolist_to_binary(io_lib:format("~p", [K])).
+as_key_name(K) -> iolist_to_binary(io_lib:format("~P", [K, 5])).
 
 %% --- Zone spawning ---
 

@@ -499,8 +499,9 @@ consequences worth sizing against before you adopt it:
 **Reading, from a zone centre.** The neighbour ring is further away than it
 looks: the far corner of a diagonal neighbour is 2.12 zones from your own
 centre, so a query meant to sweep the whole ring wants a radius of about
-`zone_size * 2.2`. A radius of `zone_size * 1.5` misses even a cardinal
-neighbour's far edge, and the mirror then looks empty rather than out of range.
+`zone_size * 2.2`. A radius of `zone_size * 1.5` only just reaches the
+midpoint of a cardinal neighbour's far edge and misses everything off-axis, and
+the mirror then looks empty rather than out of range.
 
 **Writing, when sizing the band.** A zone publishes only what is within the band
 of its own edges, so an entity parked mid-zone is in nobody's band and no

@@ -91,6 +91,8 @@ api_test_() ->
         {"game.spatial.neighbours_radius filters a binary-keyed band",
             fun spatial_neighbours_radius_opts_binary_keys/0},
         {"game.spatial.* name the opt they cannot use", fun spatial_opts_are_validated/0},
+        {"every opt asobi_spatial honours decodes", fun spatial_honoured_opts_all_decode/0},
+        {"game.spatial decodes the opts it honours", fun spatial_opts_are_decoded/0},
         {"game.spatial.neighbours_rect reads the touching zones", fun spatial_neighbours_rect/0},
         {"game.spatial.neighbours_* error without grid context", fun spatial_neighbours_no_grid/0},
         {"game.zone.apply reaches the owning zone", fun zone_apply_delivers/0},
@@ -734,6 +736,33 @@ spatial_neighbours_radius_opts() ->
     ?assertEqual(1, trunc(N)),
     ?assertEqual(~"pirate", Id).
 
+%% Binds `asobi_spatial:honours_opt/2` to the decoder: a key the query module
+%% claims to honour must actually survive decoding. Without this, adding a key
+%% to `opt_keys/0` with no matching `decode_spatial_pairs/2` clause is a
+%% function_clause inside a Luerl closure, which the loader swallows into an
+%% opaque {call_failed, _} and a lost tick.
+spatial_honoured_opts_all_decode() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Sample = #{
+        type => "'npc'",
+        exclude => "'x'",
+        max_results => "1",
+        sort => "'nearest'"
+    },
+    [
+        begin
+            Lua = atom_to_list(Key) ++ " = " ++ maps:get(Key, Sample),
+            Code =
+                "local r = game.spatial.neighbours_radius(195.0, 150.0, 30.0, { " ++ Lua ++
+                    " })\n"
+                    "return r.error",
+            {ok, [Err | _], _} = eval(Code, St),
+            ?assertEqual(nil, Err)
+        end
+     || Key <- asobi_spatial:opt_keys(), asobi_spatial:honours_opt(radius, Key)
+    ].
+
 %% widgrensit/asobi#544. An Erlang game module hands the zone atom-keyed
 %% entities and the Lua bridge binary-keyed ones, and only the first shape was
 %% covered - so "the filter drops every row" had nowhere to be caught.
@@ -750,6 +779,32 @@ spatial_neighbours_radius_opts_binary_keys() ->
     ?assertEqual(1, trunc(N)),
     ?assertEqual(~"pirate", Id).
 
+%% The honoured paths, which nothing exercised: `sort` decodes to an atom, and a
+%% `type` list is a multi-type filter rather than a filter nothing satisfies.
+%% The first case is the projectile recipe guides/world-server.md recommends.
+spatial_opts_are_decoded() ->
+    St = install_api_with_grid(),
+    asobi_zone_border:write_band(border_tab(), {2, 1}, #{
+        ~"far" => #{~"type" => ~"npc", ~"x" => 215.0, ~"y" => 150.0},
+        ~"near" => #{~"type" => ~"npc", ~"x" => 202.0, ~"y" => 150.0},
+        ~"boss" => #{~"type" => ~"boss", ~"x" => 203.0, ~"y" => 150.0}
+    }),
+    Q = fun(Opts) ->
+        Code =
+            "local r = game.spatial.neighbours_radius(195.0, 150.0, 40.0, " ++ Opts ++
+                ")\n"
+                "if r.error then return 'ERR', r.error end\n"
+                "return #r, r[1] and r[1].id or ''",
+        {ok, [N, Id | _], _} = eval(Code, St),
+        {trunc(N), Id}
+    end,
+    ?assertEqual({1, ~"near"}, Q("{ type = 'npc', sort = 'nearest', max_results = 1 }")),
+    ?assertEqual({2, ~"far"}, Q("{ type = 'npc', sort = 'farthest' }")),
+    ?assertMatch({3, _}, Q("{ type = {'npc','boss'} }")),
+    ?assertMatch({1, _}, Q("{ exclude = {'near','boss'} }")),
+    %% luerl passes a trailing nil through, so this is the absent-argument shape.
+    ?assertMatch({3, _}, Q("nil")).
+
 %% A malformed opts table used to fail two indistinguishable ways: a dropped
 %% filter returned everything, an empty `type` list matched nothing, and both
 %% read from Lua as an empty mirror.
@@ -762,7 +817,8 @@ spatial_opts_are_validated() ->
         {"{ type = 42 }", ~"opts.type must be a string or a list of strings"},
         {"{ exclude = 42 }", ~"opts.exclude must be a string or a list of strings"},
         {"{ sort = 'closest' }", ~"opts.sort must be 'nearest' or 'farthest'"},
-        {"{ max_results = 'two' }", ~"opts.max_results must be a non-negative number"},
+        {"{ max_results = 'two' }", ~"opts.max_results must be a positive number"},
+        {"{ max_results = 0 }", ~"opts.max_results must be a positive number"},
         {"'npc'", ~"opts must be a table of named options"}
     ],
     lists:foreach(
@@ -770,7 +826,8 @@ spatial_opts_are_validated() ->
             Code =
                 "return game.spatial.neighbours_radius(195.0, 150.0, 30.0, " ++ Opts ++ ").error",
             {ok, [Err | _], _} = eval(Code, St),
-            ?assertEqual(Expected, Err)
+            %% Paired with the input so a failure names which case broke.
+            ?assertEqual({Opts, Expected}, {Opts, Err})
         end,
         Cases
     ),
@@ -778,8 +835,6 @@ spatial_opts_are_validated() ->
     %% accepting it and quietly doing nothing with it: `nearest` reads neither
     %% `sort` nor `max_results`, and a rect query has no distance to sort by.
     Unsupported = [
-        {"return game.spatial.nearest({}, 1.0, 1.0, 3.0, { sort = 'nearest' }).error",
-            ~"opts.sort does not apply to nearest, which always returns the n closest"},
         {"return game.spatial.nearest({}, 1.0, 1.0, 3.0, { max_results = 2 }).error",
             ~"opts.max_results does not apply to nearest, whose n argument is the cap"},
         {"return game.spatial.neighbours_rect(0.0, 0.0, 1.0, 1.0, { sort = 'nearest' }).error",
@@ -788,16 +843,14 @@ spatial_opts_are_validated() ->
     lists:foreach(
         fun({Code, Expected}) ->
             {ok, [Err | _], _} = eval(Code, St),
-            ?assertEqual(Expected, Err)
+            ?assertEqual({Code, Expected}, {Code, Err})
         end,
         Unsupported
     ),
-    %% ... and still honours the ones it does read.
     {ok, [K | _], _} = eval(
         "return #game.spatial.neighbours_rect(190.0, 140.0, 210.0, 160.0, { max_results = 1 })", St
     ),
     ?assertEqual(1, trunc(K)),
-    %% An empty table is a caller passing no options, not a malformed one.
     {ok, [N | _], _} = eval("return #game.spatial.neighbours_radius(195.0, 150.0, 30.0, {})", St),
     ?assertEqual(2, trunc(N)).
 
@@ -950,16 +1003,10 @@ spatial_query_radius_with_opts() ->
         meck:unload(asobi_spatial)
     end.
 
-%% This test used to be called "forwards max_results" and asserted a promise
-%% `asobi_spatial:nearest/4` never kept - it reads neither `max_results` nor
-%% `sort`, since `n` is both the cap and the order. The meck returned one row
-%% whatever it was handed, so nothing could fail. It now pins the opts that are
-%% actually read, and the rejection of the two that are not lives in
-%% spatial_opts_are_validated/0.
+%% `nearest/4` takes its cap from `n`, not from `max_results`.
 spatial_nearest_with_opts() ->
     St = install_api(),
-    meck:expect(asobi_spatial, nearest, fun(_, _, _, Opts) ->
-        persistent_term:put({?MODULE, nearest_opts}, Opts),
+    meck:expect(asobi_spatial, nearest, fun(_, _, _, _) ->
         [{~"e1", #{type => ~"npc"}, 1.0}]
     end),
     try
@@ -976,10 +1023,10 @@ spatial_nearest_with_opts_body(St) ->
         "return #r",
     {ok, [Count | _], _} = eval(Code, St),
     ?assertEqual(1, trunc(Count)),
-    ?assert(meck:called(asobi_spatial, nearest, '_')),
-    ?assertEqual(
-        #{type => ~"npc", exclude => ~"b"}, persistent_term:get({?MODULE, nearest_opts})
-    ).
+    %% Asserts exactly one nearest/4 call and its opts, where meck:called/3 would
+    %% pass on any number of calls with any arguments.
+    Calls = [O || {_, {asobi_spatial, nearest, [_, _, _, O]}, _} <- meck:history(asobi_spatial)],
+    ?assertEqual([#{type => ~"npc", exclude => ~"b"}], Calls).
 
 %% asobi#108: an empty Lua table `{}` decodes to `[]`, not `#{}` - a zone
 %% with no entities yet must not be rejected outright.
