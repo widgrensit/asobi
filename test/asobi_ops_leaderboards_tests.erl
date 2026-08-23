@@ -45,6 +45,9 @@ enumeration_is_grouped_and_capped() ->
     expect_groups([]),
     meck:reset(asobi_repo),
     {ok, _} = asobi_leaderboards:boards(),
+    %% Exactly one call, which is what "grouped and capped" means and why
+    %% meck:reset/1 is above: an added asobi_repo:one/1 must fail here.
+    ?assertMatch([_], meck:history(asobi_repo)),
     [Query] = [
         Q
      || {_, {asobi_repo, all, [Q]}, _} <- meck:history(asobi_repo), is_record(Q, kura_query)

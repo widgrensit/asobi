@@ -10,7 +10,11 @@ Context: widgrensit/asobi#435.
 ## `erlang:min/2` and `max/2` return `term()`
 
 Their specs are `term() -> term()` whatever they are handed, so `max(N, 1)`
-fails even when `N :: integer()`. Narrowing the *input* does not help.
+fails when the result flows into a typed context, even with `N :: integer()`.
+Narrowing the *input* does not help. The result can still flow into another
+`term()` position unremarked - `min(Offset, Total)` inside `lists:nthtail/2`
+eqwalizes clean - so the error appears where the value is *used*, not where it
+is produced.
 
 Write a small local function that names the rule instead. Not a shared numeric
 module: only two of these remain in the whole tree, and `clamp/3` reads better
@@ -31,7 +35,19 @@ largest class of error in the tree.
 
 Two answers, and which one depends on whether the call is doing real work:
 
-**Re-narrow the result.** Preferred when the `lists:` function is worth keeping
+**Re-narrow the result — but only when the producer already guarantees the
+type.** A re-narrowing comprehension is by construction a *silent drop*: it is
+free when nothing can fail the guard, and a bug when something can. If the
+producer does not guarantee it, widen the *consumer's* spec to `[term()]` and
+let the existing validator run. **Never filter ahead of a validator.**
+
+That mistake shipped twice in this cleanup. `asobi_world_chat` put an
+`is_binary/1` in front of the function that logs a malformed channel name;
+`asobi_console` filtered non-string manifest paths out before the function
+whose entire job is refusing them by name, which turned "console refuses to
+load" into "console loads with a screen missing".
+
+Otherwise, preferred when the `lists:` function is worth keeping
 - `usort/1` is O(n log n) in C, and hand-rolling it is neither faster nor
 clearer. The comprehension restores the type and drops nothing, because the
 input already has it:
@@ -40,6 +56,10 @@ input already has it:
 -spec usort_binaries([binary()]) -> [binary()].
 usort_binaries(Names) -> [N || N <- lists:usort(Names), is_binary(N)].
 ```
+
+`foldr/3` short-circuits from the *right*, so replacing one with left-to-right
+recursion changes which of several errors is reported. Same result list, first
+failure instead of last.
 
 **Replace the fold with explicit recursion.** Preferred for `foldl`/`foreach`,
 where the accumulator is asobi's own and the recursion is usually clearer than
@@ -54,6 +74,10 @@ install_fns([{Path, Fn} | Rest], St) ->
     {ok, St2} = luerl:set_table_keys(Path, Enc, St1),
     install_fns(Rest, St2).
 ```
+
+`lists:reverse/1` widens as well, and the accumulate-then-reverse shape above
+always ends in one - so an explicit-recursion rewrite usually needs a second
+re-narrow at the end, subject to the same precondition.
 
 Do **not** split a `usort/1` into a sort plus a hand-written dedupe. That was
 tried: it cost four functions across two modules and two O(n^2) loops on a
@@ -108,8 +132,14 @@ in one step:
 
 ```erlang
 %% was: {profiles, Profiles} = lists:keyfind(profiles, 1, Terms)
-[Profiles] = [V || {K, V} <- Terms, K =:= profiles, is_list(V)],
+[Profiles | _] = [V || {K, V} <- Terms, K =:= profiles, is_list(V)],
 ```
+
+`[X | _]` preserves `keyfind/3`'s first-wins semantics. `[X] =` adds a
+uniqueness assertion the original did not have - sometimes an improvement, but
+only use it where you mean it, and say so at the site. Give the empty case a
+named error (`[] -> error({missing_config, Key})`) rather than leaving a bare
+`{badmatch, []}` that does not say which key was absent.
 
 ## `dynamic()` is for boundaries, and only for boundaries
 
@@ -134,6 +164,23 @@ Luerl's `luerlstate()` and `luerldata()` are defined in its header but exported
 by no module, so there is no `luerl:luerlstate()` to write and `dynamic()` is
 the only honest answer. Exporting those types upstream would remove a whole
 category of these.
+
+## A pattern in a generator is a filter, not a match
+
+This is the likeliest way to break something while rewriting a fold, because
+the fold body's hard matches become silent drops:
+
+```erlang
+%% Asserts. A non-zero saturation count crashes and names itself.
+{Records, 0} = asobi_dgram_pose:records(...),
+
+%% Filters. A non-zero count is skipped and the test still passes.
+{Records, 0} <- [asobi_dgram_pose:records(...)],
+```
+
+Same for `#{slot := S} <- Records`, which drops a record with no `slot` where
+a function head would have raised. When the match was load-bearing, keep it in
+a named helper with a spec and generate over *that*.
 
 ## A narrowing clause is a behaviour change
 

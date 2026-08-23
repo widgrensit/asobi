@@ -20,13 +20,14 @@ reset() ->
     ok.
 
 -doc "Every `export_player/1` call, in the order core made them.".
--spec calls() -> [{atom(), binary()}].
+-spec calls() -> [term()].
 calls() ->
-    %% persistent_term is a boundary; narrowed at the read, and lists:reverse/1
-    %% widens on the way back. See docs/eqwalizer-idioms.md.
+    %% No guards on the elements: this is the observation side of a fixture
+    %% whose whole job is catching a call core should not have made. Filtering
+    %% a malformed record out here would hide exactly what a test is looking
+    %% for, the same way narrowing run/2's return did.
     case persistent_term:get(?CALLS, []) of
-        Calls when is_list(Calls) ->
-            [{N, P} || {N, P} <- lists:reverse(Calls), is_atom(N), is_binary(P)]
+        Calls when is_list(Calls) -> lists:reverse(Calls)
     end.
 
 -doc "What this extension's export path does: `{ok, Data}`, `{error, R}` or `{raise, R}`.".

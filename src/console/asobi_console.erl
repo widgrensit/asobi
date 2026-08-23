@@ -103,7 +103,8 @@ bundle() ->
 %% resolve/0's own result, put one clause up, so this is a boundary rather than
 %% a shape worth re-deriving. See docs/eqwalizer-idioms.md.
 -spec narrow_bundle(dynamic()) -> {ok, bundle()} | {error, problem()}.
-narrow_bundle(Result) -> Result.
+narrow_bundle({ok, #{script := _, styles := _, assets := _}} = Ok) -> Ok;
+narrow_bundle({error, _} = Error) -> Error.
 
 -doc """
 One asset by basename, or `error` for anything not in the bundle.
@@ -147,9 +148,12 @@ load(Dir) ->
 %% from the build's own output rather than from a directory listing means a
 %% stray file that lands in `priv/console` is not reachable, and a name is
 %% only ever a map key.
--spec declared(map()) -> [binary()].
+%% [term()], deliberately: names/1 is what refuses a manifest value that is not
+%% a string, and it can only do that if the value reaches it. Re-narrowing here
+%% would drop the bad value silently and load a console missing a screen.
+-spec declared(map()) -> [term()].
 declared(Manifest) ->
-    usort_binaries(
+    lists:usort(
         lists:append([
             [
                 maps:get(~"file", Chunk)
@@ -160,16 +164,9 @@ declared(Manifest) ->
         ])
     ).
 
--spec collect(binary(), map()) -> [binary()].
+-spec collect(binary(), map()) -> [term()].
 collect(Key, Manifest) ->
-    binaries(
-        lists:append([maps:get(Key, Chunk, []) || Chunk <- maps:values(Manifest), is_map(Chunk)])
-    ).
-
-%% lists:usort/1 and lists:append/1 both widen to [term()]; re-narrowing keeps
-%% the real call. See docs/eqwalizer-idioms.md.
--spec usort_binaries([term()]) -> [binary()].
-usort_binaries(L) -> [B || B <- lists:usort(L), is_binary(B)].
+    lists:append([maps:get(Key, Chunk, []) || Chunk <- maps:values(Manifest), is_map(Chunk)]).
 
 -spec binaries([term()]) -> [binary()].
 binaries(L) -> [B || B <- L, is_binary(B)].
@@ -342,7 +339,11 @@ read_asset(Dir, Name, Acc) ->
                 Mime when is_binary(Mime) ->
                     {ok, Acc#{Name => #{body => Body, mime => Mime, etag => etag(Body)}}};
                 error ->
-                    {error, {asset_unreadable, Name, unknown_media_type}}
+                    %% Unreachable: name/1 refuses a name whose extension has
+                    %% no mime, on the same basename this re-derives. Raised
+                    %% rather than returned so it does not read as an outcome
+                    %% callers should expect from problem().
+                    error({unreachable, {no_mime, Name}})
             end;
         {error, Reason} ->
             {error, {asset_unreadable, Name, Reason}}

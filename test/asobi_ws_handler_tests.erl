@@ -181,12 +181,6 @@ nova_splices_a_list_reply_into_separate_commands_test() ->
 %% list-valued reply onto the command list as one cowboy command, so both
 %% frames arrived at cow_ws:frame/2 as a single frame and took the
 %% connection process down. Pin the frame count, not just the payloads -
-%% websocket_info/2 may answer one frame or a list of them, so the reply has to
-%% be narrowed to a list before it can be counted. See docs/eqwalizer-idioms.md.
--spec frames(term()) -> [term()].
-frames(Frames) when is_list(Frames) -> Frames;
-frames(Frame) -> [Frame].
-
 %% a regression to a single frame is exactly what shipped in #330.
 extension_frames_are_two_separate_frames_test() ->
     Msg = {asobi_message, {game_message, ~"hi"}},
@@ -614,3 +608,10 @@ binary_uplink_is_refused_out_loud_test() ->
         #{~"payload" := #{~"reason" := ~"binary_uplink_unsupported"}},
         decode(Frame)
     ).
+
+%% List-only on purpose: websocket_info/2 answers a list here (extension_frames/3
+%% is spec'd [{text, binary()}]), and wrapping a bare frame instead would make a
+%% regression to a single frame - the #330 / nova#399 shape these tests exist to
+%% pin - pass length/1 silently.
+-spec frames(term()) -> [term()].
+frames(Frames) when is_list(Frames) -> Frames.
