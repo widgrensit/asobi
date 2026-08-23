@@ -284,7 +284,10 @@ hit and `neighbours_rect` the same without `distance`. The entities are
 changes nothing. They return nothing at all unless the world sets
 `border_band`, which is off by default - see
 [World server](world-server.md#seeing-across-a-seam) for what it costs and how
-to act on what you find.
+to act on what you find. They see only the band along each zone's edges, so
+size the radius against the ring rather than the zone: from your own centre the
+far corner of a diagonal neighbour is 2.12 zones away, and `zone_size * 2.2`
+is the radius that covers all eight.
 
 **Entity-list only.**
 
@@ -300,7 +303,8 @@ game.spatial.in_range(entity_a, entity_b, range)      -- boolean
 game.spatial.distance(entity_a, entity_b)             -- number
 ```
 
-`opts` on `query_radius` and `nearest` accepts:
+`opts` on `query_radius`, `nearest`, `neighbours_radius` and `neighbours_rect`
+accepts:
 
 | Key | Value |
 | --- | --- |
@@ -309,7 +313,12 @@ game.spatial.distance(entity_a, entity_b)             -- number
 | `max_results` | Cap on hits returned |
 | `sort` | `"nearest"` or `"farthest"` |
 
-Anything else in `opts` is ignored.
+Anything else is an error: an unknown key, a value of the wrong shape, or a
+`type` list holding no strings all return `{ error = ... }` naming the option.
+A misspelled filter has two silent failures otherwise - it either drops the
+filter and returns everything, or it matches nothing and reads exactly like an
+empty result - and neither is distinguishable from a correct query at the call
+site. An empty table means no options.
 
 ## World mode only
 

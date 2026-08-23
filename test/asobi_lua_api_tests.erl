@@ -88,6 +88,9 @@ api_test_() ->
         {"game.spatial.neighbours_radius reads the touching zones",
             fun spatial_neighbours_radius/0},
         {"game.spatial.neighbours_radius honours opts", fun spatial_neighbours_radius_opts/0},
+        {"game.spatial.neighbours_radius filters a binary-keyed band",
+            fun spatial_neighbours_radius_opts_binary_keys/0},
+        {"game.spatial.* name the opt they cannot use", fun spatial_opts_are_validated/0},
         {"game.spatial.neighbours_rect reads the touching zones", fun spatial_neighbours_rect/0},
         {"game.spatial.neighbours_* error without grid context", fun spatial_neighbours_no_grid/0},
         {"game.zone.apply reaches the owning zone", fun zone_apply_delivers/0},
@@ -730,6 +733,50 @@ spatial_neighbours_radius_opts() ->
     {ok, [N, Id | _], _} = eval(Code, St),
     ?assertEqual(1, trunc(N)),
     ?assertEqual(~"pirate", Id).
+
+%% widgrensit/asobi#544. An Erlang game module hands the zone atom-keyed
+%% entities and the Lua bridge binary-keyed ones, and only the first shape was
+%% covered - so "the filter drops every row" had nowhere to be caught.
+spatial_neighbours_radius_opts_binary_keys() ->
+    St = install_api_with_grid(),
+    asobi_zone_border:write_band(border_tab(), {2, 1}, #{
+        ~"pirate" => #{~"type" => ~"npc", ~"x" => 205.0, ~"y" => 150.0},
+        ~"rock" => #{~"type" => ~"debris", ~"x" => 206.0, ~"y" => 150.0}
+    }),
+    Code =
+        "local r = game.spatial.neighbours_radius(195.0, 150.0, 30.0, { type = 'npc' })\n"
+        "return #r, r[1].id",
+    {ok, [N, Id | _], _} = eval(Code, St),
+    ?assertEqual(1, trunc(N)),
+    ?assertEqual(~"pirate", Id).
+
+%% A malformed opts table used to fail two indistinguishable ways: a dropped
+%% filter returned everything, an empty `type` list matched nothing, and both
+%% read from Lua as an empty mirror.
+spatial_opts_are_validated() ->
+    St = install_api_with_grid(),
+    publish_pirate(),
+    Cases = [
+        {"{ types = 'npc' }", ~"unknown spatial opt 'types'"},
+        {"{ type = {} }", ~"opts.type list has no strings in it"},
+        {"{ type = 42 }", ~"opts.type must be a string or a list of strings"},
+        {"{ exclude = 42 }", ~"opts.exclude must be a string or a list of strings"},
+        {"{ sort = 'closest' }", ~"opts.sort must be 'nearest' or 'farthest'"},
+        {"{ max_results = 'two' }", ~"opts.max_results must be a non-negative number"},
+        {"'npc'", ~"opts must be a table of named options"}
+    ],
+    lists:foreach(
+        fun({Opts, Expected}) ->
+            Code =
+                "return game.spatial.neighbours_radius(195.0, 150.0, 30.0, " ++ Opts ++ ").error",
+            {ok, [Err | _], _} = eval(Code, St),
+            ?assertEqual(Expected, Err)
+        end,
+        Cases
+    ),
+    %% An empty table is a caller passing no options, not a malformed one.
+    {ok, [N | _], _} = eval("return #game.spatial.neighbours_radius(195.0, 150.0, 30.0, {})", St),
+    ?assertEqual(2, trunc(N)).
 
 spatial_neighbours_rect() ->
     St = install_api_with_grid(),

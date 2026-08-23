@@ -416,8 +416,10 @@ position near zone edges, or turn on the border mirror below.
 ### Seeing across a seam
 
 `border_band` publishes each zone's edge entities where its neighbours can read
-them, which is what makes an NPC able to chase a player across a boundary and a
-projectile able to hit a target the next zone owns. Off by default:
+them, which is what lets a projectile hit a target the next zone owns and an NPC
+already at the seam keep chasing across it. It publishes a strip along the
+edges, not the whole zone - see [How far the band reaches](#how-far-the-band-reaches)
+before sizing it against an aggro radius. Off by default:
 
 ```lua
 border_band = 0.15   -- fraction of zone_size; 0 (the default) publishes nothing
@@ -468,6 +470,33 @@ error and its effects dropped, rather than silence.
 An event is a verb, not a payload. asobi caps one at 4 KB and a caller at 64
 sends per tick, refusing past either with `false`, so a script cannot turn its
 own budget into a neighbour's unbounded mailbox.
+
+If an option is misspelled or has a value the query cannot use, the call returns
+`{ error = ... }` naming the option rather than an empty result - `{ types =
+"npc" }` is an error, not a silently unfiltered query.
+
+#### How far the band reaches
+
+The band is a strip along each edge, `border_band * zone_size` wide. Two
+consequences worth sizing against before you adopt it:
+
+**Reading, from a zone centre.** The neighbour ring is further away than it
+looks: the far corner of a diagonal neighbour is 2.12 zones from your own
+centre, so a query meant to sweep the whole ring wants a radius of about
+`zone_size * 2.2`. A radius of `zone_size * 1.5` misses even a cardinal
+neighbour's far edge, and the mirror then looks empty rather than out of range.
+
+**Writing, when sizing the band.** A zone publishes only what is within the band
+of its own edges, so an entity parked mid-zone is in nobody's band and no
+neighbour can see it at any radius. That is the right shape for a projectile,
+which only ever needs the strip it is crossing. It is the wrong shape for aggro:
+covering an NPC acquisition radius `R` from anywhere in the zone means
+`border_band >= R / zone_size`, which for a half-zone aggro radius is
+`border_band = 0.5` - publishing half of every zone's entities every tick,
+whether or not anything reads them. If that is the cost you are looking at, a
+game-side interest list that publishes a few positions per second is cheaper
+than widening the band, and the two can coexist: the band for the bolt, your own
+structure for the chase.
 
 **What it costs.** Publishing is a filter over the zone's entities plus a copy
 of the band into shared storage, every tick, whether or not anything reads it.
