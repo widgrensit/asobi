@@ -83,13 +83,7 @@ Two further problems with the field shape, independent of the security one:
 - `zone_tick/2`'s contract widens. A game module that returns a three-tuple on
   an older asobi gets a `badmatch` and a dead zone, so this is forward-only.
 - `guides/security-trust-model.md`'s statement that `handle_input/3` is the only
-  unbudgeted callback is **still wrong, and this bullet was wrong when written.**
-  Removing `_keep_hot` removed the entry point this ADR added, but ADR 0017 had
-  already added another: `handle_effects/2` also goes through
-  `asobi_lua_loader:call/3` (`asobi_lua_world.erl:395`). The guide named one
-  callback until widgrensit/asobi#550. Left in place rather than quietly edited,
-  because this ADR accuses ADR 0018 of exactly the sin it then committed itself -
-  changing what the sandbox promises and not amending the guide.
+  unbudgeted callback is true again.
 
 ## Alternatives considered
 

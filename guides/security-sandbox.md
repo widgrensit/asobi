@@ -68,7 +68,7 @@ where each macro lives.
 
 `handle_input/3` is the exception. It runs inline in the calling process, so
 none of the three bounds apply to it. See [what that
-costs](security-trust-model.md#handle-input-and-handle-effects-are-not-sandbox-boundaries).
+costs](security-trust-model.md#handle-input-is-not-a-sandbox-boundary).
 
 The same wrapper covers the three places script-author-controlled code is
 evaluated rather than called:

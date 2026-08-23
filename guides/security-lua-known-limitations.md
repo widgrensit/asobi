@@ -37,7 +37,7 @@ Two limits are worth knowing:
 `handle_input/3` is the exception: it runs inline in the calling process with
 no child, so none of the three bounds apply. Its cost is a hung match or zone
 process, not a supervisor event - see [handle-input is not a sandbox
-boundary](security-trust-model.md#handle-input-and-handle-effects-are-not-sandbox-boundaries).
+boundary](security-trust-model.md#handle-input-is-not-a-sandbox-boundary).
 
 ### The heap cap is per eval, not per script
 
