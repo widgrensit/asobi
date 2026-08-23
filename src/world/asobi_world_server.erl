@@ -352,7 +352,9 @@ running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 running(cast, {move_player, PlayerId, NewPos, Entity}, State) ->
     handle_move(PlayerId, NewPos, Entity, State);
-running(cast, {zone_created, Coords, ZonePid}, #{player_zones := PlayerZones}) ->
+running(cast, {zone_created, {ZX, ZY} = Coords, ZonePid}, #{player_zones := PlayerZones}) when
+    is_integer(ZX), is_integer(ZY), is_pid(ZonePid)
+->
     backfill_zone_subscribers(Coords, ZonePid, undefined, PlayerZones),
     keep_state_and_data;
 %% Guards narrow both cast arguments rather than trusting the sender. The ws

@@ -13,6 +13,7 @@
 %% and carry the window's worst tick alongside the sampled one. Override with
 %% `tick_sample_interval_ms` in the ticker config.
 -define(DEFAULT_TICK_SAMPLE_INTERVAL_MS, 1000).
+-define(DEFAULT_TICK_RATE, 50).
 
 %% --- Public API ---
 
@@ -80,10 +81,29 @@ init(Config) ->
     }}.
 
 sample_every(TickRate, Config) ->
-    IntervalMs = maps:get(
-        tick_sample_interval_ms, Config, ?DEFAULT_TICK_SAMPLE_INTERVAL_MS
+    IntervalMs = pos_int(
+        maps:get(tick_sample_interval_ms, Config, ?DEFAULT_TICK_SAMPLE_INTERVAL_MS),
+        ?DEFAULT_TICK_SAMPLE_INTERVAL_MS
     ),
-    max(1, IntervalMs div max(TickRate, 1)).
+    pos_int(IntervalMs div pos_int(TickRate, ?DEFAULT_TICK_RATE), 1).
+
+%% Config reaches here from a game's own globals, so a non-integer tick_rate is
+%% a bad script rather than an impossible state - fall back rather than crash
+%% the ticker. This also gives eqwalizer the integer that `erlang:max/2` cannot:
+%% its spec is term() -> term() whatever it is handed.
+-spec pos_int(term(), pos_integer()) -> pos_integer().
+pos_int(V, _Default) when is_integer(V), V > 0 -> V;
+pos_int(_V, Default) -> Default.
+
+%% max_duration_ms is reset to 0 every sample, so it is non-negative rather
+%% than positive - pos_int/2 would be the wrong shape here.
+-spec non_neg_int(term()) -> non_neg_integer().
+non_neg_int(V) when is_integer(V), V >= 0 -> V;
+non_neg_int(_V) -> 0.
+
+-spec larger(integer(), integer()) -> integer().
+larger(A, B) when A >= B -> A;
+larger(_A, B) -> B.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call(get_tick, _From, #{tick := Tick} = State) ->
@@ -268,7 +288,7 @@ complete_tick(
     } = State
 ) ->
     DurationMs = erlang:monotonic_time(millisecond) - StartedAt,
-    MaxDurationMs = max(MaxSoFar, DurationMs),
+    MaxDurationMs = larger(non_neg_int(MaxSoFar), DurationMs),
     case Sampled + 1 >= SampleEvery of
         true ->
             asobi_telemetry:world_tick(WorldId, DurationMs, MaxDurationMs, ZoneCount),

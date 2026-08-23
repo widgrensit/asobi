@@ -105,7 +105,7 @@ release_zone(Ref, Coords) ->
 -doc "Return all active zone pids. For the ticker.".
 -spec get_active_zones(pid() | atom()) -> [pid()].
 get_active_zones(Ref) when is_atom(Ref) ->
-    [Pid || {_Coords, Pid} <- ets:tab2list(Ref)];
+    narrow_pid_list([Pid || {_Coords, Pid} <- ets:tab2list(Ref)]);
 get_active_zones(Ref) when is_pid(Ref) ->
     narrow_pid_list(gen_server:call(Ref, get_active_zones)).
 
@@ -196,7 +196,9 @@ handle_call({ensure_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
                     {reply, {error, Reason}, State}
             end
     end;
-handle_call({revive_zone, Coords, DeadPid}, _From, #{ets_tab := Tab} = State) ->
+handle_call({revive_zone, {ZX, ZY} = Coords, DeadPid}, _From, #{ets_tab := Tab} = State) when
+    is_integer(ZX), is_integer(ZY), is_pid(DeadPid)
+->
     case ets:lookup(Tab, Coords) of
         [{Coords, DeadPid}] ->
             case await_zone_down(Coords, DeadPid, State) of
@@ -430,24 +432,26 @@ reap_idle_zones(
         [],
         Active
     ),
-    lists:foldl(
-        fun(Coords, SAcc) ->
-            case ets:lookup(Tab, Coords) of
-                [{Coords, Pid}] ->
-                    %% Stop gracefully so the zone writes a final snapshot via
-                    %% terminate/2. Keep the ets slot + monitor until it is
-                    %% actually gone: cleanup runs on the pid-guarded DOWN /
-                    %% zone_terminated, so a request can't recreate the zone
-                    %% (and load a stale snapshot) until the old one finished.
-                    asobi_zone:reap(Pid),
-                    SAcc;
-                [] ->
-                    cleanup_zone(Coords, SAcc)
-            end
-        end,
-        State,
-        Expired
-    ).
+    reap_expired(Expired, Tab, State).
+
+%% Explicit recursion rather than lists:foldl/3: the fold erases the
+%% accumulator's type, and the pid read back out of ETS then had none either.
+-spec reap_expired([{integer(), integer()}], ets:table(), map()) -> map().
+reap_expired([], _Tab, State) ->
+    State;
+reap_expired([Coords | Rest], Tab, State) ->
+    case ets:lookup(Tab, Coords) of
+        [{Coords, Pid}] when is_pid(Pid) ->
+            %% Stop gracefully so the zone writes a final snapshot via
+            %% terminate/2. Keep the ets slot + monitor until it is actually
+            %% gone: cleanup runs on the pid-guarded DOWN / zone_terminated, so
+            %% a request can't recreate the zone (and load a stale snapshot)
+            %% until the old one finished.
+            asobi_zone:reap(Pid),
+            reap_expired(Rest, Tab, State);
+        _ ->
+            reap_expired(Rest, Tab, cleanup_zone(Coords, State))
+    end.
 
 touch(Coords, #{zone_last_active := Active} = State) ->
     Now = erlang:monotonic_time(millisecond),

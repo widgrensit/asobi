@@ -154,7 +154,12 @@ create_namespaces([], St) ->
 create_namespaces([Namespace | Rest], St) ->
     create_namespaces(Rest, create_table(Namespace, St)).
 
+%% `live` installs the real function; `probe` swaps every effectful one for a
+%% stub. Not a vm_kind() - a probe VM has a kind of its own.
+-type install_mode() :: live | probe.
+
 %% Builds the {LuaPath, Fun} table install/2 and install_pure/2 both wire up.
+-spec api_fns(map(), install_mode()) -> [{[binary(), ...], function()}].
 api_fns(Ctx, Mode) ->
     [{Path, pick(Mode, Effect, Path, Fn)} || {Path, Effect, Fn} <- api_surface(Ctx)].
 
@@ -243,7 +248,27 @@ extension_bindings(Ctx) ->
 
 -spec extension_namespaces(map()) -> [[binary(), ...]].
 extension_namespaces(Ctx) ->
-    lists:usort([[~"game", Namespace] || #{namespace := Namespace} <- extension_bindings(Ctx)]).
+    dedupe_paths(
+        sorted_paths([[~"game", namespace_of(Binding)] || Binding <- extension_bindings(Ctx)])
+    ).
+
+%% lists:sort/1 widens its result to [term()] under eqwalizer; the comprehension
+%% re-narrows it, matching the exact `[~"game", Namespace]` shape the
+%% comprehension above builds. Kept sorted because lists:usort/1 was: no test
+%% pins the order, but an unobserved behaviour change is not one worth making.
+-spec sorted_paths([[binary(), ...]]) -> [[binary(), ...]].
+sorted_paths(Paths) -> [[A, B] || [A, B] <- lists:sort(Paths), is_binary(A), is_binary(B)].
+
+%% Was the dedupe half of lists:usort/1.
+-spec dedupe_paths([[binary(), ...]]) -> [[binary(), ...]].
+dedupe_paths([]) -> [];
+dedupe_paths([P | Rest]) -> [P | dedupe_paths([Q || Q <- Rest, Q =/= P])].
+
+%% A typed accessor rather than a map pattern in the generator: eqwalizer does
+%% not carry binding()'s field types through a comprehension pattern, so the
+%% namespace arrived as term() and the whole list widened with it.
+-spec namespace_of(asobi_extensions:binding()) -> binary().
+namespace_of(#{namespace := Namespace}) -> Namespace.
 
 -spec extension_surface(map()) -> [{[binary(), ...], asobi_lua_surface:effect(), function()}].
 extension_surface(Ctx) ->
@@ -381,16 +406,16 @@ inert(Name) ->
         {[false], St}
     end.
 
-install_fns(Fns, St0) ->
-    lists:foldl(
-        fun({Path, Fn}, St) ->
-            {Enc, StA} = luerl:encode(Fn, St),
-            {ok, StB} = luerl:set_table_keys(Path, Enc, StA),
-            StB
-        end,
-        St0,
-        Fns
-    ).
+%% Explicit recursion rather than lists:foldl/3: the fold erases the
+%% accumulator's type, so the Lua state could not be typed against
+%% luerl:encode/2 and set_table_keys/3.
+-spec install_fns([{[binary(), ...], function()}], dynamic()) -> dynamic().
+install_fns([], St) ->
+    St;
+install_fns([{Path, Fn} | Rest], St) ->
+    {Enc, St1} = luerl:encode(Fn, St),
+    {ok, St2} = luerl:set_table_keys(Path, Enc, St1),
+    install_fns(Rest, St2).
 
 %% --- Core ---
 
@@ -536,6 +561,20 @@ fun_broadcast(_) ->
 %% owner (asobi_ws_handler:event_name_binary/1) before the fan-out so the
 %% author gets `{ error = "..." }` at the game.broadcast call site - the rules
 %% themselves stay in one place.
+%% Flattened here rather than left as a nested list inside an iolist: an
+%% iolist's recursive type defeats eqwalizer, and one binary reads no worse.
+-spec reserved_names_list() -> binary().
+reserved_names_list() ->
+    comma_join(asobi_ws_handler:reserved_event_names()).
+
+%% lists:join/2 widens to [term()] under eqwalizer, which then defeats
+%% iolist_to_binary/1.
+-spec comma_join([binary()]) -> binary().
+comma_join([]) -> ~"";
+comma_join([B]) -> B;
+comma_join([B | Rest]) -> <<B/binary, ", ", (comma_join(Rest))/binary>>.
+
+-spec do_broadcast(pid(), binary(), map(), dynamic()) -> {[term()], dynamic()}.
 do_broadcast(MatchPid, Event, Payload, St) ->
     case asobi_ws_handler:event_name_binary(Event) of
         {ok, _} ->
@@ -543,13 +582,13 @@ do_broadcast(MatchPid, Event, Payload, St) ->
             {[true], St};
         {error, reserved_event_name} ->
             error_result(
-                iolist_to_binary([
-                    ~"broadcast event name \"",
-                    Event,
-                    ~"\" is reserved by asobi (",
-                    lists:join(~", ", asobi_ws_handler:reserved_event_names()),
-                    ~")"
-                ]),
+                <<
+                    "broadcast event name \"",
+                    Event/binary,
+                    "\" is reserved by asobi (",
+                    (reserved_names_list())/binary,
+                    ")"
+                >>,
                 St
             );
         {error, invalid_event_name} ->
@@ -907,6 +946,9 @@ fun_chat_send() ->
 
 %% Both bound a game-supplied value that would otherwise be echoed or rebuilt
 %% per query; see as_key_name/1 and with_id_set/4.
+%% Both entity-pair calls need it, and returning nil to Lua would only move the
+%% failure to the arithmetic the script does next.
+-define(NO_POSITION, ~"both entities need numeric x and y").
 -define(MAX_KEY_NAME_BYTES, 128).
 -define(MAX_ID_SET, 256).
 
@@ -1102,8 +1144,10 @@ fun_spatial_in_range() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [A, B, Range] when is_map(A), is_map(B), is_number(Range) ->
-                Result = asobi_spatial:in_range(atomize_keys(A), atomize_keys(B), Range),
-                {[Result], St};
+                case asobi_spatial:in_range(atomize_keys(A), atomize_keys(B), Range) of
+                    undefined -> error_result(?NO_POSITION, St);
+                    Result -> {[Result], St}
+                end;
             _ ->
                 error_result(~"in_range requires (entity_a, entity_b, range)", St)
         end
@@ -1113,8 +1157,10 @@ fun_spatial_distance() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [A, B] when is_map(A), is_map(B) ->
-                D = asobi_spatial:distance(atomize_keys(A), atomize_keys(B)),
-                {[D], St};
+                case asobi_spatial:distance(atomize_keys(A), atomize_keys(B)) of
+                    undefined -> error_result(?NO_POSITION, St);
+                    D -> {[D], St}
+                end;
             _ ->
                 error_result(~"distance requires (entity_a, entity_b)", St)
         end
@@ -1608,7 +1654,9 @@ wrap_result({error, Reason}, St) -> error_result(Reason, St).
 
 %% --- Argument decoding ---
 
--spec decode_args([term()], dynamic()) -> [term()].
+%% Args are whatever Luerl passed the closure, so they are Lua values rather
+%% than anything asobi typed: a boundary, not a missing narrowing.
+-spec decode_args([dynamic()], dynamic()) -> [term()].
 decode_args(Args, St) ->
     [deep_decode(luerl:decode(A, St)) || A <- Args].
 

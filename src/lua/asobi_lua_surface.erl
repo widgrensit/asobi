@@ -55,7 +55,14 @@ is_reserved(Namespace) ->
 -doc "Renders a namespace or function path as its Lua name, e.g. `game.economy.grant`.".
 -spec name([binary(), ...]) -> binary().
 name(Path) ->
-    iolist_to_binary(lists:join(~".", Path)).
+    dot_join(Path).
+
+%% lists:join/2 widens to [term()] under eqwalizer, which then defeats
+%% iolist_to_binary/1.
+-spec dot_join([binary()]) -> binary().
+dot_join([]) -> ~"";
+dot_join([B]) -> B;
+dot_join([B | Rest]) -> <<B/binary, ".", (dot_join(Rest))/binary>>.
 
 -spec effects() -> [effect(), ...].
 effects() ->

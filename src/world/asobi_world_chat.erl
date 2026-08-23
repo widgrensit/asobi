@@ -52,10 +52,7 @@ player_joined(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatCo
                 false ->
                     ok
             end,
-            lists:foreach(
-                fun(Name) -> asobi_chat_channel:join(global_channel_id(Name), PlayerPid) end,
-                global_channels(ChatConfig)
-            ),
+            join_globals(global_channels(ChatConfig), PlayerPid),
             join_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
     end.
@@ -76,10 +73,7 @@ player_left(PlayerId, ZoneCoords, #{world_id := WorldId, chat_config := ChatConf
                 false ->
                     ok
             end,
-            lists:foreach(
-                fun(Name) -> asobi_chat_channel:leave(global_channel_id(Name), PlayerPid) end,
-                global_channels(ChatConfig)
-            ),
+            leave_globals(global_channels(ChatConfig), PlayerPid),
             leave_zone_chats(PlayerId, PlayerPid, WorldId, ZoneCoords, ChatConfig),
             ok
     end.
@@ -158,9 +152,40 @@ consults, so a name is auto-joined here exactly when it is authorised there.
 Malformed names are dropped loudly rather than silently minting a channel
 nothing can join.
 """.
+%% Explicit recursion rather than lists:foreach/2, which erases the element
+%% type just as the folds do - the channel name arrived as term().
+-spec join_globals([binary()], pid()) -> ok.
+join_globals([], _PlayerPid) ->
+    ok;
+join_globals([Name | Rest], PlayerPid) ->
+    asobi_chat_channel:join(global_channel_id(Name), PlayerPid),
+    join_globals(Rest, PlayerPid).
+
+-spec leave_globals([binary()], pid()) -> ok.
+leave_globals([], _PlayerPid) ->
+    ok;
+leave_globals([Name | Rest], PlayerPid) ->
+    asobi_chat_channel:leave(global_channel_id(Name), PlayerPid),
+    leave_globals(Rest, PlayerPid).
+
+%% lists:sort/1 widens its result to [term()] under eqwalizer; the comprehension
+%% re-narrows it, and never drops anything because the input is already
+%% binaries. The sorted order is asserted by asobi_world_chat_tests - usort/1
+%% sorted as well as deduped, and splitting the two has to keep both halves.
+-spec sorted([binary()]) -> [binary()].
+sorted(Names) -> [N || N <- lists:sort(Names), is_binary(N)].
+
+%% Was the dedupe half of lists:usort/1.
+-spec dedupe_names([binary()]) -> [binary()].
+dedupe_names([]) -> [];
+dedupe_names([N | Rest]) -> [N | dedupe_names([M || M <- Rest, M =/= N])].
+
 -spec global_channels(term()) -> [binary()].
 global_channels(#{global := Names}) when is_list(Names) ->
-    lists:usort([Name || Name <- Names, valid_global_name(Name)]);
+    %% is_binary inline as well as inside valid_global_name/1: eqwalizer cannot
+    %% narrow through a call, so without it the list stays [term()] and every
+    %% caller of this function widens with it.
+    dedupe_names(sorted([Name || Name <- Names, is_binary(Name), valid_global_name(Name)]));
 global_channels(#{global := Other}) ->
     ?LOG_WARNING(#{event => invalid_global_chat_config, value => Other}),
     [];
