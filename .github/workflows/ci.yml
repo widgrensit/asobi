@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.7
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.2.0
     permissions:
       contents: write
       pull-requests: write
@@ -33,7 +33,21 @@ jobs:
       enable-ct: true
       enable-coverage: true
       enable-elp-lint: true
-      # The three quality gates still off, and what each is waiting on:
+      enable-elp-eqwalize: true
+      # Diff-scoped, NOT a full-tree gate. `all` would fail on merge day: this
+      # tree carries ~390 eqwalizer errors (asobi#435). `diff` fails only on
+      # errors in modules a PR touches, so new code is type-checked from today
+      # while the backlog is worked down behind it.
+      #
+      # The ordering matters. With the job off entirely the count drifts and
+      # nothing says so: 312 on 2026-08-11, 391 on 2026-08-23, +79 in twelve
+      # days while a cleanup was being planned against the 312 figure. A
+      # cleanup that runs uncovered loses ground while it runs.
+      #
+      # This does mean a PR touching a module with pre-existing errors must
+      # clean that module before it can land. That is the intended cost.
+      elp-eqwalize-scope: 'diff'
+      # The two quality gates still off, and what each is waiting on:
       #
       # enable-sbom / enable-sbom-scan - `rebar3 sbom` crashes on this repo
       #   with `badarg` in `unicode:characters_to_binary(git)`
@@ -44,26 +58,6 @@ jobs:
       #   the unblock is one character in .app.src; that file is off-limits
       #   without a human call, and the plugin should handle the atom anyway
       #   (filed upstream).
-      #
-      # enable-elp-eqwalize - 312 eqwalizer errors on this tree (asobi#435),
-      #   so the job would fail on merge day. 310 of them are
-      #   `incompatible_types`, and 172 of those are a `term()` - out of
-      #   `maps:get/2`, `persistent_term:get/1`, ETS, or Luerl's `dynamic()` -
-      #   reaching a typed context with no narrowing clause. Weighted to
-      #   test/ (127) but present across src/console, src/lua, src/world and
-      #   src/ops. Cleaning it is a real project, tracked in the issue; the
-      #   tooling to run it is in place now, so it can go on per-area as the
-      #   count comes down.
-      #
-      #   Two reasons previously recorded here were wrong and cost time twice
-      #   over, so for the record: eqwalizer does NOT panic on OTP 29 (that
-      #   theory was superseded - the root cause was the `record()` builtin,
-      #   since fixed), and ELP does not need to run on 28.x. The real blocker
-      #   for both ELP jobs was that Taure/erlang-ci's elp action mapped OTP
-      #   majors to hardcoded asset names and stopped at 28, so on OTP 29 it
-      #   failed before downloading ELP at all. Fixed across erlang-ci#71, #72
-      #   and #73 (v2.1.7), which also moved its compile step to
-      #   `rebar3 as test compile` so test-profile parse transforms resolve.
       #
       # enable-mutate - needs the rebar3_mutate plugin, and a full-tree
       #   run over 134 modules is far too slow for per-PR CI. Wants
