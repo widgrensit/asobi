@@ -151,7 +151,7 @@ setup() ->
     %% the owner is the world's instance supervisor.
     case persistent_term:get({?MODULE, border_tab}, undefined) of
         undefined -> persistent_term:put({?MODULE, border_tab}, asobi_zone_border:new());
-        Tab -> ets:delete_all_objects(Tab)
+        Tab when is_reference(Tab); is_atom(Tab) -> ets:delete_all_objects(Tab)
     end,
     meck:new(asobi_id, [no_link]),
     meck:expect(asobi_id, generate, fun() -> ~"test-uuid-v7" end),
@@ -272,14 +272,13 @@ game_broadcast_long_name() ->
 %% the reserved list off its owner rather than restating it, so a name added
 %% to asobi_ws_handler is covered here without touching this file.
 game_broadcast_rejects_all_reserved() ->
-    lists:foreach(
-        fun(Name) ->
-            assert_broadcast_rejected(
-                "return game.broadcast('" ++ binary_to_list(Name) ++ "', {}).error"
-            )
-        end,
-        asobi_ws_handler:reserved_event_names()
-    ).
+    _ = [
+        assert_broadcast_rejected(
+            "return game.broadcast('" ++ binary_to_list(Name) ++ "', {}).error"
+        )
+     || Name <- asobi_ws_handler:reserved_event_names()
+    ],
+    ok.
 
 assert_broadcast_rejected(Code) ->
     St = install_api(),
@@ -587,16 +586,14 @@ game_economy_grant() ->
     Code = "return game.economy.grant('p1', 'gold', 100, 'reward')",
     {ok, [Result | _], St1} = eval(Code, St),
     ?assert(meck:called(asobi_economy, grant, [~"p1", ~"gold", 100, '_'])),
-    Decoded = luerl:decode(Result, St1),
-    ?assert(lists:keymember(~"ok", 1, Decoded)).
+    ?assert(decoded_has_key(luerl:decode(Result, St1), ~"ok")).
 
 game_economy_debit() ->
     St = install_api(),
     Code = "return game.economy.debit('p1', 'gold', 50, 'cost')",
     {ok, [Result | _], St1} = eval(Code, St),
     ?assert(meck:called(asobi_economy, debit, [~"p1", ~"gold", 50, '_'])),
-    Decoded = luerl:decode(Result, St1),
-    ?assert(lists:keymember(~"ok", 1, Decoded)).
+    ?assert(decoded_has_key(luerl:decode(Result, St1), ~"ok")).
 
 game_lb_submit() ->
     St = install_api(),
@@ -609,8 +606,7 @@ game_notify() ->
     Code = "return game.notify('p1', 'reward', 'You won!')",
     {ok, [Result | _], St1} = eval(Code, St),
     ?assert(meck:called(asobi_notify, send, [~"p1", ~"reward", ~"You won!", '_'])),
-    Decoded = luerl:decode(Result, St1),
-    ?assert(lists:keymember(~"ok", 1, Decoded)).
+    ?assert(decoded_has_key(luerl:decode(Result, St1), ~"ok")).
 
 game_chat_send() ->
     St = install_api(),
@@ -905,16 +901,16 @@ spatial_opts_are_validated() ->
         {"{ max_results = 0 }", ~"opts.max_results must be a positive number"},
         {"'npc'", ~"opts must be a table of named options"}
     ],
-    lists:foreach(
-        fun({Opts, Expected}) ->
+    _ = [
+        begin
             Code =
                 "return game.spatial.neighbours_radius(195.0, 150.0, 30.0, " ++ Opts ++ ").error",
             {ok, [Err | _], _} = eval(Code, St),
             %% Paired with the input so a failure names which case broke.
             ?assertEqual({Opts, Expected}, {Opts, Err})
-        end,
-        Cases
-    ),
+        end
+     || {Opts, Expected} <- Cases
+    ],
     %% An entry point that would not honour the key rejects it rather than
     %% accepting it and quietly doing nothing with it: `nearest` reads neither
     %% `sort` nor `max_results`, and a rect query has no distance to sort by.
@@ -924,13 +920,13 @@ spatial_opts_are_validated() ->
         {"return game.spatial.neighbours_rect(0.0, 0.0, 1.0, 1.0, { sort = 'nearest' }).error",
             ~"opts.sort does not apply to a rect query, which has no distance to sort by"}
     ],
-    lists:foreach(
-        fun({Code, Expected}) ->
+    _ = [
+        begin
             {ok, [Err | _], _} = eval(Code, St),
             ?assertEqual({Code, Expected}, {Code, Err})
-        end,
-        Unsupported
-    ),
+        end
+     || {Code, Expected} <- Unsupported
+    ],
     {ok, [K | _], _} = eval(
         "return #game.spatial.neighbours_rect(190.0, 140.0, 210.0, 160.0, { max_results = 1 })", St
     ),
@@ -1059,8 +1055,7 @@ spatial_query_rect_no_zone() ->
     St = install_api(),
     Code = "return game.spatial.query_rect(0.0, 0.0, 10.0, 10.0)",
     {ok, [Result | _], St1} = eval(Code, St),
-    Decoded = luerl:decode(Result, St1),
-    ?assert(lists:keymember(~"error", 1, Decoded)).
+    ?assert(decoded_has_key(luerl:decode(Result, St1), ~"error")).
 
 spatial_query_radius_with_opts() ->
     St = install_api(),
@@ -1249,10 +1244,19 @@ storage_player_set_roundtrip(LuaValueExpr, Expected) ->
 
 %% Pull a named field out of a kura_changeset record. Position 5 holds
 %% the (normalised) params map per kura.hrl.
+%% A decoded Lua table is a proplist of Lua values, so lists:keymember/3 cannot
+%% see the [tuple()] it wants. See docs/eqwalizer-idioms.md.
+-spec decoded_has_key(term(), binary()) -> boolean().
+decoded_has_key(Decoded, Key) when is_list(Decoded) ->
+    [] =/= [K || {K, _} <- Decoded, K =:= Key];
+decoded_has_key(_Decoded, _Key) ->
+    false.
+
 -spec changeset_param(term(), atom()) -> term().
 changeset_param(CS, Field) when is_tuple(CS) ->
-    Params = element(5, CS),
-    maps:get(Field, Params).
+    case element(5, CS) of
+        Params when is_map(Params) -> maps:get(Field, Params)
+    end.
 
 %% --- Probe ctx: effectful functions must be inert (widgrensit/asobi_lua#109/#117) ---
 %%
@@ -1441,9 +1445,13 @@ populated_namespaces(St) ->
         "return names",
     [binary:split(Name, ~".", [global]) || Name <- lua_strings(Code, St)].
 
+-spec lua_strings(string(), dynamic()) -> [binary()].
 lua_strings(Code, St) ->
     {ok, [Table | _], St1} = eval(Code, St),
-    [Value || {_Index, Value} <- luerl:decode(Table, St1)].
+    case luerl:decode(Table, St1) of
+        Decoded when is_list(Decoded) ->
+            [Value || {_Index, Value} <- Decoded, is_binary(Value)]
+    end.
 
 %% --- Helpers ---
 
@@ -1495,9 +1503,13 @@ install_api_with_terrain() ->
     },
     asobi_lua_api:install(Ctx, St0).
 
--spec eval(string(), dynamic()) -> {ok, [term()], dynamic()} | {error, term()}.
+%% `[dynamic()]`, not `[term()]`: these are Lua return values, so they have no
+%% static type on our side - a boundary, not a missing narrowing. See
+%% docs/eqwalizer-idioms.md. This one spec takes the module from 49 errors to a
+%% handful, because every `trunc(N)` downstream of it inherits the type.
+-spec eval(string(), dynamic()) -> {ok, [dynamic()], dynamic()} | {error, term()}.
 eval(Code, St) ->
     case luerl:do(Code, St) of
         {ok, Results, St1} -> {ok, Results, St1};
-        Other -> Other
+        {error, Reason, _} -> {error, Reason}
     end.

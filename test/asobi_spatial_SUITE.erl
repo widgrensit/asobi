@@ -73,7 +73,7 @@ query_radius_basic(_Config) ->
     ?assertNot(lists:member(~"e", Ids)),
     ?assertNot(lists:member(~"f", Ids)),
     %% Check distance for "b" (3-4-5 triangle)
-    {~"b", _, Dist} = lists:keyfind(~"b", 1, Results),
+    [Dist] = [D || {Id, _, D} <- Results, Id =:= ~"b"],
     ?assert(abs(Dist - 5.0) < 0.001),
     ok.
 
