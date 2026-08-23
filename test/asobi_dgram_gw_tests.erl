@@ -62,7 +62,7 @@ gw_role_starts_no_engine() ->
 %% boundary; a regression here is the security property gone, not a feature loss.
 gateway_application_is_minimal() ->
     _ = application:load(asobi_dgram_gw),
-    {ok, Deps} = application:get_key(asobi_dgram_gw, applications),
+    Deps = app_applications(asobi_dgram_gw),
     ?assertEqual([], Deps -- [kernel, stdlib, crypto, telemetry, seki]),
     [
         ?assertNot(lists:member(Heavy, Deps))
@@ -71,8 +71,15 @@ gateway_application_is_minimal() ->
     %% ...and the engine still depends on it, which is the direction that makes
     %% the codec shared without making the gateway carry the engine.
     _ = application:load(asobi),
-    {ok, AsobiDeps} = application:get_key(asobi, applications),
-    ?assert(lists:member(asobi_dgram_gw, AsobiDeps)).
+    ?assert(lists:member(asobi_dgram_gw, app_applications(asobi))).
+
+%% application:get_key/2 answers {ok, term()}. See docs/eqwalizer-idioms.md.
+-spec app_applications(atom()) -> [atom()].
+app_applications(App) ->
+    {ok, Value} = application:get_key(App, applications),
+    case Value of
+        List when is_list(List) -> [A || A <- List, is_atom(A)]
+    end.
 
 %% asobi#530: `asobi` lists `asobi_dgram_gw` in `applications` for the shared
 %% codec, so this supervisor's `init/1` runs on every engine. Returning the child

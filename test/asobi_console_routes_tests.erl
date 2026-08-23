@@ -64,20 +64,18 @@ until(Quote, Rest) ->
 
 %% `${...}` is a bound segment, and nothing else in these paths is dynamic.
 normalise(Path) ->
-    iolist_to_binary(
-        lists:join(~"/", [
-            case binary:match(Segment, ~"${") of
-                nomatch -> Segment;
-                _ -> ~"_"
-            end
-         || Segment <- binary:split(Path, ~"/", [global])
-        ])
-    ).
+    asobi_test_helpers:binary_join(~"/", [
+        case binary:match(Segment, ~"${") of
+            nomatch -> Segment;
+            _ -> ~"_"
+        end
+     || Segment <- binary:split(Path, ~"/", [global])
+    ]).
 
 %% The same table, as the paths a caller writes.
 declared() ->
     lists:usort([
-        iolist_to_binary([~"/", lists:join(~"/", [segment(S) || S <- Segments])])
+        <<"/", (asobi_test_helpers:binary_join(~"/", [segment(S) || S <- Segments]))/binary>>
      || {get, Segments, _Class} <- asobi_ops_caps:classes()
     ]).
 

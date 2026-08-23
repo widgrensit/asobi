@@ -1,6 +1,6 @@
 -module(asobi_test_helpers).
 
--export([start/1, unique_username/1, unique_id/1]).
+-export([start/1, unique_username/1, unique_id/1, binary_join/2]).
 -export([http_routes/1, routes_missing_options/1, preflight_targets/1, sample_path/1]).
 
 -spec start(list()) -> list().
@@ -60,7 +60,13 @@ routes_missing_options(Groups) ->
 %% carry a protocol handler (the WebSocket group) have no preflight to make.
 -spec preflight_targets([map()]) -> [{binary(), binary()}].
 preflight_targets(Groups) ->
-    lists:flatmap(fun first_http_route/1, Groups).
+    [Target || Group <- Groups, Target <- first_http_route(Group)].
+
+-doc "Join binaries with a separator. lists:join/2 widens to [term()], which then defeats iolist_to_binary/1 - see docs/eqwalizer-idioms.md.".
+-spec binary_join(binary(), [binary()]) -> binary().
+binary_join(_Sep, []) -> ~"";
+binary_join(_Sep, [B]) -> B;
+binary_join(Sep, [B | Rest]) -> <<B/binary, Sep/binary, (binary_join(Sep, Rest))/binary>>.
 
 -spec first_http_route(map()) -> [{binary(), binary()}].
 first_http_route(#{prefix := Prefix} = Group) ->
@@ -80,4 +86,4 @@ sample_path(Path) ->
         end
      || Segment <- binary:split(Path, ~"/", [global])
     ],
-    iolist_to_binary(lists:join(~"/", Segments)).
+    binary_join(~"/", Segments).
