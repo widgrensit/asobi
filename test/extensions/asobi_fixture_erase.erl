@@ -37,7 +37,13 @@ outcome(Name, Outcome) ->
         end,
     persistent_term:put(?OUTCOMES, maps:put(Name, Outcome, Current)).
 
--spec run(atom(), binary()) -> ok | {error, term()}.
+%% `term()`, not `ok | {error, _}`: this fixture exists to hand core values
+%% that are OUTSIDE the erase contract, so that core's own validation can be
+%% tested. asobi_extension_erase_tests configures `other` and asserts core
+%% answers `{bad_return, other}`. Narrowing the return here turned that into a
+%% case_clause inside the fixture - the trap docs/eqwalizer-idioms.md warns
+%% about, met in the wild.
+-spec run(atom(), binary()) -> term().
 run(Name, PlayerId) ->
     Calls =
         case persistent_term:get(?CALLS, []) of
@@ -50,6 +56,5 @@ run(Name, PlayerId) ->
         end,
     case maps:get(Name, Outcomes, ok) of
         {raise, Reason} -> error(Reason);
-        ok -> ok;
-        {error, _} = Error -> Error
+        Outcome -> Outcome
     end.

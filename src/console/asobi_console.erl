@@ -319,22 +319,31 @@ read_assets(Dir, Names) ->
 read_assets(_Dir, [], Acc) ->
     {ok, Acc};
 read_assets(Dir, [Name | Rest], Acc) ->
-    case read_asset(Dir, Name, {ok, Acc}) of
+    case read_asset(Dir, Name, Acc) of
         {ok, Next} -> read_assets(Dir, Rest, Next);
         {error, _} = Error -> Error
     end.
 
--spec read_asset(file:filename_all(), binary(), {ok, map()} | {error, problem()}) ->
-    {ok, map()} | {error, problem()}.
-read_asset(_Dir, _Name, {error, _} = Error) ->
-    Error;
-read_asset(Dir, Name, {ok, Acc}) ->
+%% Takes the accumulator itself rather than a `{ok, _} | {error, _}`: the fold
+%% this replaced threaded the error through every remaining element, and
+%% read_assets/3 short-circuits instead. Dialyzer caught the leftover clause.
+-spec read_asset(file:filename_all(), binary(), #{binary() => asset()}) ->
+    {ok, #{binary() => asset()}} | {error, problem()}.
+read_asset(Dir, Name, Acc) ->
     Path = filename:join([Dir, ~"assets", Name]),
     case file:read_file(Path) of
         {ok, Body} ->
-            {ok, Acc#{
-                Name => #{body => Body, mime => mime(Name), etag => etag(Body)}
-            }};
+            %% name/1 already refuses a name whose extension has no mime, so
+            %% this restates an invariant rather than adding a check. Worth
+            %% restating: asset()'s mime is a binary, and the controller puts
+            %% it straight into a content-type header, so the atom `error`
+            %% reaching here would be a malformed response rather than a crash.
+            case mime(Name) of
+                Mime when is_binary(Mime) ->
+                    {ok, Acc#{Name => #{body => Body, mime => Mime, etag => etag(Body)}}};
+                error ->
+                    {error, {asset_unreadable, Name, unknown_media_type}}
+            end;
         {error, Reason} ->
             {error, {asset_unreadable, Name, Reason}}
     end.

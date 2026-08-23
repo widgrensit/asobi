@@ -38,7 +38,13 @@ reset() ->
 
 -spec calls() -> [term()].
 calls() ->
-    lists:reverse(persistent_term:get(?KEY, [])).
+    case persistent_term:get(?KEY, []) of
+        Calls when is_list(Calls) -> lists:reverse(Calls)
+    end.
 
 record(Call) ->
-    persistent_term:put(?KEY, [Call | persistent_term:get(?KEY, [])]).
+    Calls =
+        case persistent_term:get(?KEY, []) of
+            L when is_list(L) -> L
+        end,
+    persistent_term:put(?KEY, [Call | Calls]).

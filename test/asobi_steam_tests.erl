@@ -82,8 +82,8 @@ outbound_call_sets_tls_options() ->
     _ = asobi_steam:validate_ticket(~"deadbeef"),
     receive
         {opts, Opts} ->
-            {ssl, Ssl} = lists:keyfind(ssl, 1, Opts),
-            ?assertEqual(verify_peer, proplists:get_value(verify, Ssl))
+            [Ssl] = [V || {K, V} <- Opts, K =:= ssl, is_list(V)],
+            ?assertEqual([verify_peer], [V || {K, V} <- Ssl, K =:= verify])
     after 1000 -> ?assert(false)
     end.
 

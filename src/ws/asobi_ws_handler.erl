@@ -533,7 +533,8 @@ log_unhandled_info(Info) ->
                 event => ws_unhandled_info,
                 tag => Tag,
                 suppressed_since_last => DroppedSinceLastLog
-            });
+            }),
+            ok;
         false ->
             ok
     end.
@@ -547,12 +548,19 @@ unhandled_tag(Info) -> plain_tag(Info).
 
 -spec plain_tag(term()) -> atom().
 plain_tag(Tag) when is_atom(Tag) -> Tag;
-plain_tag(Tuple) when is_tuple(Tuple), tuple_size(Tuple) > 0, is_atom(element(1, Tuple)) ->
-    element(1, Tuple);
+plain_tag(Tuple) when is_tuple(Tuple), tuple_size(Tuple) > 0 ->
+    case erlang:element(1, Tuple) of
+        Tag when is_atom(Tag) -> Tag;
+        _ -> unknown
+    end;
 plain_tag(_) ->
     unknown.
 
--spec terminate(term(), term(), map()) -> ok.
+%% `term()` for the state, not `map()`: the second clause below exists so that
+%% a shape terminate/3 was never designed for cannot crash the process on the
+%% way out, and asobi_ws_handler_tests asserts it. The narrower spec described
+%% the first clause rather than the function.
+-spec terminate(term(), term(), term()) -> ok.
 %% Decrements the connection gauge ONLY if this process incremented it, which is
 %% not every process that reaches here.
 %%
@@ -580,8 +588,8 @@ terminate(_Reason, _Req, State) when is_map(State) ->
     end,
     session_disconnected(State),
     case maps:get(session, State, undefined) of
-        undefined -> ok;
-        SessionPid -> asobi_player_session:stop(SessionPid)
+        SessionPid when is_pid(SessionPid) -> asobi_player_session:stop(SessionPid);
+        _ -> ok
     end,
     ok;
 terminate(_Reason, _Req, _State) ->

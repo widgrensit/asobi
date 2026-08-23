@@ -45,7 +45,10 @@ enumeration_is_grouped_and_capped() ->
     expect_groups([]),
     meck:reset(asobi_repo),
     {ok, _} = asobi_leaderboards:boards(),
-    [{_, {asobi_repo, all, [Query]}, _}] = meck:history(asobi_repo),
+    [Query] = [
+        Q
+     || {_, {asobi_repo, all, [Q]}, _} <- meck:history(asobi_repo), is_record(Q, kura_query)
+    ],
     ?assertEqual([leaderboard_id], Query#kura_query.group_bys),
     ?assertEqual([{leaderboard_id, asc}], Query#kura_query.order_bys),
     ?assertEqual(1000, Query#kura_query.limit).
@@ -141,7 +144,10 @@ entries_default_order_is_the_board_order_test() ->
 entries_rank_window_matches_the_board_order_test() ->
     {ok, Query} = asobi_ops_leaderboards:entries_query(~"arena", #{}),
     {exprs, Exprs} = Query#kura_query.select,
-    {rank, {over, row_number, #{order_by := WindowOrder}}} = lists:keyfind(rank, 1, Exprs),
+    [#{order_by := WindowOrder}] = [
+        W
+     || {rank, {over, row_number, W}} <- Exprs, is_map(W)
+    ],
     ?assertEqual(asobi_leaderboards:board_order(), WindowOrder),
     ?assertEqual(WindowOrder, Query#kura_query.order_bys).
 
