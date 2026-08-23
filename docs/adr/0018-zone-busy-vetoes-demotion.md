@@ -4,13 +4,17 @@ Date: 2026-08-22
 
 ## Status
 
-**Accepted, and shipped.** Takes the decision
-`docs/adr/0016-idle-zones-tick-at-the-cold-divisor.md` names as "a later
-decision, deliberately not taken here". ADR 0016 stands: this closes the gap its
-Consequences record, it does not reverse it.
+**Superseded by `docs/adr/0019-zone-tick-returns-whether-it-is-busy.md`.**
 
-Recorded because it adds an optional behaviour callback, which ADR 0000 names as
-ADR-worthy.
+The decision below is right about the problem and wrong about the mechanism.
+Its cost argument - "one table read is affordable; a second callback is the
+disease" - rested on `luerl:get_table_key/3` being a raw read. It is not: an
+absent key on a table with an `__index` runs the metamethod inline on the zone
+process, unbudgeted, and `_keep_hot` was absent from almost every zone state.
+ADR 0019 removes the read rather than making it safe, and records the rest.
+
+Retained as the record of why the veto exists at all, and of a premise worth not
+re-deriving.
 
 ## Context
 

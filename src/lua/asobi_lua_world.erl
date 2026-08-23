@@ -46,7 +46,6 @@ of hot reloads.
 
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, handle_input_batch/2, handle_effects/2, post_tick/2]).
--export([zone_busy/1]).
 -ifdef(TEST).
 -export([zone_ctx/2, make_ctx/1]).
 -endif.
@@ -208,7 +207,7 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 %% exactly the write/read split here.
 -define(TEMPLATES_KEY, known).
 
--spec zone_tick(map(), term()) -> {map(), term()}.
+-spec zone_tick(map(), term()) -> {map(), term()} | {map(), term(), boolean()}.
 zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Pick up any lua_state updates that handle_input stashed earlier this
     %% tick. The dev-error rate-limit stamp must ride along too: asobi_zone's
@@ -266,6 +265,9 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                         zone_tick, [EncEntities, GS], LuaSt1, ?TICK_TIMEOUT
                     )
                 of
+                    {ok, [Ents1, ZS1, Busy | _], LuaSt2} ->
+                        Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
+                        {Ents2, ZoneState#{lua_state => LuaSt2, game_state => ZS1}, truthy(Busy)};
                     {ok, [Ents1, ZS1 | _], LuaSt2} ->
                         Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
                         {Ents2, ZoneState#{lua_state => LuaSt2, game_state => ZS1}};
@@ -277,11 +279,22 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                         {Entities, ZoneState}
                 end
         end,
-    {_, NewZoneState} = Result,
-    erlang:put(?PD_KEY, NewZoneState),
+    erlang:put(?PD_KEY, result_zone_state(Result)),
     Result;
 zone_tick(Entities, ZoneState) ->
     {Entities, ZoneState}.
+
+result_zone_state({_Entities, ZoneState}) -> ZoneState;
+result_zone_state({_Entities, ZoneState, _Busy}) -> ZoneState.
+
+%% Lua truthiness, not Erlang's: `nil` and `false` are the only falsey values, so
+%% `return entities, zone_state, wave_countdown > 0` works and so does returning
+%% a number. Reading a bare returned value can run no metamethod, which is the
+%% whole reason this is a return value and not a field - see asobi_zone's
+%% zone_tick_result/2.
+truthy(nil) -> false;
+truthy(false) -> false;
+truthy(_) -> true.
 
 -doc """
 Delegates to the script's `handle_input`.
@@ -331,43 +344,6 @@ handle_input(PlayerId, Input, Entities) ->
         _ ->
             {ok, Entities}
     end.
-
--doc """
-Reads the script's `_keep_hot` veto off the zone's `game_state`.
-
-A field rather than a callback, deliberately. asobi consults this whenever it
-believes a zone is idle, and on a hot zone that is every tick - so a `zone_busy`
-Lua *function* would put one extra marshalled callback per tick on exactly the
-zones widgrensit/asobi#543 is about, to decide whether to skip a callback. One
-table read is affordable; a second callback is the disease.
-
-`_keep_hot` joins `_finished`, `_result` and `_vote` as a field a script sets on
-its state to tell asobi something (`check_post_tick_result/2`).
-
-```lua
-function zone_tick(entities, zone_state)
-  zone_state.next_wave = zone_state.next_wave - 1
-  zone_state._keep_hot = zone_state.next_wave > 0   -- still counting down
-  return entities, zone_state
-end
-```
-
-Anything other than a literal `true` reads as "not busy", so a script that never
-sets it demotes exactly as before.
-""".
--spec zone_busy(term()) -> boolean().
-zone_busy(#{lua_state := LuaSt, game_state := GS}) when GS =/= nil, GS =/= undefined ->
-    try asobi_lua_loader:get_table_key(GS, ~"_keep_hot", LuaSt) of
-        {ok, true, _} -> true;
-        _ -> false
-    catch
-        %% A game_state that is not a table at all. asobi_zone treats a raise as
-        %% "keep the zone hot", which would latch every such world to full rate,
-        %% so answer it here instead: a script with no table has no veto.
-        _:_ -> false
-    end;
-zone_busy(_ZoneState) ->
-    false.
 
 -doc """
 Delegates a tick's cross-zone effects to the script's `handle_effects`.

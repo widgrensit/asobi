@@ -1158,36 +1158,56 @@ with_every_tick_polling(Fun) ->
 
 %% widgrensit/asobi#543 follow-up: a script counting down between waves holds no
 %% entities, so asobi's own bookkeeping calls the zone idle and demotes it to a
-%% tenth of the tick rate. `_keep_hot` is how the script says otherwise - a field
-%% rather than a callback, because asobi asks on every idle tick.
-keep_hot_vetoes_demotion_test() ->
+%% tenth of the tick rate. The third return value from `zone_tick` is how the
+%% script says otherwise - a returned value rather than a field, because reading
+%% a field is a Luerl read that can run an `__index` metamethod on the zone
+%% process with no budget.
+third_return_value_vetoes_demotion_test() ->
     Script = fixture("keep_hot_world.lua"),
     Config = #{game_config => #{lua_script => Script}},
     ZoneState = asobi_lua_world:init_zone_state(Config, #{}),
     erlang:erase({asobi_lua_world, zone_state}),
     %% next_wave: 3 -> 2 -> 1 -> 0, so the veto holds for two ticks and lifts.
-    {_, ZS1} = asobi_lua_world:zone_tick(#{}, ZoneState),
-    ?assert(asobi_lua_world:zone_busy(ZS1)),
-    {_, ZS2} = asobi_lua_world:zone_tick(#{}, ZS1),
-    ?assert(asobi_lua_world:zone_busy(ZS2)),
-    {_, ZS3} = asobi_lua_world:zone_tick(#{}, ZS2),
-    ?assertNot(asobi_lua_world:zone_busy(ZS3)),
+    {_, ZS1, Busy1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ?assert(Busy1),
+    {_, ZS2, Busy2} = asobi_lua_world:zone_tick(#{}, ZS1),
+    ?assert(Busy2),
+    ?assertMatch({_, _, false}, asobi_lua_world:zone_tick(#{}, ZS2)),
     erlang:erase({asobi_lua_world, zone_state}).
 
-%% A script that never sets the field demotes exactly as it did before.
-no_keep_hot_field_is_not_busy_test() ->
+%% A script returning two values gets the two-tuple it always did.
+two_return_values_stay_a_two_tuple_test() ->
     Script = fixture("config_move_world.lua"),
     Config = #{game_config => #{lua_script => Script}},
     {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
     ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
     erlang:erase({asobi_lua_world, zone_state}),
-    {_, ZS1} = asobi_lua_world:zone_tick(#{}, ZoneState),
-    ?assertNot(asobi_lua_world:zone_busy(ZS1)),
+    ?assertMatch({_, _}, asobi_lua_world:zone_tick(#{}, ZoneState)),
     erlang:erase({asobi_lua_world, zone_state}).
 
-%% No lua_state and no game_state: the bridge must answer, not raise, because
-%% asobi_zone treats a raise as "keep hot" and would latch the zone to full rate.
-zone_busy_without_a_bridge_state_test() ->
-    ?assertNot(asobi_lua_world:zone_busy(#{})),
-    ?assertNot(asobi_lua_world:zone_busy(#{lua_state => undefined, game_state => nil})),
-    ?assertNot(asobi_lua_world:zone_busy(not_a_map)).
+%% Lua truthiness, not Erlang's: a countdown returning a number is the natural
+%% thing to write, and `_keep_hot = 1` reading as "not busy" was the silent
+%% failure this replaced.
+lua_truthiness_decides_busy_test() ->
+    Script = fixture("truthy_busy_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    ZoneState = asobi_lua_world:init_zone_state(Config, #{}),
+    erlang:erase({asobi_lua_world, zone_state}),
+    ?assertMatch({_, _, true}, asobi_lua_world:zone_tick(#{}, ZoneState)),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% The bug this design removes: a zone_state carrying an __index metamethod used
+%% to run that metamethod inline on the zone process, unbudgeted, because the
+%% veto was read as an absent table key. A returned value reads nothing.
+hostile_metatable_cannot_run_on_the_zone_test() ->
+    Script = fixture("metatable_zone_state.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    ZoneState = asobi_lua_world:init_zone_state(Config, #{}),
+    erlang:erase({asobi_lua_world, zone_state}),
+    {Us, Result} = timer:tc(fun() -> asobi_lua_world:zone_tick(#{}, ZoneState) end),
+    %% Two-tuple: the script returned no third value, and asobi read no key off
+    %% the zone state to find one out.
+    ?assertMatch({_, _}, Result),
+    %% The metamethod burns ~2e6 iterations if anything invokes it.
+    ?assert(Us < 200_000),
+    erlang:erase({asobi_lua_world, zone_state}).
