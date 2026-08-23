@@ -120,8 +120,8 @@ auth(Token) when is_binary(Token) ->
 %% --- Group API ---
 
 show_group(Config) ->
-    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
-    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    GroupId = cfg(group_id, Config),
+    Token = cfg(player1_token, Config),
     true = is_binary(GroupId),
     true = is_binary(Token),
     {ok, Resp} = nova_test:get(
@@ -135,7 +135,7 @@ show_group(Config) ->
     Config.
 
 show_group_not_found(Config) ->
-    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    Token = cfg(player1_token, Config),
     true = is_binary(Token),
     {ok, Resp} = nova_test:get(
         "/api/v1/groups/00000000-0000-0000-0000-000000000000",
@@ -146,8 +146,8 @@ show_group_not_found(Config) ->
     Config.
 
 leave_group(Config) ->
-    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
-    {player2_token, Token} = lists:keyfind(player2_token, 1, Config),
+    GroupId = cfg(group_id, Config),
+    Token = cfg(player2_token, Config),
     true = is_binary(GroupId),
     true = is_binary(Token),
     {ok, Resp} = nova_test:post(
@@ -160,8 +160,8 @@ leave_group(Config) ->
     Config.
 
 leave_group_not_member(Config) ->
-    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
-    {player2_token, Token} = lists:keyfind(player2_token, 1, Config),
+    GroupId = cfg(group_id, Config),
+    Token = cfg(player2_token, Config),
     true = is_binary(GroupId),
     true = is_binary(Token),
     {ok, Resp} = nova_test:post(
@@ -177,7 +177,7 @@ leave_group_not_member(Config) ->
 %% F-10: arbitrary channel ids that don't correspond to a group the
 %% requester is a member of must return 403, not leak history.
 chat_history_unauthorized_arbitrary_channel(Config) ->
-    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    Token = cfg(player1_token, Config),
     true = is_binary(Token),
     {ok, Resp} = nova_test:get(
         "/api/v1/chat/nonexistent_channel/history",
@@ -188,8 +188,8 @@ chat_history_unauthorized_arbitrary_channel(Config) ->
     Config.
 
 chat_history_with_messages(Config) ->
-    {channel_id, ChannelId} = lists:keyfind(channel_id, 1, Config),
-    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
+    ChannelId = cfg(channel_id, Config),
+    Token = cfg(player1_token, Config),
     true = is_binary(ChannelId),
     true = is_binary(Token),
     {ok, Resp} = nova_test:get(
@@ -206,8 +206,8 @@ chat_history_with_messages(Config) ->
 %% F-10: a player who is not a member of the group MUST not be able to
 %% read its chat history.
 chat_history_non_member_forbidden(Config) ->
-    {channel_id, ChannelId} = lists:keyfind(channel_id, 1, Config),
-    {player3_token, Token} = lists:keyfind(player3_token, 1, Config),
+    ChannelId = cfg(channel_id, Config),
+    Token = cfg(player3_token, Config),
     true = is_binary(ChannelId),
     true = is_binary(Token),
     {ok, Resp} = nova_test:get(
@@ -218,11 +218,19 @@ chat_history_non_member_forbidden(Config) ->
     ?assertStatus(403, Resp),
     Config.
 
+%% CT's config is a [tuple()] of term() values, so a lists:keyfind/3 result
+%% cannot be typed and every id or token read out of it widened. One accessor
+%% instead of twenty-four keyfinds. See docs/eqwalizer-idioms.md.
+-spec cfg(atom(), [tuple()]) -> binary().
+cfg(Key, Config) ->
+    [Value | _] = [V || {K, V} <- Config, K =:= Key, is_binary(V)],
+    Value.
+
 %% F-10: DM channels (`dm:A:B`) must only be readable by A or B.
 chat_history_dm_non_participant_forbidden(Config) ->
-    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
-    {player2_id, P2Id} = lists:keyfind(player2_id, 1, Config),
-    {player3_token, EavesdropToken} = lists:keyfind(player3_token, 1, Config),
+    P1Id = cfg(player1_id, Config),
+    P2Id = cfg(player2_id, Config),
+    EavesdropToken = cfg(player3_token, Config),
     DmChannel = asobi_dm:channel_id(P1Id, P2Id),
     true = is_binary(DmChannel),
     {ok, Resp} = nova_test:get(
@@ -234,9 +242,9 @@ chat_history_dm_non_participant_forbidden(Config) ->
     Config.
 
 chat_history_dm_participant_allowed(Config) ->
-    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
-    {player1_token, Token} = lists:keyfind(player1_token, 1, Config),
-    {player2_id, P2Id} = lists:keyfind(player2_id, 1, Config),
+    P1Id = cfg(player1_id, Config),
+    Token = cfg(player1_token, Config),
+    P2Id = cfg(player2_id, Config),
     DmChannel = asobi_dm:channel_id(P1Id, P2Id),
     {ok, Resp} = nova_test:get(
         "/api/v1/chat/" ++ binary_to_list(DmChannel) ++ "/history",
@@ -256,8 +264,8 @@ chat_history_dm_participant_allowed(Config) ->
 %% the earlier `leave_group` test case, and both groups share init_per_suite
 %% fixtures, so player1 is the only membership guaranteed still live here.
 room_channel_member_authorized(Config) ->
-    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
-    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
+    GroupId = cfg(group_id, Config),
+    P1Id = cfg(player1_id, Config),
     RoomChannel = <<"room:", GroupId/binary>>,
     ?assert(asobi_chat_acl:authorized(RoomChannel, P1Id)),
     Config.
@@ -265,8 +273,8 @@ room_channel_member_authorized(Config) ->
 %% Regression for #295: a non-member must still be rejected once the
 %% `room:` prefix is stripped correctly (closed by default).
 room_channel_non_member_rejected(Config) ->
-    {group_id, GroupId} = lists:keyfind(group_id, 1, Config),
-    {player3_id, P3Id} = lists:keyfind(player3_id, 1, Config),
+    GroupId = cfg(group_id, Config),
+    P3Id = cfg(player3_id, Config),
     RoomChannel = <<"room:", GroupId/binary>>,
     ?assertNot(asobi_chat_acl:authorized(RoomChannel, P3Id)),
     Config.
@@ -275,7 +283,7 @@ room_channel_non_member_rejected(Config) ->
 %% no group must be denied, not merely fall through to an empty membership
 %% lookup by coincidence.
 room_channel_nonexistent_group_denied(Config) ->
-    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
+    P1Id = cfg(player1_id, Config),
     Ghost = asobi_id:generate(),
     ?assertNot(asobi_chat_acl:authorized(<<"room:", Ghost/binary>>, P1Id)),
     Config.
@@ -284,7 +292,7 @@ room_channel_nonexistent_group_denied(Config) ->
 %% empty, or carrying injection-shaped garbage) must be denied outright by
 %% classify/1's uuid-shape check rather than reaching the DB query.
 room_channel_malformed_group_id_denied(Config) ->
-    {player1_id, P1Id} = lists:keyfind(player1_id, 1, Config),
+    P1Id = cfg(player1_id, Config),
     [
         ?assertNot(asobi_chat_acl:authorized(C, P1Id))
      || C <- [~"room:abc", ~"room:", ~"room:' OR 1=1 --"]
