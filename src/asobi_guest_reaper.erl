@@ -106,7 +106,8 @@ cached_unlinked_count() ->
                 %% asobi_guest_SUITE asserts a failing count is asked once per
                 %% TTL, not once per call. is_integer/1 alone rejected it and
                 %% re-queried every time.
-                [{count, N, Expiry}] when Expiry > Now, is_integer(N) orelse N =:= unknown -> N;
+                [{count, N, Expiry}] when Expiry > Now, is_integer(N), N >= 0 -> N;
+                [{count, unknown, Expiry}] when Expiry > Now -> unknown;
                 _ -> refresh_count(Now)
             end
     end.

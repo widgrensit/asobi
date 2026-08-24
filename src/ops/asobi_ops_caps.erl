@@ -25,7 +25,7 @@ A route with no entry in `classes/0` has no class and `authorised/2` denies
 it, so an untagged or mis-mounted route is closed rather than open.
 """.
 
--export([classes/0, class/2, authorised/2, class_names/0]).
+-export([classes/0, class/2, authorised/2, class_names/0, class_of/1]).
 
 -type class() :: read | player_data | config | erasure.
 -type segment() :: binary() | '_'.
@@ -96,6 +96,21 @@ authorised(Class, Caps) -> lists:member(Class, Caps).
 -spec class_names() -> [class()].
 class_names() ->
     [read, player_data, config, erasure].
+
+-doc """
+Narrow an untrusted term to a capability class, or refuse it.
+
+Exported so a consumer does not keep a second copy of the class list. A copy
+drifts the moment a class is added, and it drifts silently: the new class
+passes validation wherever it is minted and is then dropped here, which is the
+403-far-from-the-cause that asobi_ops_token:caps/1 exists to avoid.
+""".
+-spec class_of(term()) -> {ok, class()} | error.
+class_of(Term) ->
+    case [C || C <- class_names(), C =:= Term] of
+        [Class | _] -> {ok, Class};
+        [] -> error
+    end.
 
 -spec lookup(atom(), [binary()]) -> class() | undefined.
 lookup(undefined, _Segments) ->

@@ -204,7 +204,13 @@ handle_cast({evict, PlayerId}, #{table := Table, player_index := Idx, dirty := D
         [{PlayerId, Score}] when is_number(Score) ->
             ets:delete(Table, {-Score, PlayerId}),
             ets:delete(Idx, PlayerId);
-        _ ->
+        [{PlayerId, _Unusable}] ->
+            %% Unreachable today - both writers guard is_number - but this is
+            %% the erasure path (asobi_player_erase), and a board never re-reads
+            %% Postgres, so leaving the row would keep serving an erased player
+            %% from top/rank/around indefinitely.
+            ets:delete(Idx, PlayerId);
+        [] ->
             ok
     end,
     %% Unconditionally, even when the board never held them: `dirty` and the

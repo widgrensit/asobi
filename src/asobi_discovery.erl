@@ -68,6 +68,9 @@ The table is owned and written by `asobi_world_lobby_server`; reads are
 direct (the table is protected) so a browse costs no round-trip.
 `badarg` before the owner has started is a miss, not a crash.
 """.
+%% [map()] holds because asobi_world_lobby_server checks every element before
+%% it writes. Checking on the read instead would either drop a world from a
+%% browse silently or rebuild the list on every hit.
 -spec cache_lookup(term(), integer()) -> {hit, [map()]} | miss.
 cache_lookup(Key, Now) ->
     try ets:lookup(?LIST_CACHE_TAB, Key) of

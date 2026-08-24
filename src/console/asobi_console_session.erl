@@ -90,7 +90,9 @@ somewhere the operator never meant to - and an erasure is the one ops action
 no follow-up call can undo. Same secret, different blast radius, different
 default. Set `console_erasure` to `true` to erase from the console anyway.
 """.
--spec create(binary()) -> {ok, session()}.
+%% term(), because label/1 normalises every shape a caller can hand it. The
+%% controller used to re-implement that check; one normaliser is enough.
+-spec create(term()) -> {ok, session()}.
 create(Label) ->
     create(Label, console_caps(), erlang:system_time(second) + ttl_seconds()).
 
@@ -114,7 +116,7 @@ Nothing is subtracted here, unlike `create/1`: a minted token carries exactly
 the classes the control plane decided to mint, and second-guessing that would
 put the decision in two places.
 """.
--spec create(binary(), [asobi_ops_caps:class()], integer()) -> {ok, session()}.
+-spec create(term(), [asobi_ops_caps:class()], integer()) -> {ok, session()}.
 create(Label, Caps, NotAfter) ->
     %% gen_server:call/2 answers term(). See docs/eqwalizer-idioms.md.
     case gen_server:call(?MODULE, {create, label(Label), Caps, NotAfter}) of
@@ -198,7 +200,7 @@ ttl_seconds() ->
 -spec clamp(integer(), pos_integer(), pos_integer()) -> pos_integer().
 clamp(V, Lo, _Hi) when V < Lo -> Lo;
 clamp(V, _Lo, Hi) when V > Hi -> Hi;
-clamp(V, Lo, _Hi) when V >= Lo -> V.
+clamp(V, _Lo, _Hi) -> V.
 
 -spec init([]) -> {ok, #{}}.
 init([]) ->
@@ -325,11 +327,15 @@ constant_equal(Expected, Presented) ->
 %% checker cannot see through. See docs/eqwalizer-idioms.md.
 -spec caps([term()]) -> [asobi_ops_caps:class()].
 caps(Caps) ->
-    [C || C <- Caps, C =:= read orelse C =:= player_data orelse C =:= config orelse C =:= erasure].
+    [Class || Cap <- Caps, {ok, Class} <- [asobi_ops_caps:class_of(Cap)]].
 
 -spec secret() -> binary().
 secret() ->
-    case persistent_term:get(?SECRET_KEY, <<>>) of
+    %% No default. A session cannot exist without the secret that derives its
+    %% CSRF token, and an empty key makes that token publicly computable from
+    %% the session id - which is exactly what this module's second layer is
+    %% supposed to prevent.
+    case persistent_term:get(?SECRET_KEY) of
         Secret when is_binary(Secret) -> Secret
     end.
 

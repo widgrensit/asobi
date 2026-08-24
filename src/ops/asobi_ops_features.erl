@@ -34,7 +34,7 @@ It stays in the list so a console rendering against a stripped custom release
 still gets an answer rather than an absent key.
 """.
 
--export([features/0, extensions/0, capabilities/0]).
+-export([features/0, extensions/0, capabilities/0, vsn_binary/1]).
 
 -spec features() -> map().
 features() ->
@@ -103,15 +103,28 @@ ships_console(App) ->
 -spec app_version(atom()) -> binary().
 app_version(App) ->
     case application:get_key(App, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary([C || C <- Vsn, is_integer(C)]);
+        {ok, Vsn} when is_list(Vsn) -> vsn_binary(Vsn);
         _ -> ~"unknown"
+    end.
+
+%% A vsn is whatever the .app file holds, so an iolist like ["1.0", ".0"] is
+%% legitimate and must still render as "1.0.0". Filtering the list for integers
+%% would silently truncate it; application:get_key/2 is a boundary, so the
+%% conversion is made total instead. See docs/eqwalizer-idioms.md.
+-spec vsn_binary(dynamic()) -> binary().
+vsn_binary(Vsn) ->
+    try unicode:characters_to_binary(Vsn) of
+        Binary when is_binary(Binary) -> Binary;
+        _ -> ~"unknown"
+    catch
+        _:_ -> ~"unknown"
     end.
 
 -doc "Core capabilities, sorted by name so the response is stable.".
 -spec capabilities() -> [#{name := binary(), enabled := boolean()}].
 capabilities() ->
     [
-        #{name => Name, enabled => Enabled}
+        #{name => Name, enabled => Enabled =:= true}
      || {Name, Enabled} <- lists:sort([
             {~"clustering", configured(cluster)},
             {~"guest_auth", asobi_guest_controller:enabled()},
@@ -124,17 +137,17 @@ capabilities() ->
             {~"storage", asobi_storage:enabled()},
             {~"worlds", any_mode(fun is_world_mode/1)}
         ]),
-        %% lists:sort/1 widens the pairs to term(). See
-        %% docs/eqwalizer-idioms.md; nothing is dropped, the list above is a
-        %% literal of {binary(), boolean()}.
-        is_binary(Name),
-        is_boolean(Enabled)
+        %% lists:sort/1 widens the pairs to term(). The keys are literals; the
+        %% values are ten calls, so `enabled` is normalised rather than
+        %% filtered - a capability that answered oddly should report false on
+        %% this diagnostic surface, not vanish from it.
+        is_binary(Name)
     ].
 
 -spec version() -> binary().
 version() ->
     case application:get_key(asobi, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary([C || C <- Vsn, is_integer(C)]);
+        {ok, Vsn} when is_list(Vsn) -> vsn_binary(Vsn);
         _ -> ~"unknown"
     end.
 

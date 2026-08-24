@@ -70,7 +70,21 @@ auth posture at runtime.
 -doc "The effective game modes: the script layer with the operator layer on top.".
 -spec modes() -> modes().
 modes() ->
-    maps:merge(env_modes(script_game_modes), env_modes(game_modes)).
+    %% Shadowed by the operator's DECLARED names, not by the entries this module
+    %% can use. Dropping a malformed operator entry before the merge would let
+    %% the bundle's definition of that mode go live, and the guarantee above is
+    %% that no bundle reload can redefine or drop an operator mode. A malformed
+    %% operator entry still wins, and still fails closed at mode_config/1.
+    Declared = declared_names(game_modes),
+    Script = maps:without(Declared, env_modes(script_game_modes)),
+    maps:merge(Script, env_modes(game_modes)).
+
+-spec declared_names(atom()) -> [binary()].
+declared_names(Key) ->
+    case application:get_env(asobi, Key, #{}) of
+        Modes when is_map(Modes) -> [K || K <- maps:keys(Modes), is_binary(K)];
+        _ -> []
+    end.
 
 -doc "The effective guest-auth flag: the operator's key when set, else the game's.".
 -spec guest_auth() -> boolean().

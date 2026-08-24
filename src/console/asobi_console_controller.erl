@@ -132,12 +132,12 @@ login(Req) ->
 authenticate(#{json := #{~"secret" := Secret} = Body} = Req) ->
     case asobi_ops_auth:verify_secret(Secret) of
         true ->
-            Label =
-                case maps:get(~"label", Body, ~"operator") of
-                    L when is_binary(L) -> L;
-                    _ -> ~"operator"
-                end,
-            {ok, Session} = asobi_console_session:create(Label),
+            %% asobi_console_session:label/1 already normalises every
+            %% non-binary, empty, over-long and non-printable label to
+            %% "operator"; a second copy here would only drift from it.
+            {ok, Session} = asobi_console_session:create(
+                maps:get(~"label", Body, ~"operator")
+            ),
             granted(Session, Req);
         false ->
             rejected(Req)
@@ -297,6 +297,6 @@ actor(#{display := Display, source := Source, caps := Caps, attested := Attested
 -spec version() -> binary().
 version() ->
     case application:get_key(asobi, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary([C || C <- Vsn, is_integer(C)]);
+        {ok, Vsn} when is_list(Vsn) -> asobi_ops_features:vsn_binary(Vsn);
         _ -> ~"unknown"
     end.

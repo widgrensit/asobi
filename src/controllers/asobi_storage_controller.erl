@@ -308,7 +308,12 @@ do_delete_storage(
         {error, Reason} ->
             log_storage_query_failed(Col, Key, Reason),
             {asobi_error, ~"storage.query_failed"}
-    end.
+    end;
+do_delete_storage(_Req) ->
+    %% Same reasoning as do_get_storage/1: a binding that is not a binary is not
+    %% a key this collection can hold, and guarded/2 does not catch, so without
+    %% this the guard above turns a 404 into a 500.
+    {asobi_error, ~"storage.not_found"}.
 
 -spec list_storage(cowboy_req:req()) -> response().
 list_storage(Req) ->
