@@ -33,9 +33,26 @@ seasons_is_no_longer_reserved_test() ->
     #{tables := Reserved} = asobi_extension_reserved:namespaces(),
     ?assertNot(lists:member(~"seasons", Reserved)),
     _ = application:load(asobi),
-    {ok, Modules} = application:get_key(asobi, modules),
+    Modules = app_key(modules),
     ?assertNot(lists:member(asobi_season, Modules)),
     ?assertNot(lists:member(asobi_season_manager, Modules)).
+
+%% application:get_key/2 answers {ok, term()}, and proplists:get_value/2 the
+%% same. Narrowed once here rather than at each read.
+%% See docs/eqwalizer-idioms.md.
+-spec app_key(atom()) -> [term()].
+app_key(Key) ->
+    {ok, Value} = application:get_key(asobi, Key),
+    case Value of
+        List when is_list(List) -> List
+    end.
+
+-spec env_list(atom()) -> [term()].
+env_list(Key) ->
+    case [V || {K, V} <- app_key(env), K =:= Key, is_list(V)] of
+        [List | _] -> List;
+        [] -> []
+    end.
 
 queues_come_from_core_shigoto_workers_test() ->
     #{queues := Reserved} = asobi_extension_reserved:namespaces(),
@@ -116,9 +133,7 @@ core_wire_prefixes_are_reserved_rpc_prefixes_test() ->
 %% Deleting this env key silently removes `rebar3 asobi check` from every host.
 the_build_time_gate_is_declared_to_rebar3_test() ->
     _ = application:load(asobi),
-    {ok, Env} = application:get_key(asobi, env),
-    Providers = proplists:get_value(providers, Env),
-    ?assert(lists:member(rebar3_asobi_check, Providers)),
+    ?assert(lists:member(rebar3_asobi_check, env_list(providers))),
     Exports = rebar3_asobi_check:module_info(exports),
     [?assert(lists:member(E, Exports)) || E <- [{init, 1}, {do, 1}, {format_error, 1}]].
 
@@ -126,8 +141,6 @@ the_build_time_gate_is_declared_to_rebar3_test() ->
 %% silently remove `rebar3 asobi console` the same way.
 the_console_builder_is_declared_to_rebar3_test() ->
     _ = application:load(asobi),
-    {ok, Env} = application:get_key(asobi, env),
-    Providers = proplists:get_value(providers, Env),
-    ?assert(lists:member(rebar3_asobi_console, Providers)),
+    ?assert(lists:member(rebar3_asobi_console, env_list(providers))),
     Exports = rebar3_asobi_console:module_info(exports),
     [?assert(lists:member(E, Exports)) || E <- [{init, 1}, {do, 1}, {format_error, 1}]].

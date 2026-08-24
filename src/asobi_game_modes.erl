@@ -179,12 +179,15 @@ what `asobi_chat_acl` authorises against.
 -spec global_chat_channels() -> [binary()].
 global_chat_channels() ->
     Modes = asobi_game_config:modes(),
-    lists:usort([
+    %% lists:usort/1 widens to [term()]; re-narrowed rather than replaced.
+    %% See docs/eqwalizer-idioms.md.
+    Names = [
         Name
      || Config <- maps:values(Modes),
         is_map(Config),
         Name <- asobi_world_chat:global_channels(maps:get(chat, Config, #{}))
-    ]).
+    ],
+    [N || N <- lists:usort(Names), is_binary(N)].
 
 -spec forward_optional(map(), [atom()], map()) -> map().
 forward_optional(_Src, [], Acc) ->

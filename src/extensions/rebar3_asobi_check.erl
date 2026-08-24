@@ -26,7 +26,13 @@ Core's reserved names come from the plugin's copy of asobi, which is the
 version in `project_plugins`. Pin it to the same tag as the dependency.
 """.
 
--behaviour(provider).
+%% No `-behaviour(provider).`: rebar3 dispatches a provider on its exported
+%% init/1, do/1 and format_error/1, not on the attribute, and the `provider`
+%% behaviour lives in rebar3 rather than in anything asobi depends on. Declaring
+%% it bought no callback checking - the module is simply absent - while making
+%% every type checker report a behaviour that does not exist. rebar.config
+%% already excludes both providers from dialyzer for the same reason, and
+%% asobi_extension_reserved_tests asserts the three exports are present.
 
 -export([init/1, do/1, format_error/1]).
 -ifdef(TEST).

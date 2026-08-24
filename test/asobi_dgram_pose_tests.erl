@@ -147,15 +147,21 @@ axial_covers_everything() ->
     Entities = maps:from_keys(Ids, pos(1.0, 2.0)),
     {ok, Slots} = asobi_wire_slots:sync(Entities, asobi_wire_slots:new()),
     #{period_ticks := Period} = M,
-    Seen = lists:foldl(
-        fun(Tick, Acc) ->
-            {Records, 0} = asobi_dgram_pose:records(#{}, Entities, Slots, M, Tick),
-            lists:foldl(fun(#{slot := S}, A) -> sets:add_element(S, A) end, Acc, Records)
-        end,
-        sets:new([{version, 2}]),
-        lists:seq(0, Period - 1)
-    ),
+    Slotted = [S || Tick <- lists:seq(0, Period - 1), S <- tick_slots(Entities, Slots, M, Tick)],
+    Seen = sets:from_list(Slotted, [{version, 2}]),
     ?assertEqual(40, sets:size(Seen)).
+
+%% A pattern in a GENERATOR is a filter, not a match: `{Records, 0} <- [...]`
+%% would silently skip a saturated tick, where the fold this replaced asserted
+%% on the count. asobi_dgram_pose treats saturation as something worth knowing
+%% before players report teleporting, so it stays a hard match.
+-spec tick_slots(map(), asobi_wire_slots:slots(), map(), non_neg_integer()) -> [integer()].
+tick_slots(Entities, Slots, M, Tick) ->
+    {Records, 0} = asobi_dgram_pose:records(#{}, Entities, Slots, M, Tick),
+    [slot_of(R) || R <- Records].
+
+-spec slot_of(map()) -> integer().
+slot_of(#{slot := S}) -> S.
 
 %% --- Edges ---
 

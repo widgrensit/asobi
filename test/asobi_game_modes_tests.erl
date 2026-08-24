@@ -114,10 +114,10 @@ setup_lua() ->
     Prev.
 
 cleanup_lua(Prev) ->
-    lists:foreach(
-        fun(Kind) -> ok = asobi_game_modes:unregister_game_mode(Kind) end,
-        [lua_world, lua_match, lua_match_shared]
-    ),
+    _ = [
+        ok = asobi_game_modes:unregister_game_mode(Kind)
+     || Kind <- [lua_world, lua_match, lua_match_shared]
+    ],
     cleanup(Prev).
 
 lua_without_provider() ->

@@ -113,7 +113,8 @@ assert_preflight_ok(Path, #{status := Status} = Resp) ->
 
 -spec header(binary(), nova_test:response()) -> binary() | undefined.
 header(Name, #{headers := Headers}) ->
-    case lists:keyfind(binary_to_list(Name), 1, Headers) of
-        {_, Value} -> list_to_binary(Value);
-        false -> undefined
+    Wanted = binary_to_list(Name),
+    case [V || {K, V} <- Headers, K =:= Wanted, is_list(V)] of
+        [Value | _] -> list_to_binary(Value);
+        [] -> undefined
     end.

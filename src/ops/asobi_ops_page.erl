@@ -67,8 +67,21 @@ slice(Rows, Orders, #{limit := Limit, offset := Offset}, Project) when
     is_integer(Limit), Limit > 0, is_integer(Offset), Offset >= 0
 ->
     Total = length(Rows),
-    Sorted = lists:sort(fun(A, B) -> precedes(Orders, A, B) end, Rows),
-    Window = lists:sublist(lists:nthtail(min(Offset, Total), Sorted), Limit),
+    %% lists:sort/2 erases the element type; the comprehension restores it and
+    %% drops nothing, since Rows is already [map()].
+    %% See docs/eqwalizer-idioms.md.
+    Sorted = [
+        R
+     || R <- lists:sort(
+            fun
+                (A, B) when is_map(A), is_map(B) -> precedes(Orders, A, B);
+                (_A, _B) -> false
+            end,
+            Rows
+        ),
+        is_map(R)
+    ],
+    Window = [W || W <- lists:sublist(lists:nthtail(min(Offset, Total), Sorted), Limit), is_map(W)],
     #{
         data => [Project(Row) || Row <- Window],
         page => #{limit => Limit, offset => Offset, total => Total}

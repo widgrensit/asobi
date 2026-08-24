@@ -657,7 +657,7 @@ an_unsatisfiable_requires_is_refused() ->
     tunable(#{requires => [does_not_exist]}),
     Problems = check_problems(),
     ?assert(lists:member({unsatisfied_requirement, ?TUNABLE, does_not_exist}, Problems)),
-    Text = iolist_to_binary(lists:join(~" ", asobi_extensions:describe(Problems))),
+    Text = asobi_test_helpers:binary_join(~" ", asobi_extensions:describe(Problems)),
     ?assertNotEqual(nomatch, binary:match(Text, atom_to_binary(?TUNABLE, utf8))),
     ?assertNotEqual(nomatch, binary:match(Text, ~"does_not_exist")),
     ?assertError({asobi_extensions, _}, asobi_extensions:resolve()).
@@ -697,7 +697,7 @@ a_self_requirement_is_named_as_such() ->
     Problems = check_problems(),
     ?assert(lists:member({self_requirement, ?TUNABLE, economy}, Problems)),
     ?assertNot(lists:member({requirement_out_of_order, ?TUNABLE, economy}, Problems)),
-    Text = iolist_to_binary(lists:join(~" ", asobi_extensions:describe(Problems))),
+    Text = asobi_test_helpers:binary_join(~" ", asobi_extensions:describe(Problems)),
     ?assertNotEqual(nomatch, binary:match(Text, ~"itself")).
 
 %% A two-cycle terminates with a legible problem, not a loop. clans requires
@@ -766,7 +766,7 @@ check_problems() ->
 assert_conflict(Kind, Token) ->
     Problems = check_problems(),
     ?assert(lists:member({namespace_conflict, Kind, Token, ?QUESTS, ?TUNABLE}, Problems)),
-    Text = iolist_to_binary(lists:join(~" ", asobi_extensions:describe(Problems))),
+    Text = asobi_test_helpers:binary_join(~" ", asobi_extensions:describe(Problems)),
     ?assertNotEqual(nomatch, binary:match(Text, atom_to_binary(?QUESTS, utf8))),
     ?assertNotEqual(nomatch, binary:match(Text, atom_to_binary(?TUNABLE, utf8))),
     ?assertNotEqual(nomatch, binary:match(Text, Token)).

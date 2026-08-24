@@ -110,18 +110,17 @@ atom_field_names_encode_as_their_text_form_test() ->
 encode_never_produces_bytes_decode_rejects_test() ->
     Long = binary:copy(~"a", 300),
     Huge = binary:copy(~"b", 70_000),
-    Frames = [
-        frame([#{op => update, slot => 1, gen => 0, fields => #{Long => 1.0}}]),
-        frame([#{op => add, slot => 1, gen => 0, id => Long, fields => #{~"x" => 1.0}}]),
-        frame([#{op => update, slot => 1, gen => 0, fields => #{~"s" => Huge}}])
-    ],
+    BadField = frame([#{op => update, slot => 1, gen => 0, fields => #{Long => 1.0}}]),
+    BadId = frame([#{op => add, slot => 1, gen => 0, id => Long, fields => #{~"x" => 1.0}}]),
+    TooLarge = frame([#{op => update, slot => 1, gen => 0, fields => #{~"s" => Huge}}]),
+    Frames = [BadField, BadId, TooLarge],
     [
         ?assertMatch({ok, _}, asobi_wire:decode(Bin))
      || F <- Frames, {ok, Bin} <- [asobi_wire:encode(F)]
     ],
-    ?assertEqual({error, bad_field_name}, asobi_wire:encode(hd(Frames))),
-    ?assertEqual({error, bad_entity_id}, asobi_wire:encode(lists:nth(2, Frames))),
-    ?assertEqual({error, value_too_large}, asobi_wire:encode(lists:nth(3, Frames))).
+    ?assertEqual({error, bad_field_name}, asobi_wire:encode(BadField)),
+    ?assertEqual({error, bad_entity_id}, asobi_wire:encode(BadId)),
+    ?assertEqual({error, value_too_large}, asobi_wire:encode(TooLarge)).
 
 %% The boundaries are where they say they are: the dictionary and the id both
 %% count their length in one byte, and a string value in two.
@@ -189,26 +188,26 @@ length_limits_are_inclusive_test() ->
 %% CHARACTERS can be four times that in UTF-8 - so the check has to be on the
 %% rendered text rather than on the atom.
 atom_field_name_past_the_limit_refuses_the_frame_test() ->
-    Wide = list_to_atom(lists:duplicate(200, 16#4E2D)),
+    Wide = list_to_atom(repeat(16#4E2D, 200)),
     F = frame([#{op => update, slot => 1, gen => 0, fields => #{Wide => 1.0}}]),
     ?assert(byte_size(atom_to_binary(Wide, utf8)) > 255),
     ?assertEqual({error, bad_field_name}, asobi_wire:encode(F)),
     %% The boundary is where it says it is, on the rendered bytes: 85 three-byte
     %% characters is exactly 255, one ASCII character more is 256.
-    Exact = list_to_atom(lists:duplicate(85, 16#4E2D)),
+    Exact = list_to_atom(repeat(16#4E2D, 85)),
     ?assertEqual(255, byte_size(atom_to_binary(Exact, utf8))),
     ?assertMatch(
         {ok, _},
         asobi_wire:encode(frame([#{op => update, slot => 1, gen => 0, fields => #{Exact => 1.0}}]))
     ),
-    Over = list_to_atom(lists:duplicate(85, 16#4E2D) ++ "a"),
+    Over = list_to_atom(repeat(16#4E2D, 85) ++ "a"),
     ?assertEqual(256, byte_size(atom_to_binary(Over, utf8))),
     ?assertEqual(
         {error, bad_field_name},
         asobi_wire:encode(frame([#{op => update, slot => 1, gen => 0, fields => #{Over => 1.0}}]))
     ),
     %% ...and one that fits still encodes, so the bound is on length not on atoms.
-    Narrow = list_to_atom(lists:duplicate(80, 16#4E2D)),
+    Narrow = list_to_atom(repeat(16#4E2D, 80)),
     ?assertMatch(
         {ok, _},
         asobi_wire:encode(frame([#{op => update, slot => 1, gen => 0, fields => #{Narrow => 1.0}}]))
@@ -440,6 +439,13 @@ fixture_corpus_round_trips_test() ->
 
 %% --- Helpers ---
 
+%% lists:duplicate/2 widens to [term()], which is not a string(), and
+%% list_to_atom/1 wants one. See docs/eqwalizer-idioms.md.
+-spec repeat(char(), non_neg_integer()) -> string().
+repeat(_Char, 0) -> [];
+repeat(Char, N) -> [Char | repeat(Char, N - 1)].
+
+-spec frame([map()]) -> asobi_wire:frame().
 frame(Records) ->
     #{
         kind => sequenced,

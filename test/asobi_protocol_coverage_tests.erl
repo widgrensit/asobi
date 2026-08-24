@@ -302,7 +302,7 @@ scan_handled_inbound_types(Bin) ->
 scan_extension_frame_types(Bin) ->
     Re = "extension_frames\\(\\s*~\"([a-z][a-z._]*)\",\\s*~\"([a-z][a-z._]*)\"",
     case re:run(Bin, Re, [global, {capture, all_but_first, binary}]) of
-        {match, Matches} -> lists:append(Matches);
+        {match, Matches} -> [B || Group <- Matches, is_list(Group), B <- Group, is_binary(B)];
         nomatch -> []
     end.
 
@@ -424,8 +424,10 @@ guide_documents_the_reserved_event_names_test() ->
 scan_documented_reserved_names(Bin) ->
     Re = "BEGIN reserved-event-names.*?```\\s*(.*?)```",
     case re:run(Bin, Re, [dotall, {capture, all_but_first, binary}]) of
-        {match, [Block]} -> binary:split(Block, [~" ", ~"\n"], [global, trim_all]);
-        nomatch -> []
+        {match, [Block]} when is_binary(Block) ->
+            binary:split(Block, [~" ", ~"\n"], [global, trim_all]);
+        nomatch ->
+            []
     end.
 
 %% Every server->client frame family (the token before the first dot) must be a

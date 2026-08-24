@@ -71,7 +71,7 @@ world_event_non_ascii_name_is_rejected_and_logged_test() ->
 %% forwarded — same log-not-crash contract as the non-ASCII case.
 world_event_oversized_name_is_rejected_and_logged_test() ->
     ok = install_log_capture(),
-    TooLong = list_to_binary(lists:duplicate(65, $a)),
+    TooLong = binary:copy(~"a", 65),
     Msg = {asobi_message, {world_event, TooLong, #{}}},
     ?assertEqual({ok, #{}}, asobi_ws_handler:websocket_info(Msg, #{})),
     ?assertEqual(#{namespace => ~"world", reason => invalid_event_name}, await_rejection()),
@@ -184,7 +184,8 @@ nova_splices_a_list_reply_into_separate_commands_test() ->
 %% a regression to a single frame is exactly what shipped in #330.
 extension_frames_are_two_separate_frames_test() ->
     Msg = {asobi_message, {game_message, ~"hi"}},
-    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    {reply, Frames0, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    Frames = frames(Frames0),
     ?assertEqual(2, length(Frames)),
     ?assertEqual([~"game.message", ~"module.message"], [type_of(F) || F <- Frames]).
 
@@ -211,7 +212,8 @@ legacy_game_frames_can_be_disabled_test() ->
 %% Nothing of the unencodable payload may reach the client either way.
 script_error_unencodable_payload_degrades_test() ->
     Msg = {asobi_message, {script_error, #{~"message" => {not_json}}}},
-    {reply, Frames, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    {reply, Frames0, _State1} = asobi_ws_handler:websocket_info(Msg, #{}),
+    Frames = frames(Frames0),
     ?assertEqual(1, length(Frames)),
     Payload = payload_of(~"error", Frames),
     ?assertEqual(~"internal", maps:get(~"reason", Payload)),
@@ -606,3 +608,10 @@ binary_uplink_is_refused_out_loud_test() ->
         #{~"payload" := #{~"reason" := ~"binary_uplink_unsupported"}},
         decode(Frame)
     ).
+
+%% List-only on purpose: websocket_info/2 answers a list here (extension_frames/3
+%% is spec'd [{text, binary()}]), and wrapping a bare frame instead would make a
+%% regression to a single frame - the #330 / nova#399 shape these tests exist to
+%% pin - pass length/1 silently.
+-spec frames(term()) -> [term()].
+frames(Frames) when is_list(Frames) -> Frames.

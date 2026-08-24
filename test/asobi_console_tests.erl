@@ -53,7 +53,10 @@ refused(Json) ->
     end.
 
 committed() ->
-    asobi_console:load(filename:join(code:priv_dir(asobi), "console")).
+    %% code:priv_dir/1 answers file:filename() | {error, bad_name}.
+    case code:priv_dir(asobi) of
+        Priv when is_list(Priv) -> asobi_console:load(filename:join(Priv, "console"))
+    end.
 
 %%--------------------------------------------------------------------
 %% The happy path
@@ -125,6 +128,29 @@ refuses_a_bare_dot_segment_test_() ->
     Refused = refused(
         ~"""
     {"m": {"file": "assets/..", "isEntry": true}}
+    """
+    ),
+    fixture(fun(Dir) -> ?_assertMatch({error, {bad_asset_name, _}}, Refused(Dir)) end).
+
+%% asobi#435 tranche 2: a manifest value that is not a string is refused BY
+%% NAME, not filtered out of the served set. Narrowing declared/1 and collect/2
+%% for the type checker dropped the bad value before names/1 could see it, and
+%% the console then loaded silently with a screen missing. See
+%% docs/eqwalizer-idioms.md on not filtering ahead of a validator.
+refuses_a_non_string_manifest_path_test_() ->
+    Refused = refused(
+        ~"""
+    {"src/main.jsx": {"file": "assets/main-Ca5kJxSg.js", "isEntry": true},
+     "src/late.jsx": {"file": 12345}}
+    """
+    ),
+    fixture(fun(Dir) -> ?_assertMatch({error, {bad_asset_name, _}}, Refused(Dir)) end).
+
+refuses_a_non_string_stylesheet_test_() ->
+    Refused = refused(
+        ~"""
+    {"src/main.jsx": {"file": "assets/main-Ca5kJxSg.js", "isEntry": true,
+                      "css": [67890]}}
     """
     ),
     fixture(fun(Dir) -> ?_assertMatch({error, {bad_asset_name, _}}, Refused(Dir)) end).

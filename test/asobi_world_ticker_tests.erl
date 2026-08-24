@@ -512,8 +512,14 @@ with_subscription(Event, WorldId, Fun) ->
 collect_for(Ref, WindowMs) ->
     collect_until(Ref, erlang:monotonic_time(millisecond) + WindowMs, []).
 
+%% erlang:max/2 is specced term() -> term(); a receive timeout needs an
+%% integer. See docs/eqwalizer-idioms.md.
+-spec wait_ms(integer()) -> non_neg_integer().
+wait_ms(Ms) when Ms > 0 -> Ms;
+wait_ms(_Ms) -> 0.
+
 collect_until(Ref, Deadline, Acc) ->
-    Wait = max(0, Deadline - erlang:monotonic_time(millisecond)),
+    Wait = wait_ms(Deadline - erlang:monotonic_time(millisecond)),
     receive
         {Ref, M, Meta} -> collect_until(Ref, Deadline, [{M, Meta} | Acc])
     after Wait -> lists:reverse(Acc)

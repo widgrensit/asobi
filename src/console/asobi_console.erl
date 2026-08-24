@@ -96,8 +96,15 @@ bundle() ->
             persistent_term:put(?KEY, Result),
             Result;
         Result ->
-            Result
+            narrow_bundle(Result)
     end.
+
+%% persistent_term:get/2 answers persistent_term:value(). What went in is
+%% resolve/0's own result, put one clause up, so this is a boundary rather than
+%% a shape worth re-deriving. See docs/eqwalizer-idioms.md.
+-spec narrow_bundle(dynamic()) -> {ok, bundle()} | {error, problem()}.
+narrow_bundle({ok, #{script := _, styles := _, assets := _}} = Ok) -> Ok;
+narrow_bundle({error, _} = Error) -> Error.
 
 -doc """
 One asset by basename, or `error` for anything not in the bundle.
@@ -129,13 +136,22 @@ load(Dir) ->
         {ok, Served} ?= names(declared(Manifest)),
         {ok, Assets} ?= read_assets(Dir, Served),
         {ok, #{script => Script, styles => stylesheets(Served), assets => Assets}}
+    else
+        %% Behaviour-identical to the implicit short circuit - every `?=` above
+        %% answers `{ok, _} | {error, problem()}`, so this is the only shape
+        %% that can reach here. Written out because eqwalizer cannot type a
+        %% `maybe` block without it.
+        {error, _} = Error -> Error
     end.
 
 %% Everything the manifest names, and nothing else. Deriving the served set
 %% from the build's own output rather than from a directory listing means a
 %% stray file that lands in `priv/console` is not reachable, and a name is
 %% only ever a map key.
--spec declared(map()) -> [binary()].
+%% [term()], deliberately: names/1 is what refuses a manifest value that is not
+%% a string, and it can only do that if the value reaches it. Re-narrowing here
+%% would drop the bad value silently and load a console missing a screen.
+-spec declared(map()) -> [term()].
 declared(Manifest) ->
     lists:usort(
         lists:append([
@@ -148,9 +164,12 @@ declared(Manifest) ->
         ])
     ).
 
--spec collect(binary(), map()) -> [binary()].
+-spec collect(binary(), map()) -> [term()].
 collect(Key, Manifest) ->
     lists:append([maps:get(Key, Chunk, []) || Chunk <- maps:values(Manifest), is_map(Chunk)]).
+
+-spec binaries([term()]) -> [binary()].
+binaries(L) -> [B || B <- L, is_binary(B)].
 
 %% Which of the served names are stylesheets the shell has to link. Vite emits
 %% the entry's CSS as its own manifest chunk when code splitting is off, so
@@ -226,15 +245,16 @@ is_entry(_Chunk) -> false.
 
 -spec names([term()]) -> {ok, [binary()]} | {error, problem()}.
 names(Paths) ->
-    lists:foldr(fun accumulate_name/2, {ok, []}, Paths).
+    names(Paths, []).
 
--spec accumulate_name(term(), {ok, [binary()]} | {error, problem()}) ->
-    {ok, [binary()]} | {error, problem()}.
-accumulate_name(_Path, {error, _} = Error) ->
-    Error;
-accumulate_name(Path, {ok, Acc}) ->
+%% Explicit recursion: see docs/eqwalizer-idioms.md. Order is preserved, as
+%% lists:foldr/3 did.
+-spec names([term()], [binary()]) -> {ok, [binary()]} | {error, problem()}.
+names([], Acc) ->
+    {ok, binaries(lists:reverse(Acc))};
+names([Path | Rest], Acc) ->
     case name(Path) of
-        {ok, Name} -> {ok, [Name | Acc]};
+        {ok, Name} -> names(Rest, [Name | Acc]);
         {error, _} = Error -> Error
     end.
 
@@ -280,27 +300,51 @@ is_name_char(_Char) -> false.
 -spec mime(binary()) -> binary() | error.
 mime(Name) ->
     Ext = string:lowercase(filename:extension(Name)),
-    case lists:keyfind(Ext, 1, ?MIME) of
-        {_, Mime} -> Mime;
-        false -> error
+    case [M || {E, M} <- ?MIME, E =:= Ext, is_binary(M)] of
+        [Mime | _] -> Mime;
+        [] -> error
     end.
 
 -spec read_assets(file:filename_all(), [binary()]) ->
     {ok, #{binary() => asset()}} | {error, problem()}.
 read_assets(Dir, Names) ->
-    lists:foldr(fun(Name, Acc) -> read_asset(Dir, Name, Acc) end, {ok, #{}}, Names).
+    read_assets(Dir, Names, #{}).
 
--spec read_asset(file:filename_all(), binary(), {ok, map()} | {error, problem()}) ->
-    {ok, map()} | {error, problem()}.
-read_asset(_Dir, _Name, {error, _} = Error) ->
-    Error;
-read_asset(Dir, Name, {ok, Acc}) ->
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
+-spec read_assets(file:filename_all(), [binary()], #{binary() => asset()}) ->
+    {ok, #{binary() => asset()}} | {error, problem()}.
+read_assets(_Dir, [], Acc) ->
+    {ok, Acc};
+read_assets(Dir, [Name | Rest], Acc) ->
+    case read_asset(Dir, Name, Acc) of
+        {ok, Next} -> read_assets(Dir, Rest, Next);
+        {error, _} = Error -> Error
+    end.
+
+%% Takes the accumulator itself rather than a `{ok, _} | {error, _}`: the fold
+%% this replaced threaded the error through every remaining element, and
+%% read_assets/3 short-circuits instead. Dialyzer caught the leftover clause.
+-spec read_asset(file:filename_all(), binary(), #{binary() => asset()}) ->
+    {ok, #{binary() => asset()}} | {error, problem()}.
+read_asset(Dir, Name, Acc) ->
     Path = filename:join([Dir, ~"assets", Name]),
     case file:read_file(Path) of
         {ok, Body} ->
-            {ok, Acc#{
-                Name => #{body => Body, mime => mime(Name), etag => etag(Body)}
-            }};
+            %% name/1 already refuses a name whose extension has no mime, so
+            %% this restates an invariant rather than adding a check. Worth
+            %% restating: asset()'s mime is a binary, and the controller puts
+            %% it straight into a content-type header, so the atom `error`
+            %% reaching here would be a malformed response rather than a crash.
+            case mime(Name) of
+                Mime when is_binary(Mime) ->
+                    {ok, Acc#{Name => #{body => Body, mime => Mime, etag => etag(Body)}}};
+                error ->
+                    %% Unreachable: name/1 refuses a name whose extension has
+                    %% no mime, on the same basename this re-derives. Raised
+                    %% rather than returned so it does not read as an outcome
+                    %% callers should expect from problem().
+                    error({unreachable, {no_mime, Name}})
+            end;
         {error, Reason} ->
             {error, {asset_unreadable, Name, Reason}}
     end.
@@ -319,12 +363,14 @@ log({ok, #{script := Script, assets := Assets}}) ->
         msg => ~"console bundle loaded",
         script => Script,
         assets => map_size(Assets)
-    });
+    }),
+    ok;
 log({error, Problem}) ->
     ?LOG_WARNING(#{
         msg => ~"console bundle unavailable; /console answers 503",
         problem => Problem
-    }).
+    }),
+    ok.
 
 -ifdef(TEST).
 -spec reset() -> ok.

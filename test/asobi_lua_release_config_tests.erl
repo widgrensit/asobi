@@ -28,9 +28,9 @@ dev_config_declares_kura_backend_test() ->
 
 -spec kura_env([{atom(), term()}]) -> [{atom(), term()}].
 kura_env(Config) ->
-    case proplists:get_value(kura, Config) of
-        Env when is_list(Env) -> Env;
-        _ -> error(no_kura_app_in_config)
+    case [V || {K, V} <- Config, K =:= kura, is_list(V)] of
+        [Env | _] -> [{K, V} || {K, V} <- Env, is_atom(K)];
+        [] -> error(no_kura_app_in_config)
     end.
 
 -spec consult_config(string()) -> [{atom(), term()}].
@@ -41,7 +41,11 @@ consult_config(Name) ->
     ok = file:write_file(Tmp, Substituted),
     {ok, [Config]} = file:consult(Tmp),
     ok = file:delete(Tmp),
-    Config.
+    %% file:consult/1 answers [term()], so the term has to be narrowed to a
+    %% list before it can be walked. See docs/eqwalizer-idioms.md.
+    case Config of
+        Terms when is_list(Terms) -> [{K, V} || {K, V} <- Terms, is_atom(K)]
+    end.
 
 -spec locate(string()) -> file:filename_all().
 locate(Name) ->
@@ -49,7 +53,7 @@ locate(Name) ->
         filename:join(["config", Name]),
         filename:join([filename:dirname(?FILE), "..", "config", Name])
     ],
-    case lists:dropwhile(fun(P) -> not filelib:is_regular(P) end, Candidates) of
+    case [P || P <- Candidates, filelib:is_regular(P)] of
         [Path | _] -> Path;
         [] -> error({config_not_found, Name})
     end.

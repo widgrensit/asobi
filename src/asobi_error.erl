@@ -382,7 +382,10 @@ is what asobi itself defines.
 """.
 -spec codes() -> [code()].
 codes() ->
-    core_codes() ++ lists:sort(maps:keys(asobi_extensions:error_codes())).
+    %% lists:sort/1 widens to [term()]; re-narrowed against code().
+    %% See docs/eqwalizer-idioms.md.
+    Extension = [C || C <- lists:sort(maps:keys(asobi_extensions:error_codes())), is_binary(C)],
+    core_codes() ++ Extension.
 
 -doc """
 The codes asobi itself defines.
@@ -472,9 +475,9 @@ register_handler() ->
 
 -spec entry(code()) -> {code(), pos_integer(), binary()} | false.
 entry(Code) ->
-    case lists:keyfind(Code, 1, ?CODES) of
-        false -> extension_entry(Code);
-        Entry -> Entry
+    case [E || {C, _, _} = E <- ?CODES, C =:= Code] of
+        [Entry | _] -> Entry;
+        [] -> extension_entry(Code)
     end.
 
 extension_entry(Code) ->
@@ -489,6 +492,9 @@ extension_entry(Code) ->
 -spec log_undefined(code()) -> ok.
 log_undefined(Code) ->
     case entry(Code) of
-        false -> ?LOG_ERROR(#{event => undefined_error_code, code => Code});
-        _ -> ok
+        false ->
+            ?LOG_ERROR(#{event => undefined_error_code, code => Code}),
+            ok;
+        _ ->
+            ok
     end.
