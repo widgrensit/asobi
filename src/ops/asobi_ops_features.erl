@@ -103,7 +103,7 @@ ships_console(App) ->
 -spec app_version(atom()) -> binary().
 app_version(App) ->
     case application:get_key(App, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary(Vsn);
+        {ok, Vsn} when is_list(Vsn) -> list_to_binary([C || C <- Vsn, is_integer(C)]);
         _ -> ~"unknown"
     end.
 
@@ -123,13 +123,18 @@ capabilities() ->
             {~"steam", configured(steam_api_key)},
             {~"storage", asobi_storage:enabled()},
             {~"worlds", any_mode(fun is_world_mode/1)}
-        ])
+        ]),
+        %% lists:sort/1 widens the pairs to term(). See
+        %% docs/eqwalizer-idioms.md; nothing is dropped, the list above is a
+        %% literal of {binary(), boolean()}.
+        is_binary(Name),
+        is_boolean(Enabled)
     ].
 
 -spec version() -> binary().
 version() ->
     case application:get_key(asobi, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary(Vsn);
+        {ok, Vsn} when is_list(Vsn) -> list_to_binary([C || C <- Vsn, is_integer(C)]);
         _ -> ~"unknown"
     end.
 

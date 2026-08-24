@@ -71,8 +71,10 @@ direct (the table is protected) so a browse costs no round-trip.
 -spec cache_lookup(term(), integer()) -> {hit, [map()]} | miss.
 cache_lookup(Key, Now) ->
     try ets:lookup(?LIST_CACHE_TAB, Key) of
-        [{_, Listing, ExpiresAt}] when ExpiresAt > Now -> {hit, Listing};
-        _ -> miss
+        [{_, Listing, ExpiresAt}] when is_list(Listing), ExpiresAt > Now ->
+            {hit, [L || L <- Listing, is_map(L)]};
+        _ ->
+            miss
     catch
         error:badarg -> miss
     end.

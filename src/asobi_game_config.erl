@@ -117,6 +117,9 @@ write_modes(_) ->
 -spec env_modes(atom()) -> modes().
 env_modes(Key) ->
     case application:get_env(asobi, Key, #{}) of
-        Modes when is_map(Modes) -> Modes;
-        _ -> #{}
+        Modes when is_map(Modes) ->
+            %% modes() is keyed by binary, and each value is a map or a module.
+            #{K => V || K := V <- Modes, is_binary(K), is_map(V) orelse is_atom(V)};
+        _ ->
+            #{}
     end.

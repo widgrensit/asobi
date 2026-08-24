@@ -58,7 +58,10 @@
 %% lazily also self-corrects when the flag is set later, e.g. a bundle reload.
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    case gen_server:start_link({local, ?MODULE}, ?MODULE, [], []) of
+        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+        {error, _} = Error -> Error
+    end.
 
 %% For tests/ops: run a sweep synchronously.
 -spec sweep_now() -> {ok, non_neg_integer()}.
@@ -99,7 +102,11 @@ cached_unlinked_count() ->
             live_unlinked_count();
         _ ->
             case ets:lookup(?COUNT_CACHE, count) of
-                [{count, N, Expiry}] when Expiry > Now -> N;
+                %% `unknown` is a cached FAILURE, and caching it is the point:
+                %% asobi_guest_SUITE asserts a failing count is asked once per
+                %% TTL, not once per call. is_integer/1 alone rejected it and
+                %% re-queried every time.
+                [{count, N, Expiry}] when Expiry > Now, is_integer(N) orelse N =:= unknown -> N;
                 _ -> refresh_count(Now)
             end
     end.

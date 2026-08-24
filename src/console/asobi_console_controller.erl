@@ -64,7 +64,7 @@ The binding is a map key, never a path segment joined onto a directory - see
 typo or a traversal attempt.
 """.
 -spec asset(cowboy_req:req()) -> response().
-asset(#{bindings := #{~"file" := Name}} = Req) ->
+asset(#{bindings := #{~"file" := Name}} = Req) when is_binary(Name) ->
     case asobi_console:enabled() andalso asobi_console:asset(Name) of
         {ok, Asset} -> serve(Asset, Req);
         _ -> {asobi_error, ~"console.not_found"}
@@ -132,7 +132,12 @@ login(Req) ->
 authenticate(#{json := #{~"secret" := Secret} = Body} = Req) ->
     case asobi_ops_auth:verify_secret(Secret) of
         true ->
-            {ok, Session} = asobi_console_session:create(maps:get(~"label", Body, ~"operator")),
+            Label =
+                case maps:get(~"label", Body, ~"operator") of
+                    L when is_binary(L) -> L;
+                    _ -> ~"operator"
+                end,
+            {ok, Session} = asobi_console_session:create(Label),
             granted(Session, Req);
         false ->
             rejected(Req)
@@ -292,6 +297,6 @@ actor(#{display := Display, source := Source, caps := Caps, attested := Attested
 -spec version() -> binary().
 version() ->
     case application:get_key(asobi, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary(Vsn);
+        {ok, Vsn} when is_list(Vsn) -> list_to_binary([C || C <- Vsn, is_integer(C)]);
         _ -> ~"unknown"
     end.
