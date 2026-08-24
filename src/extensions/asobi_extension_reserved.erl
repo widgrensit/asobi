@@ -79,7 +79,7 @@ kinds() ->
     [tables, rpc, lua, queues, http].
 
 -doc "Core's reserved token set, per namespace kind.".
--spec namespaces() -> #{kind() := [asobi_extension:token()]}.
+-spec namespaces() -> #{kind() => [asobi_extension:token()]}.
 namespaces() ->
     Modules = core_modules(),
     Lua = lua(),
@@ -87,7 +87,7 @@ namespaces() ->
         tables => schema_tables(Modules),
         queues => worker_queues(Modules),
         lua => Lua,
-        rpc => lists:usort(error_domains() ++ Lua ++ core_wire_prefixes()),
+        rpc => tokens(lists:usort(error_domains() ++ Lua ++ core_wire_prefixes())),
         http => core_route_paths()
     }.
 
@@ -180,13 +180,16 @@ core_wire_prefixes() ->
 %% on a later app's path (nova_resilience's /health) would silently hijack
 %% it. `nova:get_env/2` reads the bootstrap application's env, which is
 %% exactly where nova_sup reads `nova_apps` from.
+-spec core_route_paths() -> [asobi_extension:token()].
 core_route_paths() ->
-    lists:usort([
-        Path
-     || App <- co_mounted_apps(),
-        Group <- app_route_groups(App),
-        Path <- group_paths(Group)
-    ]).
+    tokens(
+        lists:usort([
+            Path
+         || App <- co_mounted_apps(),
+            Group <- app_route_groups(App),
+            Path <- group_paths(Group)
+        ])
+    ).
 
 co_mounted_apps() ->
     NovaApps =
@@ -251,12 +254,15 @@ schema_tables(Modules) ->
 worker_queues(Modules) ->
     exported_values(Modules, queue, {perform, 1}).
 
+-spec lua() -> [asobi_extension:token()].
 lua() ->
-    lists:usort([
-        Namespace
-     || Path <- asobi_lua_surface:reserved_namespaces(),
-        Namespace <- lua_namespace(Path)
-    ]).
+    tokens(
+        lists:usort([
+            Namespace
+         || Path <- asobi_lua_surface:reserved_namespaces(),
+            Namespace <- lua_namespace(Path)
+        ])
+    ).
 
 %% `game` itself is reserved: an extension owning it would claim the root
 %% table every other namespace hangs off.
@@ -264,8 +270,15 @@ lua_namespace([~"game"]) -> [~"game"];
 lua_namespace([~"game", Namespace]) -> [Namespace];
 lua_namespace(_) -> [].
 
+-spec error_domains() -> [asobi_extension:token()].
 error_domains() ->
-    lists:usort([Domain || Code <- asobi_error:core_codes(), Domain <- domain(Code)]).
+    tokens(lists:usort([Domain || Code <- asobi_error:core_codes(), Domain <- domain(Code)])).
+
+%% lists:usort/1 widens to [term()]. Safe to re-narrow here: every producer
+%% above yields binaries, and unlike asobi_console's manifest paths nothing
+%% downstream validates these by name. See docs/eqwalizer-idioms.md.
+-spec tokens([term()]) -> [asobi_extension:token()].
+tokens(L) -> [T || T <- L, is_binary(T)].
 
 domain(Code) ->
     case binary:split(Code, ~".") of

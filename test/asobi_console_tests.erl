@@ -53,7 +53,10 @@ refused(Json) ->
     end.
 
 committed() ->
-    asobi_console:load(filename:join(code:priv_dir(asobi), "console")).
+    %% code:priv_dir/1 answers file:filename() | {error, bad_name}.
+    case code:priv_dir(asobi) of
+        Priv when is_list(Priv) -> asobi_console:load(filename:join(Priv, "console"))
+    end.
 
 %%--------------------------------------------------------------------
 %% The happy path

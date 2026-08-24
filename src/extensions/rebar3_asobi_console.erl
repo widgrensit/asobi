@@ -72,7 +72,13 @@ disagreeing is loud.
 See `guides/console-extensions.md`.
 """.
 
--behaviour(provider).
+%% No `-behaviour(provider).`: rebar3 dispatches a provider on its exported
+%% init/1, do/1 and format_error/1, not on the attribute, and the `provider`
+%% behaviour lives in rebar3 rather than in anything asobi depends on. Declaring
+%% it bought no callback checking - the module is simply absent - while making
+%% every type checker report a behaviour that does not exist. rebar.config
+%% already excludes both providers from dialyzer for the same reason, and
+%% asobi_extension_reserved_tests asserts the three exports are present.
 
 -export([init/1, do/1, format_error/1]).
 
@@ -255,9 +261,12 @@ with_console(#{app := App, name := Name}, Dirs) ->
     end.
 
 output(State, Args, Dirs) ->
+    %% proplists:get_value/2 answers term(); rebar3 hands `--out` through as a
+    %% string. See docs/eqwalizer-idioms.md.
     case proplists:get_value(out, Args) of
-        undefined -> configured_output(State, Dirs);
-        Path -> {ok, filename:absname(Path)}
+        Path when is_binary(Path) -> {ok, filename:absname(Path)};
+        Path when is_list(Path) -> {ok, filename:absname([C || C <- Path, is_integer(C)])};
+        _ -> configured_output(State, Dirs)
     end.
 
 configured_output(State, Dirs) ->
@@ -372,7 +381,7 @@ host_config(Out, Args) ->
         " },\n",
         "  server: {\n",
         "    port: ",
-        integer_to_list(proplists:get_value(port, Args, ?DEFAULT_PORT)),
+        integer_to_list(port_of(Args)),
         ",\n",
         "    strictPort: true,\n",
         "    // Same-origin through the proxy, so config.js reads no api base and takes\n",
@@ -414,8 +423,20 @@ dev_document() ->
 %% Escaping only the quote left `--out 'x\'` closing the literal it was meant
 %% to sit inside, which put the rest of the argument in the generated config as
 %% JavaScript that `vite` then ran.
+-spec port_of([term()]) -> integer().
+port_of(Args) ->
+    case proplists:get_value(port, Args, ?DEFAULT_PORT) of
+        Port when is_integer(Port) -> Port;
+        _ -> ?DEFAULT_PORT
+    end.
+
 quote(Value) ->
-    json:encode(unicode:characters_to_binary(Value)).
+    %% characters_to_binary/1 can answer an error tuple on malformed input; a
+    %% provider argument that is not valid unicode is a bad invocation, and
+    %% failing here beats emitting it into the generated vite config.
+    case unicode:characters_to_binary(Value) of
+        Binary when is_binary(Binary) -> json:encode(Binary)
+    end.
 
 %%====================================================================
 %% npm and Vite
@@ -435,7 +456,7 @@ install(Workspace, Args) ->
 run(Workspace, Out, Args) ->
     case proplists:get_value(dev, Args, false) of
         true ->
-            Port = integer_to_list(proplists:get_value(port, Args, ?DEFAULT_PORT)),
+            Port = integer_to_list(port_of(Args)),
             Target = proplists:get_value(target, Args, ?DEFAULT_TARGET),
             rebar_api:info("asobi: dev server on http://localhost:~ts, ops API proxied at ~ts", [
                 Port, Target
