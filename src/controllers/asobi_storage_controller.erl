@@ -147,7 +147,7 @@ get_storage(Req) ->
 do_get_storage(
     #{bindings := #{~"collection" := Col, ~"key" := Key}, auth_data := #{player_id := PlayerId}} =
         _Req
-) ->
+) when is_binary(Col), is_binary(Key) ->
     Q = kura_query:where(
         kura_query:where(
             kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
@@ -170,7 +170,13 @@ do_get_storage(
         {error, Reason} ->
             log_storage_query_failed(Col, Key, Reason),
             {asobi_error, ~"storage.query_failed"}
-    end.
+    end;
+do_get_storage(_Req) ->
+    %% A binding that is not a binary is not a key this collection can hold.
+    %% Answering not_found keeps the shape the unguarded version produced by
+    %% querying for it and finding nothing; guarded/2 does not catch, so a bare
+    %% guard would have turned that 404 into a 500.
+    {asobi_error, ~"storage.not_found"}.
 
 -spec put_storage(cowboy_req:req()) -> response().
 put_storage(Req) ->
@@ -277,7 +283,7 @@ delete_storage(Req) ->
 do_delete_storage(
     #{bindings := #{~"collection" := Col, ~"key" := Key}, auth_data := #{player_id := PlayerId}} =
         _Req
-) ->
+) when is_binary(Col), is_binary(Key) ->
     Q = kura_query:where(
         kura_query:where(
             kura_query:where(kura_query:from(asobi_storage), {collection, Col}),
@@ -342,7 +348,8 @@ log_storage_invariant_violation(Col, Key, RowCount) ->
         collection => Col,
         key => Key,
         row_count => RowCount
-    }).
+    }),
+    ok.
 
 -spec log_storage_query_failed(binary(), binary(), term()) -> ok.
 log_storage_query_failed(Col, Key, Reason) ->
@@ -351,7 +358,8 @@ log_storage_query_failed(Col, Key, Reason) ->
         collection => Col,
         key => Key,
         reason => Reason
-    }).
+    }),
+    ok.
 
 -spec data_within_limit(dynamic()) -> boolean().
 data_within_limit(Data) ->

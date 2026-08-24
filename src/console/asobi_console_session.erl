@@ -116,7 +116,13 @@ put the decision in two places.
 """.
 -spec create(binary(), [asobi_ops_caps:class()], integer()) -> {ok, session()}.
 create(Label, Caps, NotAfter) ->
-    gen_server:call(?MODULE, {create, label(Label), Caps, NotAfter}).
+    %% gen_server:call/2 answers term(). See docs/eqwalizer-idioms.md.
+    case gen_server:call(?MODULE, {create, label(Label), Caps, NotAfter}) of
+        {ok, #{id := I, csrf := C, label := L, caps := Cs, expires_at := E}} when
+            is_binary(I), is_binary(C), is_binary(L), is_list(Cs), is_integer(E)
+        ->
+            {ok, #{id => I, csrf => C, label => L, caps => caps(Cs), expires_at => E}}
+    end.
 
 -doc """
 Spend a minted token, so it can open exactly one session.
@@ -169,7 +175,7 @@ resolve(_Id, _Csrf) ->
 -doc "End a session. Unknown ids are `ok` - logging out twice is not an error.".
 -spec delete(binary()) -> ok.
 delete(Id) when is_binary(Id) ->
-    gen_server:call(?MODULE, {delete, Id});
+    ok = gen_server:call(?MODULE, {delete, Id});
 delete(_Id) ->
     ok.
 
@@ -183,9 +189,16 @@ csrf(Id) ->
 -spec ttl_seconds() -> pos_integer().
 ttl_seconds() ->
     case application:get_env(asobi, console_session_ttl) of
-        {ok, Ttl} when is_integer(Ttl) -> min(max(Ttl, ?MIN_TTL), ?MAX_TTL);
+        {ok, Ttl} when is_integer(Ttl) -> clamp(Ttl, ?MIN_TTL, ?MAX_TTL);
         _ -> ?DEFAULT_TTL
     end.
+
+%% erlang:min/2 and max/2 are specced term() -> term() whatever they are handed.
+%% See docs/eqwalizer-idioms.md.
+-spec clamp(integer(), pos_integer(), pos_integer()) -> pos_integer().
+clamp(V, Lo, _Hi) when V < Lo -> Lo;
+clamp(V, _Lo, Hi) when V > Hi -> Hi;
+clamp(V, Lo, _Hi) when V >= Lo -> V.
 
 -spec init([]) -> {ok, #{}}.
 init([]) ->
@@ -267,8 +280,12 @@ sweep_expired() ->
 -spec lookup(binary()) -> {ok, session()} | {error, reason()}.
 lookup(Id) ->
     try ets:lookup(?TABLE, Id) of
-        [{Id, ExpiresAt, Label, Caps}] -> live(Id, ExpiresAt, Label, Caps);
-        [] -> {error, unknown}
+        [{Id, ExpiresAt, Label, Caps}] when
+            is_integer(ExpiresAt), is_binary(Label), is_list(Caps)
+        ->
+            live(Id, ExpiresAt, Label, caps(Caps));
+        [] ->
+            {error, unknown}
     catch
         %% The table is gone only while the owner is restarting. That is a
         %% logged-out console, not a crashed request.
@@ -304,9 +321,17 @@ checked(#{csrf := Expected} = Session, Presented) ->
 constant_equal(Expected, Presented) ->
     crypto:hash_equals(crypto:hash(sha256, Expected), crypto:hash(sha256, Presented)).
 
+%% ETS content is this module's own, but the read is still a boundary the
+%% checker cannot see through. See docs/eqwalizer-idioms.md.
+-spec caps([term()]) -> [asobi_ops_caps:class()].
+caps(Caps) ->
+    [C || C <- Caps, C =:= read orelse C =:= player_data orelse C =:= config orelse C =:= erasure].
+
 -spec secret() -> binary().
 secret() ->
-    persistent_term:get(?SECRET_KEY, <<>>).
+    case persistent_term:get(?SECRET_KEY, <<>>) of
+        Secret when is_binary(Secret) -> Secret
+    end.
 
 -spec label(term()) -> binary().
 label(Label) when is_binary(Label), Label =/= ~"", byte_size(Label) =< ?MAX_LABEL_BYTES ->
@@ -322,13 +347,16 @@ printable(Label) ->
     lists:all(fun(Char) -> Char >= 32 andalso Char =< 126 end, binary_to_list(Label)).
 
 -spec log_sweep(non_neg_integer()) -> ok.
-log_sweep(0) -> ok;
-log_sweep(Removed) -> ?LOG_INFO(#{msg => ~"console sessions expired", removed => Removed}).
+log_sweep(0) ->
+    ok;
+log_sweep(Removed) ->
+    ?LOG_INFO(#{msg => ~"console sessions expired", removed => Removed}),
+    ok.
 
 -ifdef(TEST).
 -spec expire(binary()) -> ok.
-expire(Id) -> gen_server:call(?MODULE, {expire, Id}).
+expire(Id) -> ok = gen_server:call(?MODULE, {expire, Id}).
 
 -spec sweep() -> ok.
-sweep() -> gen_server:call(?MODULE, sweep).
+sweep() -> ok = gen_server:call(?MODULE, sweep).
 -endif.
