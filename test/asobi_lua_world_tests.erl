@@ -856,7 +856,7 @@ hot_reload_zone_tick_signals_spawn_templates_hint_test_body() ->
         Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
         erlang:erase({asobi_lua_world, zone_state}),
         {_Ents0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
-        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone1)),
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(zone_state(Zone1))),
 
         ok = file:write_file(
             Path,
@@ -877,12 +877,12 @@ hot_reload_zone_tick_signals_spawn_templates_hint_test_body() ->
         {_Ents1, Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
         ?assertMatch(
             {changed, #{~"goblin" := _, ~"dragon" := _}},
-            asobi_lua_world:spawn_templates_hint(Zone2)
+            asobi_lua_world:spawn_templates_hint(zone_state(Zone2))
         ),
 
         %% The signal is one-tick only - it must not leak into the next tick.
         {_Ents2, Zone3} = asobi_lua_world:zone_tick(#{}, Zone2),
-        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone3))
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(zone_state(Zone3)))
     after
         erlang:erase({asobi_lua_world, zone_state}),
         file:delete(Path)
@@ -926,7 +926,7 @@ hot_reload_broken_spawn_templates_does_not_wipe_hint_test() ->
         bump_mtime(Path),
 
         {_Ents1, Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
-        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone2))
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(zone_state(Zone2)))
     after
         erlang:erase({asobi_lua_world, zone_state}),
         file:delete(Path)
@@ -1042,8 +1042,9 @@ game_namespace_visible_in_zone_tick_and_handle_input_test() ->
     {_Ents, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
     %% ZoneState1.game_state holds the script's zone_state luerl tref;
     %% decode it to inspect the flag.
+    ZoneState1Map = zone_state(ZoneState1),
     ZoneTickGS = asobi_lua_api:decode_to_map(
-        maps:get(game_state, ZoneState1), maps:get(lua_state, ZoneState1)
+        maps:get(game_state, ZoneState1Map), maps:get(lua_state, ZoneState1Map)
     ),
     ?assertEqual(true, maps:get(~"zone_tick_saw_game", ZoneTickGS, false)),
 
@@ -1211,3 +1212,153 @@ hostile_metatable_cannot_run_on_the_zone_test() ->
     %% The metamethod burns ~2e6 iterations if anything invokes it.
     ?assert(Us < 200_000),
     erlang:erase({asobi_lua_world, zone_state}).
+
+%% widgrensit/asobi#557: a script that says what it changed lets the bridge
+%% skip decoding the whole entities table, and asobi merges the declaration
+%% onto the map it handed in - so untouched entities stay the same terms.
+zone_tick_dirty_declaration_test() ->
+    Script = fixture("dirty_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    Entities = #{
+        ~"a" => #{type => ~"npc", x => 1.0, y => 1.0},
+        ~"b" => #{type => ~"npc", x => 2.0, y => 2.0},
+        ~"c" => #{type => ~"npc", x => 3.0, y => 3.0}
+    },
+    {Base, _ZS, false, Dirty} = asobi_lua_world:zone_tick(Entities, ZoneState),
+    %% The bridge passes the INPUT map straight back rather than a decode of
+    %% what the script returned. That is what preserves sharing.
+    ?assertEqual(Entities, Base),
+    ?assertMatch(#{changed := #{~"a" := #{x := 11.0}}, removed := [~"c"]}, Dirty),
+    #{changed := Changed} = Dirty,
+    %% "b" was mutated by the script but not declared, so it is not changed.
+    ?assertNot(maps:is_key(~"b", Changed)),
+    ?assertEqual(1, map_size(Changed)).
+
+%% A script that returns three values (or two) keeps the old contract: the
+%% whole table is decoded and there is no fourth element.
+%%
+%% In its own process: zone_tick/2 stashes its zone state in the process
+%% dictionary and reads `lua_state` back from it, so a test running after
+%% another one in the same process would call the OTHER script's zone_tick.
+zone_tick_without_dirty_declaration_test() ->
+    Script = fixture("config_move_world.lua"),
+    Self = self(),
+    Pid = spawn(fun() ->
+        Config = #{game_config => #{lua_script => Script}},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+        Self ! {result, asobi_lua_world:zone_tick(#{}, ZoneState)}
+    end),
+    MonRef = monitor(process, Pid),
+    receive
+        {result, Result} ->
+            demonitor(MonRef, [flush]),
+            ?assertEqual(2, tuple_size(Result))
+    after 5_000 ->
+        ?assert(false)
+    end.
+
+%% widgrensit/asobi#557 review: `is_tuple/1` is not a Luerl-table check. Luerl
+%% represents every non-scalar as a record - #tref{}, #funref{}, #erl_func{},
+%% #erl_mfa{}, #usdref{} - so a script returning a function or a recursive
+%% table as its fourth value raised out of decode_to_map/2, and asobi_zone
+%% calls zone_tick/2 with no try/catch: the zone died with everyone in it.
+%%
+%% Each mode runs in its own process because zone_tick/2 stashes its zone state
+%% in the process dictionary and reads lua_state back from it.
+zone_tick_hostile_fourth_value_test_() ->
+    [
+        {binary_to_list(Mode), fun() -> assert_survives(Mode, ExpectedX) end}
+     || {Mode, ExpectedX} <- [
+            %% Not a declaration at all, so the safe answer is the full decode
+            %% and the script's mutation lands.
+            {~"function", 2.0},
+            {~"recursive", 2.0},
+            {~"number", 2.0},
+            {~"nil_fourth", 2.0},
+            {~"not_a_declaration", 2.0},
+            %% This one DOES declare - it has a `changed` key - but the half is
+            %% array-shaped and unusable. The declaration stands and the
+            %% malformed half is reported, so the base map is what survives.
+            {~"array", 1.0}
+        ]
+    ].
+
+%% Two assertions, and the first is the one that matters: the bridge must not
+%% raise. The second separates "asobi decoded what the script returned" from
+%% "asobi kept the map it handed in", which is the difference between a
+%% fallback and a silent freeze.
+assert_survives(Mode, ExpectedX) ->
+    case run_fourth_value(Mode) of
+        {raised, Crash} ->
+            erlang:error({zone_tick_raised, Mode, Crash});
+        {ok, Result} ->
+            ?assert(is_tuple(Result)),
+            Entities = element(1, Result),
+            ?assert(is_map(Entities)),
+            ?assertEqual(ExpectedX, maps:get(x, maps:get(~"a", Entities)))
+    end.
+
+run_fourth_value(Mode) ->
+    Script = fixture("dirty_bad_world.lua"),
+    Self = self(),
+    Pid = spawn(fun() ->
+        Config = #{game_config => #{lua_script => Script}},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+        Entities = #{
+            ~"a" => #{type => ~"npc", x => 1.0, y => 1.0},
+            ~"probe" => #{type => ~"npc", mode => Mode, x => 0.0, y => 0.0}
+        },
+        Self !
+            {result,
+                try asobi_lua_world:zone_tick(Entities, ZoneState) of
+                    R -> {ok, R}
+                catch
+                    C:E -> {raised, {C, E}}
+                end}
+    end),
+    MonRef = monitor(process, Pid),
+    receive
+        {result, Result} ->
+            demonitor(MonRef, [flush]),
+            Result;
+        {'DOWN', MonRef, process, Pid, Reason} ->
+            {raised, {down, Reason}}
+    after 5_000 ->
+        {raised, timeout}
+    end.
+
+%% The array-shaped half is the one the guide's own idiom invites -
+%% `changed[#changed + 1] = e` - and until widgrensit/asobi#557's review it was
+%% normalised to #{} in this bridge BEFORE asobi_zone could complain, so every
+%% mutation the tick made was reverted with no log and no telemetry. Assert the
+%% report, not just the outcome: the outcome alone looks identical to silence.
+zone_tick_malformed_half_is_reported_test() ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    Self = self(),
+    Handler = ?FUNCTION_NAME,
+    ok = telemetry:attach(
+        Handler,
+        [asobi, error],
+        fun(_E, _M, Meta, _C) -> Self ! {game_error, Meta} end,
+        undefined
+    ),
+    try
+        {ok, _} = run_fourth_value(~"array"),
+        receive
+            {game_error, #{kind := bad_zone_dirty}} -> ok
+        after 1_000 ->
+            ?assert(false)
+        end
+    after
+        telemetry:detach(Handler)
+    end.
+
+%% `zone_tick/2` returns the zone state as `term()` - the callback contract is
+%% game-defined - so a test reading fields out of it narrows first.
+-spec zone_state(term()) -> map().
+zone_state(ZoneState) when is_map(ZoneState) ->
+    ZoneState.

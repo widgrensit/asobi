@@ -207,7 +207,8 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 %% exactly the write/read split here.
 -define(TEMPLATES_KEY, known).
 
--spec zone_tick(map(), term()) -> {map(), term()} | {map(), term(), boolean()}.
+-spec zone_tick(map(), term()) ->
+    {map(), term()} | {map(), term(), boolean()} | {map(), term(), boolean(), map()}.
 zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Pick up any lua_state updates that handle_input stashed earlier this
     %% tick. The dev-error rate-limit stamp must ride along too: asobi_zone's
@@ -265,6 +266,20 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                         zone_tick, [EncEntities, GS], LuaSt1, ?TICK_TIMEOUT
                     )
                 of
+                    {ok, [Ents1, ZS1, Busy, Dirty | _], LuaSt2} ->
+                        ZS = ZoneState#{lua_state => LuaSt2, game_state => ZS1},
+                        case decode_dirty(Dirty, LuaSt2) of
+                            undefined ->
+                                Ents2 = asobi_lua_api:atomize_entities(
+                                    decode_to_map(Ents1, LuaSt2)
+                                ),
+                                {Ents2, ZS, truthy(Busy)};
+                            DirtySet ->
+                                %% `Entities` - what asobi handed IN - rather
+                                %% than a decode of what came back. That is the
+                                %% point: see decode_dirty/2.
+                                {Entities, ZS, truthy(Busy), DirtySet}
+                        end;
                     {ok, [Ents1, ZS1, Busy | _], LuaSt2} ->
                         Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
                         {Ents2, ZoneState#{lua_state => LuaSt2, game_state => ZS1}, truthy(Busy)};
@@ -285,7 +300,124 @@ zone_tick(Entities, ZoneState) ->
     {Entities, ZoneState}.
 
 result_zone_state({_Entities, ZoneState}) -> ZoneState;
-result_zone_state({_Entities, ZoneState, _Busy}) -> ZoneState.
+result_zone_state({_Entities, ZoneState, _Busy}) -> ZoneState;
+result_zone_state({_Entities, ZoneState, _Busy, _Dirty}) -> ZoneState.
+
+%% Reads `zone_tick`'s optional fourth return value: what actually changed.
+%%
+%% ```lua
+%% function zone_tick(entities, zone_state)
+%%   local changed, removed = {}, {}
+%%   for id, e in pairs(entities) do
+%%     if wants_to_move(e) then step(e); changed[id] = e end
+%%     if e.hp and e.hp <= 0 then removed[#removed + 1] = id end
+%%   end
+%%   return entities, zone_state, false, { changed = changed, removed = removed }
+%% end
+%% ```
+%%
+%% Declaring it is what lets this bridge stop decoding the whole entities table.
+%% Without it a populated zone round-trips every entity across the boundary in
+%% both directions on every tick regardless of how many actually changed - a zone
+%% with 500 NPCs of which 3 move pays for 500, twenty times a second, and pays
+%% again downstream because the decode rebuilds every entity map and destroys the
+%% structural sharing `compute_deltas/2` and `sync_spatial_grid/3` rely on
+%% (widgrensit/asobi#557). Measured on a 2,000-entity zone with an inert script
+%% under `owned`, the round trip was ~9.3ms per tick and 200k reductions on the
+%% zone process; declaring takes it to ~4.6ms and 1.2k.
+%%
+%% **The declaration is the truth.** An entity the script mutated and did not put
+%% in `changed` is not changed as far as asobi is concerned, and the next tick
+%% re-encodes asobi's map over the top of it - so the mutation is not merely
+%% invisible, it is undone. That is inherent to any dirty contract and it is why
+%% this is opt-in per script rather than a mode.
+%%
+%% Anything that is not a table declaring at least one of `changed` and `removed`
+%% means "no declaration" and today's semantics, which is also what a three-value
+%% return gives. That fallback is the safe direction in both places it is reached
+%% from: it costs a full decode and nothing else. Malformed HALVES are narrowed
+%% and reported in `asobi_zone:apply_dirty/3` rather than here, so an Erlang game
+%% module declaring the same thing meets the same bar.
+-spec decode_dirty(term(), dynamic()) -> map() | undefined.
+%% Only a TABLE reference is a declaration, and `is_tuple/1` does not say that.
+%% Luerl represents every non-scalar as a record - `#tref{}`, `#funref{}`,
+%% `#erl_func{}`, `#erl_mfa{}`, `#usdref{}` - so `is_tuple/1` admitted all of
+%% them, and each one raises out of decode_to_map/2. `asobi_zone:do_tick/2`
+%% calls `zone_tick/2` with no try/catch, so `return entities, zone_state,
+%% false, print` killed the zone and everyone in it (widgrensit/asobi#557
+%% review). The record tag is the check; the try/catch is for a `#tref{}` that
+%% is recursive or stale, which decode_to_map/2 also raises on.
+decode_dirty(Ref, LuaSt) when is_tuple(Ref), element(1, Ref) =:= tref ->
+    try decode_to_map(Ref, LuaSt) of
+        Decoded -> narrow_dirty(Decoded)
+    catch
+        _:_ -> undefined
+    end;
+decode_dirty(_Other, _LuaSt) ->
+    undefined.
+
+%% A table has to actually declare something. `decode_to_map/2` coerces an
+%% array-shaped decode to `#{}`, so without this test `{"a","b"}` - or any
+%% table that is simply not a dirty set - became a well-formed EMPTY
+%% declaration, and an empty declaration means "nothing changed", every tick,
+%% forever. Falling back to the full decode is the only reading that cannot
+%% silently freeze a zone.
+-spec narrow_dirty(map()) -> map() | undefined.
+narrow_dirty(Decoded) when
+    is_map_key(~"changed", Decoded); is_map_key(~"removed", Decoded)
+->
+    #{
+        changed => asobi_lua_api:atomize_entities(
+            as_entity_map(maps:get(~"changed", Decoded, #{}))
+        ),
+        removed => as_id_list(maps:get(~"removed", Decoded, []))
+    };
+narrow_dirty(_NotADeclaration) ->
+    undefined.
+
+%% An empty Lua table decodes to `[]`, not `#{}` - there is nothing in it to
+%% tell a record from an array - so `changed = {}` is the ordinary "I moved
+%% nothing this tick" case and passes through silently. A NON-empty list is a
+%% script that built `changed` as an array (`changed[#changed + 1] = e`), which
+%% is one line away from the idiom in the guide; asobi cannot use it, and
+%% saying nothing would revert every mutation the tick made.
+-spec as_entity_map(term()) -> map().
+as_entity_map(M) when is_map(M) ->
+    M;
+as_entity_map([]) ->
+    #{};
+as_entity_map(Other) ->
+    report_bad_half(~"changed", Other),
+    #{}.
+
+-spec as_id_list(term()) -> [binary()].
+as_id_list(L) when is_list(L) ->
+    [Id || Id <- L, is_binary(Id)];
+as_id_list(#{} = Empty) when map_size(Empty) =:= 0 ->
+    [];
+as_id_list(Other) ->
+    report_bad_half(~"removed", Other),
+    [].
+
+%% Reported here rather than left to asobi_zone: by the time the bridge has
+%% normalised a malformed half away, core sees something well-formed and has
+%% nothing to complain about. That gap is what made this whole class silent.
+-spec report_bad_half(binary(), term()) -> ok.
+report_bad_half(Half, Other) ->
+    asobi_telemetry:game_error(bad_zone_dirty, #{callback => zone_tick}),
+    ?LOG_ERROR(#{
+        msg => ~"zone_tick's dirty declaration has a malformed half; ignoring it",
+        half => Half,
+        shape => dirty_half_shape(Other)
+    }),
+    ok.
+
+%% Shape, never the value: the value is the script's and so is its size.
+-spec dirty_half_shape(term()) -> tuple() | binary().
+dirty_half_shape(T) when is_list(T) -> {list, length(T)};
+dirty_half_shape(T) when is_map(T) -> {map, map_size(T)};
+dirty_half_shape(T) when is_binary(T) -> {binary, byte_size(T)};
+dirty_half_shape(T) -> iolist_to_binary(io_lib:format("~P", [T, 4])).
 
 %% Lua truthiness, not Erlang's: `nil` and `false` are the only falsey values, so
 %% `return entities, zone_state, wave_countdown > 0` works and so does returning

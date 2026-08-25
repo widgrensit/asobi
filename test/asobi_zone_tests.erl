@@ -397,9 +397,9 @@ world_ack_garbage_seq_does_not_kill_the_zone() ->
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     timer:sleep(10),
     flush_messages(),
-    asobi_zone:player_input(Pid, ~"p1", #{}, ~"garbage"),
-    asobi_zone:player_input(Pid, ~"p1", #{}, {tuple, 1}),
-    asobi_zone:player_input(Pid, ~"p1", #{}, [1, 2, 3]),
+    asobi_zone:player_input(Pid, ~"p1", #{}, off_the_wire(~"garbage")),
+    asobi_zone:player_input(Pid, ~"p1", #{}, off_the_wire({tuple, 1})),
+    asobi_zone:player_input(Pid, ~"p1", #{}, off_the_wire([1, 2, 3])),
     asobi_zone:tick(Pid, 1),
     ?assertEqual(no_ack, recv_ack()),
     ?assert(is_process_alive(Pid)),
@@ -521,7 +521,7 @@ world_ack_survives_non_integer_seq() ->
     asobi_zone:subscribe(Pid, {~"p1", self()}),
     timer:sleep(10),
     flush_messages(),
-    asobi_zone:player_input(Pid, ~"p1", #{}, ~"not-a-seq"),
+    asobi_zone:player_input(Pid, ~"p1", #{}, off_the_wire(~"not-a-seq")),
     asobi_zone:tick(Pid, 1),
     ?assertEqual(no_ack, recv_ack()),
     ?assert(is_process_alive(Pid)),
@@ -1120,7 +1120,7 @@ reap_stops_empty_zone() ->
     end.
 
 %% asobi#283, found via the nightly prop_input_never_dropped flake (#282):
-%% asobi_zone_manager:release_zone/2 backdates a zone's zone_last_active the
+%% asobi_zone_manager:release_zone/2 backdates a zone's last-active stamp the
 %% moment it empties out, so it becomes reap-eligible on the next sweep. But
 %% nothing un-stales that timestamp on re-occupation for a zone with no live
 %% subscribers - this zone's own tick only touches the manager on the
@@ -1204,3 +1204,12 @@ flush_messages() ->
         _ -> flush_messages()
     after 0 -> ok
     end.
+
+%% The seq a client stamps on a world.input frame is whatever it sent, and
+%% `player_input/4` is exported - so proving the zone survives a spec-violating
+%% one means handing it a value the spec forbids. `dynamic()` is the honest
+%% type for a value that crossed the wire, and it is confined to this helper:
+%% it enters `player_input/4` and never leaves it (docs/eqwalizer-idioms.md).
+-spec off_the_wire(term()) -> dynamic().
+off_the_wire(Seq) ->
+    Seq.

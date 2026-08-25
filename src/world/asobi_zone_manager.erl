@@ -14,9 +14,12 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 
 -export([start_link/1]).
 -export([ensure_zone/2, ensure_zone/3, get_zone/2, touch_zone/2, release_zone/2, revive_zone/3]).
+-export([stamp_active/2]).
 -export([get_active_zones/1, zone_terminated/3, pre_warm/1]).
 -export([register_zone/3, set_zone_config/2, set_initial_zone_states/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+
+-include_lib("kernel/include/logger.hrl").
 
 -define(REAP_INTERVAL, 10_000).
 -define(DEFAULT_IDLE_TIMEOUT, 30_000).
@@ -92,14 +95,61 @@ revive_zone(Ref, Coords, DeadPid) when is_pid(DeadPid) ->
         {error, _} = Err -> Err
     end.
 
--doc "Reset idle timer for a zone. Fire-and-forget.".
+-doc """
+Reset idle timer for a zone. Fire-and-forget.
+
+For callers that hold the stamp table - every zone the manager itself started
+does - prefer `stamp_active/2`: this cast serialises on the manager, which is
+also what answers `ensure_zone/2` on the join and crossing hot path
+(widgrensit/asobi#559).
+""".
 -spec touch_zone(pid() | atom(), {integer(), integer()}) -> ok.
-touch_zone(Ref, Coords) ->
+touch_zone(Ref, {X, Y} = Coords) when is_integer(X), is_integer(Y) ->
     gen_server:cast(Ref, {touch_zone, Coords}).
+
+-doc """
+Stamp a zone as active by writing the ETS row directly.
+
+The reaper needs last-active at `idle_timeout` resolution (30s by default) and
+only sweeps every 10s, so the information content of a stamp is tiny - but
+every occupied zone used to send it as a cast on EVERY tick, and the manager
+rebuilt a map per cast. At `tick_rate = 50` that is 20 casts per second per
+occupied zone through the one gen_server that also serves `ensure_zone/2` on
+the join and NPC-crossing path, where the crossing budget is 1s and a timeout
+costs the crossing. The manager's mailbox became a queue the whole world
+shared (widgrensit/asobi#559).
+
+Distinct keys take distinct locks under `write_concurrency`, so zones stamping
+concurrently do not contend with each other, and none of them touch the
+manager process at all. `undefined` is accepted so a zone started outside the
+manager (`register_zone/3`) keeps working through the cast.
+
+The table is owned by the manager and the instance supervisor stops the manager
+BEFORE the zone supervisor, so on world teardown a zone can still be ticking
+after the table has gone. A `gen_server` cast at a dead manager is a silent
+no-op and this must not crash either, or every world teardown ends in a burst
+of `badarg` crashes from zones that did nothing wrong.
+
+It answers `stamp_failed` rather than `ok` so the caller can tell the two apart:
+a teardown is transient and a wrong handle is forever, and a zone that silently
+never stamps is a zone the reaper will take. The zone's own touch helper falls
+back to `touch_zone/2` on `stamp_failed`, which degrades to the pre-#559 path
+instead of to nothing.
+""".
+-spec stamp_active(ets:table() | undefined, {integer(), integer()}) -> ok | stamp_failed.
+stamp_active(undefined, _Coords) ->
+    stamp_failed;
+stamp_active(Tab, {X, Y} = Coords) when is_integer(X), is_integer(Y) ->
+    try
+        true = ets:insert(Tab, {Coords, erlang:monotonic_time(millisecond)}),
+        ok
+    catch
+        error:badarg -> stamp_failed
+    end.
 
 -doc "Hint that zone can be unloaded.".
 -spec release_zone(pid() | atom(), {integer(), integer()}) -> ok.
-release_zone(Ref, Coords) ->
+release_zone(Ref, {X, Y} = Coords) when is_integer(X), is_integer(Y) ->
     gen_server:cast(Ref, {release_zone, Coords}).
 
 -doc "Return all active zone pids. For the ticker.".
@@ -157,6 +207,13 @@ init(Opts) ->
             N when is_atom(N) ->
                 ets:new(N, [set, public, named_table, {read_concurrency, true}])
         end,
+    %% A separate table from the coords->pid one on purpose. That one is read
+    %% on every lookup and never written on the tick path; this one is written
+    %% by every occupied zone on its own tick and read only by the 10s reap
+    %% sweep, so it wants `write_concurrency` and the lookup table does not.
+    StampTab = ets:new(asobi_zone_stamps, [
+        set, public, {write_concurrency, auto}, {read_concurrency, true}
+    ]),
     ZoneSup =
         case maps:get(zone_sup, Opts, undefined) of
             undefined ->
@@ -172,7 +229,7 @@ init(Opts) ->
         instance_sup => maps:get(instance_sup, Opts, undefined),
         zone_sup => ZoneSup,
         ets_tab => Tab,
-        zone_last_active => #{},
+        stamp_tab => StampTab,
         zone_monitors => #{},
         idle_timeout => maps:get(idle_timeout, Opts, ?DEFAULT_IDLE_TIMEOUT),
         max_active_zones => maps:get(max_active_zones, Opts, ?DEFAULT_MAX_ACTIVE),
@@ -187,7 +244,8 @@ init(Opts) ->
 handle_call({ensure_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
     case ets:lookup(Tab, Coords) of
         [{Coords, Pid}] ->
-            {reply, {ok, Pid, existing}, touch(Coords, State)};
+            touch(Coords, State),
+            {reply, {ok, Pid, existing}, State};
         [] ->
             case start_zone(Coords, State) of
                 {ok, Pid, State1} ->
@@ -211,7 +269,8 @@ handle_call({revive_zone, {ZX, ZY} = Coords, DeadPid}, _From, #{ets_tab := Tab} 
                     {reply, {error, zone_stopping}, State}
             end;
         [{Coords, Pid}] ->
-            {reply, {ok, Pid, existing}, touch(Coords, State)};
+            touch(Coords, State),
+            {reply, {ok, Pid, existing}, State};
         [] ->
             case start_zone(Coords, State) of
                 {ok, Pid, State1} -> {reply, {ok, Pid, created}, State1};
@@ -227,17 +286,14 @@ handle_call(
     _From,
     #{
         ets_tab := Tab,
-        zone_last_active := Active,
         zone_monitors := Monitors
     } = State
 ) when is_pid(ZonePid) ->
     ets:insert(Tab, {Coords, ZonePid}),
     MonRef = monitor(process, ZonePid),
-    Now = erlang:monotonic_time(millisecond),
-    State1 = State#{
-        zone_last_active => Active#{Coords => Now},
-        zone_monitors => Monitors#{MonRef => Coords, Coords => MonRef}
-    },
+    announce_zone(ZonePid, State),
+    touch(Coords, State),
+    State1 = State#{zone_monitors => Monitors#{MonRef => Coords, Coords => MonRef}},
     {reply, ok, State1};
 handle_call({set_zone_config, Config}, _From, State) ->
     {reply, ok, State#{zone_config => Config}};
@@ -257,10 +313,14 @@ handle_call(_Request, _From, State) ->
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
 handle_cast({touch_zone, Coords}, State) ->
-    {noreply, touch(Coords, State)};
-handle_cast({release_zone, Coords}, #{zone_last_active := Active, idle_timeout := Timeout} = State) ->
+    touch(Coords, State),
+    {noreply, State};
+handle_cast(
+    {release_zone, Coords}, #{stamp_tab := StampTab, idle_timeout := Timeout} = State
+) ->
     Stale = erlang:monotonic_time(millisecond) - Timeout - 1,
-    {noreply, State#{zone_last_active => Active#{Coords => Stale}}};
+    ets:insert(StampTab, {Coords, Stale}),
+    {noreply, State};
 handle_cast({zone_terminated, Coords, ZonePid}, #{ets_tab := Tab} = State) ->
     %% Only clean up if this coords still maps to the pid that terminated -
     %% a reaped zone's slot may already have been recreated.
@@ -308,8 +368,9 @@ handle_info(_Info, State) ->
 %% gauge from opened minus closed must key it on world_id and drop the world's
 %% counters when the world ends - see ADR 0005.
 -spec terminate(term(), map()) -> ok.
-terminate(_Reason, #{ets_tab := Tab}) ->
+terminate(_Reason, #{ets_tab := Tab, stamp_tab := StampTab}) ->
     ets:delete(Tab),
+    ets:delete(StampTab),
     ok.
 
 %% --- Internal ---
@@ -318,8 +379,8 @@ start_zone(
     Coords,
     #{
         ets_tab := Tab,
+        stamp_tab := StampTab,
         zone_sup := ZoneSup,
-        zone_last_active := Active,
         zone_monitors := Monitors,
         max_active_zones := MaxActive,
         zone_config := BaseConfig,
@@ -331,7 +392,9 @@ start_zone(
         true ->
             {error, max_zones_reached};
         false ->
-            Config0 = BaseConfig#{coords => Coords},
+            %% Handed to the zone so it can stamp itself active without a cast
+            %% at the manager - see stamp_active/2.
+            Config0 = BaseConfig#{coords => Coords, zone_stamp_tab => StampTab},
             Config =
                 case maps:get(Coords, InitialStates, undefined) of
                     undefined -> Config0;
@@ -339,13 +402,13 @@ start_zone(
                     _ -> Config0
                 end,
             case asobi_zone_sup:start_zone(ZoneSup, Config) of
-                {ok, Pid} ->
+                {ok, Pid} when is_pid(Pid) ->
                     ets:insert(Tab, {Coords, Pid}),
                     asobi_telemetry:zone_opened(WorldId, Coords),
+                    announce_zone(Pid, State),
                     MonRef = monitor(process, Pid),
-                    Now = erlang:monotonic_time(millisecond),
+                    touch(Coords, State),
                     State1 = State#{
-                        zone_last_active => Active#{Coords => Now},
                         zone_monitors => Monitors#{MonRef => Coords, Coords => MonRef}
                     },
                     {ok, Pid, State1};
@@ -358,7 +421,7 @@ cleanup_zone(
     Coords,
     #{
         ets_tab := Tab,
-        zone_last_active := Active,
+        stamp_tab := StampTab,
         zone_monitors := Monitors,
         world_id := WorldId
     } = State
@@ -380,6 +443,7 @@ cleanup_zone(
         maps:get(border_tab, maps:get(zone_config, State, #{}), undefined), Coords
     ),
     ets:delete(Tab, Coords),
+    ets:delete(StampTab, Coords),
     Monitors1 =
         case maps:get(Coords, Monitors, undefined) of
             undefined ->
@@ -388,10 +452,7 @@ cleanup_zone(
                 demonitor(MonRef, [flush]),
                 maps:without([Coords, MonRef], Monitors)
         end,
-    State#{
-        zone_last_active => maps:remove(Coords, Active),
-        zone_monitors => Monitors1
-    }.
+    State#{zone_monitors => Monitors1}.
 
 %% The manager owns a monitor on every zone it has in ETS, so the DOWN for a
 %% zone a caller has just seen die is either already in this mailbox or on its
@@ -416,23 +477,42 @@ await_zone_down(Coords, ZonePid, #{zone_monitors := Monitors} = State) ->
 
 reap_idle_zones(
     #{
-        zone_last_active := Active,
+        stamp_tab := StampTab,
         idle_timeout := Timeout,
         ets_tab := Tab
     } = State
 ) ->
-    Now = erlang:monotonic_time(millisecond),
-    Expired = maps:fold(
-        fun(Coords, LastActive, Acc) ->
-            case Now - LastActive > Timeout of
-                true -> [Coords | Acc];
-                false -> Acc
-            end
-        end,
-        [],
-        Active
-    ),
-    reap_expired(Expired, Tab, State).
+    Cutoff = erlang:monotonic_time(millisecond) - Timeout,
+    %% Selected in ETS rather than folded in the manager's own state: the
+    %% stamps live in the table zones write to directly (widgrensit/asobi#559),
+    %% and this runs once every ?REAP_INTERVAL rather than per tick.
+    Expired = ets:select(StampTab, [
+        {{'$1', '$2'}, [{'<', '$2', Cutoff}], ['$1']}
+    ]),
+    reap_expired(narrow_coords(Expired, StampTab), Tab, State).
+
+%% Drops a key that is not a coords pair rather than function_clausing on it.
+%% This manager is `transient` under a ONE_FOR_ALL supervisor, so a crash here
+%% restarts the zone supervisor, the ticker and the world server - every zone
+%% in the world dies. The code this replaced just handed whatever it found to
+%% `ets:lookup/2` and swept the miss, so failing loud here would have been a
+%% robustness regression, not an improvement (widgrensit/asobi#559 review).
+%%
+%% Deleted as well as dropped: `release_zone/2` writes an already-expired
+%% stamp, so a bad key lands in the very next sweep and would be re-found for
+%% the life of the world.
+-spec narrow_coords([term()], ets:table()) -> [{integer(), integer()}].
+narrow_coords([], _StampTab) ->
+    [];
+narrow_coords([{X, Y} = Coords | Rest], StampTab) when is_integer(X), is_integer(Y) ->
+    [Coords | narrow_coords(Rest, StampTab)];
+narrow_coords([Bad | Rest], StampTab) ->
+    ?LOG_WARNING(#{
+        msg => ~"non-coords key in the zone stamp table; dropping it",
+        key => io_lib:format("~P", [Bad, 4])
+    }),
+    ets:delete(StampTab, Bad),
+    narrow_coords(Rest, StampTab).
 
 %% Explicit recursion: see docs/eqwalizer-idioms.md.
 -spec reap_expired([{integer(), integer()}], ets:table(), map()) -> map().
@@ -452,9 +532,23 @@ reap_expired([Coords | Rest], Tab, State) ->
             reap_expired(Rest, Tab, cleanup_zone(Coords, State))
     end.
 
-touch(Coords, #{zone_last_active := Active} = State) ->
-    Now = erlang:monotonic_time(millisecond),
-    State#{zone_last_active => Active#{Coords => Now}}.
+touch(Coords, #{stamp_tab := StampTab}) ->
+    stamp_active(StampTab, Coords).
+
+%% The ticker owns its own active set rather than re-reading this manager's
+%% table every tick (widgrensit/asobi#560), so a zone has to be handed to it
+%% when it opens. Removal needs no counterpart: the ticker monitors what it is
+%% told about, so a reaped or crashed zone drops out on its own `DOWN`.
+%%
+%% The ticker pid rides in the zone config the world server sets, which is the
+%% same map every zone is started from - so a manager configured for a world
+%% has it, and one that has not been configured yet has started no zones.
+-spec announce_zone(pid(), map()) -> ok.
+announce_zone(ZonePid, #{zone_config := ZoneConfig}) ->
+    case maps:get(ticker_pid, ZoneConfig, undefined) of
+        TickerPid when is_pid(TickerPid) -> asobi_world_ticker:add_zone(TickerPid, ZonePid);
+        _ -> ok
+    end.
 
 schedule_reap() ->
     Ref = make_ref(),

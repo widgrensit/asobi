@@ -104,3 +104,36 @@ entity_without_position_ignored_by_grid_test() ->
     Result = asobi_zone:query_radius(Pid, {0.0, 0.0}, 1000.0),
     ?assertEqual([], Result),
     stop_zone(Pid).
+
+%% widgrensit/asobi#558: sync_spatial_grid derived its removals with `--`, and
+%% the O(N^2) that replaced covers exactly this path - an entity that the tick
+%% dropped, rather than one a `remove_entity` cast took out of the grid
+%% directly.
+tick_removal_reflected_in_grid_test() ->
+    Pid = start_zone(config_with_grid()),
+    asobi_zone:add_entity(Pid, ~"stays", #{x => 10.0, y => 10.0}),
+    asobi_zone:add_entity(Pid, ~"goes", #{x => 11.0, y => 11.0, despawn => true}),
+    asobi_zone:tick(Pid, 1),
+    _ = sys:get_state(Pid),
+    Result = asobi_zone:query_radius(Pid, {10.0, 10.0}, 5.0),
+    ?assertEqual([{~"stays", {10.0, 10.0}}], Result),
+    stop_zone(Pid).
+
+%% The other half of tick_removal_reflected_in_grid_test: an entity the tick
+%% MOVED. That is the branch of sync_spatial_grid/3 on the hot path, and it had
+%% no coverage in eunit or CT before widgrensit/asobi#557's review.
+tick_movement_reflected_in_grid_test() ->
+    Pid = start_zone(config_with_grid()),
+    asobi_zone:add_entity(Pid, ~"mover", #{x => 10.0, y => 10.0, drift => 40.0}),
+    asobi_zone:add_entity(Pid, ~"still", #{x => 11.0, y => 11.0}),
+    asobi_zone:tick(Pid, 1),
+    _ = sys:get_state(Pid),
+    ?assertEqual(
+        [{~"still", {11.0, 11.0}}],
+        asobi_zone:query_radius(Pid, {10.0, 10.0}, 5.0)
+    ),
+    ?assertEqual(
+        [{~"mover", {50.0, 10.0}}],
+        asobi_zone:query_radius(Pid, {50.0, 10.0}, 5.0)
+    ),
+    stop_zone(Pid).

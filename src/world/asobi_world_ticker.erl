@@ -3,8 +3,10 @@
 
 -export([start_link/1]).
 -export([tick_done/3, set_zones/3, set_zone_manager/3, get_tick/1]).
--export([promote_zone/2, demote_zone/2, remove_zone/2]).
+-export([promote_zone/2, demote_zone/2, add_zone/2, remove_zone/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+
+-include_lib("kernel/include/logger.hrl").
 
 %% #313: a world tick is the fan-out to every zone plus the fan-in of their
 %% tick_done replies, which is the saturation signal an operator watching a
@@ -14,6 +16,7 @@
 %% `tick_sample_interval_ms` in the ticker config.
 -define(DEFAULT_TICK_SAMPLE_INTERVAL_MS, 1000).
 -define(DEFAULT_TICK_RATE, 50).
+-define(DEFAULT_COLD_DIVISOR, 10).
 
 %% --- Public API ---
 
@@ -39,6 +42,25 @@ get_tick(TickerPid) ->
         N when is_integer(N), N >= 0 -> N
     end.
 
+-doc """
+Take ownership of a zone, hot, from the moment it exists.
+
+Before widgrensit/asobi#560 the ticker asked the zone manager for the active
+set on EVERY tick, and the manager answered with `ets:tab2list/1` - a full
+table copy plus a list rebuild, 20 times a second on a world with thousands of
+loaded zones, before a single zone had been ticked. The set only changes when
+a zone opens or closes, so it is pushed here instead and the manager is off
+the per-tick path entirely (with widgrensit/asobi#559, off the tick path full
+stop).
+
+The ticker monitors what it is told about, so a reaped or crashed zone drops
+out on its `DOWN` without needing `remove_zone/2` to arrive - which is the
+self-healing the old partition-against-the-manager's-list gave for free.
+""".
+-spec add_zone(pid(), pid()) -> ok.
+add_zone(TickerPid, ZonePid) ->
+    gen_server:cast(TickerPid, {add_zone, ZonePid}).
+
 -spec promote_zone(pid(), pid()) -> ok.
 promote_zone(TickerPid, ZonePid) ->
     gen_server:cast(TickerPid, {promote_zone, ZonePid}).
@@ -61,15 +83,29 @@ init(Config) ->
     TickRate = pos_int(maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE), ?DEFAULT_TICK_RATE),
     WorldPid = maps:get(world_pid, Config, undefined),
     ZoneManager = maps:get(zone_manager, Config, undefined),
-    ColdTickDivisor = maps:get(cold_tick_divisor, Config, 10),
+    ColdTickDivisor = cold_divisor(maps:get(cold_tick_divisor, Config, ?DEFAULT_COLD_DIVISOR)),
     {ok, #{
         tick => 0,
         tick_rate => TickRate,
         world_id => maps:get(world_id, Config, undefined),
         world_pid => WorldPid,
+        %% Diagnostic only since widgrensit/asobi#560 - the ticker owns its own
+        %% active set and never asks the manager for anything. Kept so
+        %% `sys:get_state/1` still says which manager this ticker belongs to.
+        %% `set_zone_manager/3`'s remaining effect is start_ticking/1, which is
+        %% what actually starts the world: do not delete that call as dead
+        %% plumbing on the strength of this field being unread.
         zone_manager => ZoneManager,
-        hot_zones => [],
-        cold_zones => [],
+        %% Maps used as sets: the tick loop derives its candidate list from
+        %% these every tick, and `lists:uniq/1` on a list of thousands of zones
+        %% is per-tick work a map's key set gives for nothing. Kept disjoint by
+        %% construction, so `maps:keys(Hot) ++ maps:keys(Cold)` has no
+        %% duplicates and needs no `uniq`.
+        hot_zones => #{},
+        cold_zones => #{},
+        %% One monitor per known zone, so a zone that dies leaves both sets
+        %% without anyone having to tell us.
+        zone_monitors => #{},
         cold_tick_divisor => ColdTickDivisor,
         tick_count => 0,
         pending => #{},
@@ -114,31 +150,40 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 -spec handle_cast(term(), map()) -> {noreply, map()}.
-handle_cast({set_zones, Zones, WorldPid}, State) ->
-    {noreply, start_ticking(State#{hot_zones => Zones, world_pid => WorldPid})};
+%% Replaces the set rather than adding to it, which is what "set" has always
+%% meant here - and now that the ticker holds a monitor per zone, the ones it
+%% is dropping have to be released too.
+handle_cast({set_zones, Zones, WorldPid}, State) when is_list(Zones) ->
+    State1 = forget_all(maps:keys(maps:get(zone_monitors, State)), State),
+    {noreply, start_ticking(add_all(Zones, State1#{world_pid => WorldPid}))};
 handle_cast({set_zone_manager, ZoneManagerPid, WorldPid}, State) ->
     {noreply, start_ticking(State#{zone_manager => ZoneManagerPid, world_pid => WorldPid})};
-handle_cast({promote_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = State) ->
-    Cold1 = lists:delete(ZonePid, Cold),
-    Hot1 =
-        case lists:member(ZonePid, Hot) of
-            true -> Hot;
-            false -> [ZonePid | Hot]
-        end,
-    {noreply, State#{hot_zones => Hot1, cold_zones => Cold1}};
-handle_cast({demote_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = State) ->
-    Hot1 = lists:delete(ZonePid, Hot),
-    Cold1 =
-        case lists:member(ZonePid, Cold) of
-            true -> Cold;
-            false -> [ZonePid | Cold]
-        end,
-    {noreply, State#{hot_zones => Hot1, cold_zones => Cold1}};
-handle_cast({remove_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = State) ->
-    {noreply, State#{
-        hot_zones => lists:delete(ZonePid, Hot),
-        cold_zones => lists:delete(ZonePid, Cold)
+handle_cast({add_zone, ZonePid}, State) when is_pid(ZonePid) ->
+    {noreply, add_known(ZonePid, State)};
+%% Promotion doubles as registration: a zone that warms up before its opener's
+%% `add_zone` lands must not be left out of the tick.
+handle_cast({promote_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = State) when
+    is_pid(ZonePid)
+->
+    State1 = watch(ZonePid, State),
+    {noreply, State1#{
+        hot_zones => Hot#{ZonePid => ok},
+        cold_zones => maps:remove(ZonePid, Cold)
     }};
+%% Demotion registers an unknown zone as COLD, which at `cold_tick_divisor = 0`
+%% means it never ticks. Safe because the only sender is `reclassify/1`, which
+%% runs inside the zone's own `do_tick` - so the ticker has already dispatched
+%% to it and therefore already knows it.
+handle_cast({demote_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = State) when
+    is_pid(ZonePid)
+->
+    State1 = watch(ZonePid, State),
+    {noreply, State1#{
+        hot_zones => maps:remove(ZonePid, Hot),
+        cold_zones => Cold#{ZonePid => ok}
+    }};
+handle_cast({remove_zone, ZonePid}, State) when is_pid(ZonePid) ->
+    {noreply, forget(ZonePid, State)};
 %% A reply frees the zone whatever tick it carries: a zone only ever has one
 %% tick in flight, so `tick_done` means "this zone is idle again". Matching the
 %% reply against the ticker's current tick instead - as this did before #426 -
@@ -172,45 +217,27 @@ handle_info(
         tick_rate := TickRate,
         tick_count := TickCount,
         cold_tick_divisor := ColdTickDivisor,
-        hot_zones := StaticHot,
-        cold_zones := StaticCold,
-        zone_manager := ZoneManager,
+        hot_zones := Hot,
+        cold_zones := Cold,
         pending := Pending,
         world_id := WorldId
     } = State
 ) ->
     NextTick = Tick + 1,
     NextTickCount = TickCount + 1,
-    %% Under a zone manager the active set is the manager's, but which of those
-    %% zones are cold is still this ticker's own bookkeeping - it is fed by
-    %% asobi_zone's promote/demote casts. Before widgrensit/asobi#543 this
-    %% branch discarded `cold_zones` outright. That was not the only reason
-    %% `cold_tick_divisor` was inert: nothing anywhere called promote_zone/2 or
-    %% demote_zone/2, and `set_zones/3` (the only path that populates the static
-    %% lists) has no caller in src/ either, so no world of any shape ever had a
-    %% cold zone. This branch is what would have kept it inert for a lazy world
-    %% even after the zone side started classifying itself.
+    %% The hot/cold split is this ticker's own bookkeeping, fed by asobi_zone's
+    %% add/promote/demote casts and pruned by the zones' own `DOWN`s
+    %% (widgrensit/asobi#560). It used to be re-derived from the zone manager
+    %% every tick, which cost a full `ets:tab2list/1` of the world's loaded
+    %% zones - plus, when the manager was addressed by pid, a `gen_server` call
+    %% into the same process the join and crossing paths go through.
     %%
-    %% Partitioning the manager's list also prunes the cold set: a zone that has
-    %% been reaped is absent from `AllZones` and so drops out of `cold_zones`
-    %% below without needing a `remove_zone` cast to arrive.
-    {Hot, Cold} =
-        case ZoneManager of
-            undefined ->
-                {StaticHot, StaticCold};
-            ZMPid ->
-                AllZones = asobi_zone_manager:get_active_zones(ZMPid),
-                ColdSet = maps:from_keys(StaticCold, []),
-                lists:partition(fun(Z) -> not is_map_key(Z, ColdSet) end, AllZones)
-        end,
-    TickCold = (NextTickCount rem ColdTickDivisor) =:= 0,
-    %% `uniq` because a zone dispatched twice in one tick replies twice, and
-    %% the second reply finds nothing left in `pending` to retire - the tick
-    %% would then never complete and the world would stop posting.
+    TickCold = tick_cold(NextTickCount, ColdTickDivisor),
+    %% No `lists:uniq/1`: the two sets are disjoint map key sets.
     Candidates =
         case TickCold of
-            true -> lists:uniq(Hot ++ Cold);
-            false -> lists:uniq(Hot)
+            true -> maps:keys(Hot) ++ maps:keys(Cold);
+            false -> maps:keys(Hot)
         end,
     %% #426: a zone that has not retired its previous tick is skipped rather
     %% than sent another one. Without this the fan-out is open-loop - a zone
@@ -231,8 +258,6 @@ handle_info(
     State1 = State#{
         tick => NextTick,
         tick_count => NextTickCount,
-        hot_zones => Hot,
-        cold_zones => Cold,
         tick_started_at => erlang:monotonic_time(millisecond),
         tick_zone_count => length(ZonesToTick),
         pending => maps:merge(Pending0, maps:from_keys(ZonesToTick, NextTick)),
@@ -242,8 +267,90 @@ handle_info(
         [] -> {noreply, complete_tick(maybe_post_tick(NextTick, State1))};
         _ -> {noreply, State1}
     end;
+handle_info({'DOWN', MonRef, process, ZonePid, _Reason}, #{zone_monitors := Mons} = State) when
+    is_pid(ZonePid)
+->
+    case maps:get(ZonePid, Mons, undefined) of
+        MonRef -> {noreply, forget(ZonePid, State)};
+        _ -> {noreply, State}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% `0` means an idle zone is not ticked at all: `warm_up/1` on the message that
+%% creates the work is then the only transition back, which is ADR 0016's
+%% decision 2 doing a load-bearing job rather than an optimisation. See ADR
+%% 0021 and widgrensit/asobi#561.
+-spec tick_cold(pos_integer(), non_neg_integer()) -> boolean().
+tick_cold(_TickCount, 0) -> false;
+tick_cold(TickCount, Divisor) -> (TickCount rem Divisor) =:= 0.
+
+%% Hardened here rather than at the reader, for the same reason `tick_rate` is:
+%% a Lua game cannot deliver a bad value (`asobi_lua_config` guards it) but a
+%% hand-written Erlang `game_modes` map can.
+%%
+%% A bad value takes the DOCUMENTED DEFAULT, loudly - never the never-tick
+%% regime. Folding `"10"` or `-1` into 0 would hand a world the most aggressive
+%% setting in the system by typo, and ADR 0021 is explicit that at 0 the whole
+%% thing rests on `warm_up/1`: that is a property a world opts into, not one it
+%% lands in silently.
+-spec cold_divisor(term()) -> non_neg_integer().
+cold_divisor(D) when is_integer(D), D >= 0 ->
+    D;
+cold_divisor(D) ->
+    ?LOG_WARNING(#{
+        msg => ~"cold_tick_divisor must be a non-negative integer; using the default",
+        value => io_lib:format("~P", [D, 4]),
+        default => ?DEFAULT_COLD_DIVISOR
+    }),
+    ?DEFAULT_COLD_DIVISOR.
+
+%% Explicit recursion: see docs/eqwalizer-idioms.md.
+-spec add_all([term()], map()) -> map().
+add_all([], State) -> State;
+add_all([ZonePid | Rest], State) -> add_all(Rest, add_known(ZonePid, State)).
+
+-spec forget_all([term()], map()) -> map().
+forget_all([], State) ->
+    State;
+forget_all([ZonePid | Rest], State) when is_pid(ZonePid) ->
+    forget_all(Rest, forget(ZonePid, State));
+forget_all([_ | Rest], State) ->
+    forget_all(Rest, State).
+
+%% A newly-known zone starts hot: it has not ticked, so it has not established
+%% that it is idle - the same reason asobi_zone's own `cold` starts false.
+-spec add_known(term(), map()) -> map().
+add_known(ZonePid, #{hot_zones := Hot, cold_zones := Cold} = State) when is_pid(ZonePid) ->
+    case is_map_key(ZonePid, Hot) orelse is_map_key(ZonePid, Cold) of
+        true -> State;
+        false -> (watch(ZonePid, State))#{hot_zones => Hot#{ZonePid => ok}}
+    end;
+add_known(_ZonePid, State) ->
+    State.
+
+-spec watch(pid(), map()) -> map().
+watch(ZonePid, #{zone_monitors := Mons} = State) ->
+    case is_map_key(ZonePid, Mons) of
+        true -> State;
+        false -> State#{zone_monitors => Mons#{ZonePid => monitor(process, ZonePid)}}
+    end.
+
+-spec forget(pid(), map()) -> map().
+forget(ZonePid, #{hot_zones := Hot, cold_zones := Cold, zone_monitors := Mons} = State) ->
+    Mons1 =
+        case maps:take(ZonePid, Mons) of
+            {MonRef, Rest} ->
+                demonitor(MonRef, [flush]),
+                Rest;
+            error ->
+                Mons
+        end,
+    State#{
+        hot_zones => maps:remove(ZonePid, Hot),
+        cold_zones => maps:remove(ZonePid, Cold),
+        zone_monitors => Mons1
+    }.
 
 start_ticking(#{running := true} = State) ->
     State;

@@ -42,6 +42,8 @@ config_test_() ->
         {"bot names: falls back to defaults", fun bot_names_fallback/0},
         {"world config: reads zone settings", fun world_config_zone_settings/0},
         {"world config: reads phase 2 settings", fun world_config_phase2_settings/0},
+        {"world config: cold_tick_divisor = 0 survives parsing",
+            fun world_config_cold_divisor_zero/0},
         {"game_type world selects world bridge", fun game_type_world_selects_world_bridge/0},
         {"game_type absent defaults to match bridge", fun game_type_absent_defaults_to_match/0},
         {"empty_grace_ms global is forwarded to mode config", fun empty_grace_ms_forwarded/0},
@@ -447,6 +449,21 @@ world_config_phase2_settings() ->
     ?assertEqual(64, maps:get(spatial_grid_cell_size, Mode)),
     ?assertEqual(5, maps:get(cold_tick_divisor, Mode)),
     ?assertEqual(true, maps:get(lazy_zones, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+%% widgrensit/asobi#561: 0 is meaningful - an idle zone is never ticked - so it
+%% cannot go through maybe_add_int/3, which requires `Val > 0` and would drop it
+%% back to the default of 10 without a word. This one token is the whole
+%% user-facing entry point for ADR 0021 on a Lua game, and asobi's docs are
+%% Lua-first. `maps:get/2` raises badkey when the value is dropped.
+world_config_cold_divisor_zero() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_world_cold_zero.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(0, maps:get(cold_tick_divisor, Mode)),
     cleanup_temp_dir(TmpDir).
 
 game_type_world_selects_world_bridge() ->

@@ -56,12 +56,15 @@ init_per_suite(Config) ->
         lists:seq(1, 5)
     ),
     [{P1Id, P1Token} | _] = Players,
-    BoardId = iolist_to_binary([
-        ~"test_board_", integer_to_binary(erlang:unique_integer([positive]))
-    ]),
-    DisabledBoardId = iolist_to_binary([
-        ~"test_board_disabled_", integer_to_binary(erlang:unique_integer([positive]))
-    ]),
+    %% asobi_test_helpers:unique_id/1, not erlang:unique_integer/1: the latter
+    %% is unique within ONE runtime instance and every `rebar3 ct` is a new
+    %% one, so two runs hand out the same low integers. The local database
+    %% persists between runs, so the second run inherited the first run's rows
+    %% on the same board id - `get_top_empty` found scores and
+    %% `ops_board_listing` counted 6 entries where it seeds 3. Exactly the
+    %% failure asobi#357 recorded and unique_id/1 was written for.
+    BoardId = asobi_test_helpers:unique_id(~"test_board"),
+    DisabledBoardId = asobi_test_helpers:unique_id(~"test_board_disabled"),
     {ok, _} = asobi_leaderboard_sup:start_board(BoardId),
     %% Whitelist this board for client submits — submit_score_disabled
     %% deliberately uses an un-whitelisted board to confirm the gate.
@@ -69,9 +72,7 @@ init_per_suite(Config) ->
     %% The ops reads are database reads. Seed rows straight into the table
     %% rather than waiting out the 30s flush, and out of rank order so the
     %% ranking is proven rather than inherited from the insert order.
-    OpsBoardId = iolist_to_binary([
-        ~"ops_board_", integer_to_binary(erlang:unique_integer([positive]))
-    ]),
+    OpsBoardId = asobi_test_helpers:unique_id(~"ops_board"),
     [{Pa, _}, {Pb, _}, {Pc, _} | _] = Players,
     ok = seed_entry(OpsBoardId, Pb, 100),
     ok = seed_entry(OpsBoardId, Pa, 300),
