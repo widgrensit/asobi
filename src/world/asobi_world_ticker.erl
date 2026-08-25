@@ -6,6 +6,8 @@
 -export([promote_zone/2, demote_zone/2, add_zone/2, remove_zone/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% #313: a world tick is the fan-out to every zone plus the fan-in of their
 %% tick_done replies, which is the saturation signal an operator watching a
 %% world server wants. At the default 50ms tick rate that is 20 events per
@@ -14,6 +16,7 @@
 %% `tick_sample_interval_ms` in the ticker config.
 -define(DEFAULT_TICK_SAMPLE_INTERVAL_MS, 1000).
 -define(DEFAULT_TICK_RATE, 50).
+-define(DEFAULT_COLD_DIVISOR, 10).
 
 %% --- Public API ---
 
@@ -80,18 +83,24 @@ init(Config) ->
     TickRate = pos_int(maps:get(tick_rate, Config, ?DEFAULT_TICK_RATE), ?DEFAULT_TICK_RATE),
     WorldPid = maps:get(world_pid, Config, undefined),
     ZoneManager = maps:get(zone_manager, Config, undefined),
-    ColdTickDivisor = maps:get(cold_tick_divisor, Config, 10),
+    ColdTickDivisor = cold_divisor(maps:get(cold_tick_divisor, Config, ?DEFAULT_COLD_DIVISOR)),
     {ok, #{
         tick => 0,
         tick_rate => TickRate,
         world_id => maps:get(world_id, Config, undefined),
         world_pid => WorldPid,
+        %% Diagnostic only since widgrensit/asobi#560 - the ticker owns its own
+        %% active set and never asks the manager for anything. Kept so
+        %% `sys:get_state/1` still says which manager this ticker belongs to.
+        %% `set_zone_manager/3`'s remaining effect is start_ticking/1, which is
+        %% what actually starts the world: do not delete that call as dead
+        %% plumbing on the strength of this field being unread.
         zone_manager => ZoneManager,
-        %% Maps rather than lists: the tick loop derives its candidate list
-        %% from these every tick, and `lists:uniq/1` on a list of thousands of
-        %% zones is per-tick work that a map's key set gives for nothing. Kept
-        %% disjoint by construction, so `maps:keys(Hot) ++ maps:keys(Cold)` has
-        %% no duplicates and needs no `uniq`.
+        %% Maps used as sets: the tick loop derives its candidate list from
+        %% these every tick, and `lists:uniq/1` on a list of thousands of zones
+        %% is per-tick work a map's key set gives for nothing. Kept disjoint by
+        %% construction, so `maps:keys(Hot) ++ maps:keys(Cold)` has no
+        %% duplicates and needs no `uniq`.
         hot_zones => #{},
         cold_zones => #{},
         %% One monitor per known zone, so a zone that dies leaves both sets
@@ -158,16 +167,20 @@ handle_cast({promote_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = S
 ->
     State1 = watch(ZonePid, State),
     {noreply, State1#{
-        hot_zones => Hot#{ZonePid => []},
+        hot_zones => Hot#{ZonePid => ok},
         cold_zones => maps:remove(ZonePid, Cold)
     }};
+%% Demotion registers an unknown zone as COLD, which at `cold_tick_divisor = 0`
+%% means it never ticks. Safe because the only sender is `reclassify/1`, which
+%% runs inside the zone's own `do_tick` - so the ticker has already dispatched
+%% to it and therefore already knows it.
 handle_cast({demote_zone, ZonePid}, #{hot_zones := Hot, cold_zones := Cold} = State) when
     is_pid(ZonePid)
 ->
     State1 = watch(ZonePid, State),
     {noreply, State1#{
         hot_zones => maps:remove(ZonePid, Hot),
-        cold_zones => Cold#{ZonePid => []}
+        cold_zones => Cold#{ZonePid => ok}
     }};
 handle_cast({remove_zone, ZonePid}, State) when is_pid(ZonePid) ->
     {noreply, forget(ZonePid, State)};
@@ -219,10 +232,6 @@ handle_info(
     %% zones - plus, when the manager was addressed by pid, a `gen_server` call
     %% into the same process the join and crossing paths go through.
     %%
-    %% Before widgrensit/asobi#543 this branch discarded `cold_zones` outright.
-    %% That was not the only reason `cold_tick_divisor` was inert: nothing
-    %% anywhere called promote_zone/2 or demote_zone/2, so no world of any
-    %% shape ever had a cold zone.
     TickCold = tick_cold(NextTickCount, ColdTickDivisor),
     %% No `lists:uniq/1`: the two sets are disjoint map key sets.
     Candidates =
@@ -268,16 +277,33 @@ handle_info({'DOWN', MonRef, process, ZonePid, _Reason}, #{zone_monitors := Mons
 handle_info(_Info, State) ->
     {noreply, State}.
 
-%% `0` (and `infinity`) means an idle zone is not ticked at all: `warm_up/1`
-%% on the message that creates the work is then the only transition back, which
-%% is exactly ADR 0016's decision 2 doing the load-bearing job rather than an
-%% optimisation. See ADR 0021 and widgrensit/asobi#561. Any other non-positive
-%% value would be a division by zero or a `rem` that fires every tick, so it is
-%% folded into the same never-tick answer rather than crashing the loop.
--spec tick_cold(pos_integer(), term()) -> boolean().
-tick_cold(_TickCount, Divisor) when not is_integer(Divisor) -> false;
-tick_cold(_TickCount, Divisor) when Divisor =< 0 -> false;
+%% `0` means an idle zone is not ticked at all: `warm_up/1` on the message that
+%% creates the work is then the only transition back, which is ADR 0016's
+%% decision 2 doing a load-bearing job rather than an optimisation. See ADR
+%% 0021 and widgrensit/asobi#561.
+-spec tick_cold(pos_integer(), non_neg_integer()) -> boolean().
+tick_cold(_TickCount, 0) -> false;
 tick_cold(TickCount, Divisor) -> (TickCount rem Divisor) =:= 0.
+
+%% Hardened here rather than at the reader, for the same reason `tick_rate` is:
+%% a Lua game cannot deliver a bad value (`asobi_lua_config` guards it) but a
+%% hand-written Erlang `game_modes` map can.
+%%
+%% A bad value takes the DOCUMENTED DEFAULT, loudly - never the never-tick
+%% regime. Folding `"10"` or `-1` into 0 would hand a world the most aggressive
+%% setting in the system by typo, and ADR 0021 is explicit that at 0 the whole
+%% thing rests on `warm_up/1`: that is a property a world opts into, not one it
+%% lands in silently.
+-spec cold_divisor(term()) -> non_neg_integer().
+cold_divisor(D) when is_integer(D), D >= 0 ->
+    D;
+cold_divisor(D) ->
+    ?LOG_WARNING(#{
+        msg => ~"cold_tick_divisor must be a non-negative integer; using the default",
+        value => io_lib:format("~P", [D, 4]),
+        default => ?DEFAULT_COLD_DIVISOR
+    }),
+    ?DEFAULT_COLD_DIVISOR.
 
 %% Explicit recursion: see docs/eqwalizer-idioms.md.
 -spec add_all([term()], map()) -> map().
@@ -298,7 +324,7 @@ forget_all([_ | Rest], State) ->
 add_known(ZonePid, #{hot_zones := Hot, cold_zones := Cold} = State) when is_pid(ZonePid) ->
     case is_map_key(ZonePid, Hot) orelse is_map_key(ZonePid, Cold) of
         true -> State;
-        false -> (watch(ZonePid, State))#{hot_zones => Hot#{ZonePid => []}}
+        false -> (watch(ZonePid, State))#{hot_zones => Hot#{ZonePid => ok}}
     end;
 add_known(_ZonePid, State) ->
     State.

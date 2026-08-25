@@ -78,7 +78,10 @@ zone_manager_test_() ->
         {"manager shutdown emits no zone/closed", fun manager_shutdown_emits_no_close/0},
         {"a zone stamps itself active without a cast", fun zone_stamps_itself_active/0},
         {"a zone that stamped itself is not reaped", fun stamped_zone_survives_sweep/0},
-        {"a new zone is announced to the ticker", fun zone_open_announced_to_ticker/0}
+        {"a new zone is announced to the ticker", fun zone_open_announced_to_ticker/0},
+        {"stamping a dead table does not crash the zone", fun stamp_on_dead_table/0},
+        {"stamping without a table reports rather than pretends", fun stamp_without_table/0},
+        {"a junk stamp key is dropped, not fatal", fun junk_stamp_key_dropped/0}
     ]}.
 
 %% --- #313: zone lifecycle telemetry ---
@@ -305,8 +308,46 @@ zone_open_announced_to_ticker() ->
     end,
     stop_manager(Ctx).
 
+%% The manager owns the stamp table and the instance supervisor stops the
+%% manager BEFORE the zone supervisor, so on teardown a zone can still be
+%% ticking after the table has gone. That has to be as quiet as a cast at a
+%% dead gen_server was, or every world teardown ends in a burst of badarg
+%% crashes from zones that did nothing wrong (widgrensit/asobi#559).
+stamp_on_dead_table() ->
+    Tab = ets:new(stamp_probe, [set, public]),
+    true = ets:delete(Tab),
+    ?assertEqual(stamp_failed, asobi_zone_manager:stamp_active(Tab, {0, 0})).
+
+%% `undefined` is a zone the manager did not start. It answers stamp_failed
+%% rather than ok so asobi_zone:touch_manager/1 can fall back to the cast - a
+%% zone that silently never stamps is a zone the reaper takes.
+stamp_without_table() ->
+    ?assertEqual(stamp_failed, asobi_zone_manager:stamp_active(undefined, {0, 0})).
+
+%% The sweep reads keys straight out of a public table, and this manager is
+%% transient under a ONE_FOR_ALL supervisor - so a function_clause here would
+%% restart the zone supervisor, the ticker and the world server. The code this
+%% replaced swept an unknown key harmlessly; failing loud would have been a
+%% robustness regression (widgrensit/asobi#559 review).
+junk_stamp_key_dropped() ->
+    Ctx = #{mgr := Mgr} = start_manager(#{idle_timeout => 20}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    #{zone_stamp_tab := Tab} = zone_state(ZonePid),
+    %% Genuinely stale, not literal 0: the clock is monotonic and starts deeply
+    %% negative, so 0 is in the FUTURE and the sweep would never select it.
+    Stale = erlang:monotonic_time(millisecond) - 100_000,
+    true = ets:insert(Tab, {{1.5, 2.5}, Stale}),
+    true = ets:insert(Tab, {not_even_a_pair, Stale}),
+    force_reap_sweep(Mgr),
+    ?assert(is_process_alive(Mgr)),
+    %% Dropped AND deleted: release_zone writes an already-expired stamp, so a
+    %% key that survived would be re-found on every sweep for the world's life.
+    ?assertEqual([], ets:lookup(Tab, {1.5, 2.5})),
+    ?assertEqual([], ets:lookup(Tab, not_even_a_pair)),
+    stop_manager(Ctx).
+
 %% Regression widgrensit/asobi#283, found via the prop_input_never_dropped
-%% nightly flake (asobi#282): release_zone/2 backdates zone_last_active as
+%% nightly flake (asobi#282): release_zone/2 backdates the zone's stamp as
 %% soon as a zone empties out, and nothing un-stales it on re-occupation - a
 %% zone's own tick only touches the manager when it has live subscribers
 %% (asobi_zone.erl, map_size(Subs) > 0), which this test's raw add_entity

@@ -44,7 +44,10 @@ ticker_test_() ->
             {"post_tick never runs backwards", fun post_tick_is_monotonic/0},
             {"the world keeps posting while saturated", fun post_tick_survives_saturation/0},
             {"set_zones twice arms one timer", fun set_zones_twice_arms_one_timer/0},
-            {"a demoted zone stays cold under a zone manager", fun manager_honours_cold_zones/0},
+            {"a demoted zone stays cold while its neighbour stays hot",
+                fun demoted_zone_stays_cold/0},
+            {"set_zones releases the monitors it drops", fun set_zones_releases_monitors/0},
+            {"a non-integer cold_tick_divisor takes the default", fun bad_cold_divisor_defaults/0},
             {"cold_tick_divisor 0 never ticks a cold zone", fun cold_divisor_zero_never_ticks/0},
             {"a divisor of 0 still ticks hot zones", fun cold_divisor_zero_ticks_hot/0},
             {"a warmed zone at divisor 0 ticks again", fun cold_divisor_zero_warms_back/0},
@@ -52,29 +55,53 @@ ticker_test_() ->
             {"a reaped cold zone drops out of the cold set", fun cold_set_prunes_dead_zones/0}
         ]}.
 
-%% widgrensit/asobi#543: with a zone manager the ticker used to overwrite its
-%% own hot/cold split with "every active zone is hot", which made
-%% cold_tick_divisor inert for every world running lazy zones. Since
-%% widgrensit/asobi#560 the split IS the active set - the manager pushes zones
-%% in as they open and never gets asked for the list again.
-manager_honours_cold_zones() ->
+%% widgrensit/asobi#543: the ticker used to overwrite its own hot/cold split
+%% with "every active zone is hot", which made cold_tick_divisor inert for
+%% every world running lazy zones. Since widgrensit/asobi#560 the split IS the
+%% active set - nothing asks a manager for a list any more, which is why this
+%% no longer involves one.
+demoted_zone_stays_cold() ->
     Z1 = idle_proc(),
     Z2 = idle_proc(),
-    Manager = fake_manager([Z1, Z2]),
     Pid = start_ticker(#{tick_rate => 20}),
-    asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
-    asobi_world_ticker:add_zone(Pid, Z1),
-    asobi_world_ticker:add_zone(Pid, Z2),
+    asobi_world_ticker:set_zones(Pid, [Z1, Z2], self()),
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(80),
     State = get_state_map(Pid),
     ?assertEqual([Z1], maps:keys(maps:get(cold_zones, State))),
     ?assertEqual([Z2], maps:keys(maps:get(hot_zones, State))).
 
+%% "set" replaces, and since widgrensit/asobi#560 the ticker holds a monitor
+%% per zone - so a zone it drops has to lose its monitor too, or the ticker
+%% leaks one per zone for the life of the world.
+set_zones_releases_monitors() ->
+    Z1 = idle_proc(),
+    Z2 = idle_proc(),
+    Pid = start_ticker(),
+    asobi_world_ticker:add_zone(Pid, Z1),
+    timer:sleep(10),
+    asobi_world_ticker:set_zones(Pid, [Z2], self()),
+    timer:sleep(10),
+    State = get_state_map(Pid),
+    ?assertEqual([Z2], maps:keys(maps:get(hot_zones, State))),
+    ?assertEqual([Z2], maps:keys(maps:get(zone_monitors, State))),
+    %% Dropped means dropped: Z1 dying is now a DOWN the ticker must ignore.
+    Z1 ! stop,
+    timer:sleep(40),
+    ?assertEqual([Z2], maps:keys(maps:get(hot_zones, get_state_map(Pid)))).
+
+%% A bad divisor must take the documented default, not the never-tick regime -
+%% landing in ADR 0021's semantics by typo is exactly what the hardening in
+%% cold_divisor/1 exists to stop.
+bad_cold_divisor_defaults() ->
+    Pid = start_ticker(#{cold_tick_divisor => ~"10"}),
+    ?assertEqual(10, maps:get(cold_tick_divisor, get_state_map(Pid))),
+    Neg = start_ticker(#{cold_tick_divisor => -1}),
+    ?assertEqual(10, maps:get(cold_tick_divisor, get_state_map(Neg))).
+
 cold_zone_skipped() ->
     Z1 = counting_proc(),
     Z2 = counting_proc(),
-    Manager = fake_manager([Z1, Z2]),
     Pid = start_ticker(#{tick_rate => 10, cold_tick_divisor => 100}),
     asobi_world_ticker:add_zone(Pid, Z1),
     asobi_world_ticker:add_zone(Pid, Z2),
@@ -82,7 +109,7 @@ cold_zone_skipped() ->
     %% skips it from the second tick onwards and both counts stay at 1.
     Z1 ! {ticker, Pid},
     Z2 ! {ticker, Pid},
-    asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
+    asobi_world_ticker:set_zones(Pid, [Z1, Z2], self()),
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(150),
     Hot = tick_count(Z2),
@@ -134,10 +161,8 @@ cold_divisor_zero_warms_back() ->
 
 cold_set_prunes_dead_zones() ->
     Z1 = idle_proc(),
-    Manager = fake_manager([Z1]),
     Pid = start_ticker(#{tick_rate => 20}),
-    asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
-    asobi_world_ticker:add_zone(Pid, Z1),
+    asobi_world_ticker:set_zones(Pid, [Z1], self()),
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(60),
     ?assertEqual([Z1], maps:keys(maps:get(cold_zones, get_state_map(Pid)))),
@@ -156,20 +181,6 @@ idle_proc() ->
             stop -> ok
         end
     end).
-
-%% Answers get_active_zones and counts nothing else; the zone list is
-%% swappable so a test can simulate a reap.
-fake_manager(Zones) ->
-    spawn(fun() -> manager_loop(Zones) end).
-
-manager_loop(Zones) ->
-    receive
-        {'$gen_call', {From, Tag}, get_active_zones} ->
-            From ! {Tag, Zones},
-            manager_loop(Zones);
-        stop ->
-            ok
-    end.
 
 %% A zone stand-in that counts the ticks it is sent.
 counting_proc() ->

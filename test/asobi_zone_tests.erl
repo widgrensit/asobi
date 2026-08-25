@@ -1120,7 +1120,7 @@ reap_stops_empty_zone() ->
     end.
 
 %% asobi#283, found via the nightly prop_input_never_dropped flake (#282):
-%% asobi_zone_manager:release_zone/2 backdates a zone's zone_last_active the
+%% asobi_zone_manager:release_zone/2 backdates a zone's last-active stamp the
 %% moment it empties out, so it becomes reap-eligible on the next sweep. But
 %% nothing un-stales that timestamp on re-occupation for a zone with no live
 %% subscribers - this zone's own tick only touches the manager on the

@@ -1258,3 +1258,100 @@ zone_tick_without_dirty_declaration_test() ->
     after 5_000 ->
         ?assert(false)
     end.
+
+%% widgrensit/asobi#557 review: `is_tuple/1` is not a Luerl-table check. Luerl
+%% represents every non-scalar as a record - #tref{}, #funref{}, #erl_func{},
+%% #erl_mfa{}, #usdref{} - so a script returning a function or a recursive
+%% table as its fourth value raised out of decode_to_map/2, and asobi_zone
+%% calls zone_tick/2 with no try/catch: the zone died with everyone in it.
+%%
+%% Each mode runs in its own process because zone_tick/2 stashes its zone state
+%% in the process dictionary and reads lua_state back from it.
+zone_tick_hostile_fourth_value_test_() ->
+    [
+        {binary_to_list(Mode), fun() -> assert_survives(Mode, ExpectedX) end}
+     || {Mode, ExpectedX} <- [
+            %% Not a declaration at all, so the safe answer is the full decode
+            %% and the script's mutation lands.
+            {~"function", 2.0},
+            {~"recursive", 2.0},
+            {~"number", 2.0},
+            {~"nil_fourth", 2.0},
+            {~"not_a_declaration", 2.0},
+            %% This one DOES declare - it has a `changed` key - but the half is
+            %% array-shaped and unusable. The declaration stands and the
+            %% malformed half is reported, so the base map is what survives.
+            {~"array", 1.0}
+        ]
+    ].
+
+%% Two assertions, and the first is the one that matters: the bridge must not
+%% raise. The second separates "asobi decoded what the script returned" from
+%% "asobi kept the map it handed in", which is the difference between a
+%% fallback and a silent freeze.
+assert_survives(Mode, ExpectedX) ->
+    case run_fourth_value(Mode) of
+        {raised, Crash} ->
+            erlang:error({zone_tick_raised, Mode, Crash});
+        {ok, Result} ->
+            ?assert(is_tuple(Result)),
+            Entities = element(1, Result),
+            ?assert(is_map(Entities)),
+            ?assertEqual(ExpectedX, maps:get(x, maps:get(~"a", Entities)))
+    end.
+
+run_fourth_value(Mode) ->
+    Script = fixture("dirty_bad_world.lua"),
+    Self = self(),
+    Pid = spawn(fun() ->
+        Config = #{game_config => #{lua_script => Script}},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+        Entities = #{
+            ~"a" => #{type => ~"npc", x => 1.0, y => 1.0},
+            ~"probe" => #{type => ~"npc", mode => Mode, x => 0.0, y => 0.0}
+        },
+        Self !
+            {result,
+                try asobi_lua_world:zone_tick(Entities, ZoneState) of
+                    R -> {ok, R}
+                catch
+                    C:E -> {raised, {C, E}}
+                end}
+    end),
+    MonRef = monitor(process, Pid),
+    receive
+        {result, Result} ->
+            demonitor(MonRef, [flush]),
+            Result;
+        {'DOWN', MonRef, process, Pid, Reason} ->
+            {raised, {down, Reason}}
+    after 5_000 ->
+        {raised, timeout}
+    end.
+
+%% The array-shaped half is the one the guide's own idiom invites -
+%% `changed[#changed + 1] = e` - and until widgrensit/asobi#557's review it was
+%% normalised to #{} in this bridge BEFORE asobi_zone could complain, so every
+%% mutation the tick made was reverted with no log and no telemetry. Assert the
+%% report, not just the outcome: the outcome alone looks identical to silence.
+zone_tick_malformed_half_is_reported_test() ->
+    {ok, _} = application:ensure_all_started(telemetry),
+    Self = self(),
+    Handler = ?FUNCTION_NAME,
+    ok = telemetry:attach(
+        Handler,
+        [asobi, error],
+        fun(_E, _M, Meta, _C) -> Self ! {game_error, Meta} end,
+        undefined
+    ),
+    try
+        {ok, _} = run_fourth_value(~"array"),
+        receive
+            {game_error, #{kind := bad_zone_dirty}} -> ok
+        after 1_000 ->
+            ?assert(false)
+        end
+    after
+        telemetry:detach(Handler)
+    end.

@@ -138,7 +138,9 @@ function zone_tick(entities, zone_state)
       step(e)
       changed[id] = e
     end
-    if e.hp <= 0 then
+    -- `e.hp and` matters: an entity without an `hp` field compares nil with
+    -- a number, which raises and takes the whole zone_tick down.
+    if e.hp and e.hp <= 0 then
       removed[#removed + 1] = id
     end
   end
@@ -152,13 +154,15 @@ an inert script moving three entities, under `lua_vm_mode = owned`:
 
 | entities | before | after |
 |----------|--------|-------|
-| 100 | 280us | 224us |
-| 500 | 1,773us | 1,152us |
-| 2,000 | 10,509us | 5,929us |
+| 100 | 299us | 181us |
+| 500 | 1,784us | 898us |
+| 2,000 | 9,292us | 4,569us |
 
 The reductions the zone process itself burns per tick fall much further - 200k
 to 1.2k at 2,000 entities - because the decode used to run on the zone rather
-than in the VM.
+than in the VM. That is the number that decides whether a zone keeps up with
+its tick budget, and it is the stable one: the wall-clock column moves by
+10-20% between runs on the same machine.
 
 **The declaration is the truth.** An entity your script mutated and did not put
 in `changed` is not changed as far as asobi is concerned, and the next tick
@@ -167,9 +171,17 @@ merely invisible. That is the trade: it is opt-in per game for exactly this
 reason, and returning the ordinary two- or three-tuple keeps the
 full-comparison behaviour.
 
-What it does **not** remove is the encode in the other direction, which is still
-proportional to the entity count. See
-`docs/adr/0022-zone-tick-may-declare-what-changed.md`.
+Two things it does **not** do, both worth knowing before you reach for it:
+
+- The encode in the other direction is unchanged and still proportional to the
+  entity count. The table above is measured with it still in.
+- The numbers above are for a tick carrying **no player input**. `handle_input`
+  encodes the entity map and decodes it back, which rebuilds every entity and
+  undoes the structural sharing the declaration preserved - so on a populated
+  zone with players in it you keep the large half of the win (`zone_tick` not
+  decoding the whole table) and lose the smaller half (the cheaper delta diff).
+
+See `docs/adr/0022-zone-tick-may-declare-what-changed.md`.
 
 **If your game drives work from `zone_tick` on a zone that holds nothing** - a
 wave spawner counting down between waves, weather, a zone-level timer - asobi

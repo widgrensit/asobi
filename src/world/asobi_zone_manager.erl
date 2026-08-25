@@ -19,6 +19,8 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 -export([register_zone/3, set_zone_config/2, set_initial_zone_states/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-include_lib("kernel/include/logger.hrl").
+
 -define(REAP_INTERVAL, 10_000).
 -define(DEFAULT_IDLE_TIMEOUT, 30_000).
 -define(DEFAULT_MAX_ACTIVE, 10_000).
@@ -102,7 +104,7 @@ also what answers `ensure_zone/2` on the join and crossing hot path
 (widgrensit/asobi#559).
 """.
 -spec touch_zone(pid() | atom(), {integer(), integer()}) -> ok.
-touch_zone(Ref, Coords) ->
+touch_zone(Ref, {X, Y} = Coords) when is_integer(X), is_integer(Y) ->
     gen_server:cast(Ref, {touch_zone, Coords}).
 
 -doc """
@@ -125,23 +127,29 @@ manager (`register_zone/3`) keeps working through the cast.
 The table is owned by the manager and the instance supervisor stops the manager
 BEFORE the zone supervisor, so on world teardown a zone can still be ticking
 after the table has gone. A `gen_server` cast at a dead manager is a silent
-no-op and this has to be one too, or every world teardown ends in a burst of
-`badarg` crashes from zones that did nothing wrong.
+no-op and this must not crash either, or every world teardown ends in a burst
+of `badarg` crashes from zones that did nothing wrong.
+
+It answers `stamp_failed` rather than `ok` so the caller can tell the two apart:
+a teardown is transient and a wrong handle is forever, and a zone that silently
+never stamps is a zone the reaper will take. The zone's own touch helper falls
+back to `touch_zone/2` on `stamp_failed`, which degrades to the pre-#559 path
+instead of to nothing.
 """.
--spec stamp_active(ets:table() | undefined, {integer(), integer()}) -> ok.
+-spec stamp_active(ets:table() | undefined, {integer(), integer()}) -> ok | stamp_failed.
 stamp_active(undefined, _Coords) ->
-    ok;
-stamp_active(Tab, Coords) ->
+    stamp_failed;
+stamp_active(Tab, {X, Y} = Coords) when is_integer(X), is_integer(Y) ->
     try
         true = ets:insert(Tab, {Coords, erlang:monotonic_time(millisecond)}),
         ok
     catch
-        error:badarg -> ok
+        error:badarg -> stamp_failed
     end.
 
 -doc "Hint that zone can be unloaded.".
 -spec release_zone(pid() | atom(), {integer(), integer()}) -> ok.
-release_zone(Ref, Coords) ->
+release_zone(Ref, {X, Y} = Coords) when is_integer(X), is_integer(Y) ->
     gen_server:cast(Ref, {release_zone, Coords}).
 
 -doc "Return all active zone pids. For the ticker.".
@@ -481,11 +489,30 @@ reap_idle_zones(
     Expired = ets:select(StampTab, [
         {{'$1', '$2'}, [{'<', '$2', Cutoff}], ['$1']}
     ]),
-    reap_expired(narrow_coords(Expired), Tab, State).
+    reap_expired(narrow_coords(Expired, StampTab), Tab, State).
 
--spec narrow_coords(term()) -> [{integer(), integer()}].
-narrow_coords([]) -> [];
-narrow_coords([{X, Y} | Rest]) when is_integer(X), is_integer(Y) -> [{X, Y} | narrow_coords(Rest)].
+%% Drops a key that is not a coords pair rather than function_clausing on it.
+%% This manager is `transient` under a ONE_FOR_ALL supervisor, so a crash here
+%% restarts the zone supervisor, the ticker and the world server - every zone
+%% in the world dies. The code this replaced just handed whatever it found to
+%% `ets:lookup/2` and swept the miss, so failing loud here would have been a
+%% robustness regression, not an improvement (widgrensit/asobi#559 review).
+%%
+%% Deleted as well as dropped: `release_zone/2` writes an already-expired
+%% stamp, so a bad key lands in the very next sweep and would be re-found for
+%% the life of the world.
+-spec narrow_coords([term()], ets:table()) -> [{integer(), integer()}].
+narrow_coords([], _StampTab) ->
+    [];
+narrow_coords([{X, Y} = Coords | Rest], StampTab) when is_integer(X), is_integer(Y) ->
+    [Coords | narrow_coords(Rest, StampTab)];
+narrow_coords([Bad | Rest], StampTab) ->
+    ?LOG_WARNING(#{
+        msg => ~"non-coords key in the zone stamp table; dropping it",
+        key => io_lib:format("~P", [Bad, 4])
+    }),
+    ets:delete(StampTab, Bad),
+    narrow_coords(Rest, StampTab).
 
 %% Explicit recursion: see docs/eqwalizer-idioms.md.
 -spec reap_expired([{integer(), integer()}], ets:table(), map()) -> map().

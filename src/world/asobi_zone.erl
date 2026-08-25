@@ -1160,35 +1160,47 @@ zone_tick_result({Entities, ZoneState, Other}, State) when is_map(Entities) ->
     log_bad_zone_busy(State, Other),
     {Entities, ZoneState, true}.
 
--doc """
-Apply `zone_tick/2`'s optional fourth return value: what actually changed.
-
-`#{changed => #{Id => Entity}, removed => [Id]}` on top of the map the callback
-returned. A game that declares this is telling asobi that every entity it did
-NOT name is byte-for-byte what asobi handed in - so the unchanged ones stay the
-same TERMS, and structural sharing with the previous tick survives the callback
-(widgrensit/asobi#557).
-
-That sharing is the whole point, and it is worth more than the merge costs.
-`compute_deltas/2` short-circuits on an identical entity with one pointer
-comparison instead of walking its fields, and so does `sync_spatial_grid/3`.
-Without it a Lua zone rebuilds every entity map on every tick's decode, so both
-of those degrade to O(all entities x fields) to discover that three NPCs moved.
-The bigger half of the win is upstream, in the bridge: `asobi_lua_world` decodes
-only `changed` rather than the whole entities table.
-
-Ignoring the declaration entirely is always safe and never wrong - it only
-costs the sharing - so this fails towards "merge what is well-formed and log
-the rest" rather than towards refusing a tick.
-""".
+%% Apply `zone_tick/2`'s optional fourth return value: what actually changed.
+%%
+%% `#{changed => #{Id => Entity}, removed => [Id]}` on top of the map the callback
+%% returned. A game that declares this is telling asobi that every entity it did
+%% NOT name is byte-for-byte what asobi handed in - so the unchanged ones stay the
+%% same TERMS, and structural sharing with the previous tick survives the callback
+%% (widgrensit/asobi#557).
+%%
+%% That sharing is the whole point. `compute_deltas/2` settles an identical entity
+%% with one pointer comparison instead of walking its fields; without it a Lua zone
+%% rebuilds every entity map on every tick's decode, so the diff degrades to
+%% O(all entities x fields) to discover that three NPCs moved. `sync_spatial_grid/3`
+%% deliberately does NOT test identity - see the comment there. The bigger half of
+%% the win is upstream, in the bridge: `asobi_lua_world` decodes only `changed`
+%% rather than the whole entities table.
+%%
+%% Ignoring the declaration entirely is always safe and never wrong - it only
+%% costs the sharing - so this fails towards "merge what is well-formed and log
+%% the rest" rather than towards refusing a tick. Every way of being malformed is
+%% reported: a declaration that silently does nothing freezes every entity in the
+%% zone for as long as the zone lives, because the base map it merges onto is the
+%% one asobi handed the callback.
 -spec apply_dirty(map(), term(), map()) -> map().
 apply_dirty(Entities, Dirty, State) when is_map(Dirty) ->
+    report_unknown_dirty_keys(Dirty, State),
     Changed = narrow_changed(maps:get(changed, Dirty, #{}), State),
-    Removed = narrow_ids(maps:get(removed, Dirty, [])),
+    Removed = narrow_ids(maps:get(removed, Dirty, []), State),
     maps:without(Removed, maps:merge(Entities, Changed));
 apply_dirty(Entities, Dirty, State) ->
-    log_bad_zone_dirty(State, Dirty),
+    log_bad_zone_dirty(State, {not_a_map, dirty_shape(Dirty)}),
     Entities.
+
+%% A typo is the likeliest malformation and, until this reported it, the only
+%% one that produced neither a merge nor a word: `#{chnaged => ...}` reads as
+%% an empty declaration, which means "nothing changed this tick" - forever.
+-spec report_unknown_dirty_keys(map(), map()) -> ok.
+report_unknown_dirty_keys(Dirty, State) ->
+    case maps:keys(maps:without([changed, removed], Dirty)) of
+        [] -> ok;
+        Unknown -> log_bad_zone_dirty(State, {unknown_keys, [key_label(K) || K <- Unknown]})
+    end.
 
 %% Same bar every other id-bearing path in this module holds: a non-binary id
 %% reaches byte_size/1 in the encoder and kills the zone mid-tick (asobi#509).
@@ -1201,18 +1213,64 @@ narrow_changed(Changed, State) when is_map(Changed) ->
         end,
         Changed
     ),
-    case map_size(Narrowed) =:= map_size(Changed) of
-        true -> ok;
-        false -> log_bad_zone_dirty(State, Changed)
+    case map_size(Changed) - map_size(Narrowed) of
+        0 ->
+            ok;
+        Dropped ->
+            log_bad_zone_dirty(State, dirty_summary(dropped_changed, Dropped, Changed, Narrowed))
     end,
     Narrowed;
 narrow_changed(Changed, State) ->
-    log_bad_zone_dirty(State, Changed),
+    log_bad_zone_dirty(State, {changed_not_a_map, dirty_shape(Changed)}),
     #{}.
 
--spec narrow_ids(term()) -> [binary()].
-narrow_ids(Ids) when is_list(Ids) -> [Id || Id <- Ids, is_binary(Id)];
-narrow_ids(_Ids) -> [].
+%% Reports what it dropped, like its sibling. ADR 0022 decision 4 promises both
+%% halves are logged, and only one of them was.
+-spec narrow_ids(term(), map()) -> [binary()].
+narrow_ids(Ids, State) when is_list(Ids) ->
+    Narrowed = [Id || Id <- Ids, is_binary(Id)],
+    case length(Ids) - length(Narrowed) of
+        0 -> ok;
+        Dropped -> log_bad_zone_dirty(State, {dropped_removed, Dropped})
+    end,
+    Narrowed;
+narrow_ids(Ids, State) ->
+    log_bad_zone_dirty(State, {removed_not_a_list, dirty_shape(Ids)}),
+    [].
+
+%% A bounded description of a malformed declaration, never the declaration itself.
+%%
+%% `changed` is a script-controlled map of arbitrary size, and `bound_debug_term/1`
+%% renders its whole argument before it truncates - so handing it the map cost
+%% seconds of `io_lib:format/2` ON THE ZONE PROCESS for a script that put a 32MB
+%% string in it, outside `bounded_eval`'s wall clock and invisible to
+%% `max_heap_size` because a refc binary is. Three of those per limiter window is
+%% a zone that never ticks again, with no crash to attribute it to.
+%%
+%% So the bound is on the way in: a count, and the first offending key clipped to
+%% 64 bytes. That is what an operator needs to find the line in the script, and it
+%% cannot be made expensive by the script.
+-spec dirty_summary(atom(), non_neg_integer(), map(), map()) -> tuple().
+dirty_summary(Tag, Dropped, Changed, Narrowed) ->
+    Bad = maps:keys(maps:without(maps:keys(Narrowed), Changed)),
+    {Tag, Dropped, first_key(Bad)}.
+
+-spec first_key([term()]) -> binary().
+first_key([K | _]) -> key_label(K);
+first_key([]) -> ~"".
+
+-spec key_label(term()) -> binary().
+key_label(K) when is_binary(K) -> binary:part(K, 0, min(64, byte_size(K)));
+key_label(K) when is_atom(K) -> atom_to_binary(K, utf8);
+key_label(K) -> iolist_to_binary(io_lib:format("~P", [K, 4])).
+
+%% Shape only. Same reason as dirty_summary/4: the value is the script's, and
+%% its size is the script's choice.
+-spec dirty_shape(term()) -> tuple() | binary().
+dirty_shape(T) when is_binary(T) -> {binary, byte_size(T)};
+dirty_shape(T) when is_list(T) -> {list, length(T)};
+dirty_shape(T) when is_map(T) -> {map, map_size(T)};
+dirty_shape(T) -> iolist_to_binary(io_lib:format("~P", [T, 4])).
 
 apply_timer_events([], Entities) ->
     Entities;
@@ -2775,23 +2833,34 @@ warm_up(#{cold := true} = State) ->
 warm_up(State) ->
     State.
 
--doc """
-Tell the reaper this zone is still in use.
-
-Written straight into the manager's stamp table where the zone has one, which
-is every zone the manager started. An occupied zone does this on EVERY tick,
-and as a `gen_server` cast it made the zone manager a queue the whole world
-shared - the same process `ensure_zone/2` goes through on the join and
-crossing hot path, where a 1s timeout costs the crossing
-(widgrensit/asobi#559). The cast remains for a zone started outside the
-manager, which has no table to write to.
-""".
+%% Tell the reaper this zone is still in use.
+%%
+%% Written straight into the manager's stamp table where the zone has one, which
+%% is every zone the manager started. An occupied zone does this on EVERY tick,
+%% and as a `gen_server` cast it made the zone manager a queue the whole world
+%% shared - the same process `ensure_zone/2` goes through on the join and
+%% crossing hot path, where a 1s timeout costs the crossing
+%% (widgrensit/asobi#559). The cast remains for a zone started outside the
+%% manager, which has no table to write to.
 -spec touch_manager(map()) -> ok.
-touch_manager(#{zone_stamp_tab := Tab, coords := Coords}) when Tab =/= undefined ->
-    asobi_zone_manager:stamp_active(Tab, Coords);
-touch_manager(#{zone_manager_pid := ZMPid, coords := Coords}) when is_pid(ZMPid) ->
+touch_manager(#{zone_stamp_tab := Tab, coords := Coords} = State) when Tab =/= undefined ->
+    case asobi_zone_manager:stamp_active(Tab, Coords) of
+        ok ->
+            ok;
+        stamp_failed ->
+            %% A dead table during world teardown, or a handle a consumer got
+            %% wrong. The first is transient and the second is forever, and a
+            %% zone that silently never stamps is a zone the reaper takes - so
+            %% degrade to the pre-#559 cast rather than to nothing.
+            touch_via_manager(State)
+    end;
+touch_manager(State) ->
+    touch_via_manager(State).
+
+-spec touch_via_manager(map()) -> ok.
+touch_via_manager(#{zone_manager_pid := ZMPid, coords := Coords}) when is_pid(ZMPid) ->
     asobi_zone_manager:touch_zone(ZMPid, Coords);
-touch_manager(_State) ->
+touch_via_manager(_State) ->
     ok.
 
 %% Emitted on the transition only, never per tick: a zone that is merely busy is
@@ -2943,7 +3012,12 @@ bound_template_id(TemplateId) ->
 %% binary rather than a raw pid/reference/fun it cannot encode.
 -spec bound_debug_term(term()) -> binary().
 bound_debug_term(Term) ->
-    Formatted = iolist_to_binary(io_lib:format("~0p", [Term])),
+    %% `~P` with a depth rather than `~0p`: the depth cut happens DURING the
+    %% render, so a caller that hands this a large game-supplied term pays a
+    %% bounded cost instead of formatting the whole thing and then throwing
+    %% almost all of it away. That difference was measured at ~10 seconds on
+    %% the zone process for a 32MB script binary (widgrensit/asobi#557 review).
+    Formatted = iolist_to_binary(io_lib:format("~P", [Term, 6])),
     Head = binary:part(Formatted, 0, min(200, byte_size(Formatted))),
     case unicode:characters_to_binary(Head) of
         Valid when is_binary(Valid) -> Valid;
@@ -3038,20 +3112,30 @@ sync_spatial_grid(_OldEntities, _NewEntities, undefined) ->
     undefined;
 sync_spatial_grid(OldEntities, NewEntities, Grid) when is_map(Grid) ->
     Grid1 = remove_from_grid_do(removed_ids(OldEntities, NewEntities), Grid),
-    %% Update/insert entities with changed or new positions
+    %% Compares POSITIONS rather than whole entities, deliberately. Matching the
+    %% previous tick's entity term would settle an untouched entity in one
+    %% pointer comparison where a tick preserved structural sharing - but where
+    %% it did not, `=:=` on two maps is a structural walk THAT CAN ONLY FAIL,
+    %% and that is the common case: every game that does not declare a dirty
+    %% set, and every Lua game on any tick carrying input, because
+    %% `handle_input` rebuilds the map. Two position lookups are O(1) whatever
+    %% the entity holds (widgrensit/asobi#557 review).
     maps:fold(
         fun
-            (Id, Entity, G) when is_binary(Id), is_map(Entity) ->
-                %% `{ok, Entity}` matches the bound entity, so an entity the
-                %% tick left alone settles in one pointer comparison rather
-                %% than two position extractions. Worth having only because a
-                %% tick can now preserve structural sharing - see apply_dirty/3
-                %% and widgrensit/asobi#557.
-                case maps:find(Id, OldEntities) of
-                    {ok, Entity} ->
+            (Id, Entity, G) when is_map(Entity) ->
+                case entity_pos(Entity) of
+                    undefined ->
                         G;
-                    Found ->
-                        sync_moved_entity(Id, Entity, Found, G)
+                    Pos ->
+                        case maps:find(Id, OldEntities) of
+                            {ok, Old} when is_map(Old) ->
+                                case entity_pos(Old) of
+                                    Pos -> G;
+                                    _ -> asobi_spatial_grid:update(Id, Pos, G)
+                                end;
+                            _ ->
+                                asobi_spatial_grid:update(Id, Pos, G)
+                        end
                 end;
             (_Id, _Entity, G) ->
                 G
@@ -3059,22 +3143,3 @@ sync_spatial_grid(OldEntities, NewEntities, Grid) when is_map(Grid) ->
         Grid1,
         NewEntities
     ).
-
--spec sync_moved_entity(
-    binary(), map(), {ok, term()} | error, asobi_spatial_grid:grid()
-) -> asobi_spatial_grid:grid().
-sync_moved_entity(Id, Entity, Found, Grid) ->
-    case entity_pos(Entity) of
-        undefined ->
-            Grid;
-        Pos ->
-            case Found of
-                {ok, Old} when is_map(Old) ->
-                    case entity_pos(Old) of
-                        Pos -> Grid;
-                        _ -> asobi_spatial_grid:update(Id, Pos, Grid)
-                    end;
-                _ ->
-                    asobi_spatial_grid:update(Id, Pos, Grid)
-            end
-    end.

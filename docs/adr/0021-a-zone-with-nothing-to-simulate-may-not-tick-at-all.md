@@ -5,7 +5,9 @@ Date: 2026-08-25
 ## Status
 
 **Accepted, and shipped.** Extends
-`docs/adr/0016-idle-zones-tick-at-the-cold-divisor.md`, which stands. Closes
+`docs/adr/0016-idle-zones-tick-at-the-cold-divisor.md`, whose decision 3 is
+superseded by widgrensit/asobi#560 and whose decision 1 is amended by decision
+4 below; both are recorded in that file's own "Amended by later work". Closes
 widgrensit/asobi#561. **Off by default**: the divisor is still 10, and a world
 has to ask for 0.
 
@@ -54,13 +56,21 @@ the only transition back.**
    lost: it demoted before it went silent, and message-driven promotion is the
    only transition left. That is ADR 0016's decision 2, load-bearing rather
    than an optimisation.
-4. **A zone with subscribers declines `reap` and re-stamps itself.** This was
-   already true in effect - an empty watched zone re-stamped itself on the
-   `map_size(Subs) > 0` branch of every tick, so the reap cast never arrived -
-   but it was emergent from the tick rather than stated, and a zone that stops
-   ticking stops stamping. Without the guard, turning the knob on would tear a
-   watched zone out from under subscribers who are not re-subscribed until they
-   next move, and they would silently stop seeing anything that happens there.
+4. **A zone with subscribers declines `reap` and re-stamps itself.** Mostly a
+   statement of emergent behaviour - an empty watched zone re-stamped itself on
+   the `map_size(Subs) > 0` branch of every tick, so the reap cast never
+   arrived - made necessary because a zone that stops ticking stops stamping.
+   Without the guard, turning the knob on would tear a watched zone out from
+   under subscribers who are not re-subscribed until they next move, and they
+   would silently stop seeing anything that happens there.
+
+   **It also closes a race that existed at every divisor.** `release_zone/2`
+   backdates the stamp the moment a zone empties, and the sweep runs every
+   `?REAP_INTERVAL`. A sweep landing between that backdate and the zone's next
+   tick re-stamping it - a 20ms window when hot, 200ms when cold - fell through
+   to the `map_size(Entities) =:= 0` clause and stopped a *watched* zone. Small,
+   but real, and the same shape as the widgrensit/asobi#283 nightly flake. So
+   this is not purely a restatement.
 5. A `busy` zone is never idle, so a script driving wave logic from `zone_tick`
    keeps its full rate at 0 exactly as it does at 10 (ADR 0019).
 
@@ -76,6 +86,16 @@ the only transition back.**
 - The reap guard changes behaviour at every divisor, not only at 0. It makes an
   existing emergent behaviour explicit; no zone that used to be reaped is
   reaped less often, because a watched zone was never reachable by the sweep.
+- A dormant zone does not run `maybe_apply_spawn_templates_hint/5`, so it does
+  not pick up a hot-reloaded spawn template until it next warms. Self-corrects
+  on the first warm tick, and hot reload is a stated differentiator, so it is
+  worth knowing rather than a defect.
+- **The escape hatch is all-or-nothing.** A script with zone-level time - a
+  wave countdown, weather, a capture timer - must return `busy = true`
+  continuously, which pins the zone at full rate. There is no "wake me in N
+  ms". The missing primitive is a zone-level timer wheel, the zone equivalent
+  of `asobi_entity_timer`, which `zone_idle/1` already consults. That is what
+  would make this knob broadly safe, and it is a follow-up.
 - Declined: making 0 the default. The failure mode of a game that quietly needs
   the cold tick is silent and slow to attribute, and there is no way for asobi
   to detect it. An operator turning a knob on a large lazy world has the

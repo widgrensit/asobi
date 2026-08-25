@@ -12,6 +12,24 @@ Recorded because it changes when a documented callback fires. `zone_tick/2` is
 a public behaviour callback and this makes it run 1-in-N ticks for some zones,
 which ADR 0000 names as "optimisations that change observable semantics".
 
+## Amended by later work
+
+- **Decision 3 no longer describes the code.** widgrensit/asobi#560 removed the
+  per-tick partition against the zone manager's active list: the ticker owns
+  its hot and cold sets outright, is told when a zone opens, and prunes a dead
+  zone from its own monitor rather than by the zone's absence from a list it
+  re-reads. The *effect* decision 3 describes - a reaped zone drops out without
+  a `remove_zone` cast - still holds, by a different mechanism.
+- **Decision 1's "subscribers deliberately do not count" holds for
+  classification, and no longer holds for reaping.**
+  `docs/adr/0021-a-zone-with-nothing-to-simulate-may-not-tick-at-all.md`
+  decision 4 makes a zone with subscribers decline `reap`. A watched empty zone
+  is still demoted; it is just not torn down.
+- ADR 0021 extends this one with `cold_tick_divisor = 0`.
+
+The file:line citations below were accurate at the time and are not now.
+Function names are the durable reference; treat the numbers as historical.
+
 ## Context
 
 A reporter measured an empty zone - zero entities, an inert `zone_tick`, no
