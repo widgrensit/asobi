@@ -856,7 +856,7 @@ hot_reload_zone_tick_signals_spawn_templates_hint_test_body() ->
         Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
         erlang:erase({asobi_lua_world, zone_state}),
         {_Ents0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
-        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone1)),
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(zone_state(Zone1))),
 
         ok = file:write_file(
             Path,
@@ -877,12 +877,12 @@ hot_reload_zone_tick_signals_spawn_templates_hint_test_body() ->
         {_Ents1, Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
         ?assertMatch(
             {changed, #{~"goblin" := _, ~"dragon" := _}},
-            asobi_lua_world:spawn_templates_hint(Zone2)
+            asobi_lua_world:spawn_templates_hint(zone_state(Zone2))
         ),
 
         %% The signal is one-tick only - it must not leak into the next tick.
         {_Ents2, Zone3} = asobi_lua_world:zone_tick(#{}, Zone2),
-        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone3))
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(zone_state(Zone3)))
     after
         erlang:erase({asobi_lua_world, zone_state}),
         file:delete(Path)
@@ -926,7 +926,7 @@ hot_reload_broken_spawn_templates_does_not_wipe_hint_test() ->
         bump_mtime(Path),
 
         {_Ents1, Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
-        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone2))
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(zone_state(Zone2)))
     after
         erlang:erase({asobi_lua_world, zone_state}),
         file:delete(Path)
@@ -1042,8 +1042,9 @@ game_namespace_visible_in_zone_tick_and_handle_input_test() ->
     {_Ents, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
     %% ZoneState1.game_state holds the script's zone_state luerl tref;
     %% decode it to inspect the flag.
+    ZoneState1Map = zone_state(ZoneState1),
     ZoneTickGS = asobi_lua_api:decode_to_map(
-        maps:get(game_state, ZoneState1), maps:get(lua_state, ZoneState1)
+        maps:get(game_state, ZoneState1Map), maps:get(lua_state, ZoneState1Map)
     ),
     ?assertEqual(true, maps:get(~"zone_tick_saw_game", ZoneTickGS, false)),
 
@@ -1355,3 +1356,9 @@ zone_tick_malformed_half_is_reported_test() ->
     after
         telemetry:detach(Handler)
     end.
+
+%% `zone_tick/2` returns the zone state as `term()` - the callback contract is
+%% game-defined - so a test reading fields out of it narrows first.
+-spec zone_state(term()) -> map().
+zone_state(ZoneState) when is_map(ZoneState) ->
+    ZoneState.

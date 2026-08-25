@@ -240,7 +240,7 @@ zone_busy_released() ->
     Pid = start_busy_zone(#{busy => true}),
     tick(Pid, 1),
     ?assertNot(is_cold(Pid)),
-    sys:replace_state(Pid, fun(S) -> S#{zone_state => #{busy => false}} end),
+    sys:replace_state(Pid, fun clear_busy/1),
     tick(Pid, 2),
     ?assert(is_cold(Pid)),
     gen_server:stop(Pid).
@@ -289,3 +289,9 @@ busy_zone_does_not_hibernate() ->
         process_info(Busy, current_function)
     ),
     gen_server:stop(Busy).
+
+%% sys:replace_state/2 hands the fun a term(), so the update needs a narrowing
+%% clause rather than a map update on an unknown shape.
+-spec clear_busy(term()) -> map().
+clear_busy(State) when is_map(State) ->
+    State#{zone_state => #{busy => false}}.

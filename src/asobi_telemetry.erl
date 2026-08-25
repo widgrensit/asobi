@@ -549,4 +549,5 @@ handle_event(EventName, Measurements, Metadata, _Config) ->
         event => EventName,
         measurements => Measurements,
         metadata => Metadata
-    }).
+    }),
+    ok.
