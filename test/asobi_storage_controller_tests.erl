@@ -29,16 +29,20 @@ a_malformed_binding_answers_the_same_on_every_handler() ->
         qs => ~"",
         auth_data => #{player_id => ?PID}
     },
-    Crashed = [
-        Name
-     || {Name, Result} <- [
-            {get, catch asobi_storage_controller:get_storage(Req)},
-            {put, catch asobi_storage_controller:put_storage(Req)},
-            {delete, catch asobi_storage_controller:delete_storage(Req)}
-        ],
-        element(1, Result) =:= 'EXIT'
+    Handlers = [
+        {get, fun asobi_storage_controller:get_storage/1},
+        {put, fun asobi_storage_controller:put_storage/1},
+        {delete, fun asobi_storage_controller:delete_storage/1}
     ],
+    Crashed = [Name || {Name, Fn} <- Handlers, crashes(Fn, Req)],
     ?assertEqual([], Crashed).
+
+crashes(Fn, Req) ->
+    try Fn(Req) of
+        _ -> false
+    catch
+        _:_ -> true
+    end.
 
 setup() ->
     Was = application:get_env(asobi, storage),
