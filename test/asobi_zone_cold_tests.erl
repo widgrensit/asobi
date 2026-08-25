@@ -68,8 +68,34 @@ cold_test_() ->
         {"a two-tuple return still means not busy", fun two_tuple_is_not_busy/0},
         {"a non-boolean third element keeps the zone hot", fun bad_zone_busy_fails_safe/0},
         {"a busy zone is not reaped", fun busy_zone_declines_reap/0},
-        {"a busy zone is not hibernated", fun busy_zone_does_not_hibernate/0}
+        {"a busy zone is not hibernated", fun busy_zone_does_not_hibernate/0},
+        {"a watched empty zone is not reaped", fun watched_zone_declines_reap/0},
+        {"an unwatched empty zone still is", fun unwatched_zone_accepts_reap/0}
     ]}.
+
+%% widgrensit/asobi#561: an empty zone with subscribers was only kept alive by
+%% re-stamping itself on every tick, so at `cold_tick_divisor = 0` - where it
+%% stops ticking entirely - the reaper would tear it out from under players
+%% who are not re-subscribed until they next move.
+watched_zone_declines_reap() ->
+    Pid = start_zone(),
+    asobi_zone:subscribe(Pid, {~"p1", self()}),
+    _ = sys:get_state(Pid),
+    asobi_zone:reap(Pid),
+    _ = sys:get_state(Pid),
+    ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid).
+
+unwatched_zone_accepts_reap() ->
+    Pid = start_zone(),
+    unlink(Pid),
+    MonRef = monitor(process, Pid),
+    asobi_zone:reap(Pid),
+    receive
+        {'DOWN', MonRef, process, Pid, normal} -> ok
+    after 1_000 ->
+        ?assert(false)
+    end.
 
 start_busy_zone(ZoneState) ->
     {ok, Pid} = asobi_zone:start_link(#{

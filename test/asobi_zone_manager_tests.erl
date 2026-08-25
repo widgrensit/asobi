@@ -33,6 +33,15 @@ start_manager(Overrides) ->
     unlink(Pid),
     #{mgr => Pid, zone_sup => ZoneSup}.
 
+%% sys:get_state/1 is term(); the stamp table has to come out as an ets:table()
+%% or every use of it downstream is an untyped boundary read.
+-spec zone_state(pid()) -> #{zone_stamp_tab := ets:table(), coords := term()}.
+zone_state(ZonePid) ->
+    case sys:get_state(ZonePid) of
+        #{zone_stamp_tab := Tab, coords := Coords} when is_reference(Tab); is_atom(Tab) ->
+            #{zone_stamp_tab => Tab, coords => Coords}
+    end.
+
 stop_manager(#{mgr := Pid, zone_sup := ZoneSup}) ->
     catch exit(Pid, shutdown),
     catch exit(ZoneSup, shutdown),
@@ -66,7 +75,10 @@ zone_manager_test_() ->
         {"missing per-coord state leaves zone_state default", fun initial_zone_states_default/0},
         {"a zone start emits zone/opened", fun zone_open_emits_telemetry/0},
         {"a zone death emits exactly one zone/closed", fun zone_close_emits_telemetry_once/0},
-        {"manager shutdown emits no zone/closed", fun manager_shutdown_emits_no_close/0}
+        {"manager shutdown emits no zone/closed", fun manager_shutdown_emits_no_close/0},
+        {"a zone stamps itself active without a cast", fun zone_stamps_itself_active/0},
+        {"a zone that stamped itself is not reaped", fun stamped_zone_survives_sweep/0},
+        {"a new zone is announced to the ticker", fun zone_open_announced_to_ticker/0}
     ]}.
 
 %% --- #313: zone lifecycle telemetry ---
@@ -251,6 +263,46 @@ stale_zone_reaped_on_sweep() ->
     force_reap_sweep(Mgr),
     ?assertEqual(not_loaded, asobi_zone_manager:get_zone(Mgr, {0, 0})),
     ?assert(not is_process_alive(ZonePid)),
+    stop_manager(Ctx).
+
+%% widgrensit/asobi#559: an occupied zone used to cast `touch_zone` at the
+%% manager on EVERY tick, through the same gen_server that answers
+%% `ensure_zone/2` on the join and crossing hot path. The stamp is written
+%% straight into a public ETS table now, and the zone is handed that table in
+%% its config when the manager starts it.
+zone_stamps_itself_active() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    #{zone_stamp_tab := Tab, coords := Coords} = zone_state(ZonePid),
+    ?assertEqual({0, 0}, Coords),
+    ?assertMatch([{{0, 0}, _}], ets:lookup(Tab, {0, 0})),
+    stop_manager(Ctx).
+
+%% The other half of the same change: the reap sweep has to read the stamps
+%% the zones wrote, not a map the manager keeps for itself. A zone that
+%% stamped after being released is not idle any more.
+stamped_zone_survives_sweep() ->
+    Ctx = #{mgr := Mgr} = start_manager(#{idle_timeout => 20}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    ok = asobi_zone_manager:release_zone(Mgr, {0, 0}),
+    #{zone_stamp_tab := Tab} = zone_state(ZonePid),
+    ok = asobi_zone_manager:stamp_active(Tab, {0, 0}),
+    force_reap_sweep(Mgr),
+    ?assertMatch({ok, ZonePid}, asobi_zone_manager:get_zone(Mgr, {0, 0})),
+    ?assert(is_process_alive(ZonePid)),
+    stop_manager(Ctx).
+
+%% widgrensit/asobi#560: the ticker owns its active set now, so a zone that
+%% opens has to be pushed to it - nothing asks the manager for the list any
+%% more. ?BASE_OPTS puts this test process in as the ticker.
+zone_open_announced_to_ticker() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {0, 0}),
+    receive
+        {'$gen_cast', {add_zone, ZonePid}} -> ok
+    after 1_000 ->
+        ?assert(false)
+    end,
     stop_manager(Ctx).
 
 %% Regression widgrensit/asobi#283, found via the prop_input_never_dropped

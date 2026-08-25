@@ -45,30 +45,39 @@ ticker_test_() ->
             {"the world keeps posting while saturated", fun post_tick_survives_saturation/0},
             {"set_zones twice arms one timer", fun set_zones_twice_arms_one_timer/0},
             {"a demoted zone stays cold under a zone manager", fun manager_honours_cold_zones/0},
+            {"cold_tick_divisor 0 never ticks a cold zone", fun cold_divisor_zero_never_ticks/0},
+            {"a divisor of 0 still ticks hot zones", fun cold_divisor_zero_ticks_hot/0},
+            {"a warmed zone at divisor 0 ticks again", fun cold_divisor_zero_warms_back/0},
             {"a cold zone is skipped on an off-divisor tick", fun cold_zone_skipped/0},
             {"a reaped cold zone drops out of the cold set", fun cold_set_prunes_dead_zones/0}
         ]}.
 
 %% widgrensit/asobi#543: with a zone manager the ticker used to overwrite its
 %% own hot/cold split with "every active zone is hot", which made
-%% cold_tick_divisor inert for every world running lazy zones.
+%% cold_tick_divisor inert for every world running lazy zones. Since
+%% widgrensit/asobi#560 the split IS the active set - the manager pushes zones
+%% in as they open and never gets asked for the list again.
 manager_honours_cold_zones() ->
     Z1 = idle_proc(),
     Z2 = idle_proc(),
     Manager = fake_manager([Z1, Z2]),
     Pid = start_ticker(#{tick_rate => 20}),
     asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
+    asobi_world_ticker:add_zone(Pid, Z1),
+    asobi_world_ticker:add_zone(Pid, Z2),
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(80),
     State = get_state_map(Pid),
-    ?assertEqual([Z1], maps:get(cold_zones, State)),
-    ?assertEqual([Z2], maps:get(hot_zones, State)).
+    ?assertEqual([Z1], maps:keys(maps:get(cold_zones, State))),
+    ?assertEqual([Z2], maps:keys(maps:get(hot_zones, State))).
 
 cold_zone_skipped() ->
     Z1 = counting_proc(),
     Z2 = counting_proc(),
     Manager = fake_manager([Z1, Z2]),
     Pid = start_ticker(#{tick_rate => 10, cold_tick_divisor => 100}),
+    asobi_world_ticker:add_zone(Pid, Z1),
+    asobi_world_ticker:add_zone(Pid, Z2),
     %% Each stand-in must retire its tick, or the ticker's saturation guard
     %% skips it from the second tick onwards and both counts stay at 1.
     Z1 ! {ticker, Pid},
@@ -84,20 +93,62 @@ cold_zone_skipped() ->
     %% ticker's dispatch count over 150ms is not something to assert tightly.
     ?assert(Hot >= 3).
 
+%% widgrensit/asobi#561: the opt-in last step past ADR 0016. At a divisor of
+%% 10 an idle zone still pays a full do_tick twice a second, plus a
+%% full-sweep GC per hibernate/wake cycle; at 0 it pays nothing until a
+%% message gives it work.
+cold_divisor_zero_never_ticks() ->
+    Z = counting_proc(),
+    Pid = start_ticker(#{tick_rate => 10, cold_tick_divisor => 0}),
+    Z ! {ticker, Pid},
+    asobi_world_ticker:set_zones(Pid, [], self()),
+    asobi_world_ticker:add_zone(Pid, Z),
+    asobi_world_ticker:demote_zone(Pid, Z),
+    timer:sleep(150),
+    ?assertEqual(0, tick_count(Z)).
+
+%% The knob must not be a world-wide off switch: only the cold set is skipped.
+cold_divisor_zero_ticks_hot() ->
+    Z = counting_proc(),
+    Pid = start_ticker(#{tick_rate => 10, cold_tick_divisor => 0}),
+    Z ! {ticker, Pid},
+    asobi_world_ticker:set_zones(Pid, [], self()),
+    asobi_world_ticker:add_zone(Pid, Z),
+    timer:sleep(150),
+    ?assert(tick_count(Z) >= 3).
+
+%% Promotion is the only transition left for a zone that never ticks, so if
+%% warming did not bring it back it would be dead rather than dormant.
+cold_divisor_zero_warms_back() ->
+    Z = counting_proc(),
+    Pid = start_ticker(#{tick_rate => 10, cold_tick_divisor => 0}),
+    Z ! {ticker, Pid},
+    asobi_world_ticker:set_zones(Pid, [], self()),
+    asobi_world_ticker:add_zone(Pid, Z),
+    asobi_world_ticker:demote_zone(Pid, Z),
+    timer:sleep(100),
+    ?assertEqual(0, tick_count(Z)),
+    asobi_world_ticker:promote_zone(Pid, Z),
+    timer:sleep(150),
+    ?assert(tick_count(Z) >= 3).
+
 cold_set_prunes_dead_zones() ->
     Z1 = idle_proc(),
     Manager = fake_manager([Z1]),
     Pid = start_ticker(#{tick_rate => 20}),
     asobi_world_ticker:set_zone_manager(Pid, Manager, self()),
+    asobi_world_ticker:add_zone(Pid, Z1),
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(60),
-    ?assertEqual([Z1], maps:get(cold_zones, get_state_map(Pid))),
-    %% The manager stops listing it (the zone was reaped). Nothing sends
-    %% remove_zone, so the cold set has to prune itself or it grows for the
-    %% life of the world.
-    set_manager_zones(Manager, []),
+    ?assertEqual([Z1], maps:keys(maps:get(cold_zones, get_state_map(Pid)))),
+    %% The zone is reaped. Nothing sends remove_zone, so the ticker's own
+    %% monitor has to prune it or both sets grow for the life of the world -
+    %% which is what re-deriving them from the manager's list used to do for
+    %% free (widgrensit/asobi#560).
+    Z1 ! stop,
     timer:sleep(80),
-    ?assertEqual([], maps:get(cold_zones, get_state_map(Pid))).
+    ?assertEqual(#{}, maps:get(cold_zones, get_state_map(Pid))),
+    ?assertEqual(#{}, maps:get(hot_zones, get_state_map(Pid))).
 
 idle_proc() ->
     spawn(fun() ->
@@ -116,15 +167,9 @@ manager_loop(Zones) ->
         {'$gen_call', {From, Tag}, get_active_zones} ->
             From ! {Tag, Zones},
             manager_loop(Zones);
-        {set_zones, New} ->
-            manager_loop(New);
         stop ->
             ok
     end.
-
-set_manager_zones(Manager, Zones) ->
-    Manager ! {set_zones, Zones},
-    ok.
 
 %% A zone stand-in that counts the ticks it is sent.
 counting_proc() ->
@@ -173,8 +218,8 @@ set_zones_all_hot() ->
     asobi_world_ticker:set_zones(Pid, [Z1, Z2], self()),
     timer:sleep(10),
     State = get_state_map(Pid),
-    ?assertEqual([Z1, Z2], maps:get(hot_zones, State)),
-    ?assertEqual([], maps:get(cold_zones, State)).
+    ?assertEqual(lists:sort([Z1, Z2]), lists:sort(maps:keys(maps:get(hot_zones, State)))),
+    ?assertEqual(#{}, maps:get(cold_zones, State)).
 
 promote_zone_adds_to_hot() ->
     Pid = start_ticker(),
@@ -186,8 +231,8 @@ promote_zone_adds_to_hot() ->
     asobi_world_ticker:promote_zone(Pid, Z1),
     timer:sleep(10),
     State = get_state_map(Pid),
-    ?assert(lists:member(Z1, maps:get(hot_zones, State))),
-    ?assertNot(lists:member(Z1, maps:get(cold_zones, State))).
+    ?assert(is_map_key(Z1, maps:get(hot_zones, State))),
+    ?assertNot(is_map_key(Z1, maps:get(cold_zones, State))).
 
 demote_zone_moves_to_cold() ->
     Pid = start_ticker(),
@@ -201,8 +246,8 @@ demote_zone_moves_to_cold() ->
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(10),
     State = get_state_map(Pid),
-    ?assertNot(lists:member(Z1, maps:get(hot_zones, State))),
-    ?assert(lists:member(Z1, maps:get(cold_zones, State))).
+    ?assertNot(is_map_key(Z1, maps:get(hot_zones, State))),
+    ?assert(is_map_key(Z1, maps:get(cold_zones, State))).
 
 remove_zone_removes() ->
     Pid = start_ticker(),
@@ -216,8 +261,8 @@ remove_zone_removes() ->
     asobi_world_ticker:remove_zone(Pid, Z1),
     timer:sleep(10),
     State = get_state_map(Pid),
-    ?assertNot(lists:member(Z1, maps:get(hot_zones, State))),
-    ?assertNot(lists:member(Z1, maps:get(cold_zones, State))).
+    ?assertNot(is_map_key(Z1, maps:get(hot_zones, State))),
+    ?assertNot(is_map_key(Z1, maps:get(cold_zones, State))).
 
 promote_idempotent() ->
     Pid = start_ticker(),
@@ -231,8 +276,7 @@ promote_idempotent() ->
     asobi_world_ticker:promote_zone(Pid, Z1),
     timer:sleep(10),
     State = get_state_map(Pid),
-    Hot = maps:get(hot_zones, State),
-    ?assertEqual(1, length([Z || Z <- Hot, Z =:= Z1])).
+    ?assertEqual([Z1], maps:keys(maps:get(hot_zones, State))).
 
 demote_idempotent() ->
     Pid = start_ticker(),
@@ -246,8 +290,7 @@ demote_idempotent() ->
     asobi_world_ticker:demote_zone(Pid, Z1),
     timer:sleep(10),
     State = get_state_map(Pid),
-    Cold = maps:get(cold_zones, State),
-    ?assertEqual(1, length([Z || Z <- Cold, Z =:= Z1])).
+    ?assertEqual([Z1], maps:keys(maps:get(cold_zones, State))).
 
 cold_divisor_default() ->
     Pid = start_ticker(),

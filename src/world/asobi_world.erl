@@ -65,7 +65,8 @@ Per-zone tick: advance the entities in one zone from its zone_state.
 The optional third element answers "does this zone still have work asobi cannot
 see?". A zone with no entities, no queued input, no live entity timer and no
 pending respawn is demoted and ticks once every `cold_tick_divisor` ticks
-(widgrensit/asobi#543). That test reads asobi's own bookkeeping, which is blind
+(widgrensit/asobi#543), or not at all where a world sets that to 0
+(widgrensit/asobi#561). That test reads asobi's own bookkeeping, which is blind
 to work a script keeps in its zone state - a wave spawner counting down between
 waves, weather, a zone-level phase timer. Return `true` and the zone stays hot,
 is not hibernated between ticks, and is not reaped while it says so.
@@ -79,10 +80,24 @@ additive.
 
 A non-boolean third element keeps the zone hot and is logged: demoting a zone
 that has work is the harmful direction.
+
+The optional fourth element says what actually changed:
+`#{changed => #{Id => Entity}, removed => [Id]}`, applied on top of the map
+returned as the first element. Declaring it is a promise that every entity NOT
+named is exactly what asobi handed in, which is what lets the untouched ones
+stay the same TERMS - `compute_deltas/2` and the spatial-grid sync then settle
+each of them with a pointer comparison instead of walking its fields, and a Lua
+zone stops decoding its whole entity table on every tick
+(widgrensit/asobi#557).
+
+The declaration is the truth: an entity mutated but not named is not changed as
+far as asobi is concerned. Return the ordinary two- or three-tuple to keep the
+full-comparison semantics, which is what every game gets by default.
 """.
 -callback zone_tick(Entities :: map(), ZoneState :: term()) ->
     {Entities1 :: map(), ZoneState1 :: term()}
-    | {Entities1 :: map(), ZoneState1 :: term(), Busy :: boolean()}.
+    | {Entities1 :: map(), ZoneState1 :: term(), Busy :: boolean()}
+    | {Entities1 :: map(), ZoneState1 :: term(), Busy :: boolean(), Dirty :: map()}.
 
 -doc """
 Apply a player input to a zone's entities.

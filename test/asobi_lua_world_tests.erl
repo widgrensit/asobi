@@ -1211,3 +1211,50 @@ hostile_metatable_cannot_run_on_the_zone_test() ->
     %% The metamethod burns ~2e6 iterations if anything invokes it.
     ?assert(Us < 200_000),
     erlang:erase({asobi_lua_world, zone_state}).
+
+%% widgrensit/asobi#557: a script that says what it changed lets the bridge
+%% skip decoding the whole entities table, and asobi merges the declaration
+%% onto the map it handed in - so untouched entities stay the same terms.
+zone_tick_dirty_declaration_test() ->
+    Script = fixture("dirty_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+    Entities = #{
+        ~"a" => #{type => ~"npc", x => 1.0, y => 1.0},
+        ~"b" => #{type => ~"npc", x => 2.0, y => 2.0},
+        ~"c" => #{type => ~"npc", x => 3.0, y => 3.0}
+    },
+    {Base, _ZS, false, Dirty} = asobi_lua_world:zone_tick(Entities, ZoneState),
+    %% The bridge passes the INPUT map straight back rather than a decode of
+    %% what the script returned. That is what preserves sharing.
+    ?assertEqual(Entities, Base),
+    ?assertMatch(#{changed := #{~"a" := #{x := 11.0}}, removed := [~"c"]}, Dirty),
+    #{changed := Changed} = Dirty,
+    %% "b" was mutated by the script but not declared, so it is not changed.
+    ?assertNot(maps:is_key(~"b", Changed)),
+    ?assertEqual(1, map_size(Changed)).
+
+%% A script that returns three values (or two) keeps the old contract: the
+%% whole table is decoded and there is no fourth element.
+%%
+%% In its own process: zone_tick/2 stashes its zone state in the process
+%% dictionary and reads `lua_state` back from it, so a test running after
+%% another one in the same process would call the OTHER script's zone_tick.
+zone_tick_without_dirty_declaration_test() ->
+    Script = fixture("config_move_world.lua"),
+    Self = self(),
+    Pid = spawn(fun() ->
+        Config = #{game_config => #{lua_script => Script}},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+        Self ! {result, asobi_lua_world:zone_tick(#{}, ZoneState)}
+    end),
+    MonRef = monitor(process, Pid),
+    receive
+        {result, Result} ->
+            demonitor(MonRef, [flush]),
+            ?assertEqual(2, tuple_size(Result))
+    after 5_000 ->
+        ?assert(false)
+    end.

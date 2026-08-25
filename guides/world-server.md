@@ -213,6 +213,7 @@ end
 | `handle_input(player_id, input, entities)` | no | Apply one player's input to that zone's entities. A second return value is the client seq you consumed - see [Batched input and the ack](websocket-protocol.md#client-side-prediction). Every input in a tick is handed the same table rather than a copy, but returning nothing still discards whatever that call mutated - see [Players in one zone](performance-tuning.md#players-in-one-zone) |
 | `handle_effects(effects, entities)` | no | This tick's cross-zone effects, batched. See [Seeing across a seam](#seeing-across-a-seam) |
 | a third return from `zone_tick` | no | `return entities, zone_state, true` stops an entity-less zone being demoted. See [Performance tuning](performance-tuning.md#zone-tick-hibernation-and-reaping) |
+| a fourth return from `zone_tick` | no | `return entities, zone_state, busy, { changed = ..., removed = ... }` says what actually changed, so asobi stops decoding the whole entity table every tick. See [Performance tuning](performance-tuning.md#telling-asobi-what-changed) |
 | `generate_world(seed, config)` | no | Return a table keyed by `"x,y"` strings |
 | `get_state(player_id, state)` | no | Player-visible state |
 | `spawn_templates(config)` | no | See [Spawn templates](#spawn-templates) |
@@ -327,6 +328,7 @@ post_tick(_TickN, State) ->
 | `handle_input_batch/2` | one of | The whole tick's inputs in one call, returning one entity map plus one outcome per input. Export it instead of `handle_input/3` when your per-input cost is dominated by marshalling the entity map rather than by the input. Exporting it shadows `handle_input/3` entirely. asobi still owns the ack policy: you return one outcome per input - see [Players in one zone](performance-tuning.md#players-in-one-zone) |
 | `handle_effects/2` | no | This tick's cross-zone effects: `([{EntityId, Event}], Entities) -> {ok, Entities}`. Delivered after inputs, already filtered to entities this zone still owns. See [Seeing across a seam](#seeing-across-a-seam) |
 | `zone_tick/2`'s third element | no | `{Entities, ZoneState, Busy :: boolean()}` vetoes demotion of an entity-less zone that still has work asobi cannot see. A two-tuple means "not busy"; a non-boolean keeps the zone hot and is logged |
+| `zone_tick/2`'s fourth element | no | `{Entities, ZoneState, Busy, #{changed => #{Id => Entity}, removed => [Id]}}` declares what changed, merged onto the returned map. An entity not named is not changed |
 | `post_tick/2` | yes | Global post-tick: return `{ok, State}`, `{vote, Config, State}`, or `{finished, Result, State}` |
 | `generate_world/2` | no | Procedural generation: `(Seed, Config) -> {ok, #{Coords => ZoneState}}` |
 | `get_state/2` | no | Per-player state view |
@@ -395,7 +397,7 @@ version they are facts of the deployment rather than knobs.
 | `max_active_zones` | 10,000 | See [Large worlds](large-worlds.md) for what happens at that ceiling |
 | `zone_idle_timeout` | 30,000 | Milliseconds an empty zone lingers before it is released |
 | `spatial_grid_cell_size` | unset | Cell side for the in-zone spatial index. Unset means no index is built |
-| `cold_tick_divisor` | 10 | Ticks between ticks of a zone with nothing to simulate - see [Performance tuning](performance-tuning.md) |
+| `cold_tick_divisor` | 10 | Ticks between ticks of a zone with nothing to simulate; `1` ticks it every tick, `0` never ticks it - see [Performance tuning](performance-tuning.md) |
 | `border_band` | 0 | Fraction of `zone_size` published to neighbours - see [Seeing across a seam](#seeing-across-a-seam) |
 
 `rehome_margin` (default 0.15 of `zone_size`, described below) is settable the

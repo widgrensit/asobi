@@ -300,6 +300,9 @@ init(Config) ->
             world_server_pid => WorldServerPid,
             spawn_templates => Templates,
             zone_manager_pid => ZoneManagerPid,
+            %% The manager's stamp table, when this zone was started by one.
+            %% See touch_manager/1.
+            zone_stamp_tab => maps:get(zone_stamp_tab, Config, undefined),
             terrain_store_pid => TerrainStorePid,
             zone_size => ZoneSize,
             grid_size => GridSize,
@@ -569,17 +572,27 @@ handle_cast(reap, #{entities := Entities, script_busy := true} = State) when
     %% counting down between waves is reaped mid-countdown at
     %% `zone_idle_timeout` and the wave never comes. Declined the same way an
     %% occupied zone declines below.
-    case maps:get(zone_manager_pid, State, undefined) of
-        undefined -> ok;
-        ZMPid -> asobi_zone_manager:touch_zone(ZMPid, maps:get(coords, State))
-    end,
+    touch_manager(State),
+    {noreply, State};
+%% A watched zone is in use even with nothing in it. This was already true in
+%% effect - an empty zone with subscribers re-stamps itself active on the
+%% `map_size(Subs) > 0` branch of every tick, so the reap cast never arrived -
+%% but it was emergent rather than stated, and at `cold_tick_divisor = 0` the
+%% zone stops ticking and stops stamping (widgrensit/asobi#561). Reaping it
+%% then would tear it out from under subscribers who are not re-subscribed
+%% until they next move, so they would silently stop seeing anything that
+%% happens there.
+handle_cast(reap, #{entities := Entities, subscribers := Subs} = State) when
+    map_size(Entities) =:= 0, map_size(Subs) > 0
+->
+    touch_manager(State),
     {noreply, State};
 handle_cast(reap, #{entities := Entities} = State) when map_size(Entities) =:= 0 ->
     %% Graceful stop so terminate/2 writes a final snapshot. Transient restart
     %% means a normal stop is not respawned.
     {stop, normal, State};
-handle_cast(reap, #{zone_manager_pid := ZMPid, coords := Coords} = State) ->
-    %% asobi#283: the manager decides to reap from its own zone_last_active
+handle_cast(reap, State) ->
+    %% asobi#283: the manager decides to reap from its own last-active
     %% bookkeeping, which can lag real occupancy - release_zone backdates it
     %% the moment a zone empties, and nothing re-touches it for an occupied
     %% zone with no live subscribers (this zone's own tick only touches on
@@ -587,16 +600,13 @@ handle_cast(reap, #{zone_manager_pid := ZMPid, coords := Coords} = State) ->
     %% an occupied zone out from under its entities. This zone is the one
     %% source of truth for its own occupancy at the moment it actually
     %% receives the cast, so decline and re-touch instead of stopping.
-    case ZMPid of
-        undefined -> ok;
-        _ -> asobi_zone_manager:touch_zone(ZMPid, Coords)
-    end,
+    touch_manager(State),
     {noreply, State};
 handle_cast({tick, TickN}, State) ->
     State1 = do_tick(TickN, State),
     State2 = publish_border(resolve_zone_crossings(State1)),
     State3 = reclassify(State2),
-    #{subscribers := Subs, entities := Ents, zone_manager_pid := ZMPid, coords := Coords} = State3,
+    #{subscribers := Subs, entities := Ents} = State3,
     case map_size(Subs) of
         0 ->
             %% A zone that says it is busy is not idle between its ticks, so
@@ -607,10 +617,7 @@ handle_cast({tick, TickN}, State) ->
                 true -> {noreply, State3}
             end;
         _ ->
-            case ZMPid of
-                undefined -> ok;
-                _ -> asobi_zone_manager:touch_zone(ZMPid, Coords)
-            end,
+            touch_manager(State3),
             {noreply, State3}
     end;
 handle_cast({input, PlayerId, Input, Seq}, #{input_queue := Queue} = State) ->
@@ -1142,9 +1149,70 @@ zone_tick_result({Entities, ZoneState, Busy}, _State) when
     is_map(Entities), is_boolean(Busy)
 ->
     {Entities, ZoneState, Busy};
+zone_tick_result({Entities, ZoneState, Busy, Dirty}, State) when
+    is_map(Entities), is_boolean(Busy)
+->
+    {apply_dirty(Entities, Dirty, State), ZoneState, Busy};
+zone_tick_result({Entities, ZoneState, Other, Dirty}, State) when is_map(Entities) ->
+    log_bad_zone_busy(State, Other),
+    {apply_dirty(Entities, Dirty, State), ZoneState, true};
 zone_tick_result({Entities, ZoneState, Other}, State) when is_map(Entities) ->
     log_bad_zone_busy(State, Other),
     {Entities, ZoneState, true}.
+
+-doc """
+Apply `zone_tick/2`'s optional fourth return value: what actually changed.
+
+`#{changed => #{Id => Entity}, removed => [Id]}` on top of the map the callback
+returned. A game that declares this is telling asobi that every entity it did
+NOT name is byte-for-byte what asobi handed in - so the unchanged ones stay the
+same TERMS, and structural sharing with the previous tick survives the callback
+(widgrensit/asobi#557).
+
+That sharing is the whole point, and it is worth more than the merge costs.
+`compute_deltas/2` short-circuits on an identical entity with one pointer
+comparison instead of walking its fields, and so does `sync_spatial_grid/3`.
+Without it a Lua zone rebuilds every entity map on every tick's decode, so both
+of those degrade to O(all entities x fields) to discover that three NPCs moved.
+The bigger half of the win is upstream, in the bridge: `asobi_lua_world` decodes
+only `changed` rather than the whole entities table.
+
+Ignoring the declaration entirely is always safe and never wrong - it only
+costs the sharing - so this fails towards "merge what is well-formed and log
+the rest" rather than towards refusing a tick.
+""".
+-spec apply_dirty(map(), term(), map()) -> map().
+apply_dirty(Entities, Dirty, State) when is_map(Dirty) ->
+    Changed = narrow_changed(maps:get(changed, Dirty, #{}), State),
+    Removed = narrow_ids(maps:get(removed, Dirty, [])),
+    maps:without(Removed, maps:merge(Entities, Changed));
+apply_dirty(Entities, Dirty, State) ->
+    log_bad_zone_dirty(State, Dirty),
+    Entities.
+
+%% Same bar every other id-bearing path in this module holds: a non-binary id
+%% reaches byte_size/1 in the encoder and kills the zone mid-tick (asobi#509).
+-spec narrow_changed(term(), map()) -> map().
+narrow_changed(Changed, State) when is_map(Changed) ->
+    Narrowed = maps:filter(
+        fun
+            (Id, E) when is_binary(Id), is_map(E) -> true;
+            (_Id, _E) -> false
+        end,
+        Changed
+    ),
+    case map_size(Narrowed) =:= map_size(Changed) of
+        true -> ok;
+        false -> log_bad_zone_dirty(State, Changed)
+    end,
+    Narrowed;
+narrow_changed(Changed, State) ->
+    log_bad_zone_dirty(State, Changed),
+    #{}.
+
+-spec narrow_ids(term()) -> [binary()].
+narrow_ids(Ids) when is_list(Ids) -> [Id || Id <- Ids, is_binary(Id)];
+narrow_ids(_Ids) -> [].
 
 apply_timer_events([], Entities) ->
     Entities;
@@ -2630,6 +2698,26 @@ clamp_border_band(Band) ->
 %% way every other game-supplied term in this module is - an unbounded `~0p` of
 %% a zone state is both a 200KB log line and a way to print a secret the game
 %% keeps in it.
+log_bad_zone_dirty(State, Detail) ->
+    Zone = log_zone(State),
+    asobi_telemetry:game_error(bad_zone_dirty, #{
+        game_module => maps:get(game_module, State, undefined),
+        world_id => maps:get(world_id, State, undefined),
+        coords => maps:get(coords, State, undefined)
+    }),
+    case asobi_script_log_limiter:allow(effect_log_key(Zone, bad_zone_dirty)) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_ERROR(#{
+                msg =>
+                    ~"zone_tick/2's fourth return value was not a well-formed dirty set; ignoring it",
+                coords => maps:get(coords, State, undefined),
+                detail => bound_debug_term(Detail),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
+
 log_bad_zone_busy(State, Detail) ->
     Zone = log_zone(State),
     asobi_telemetry:game_error(bad_zone_busy, #{
@@ -2668,12 +2756,43 @@ reclassify(#{cold := Cold, ticker_pid := TickerPid} = State) ->
 %% Promote from the message that created the work rather than from the next
 %% tick. A cold zone only ticks once every `cold_tick_divisor` ticks, so
 %% waiting for its own tick to notice a player arrived would put that whole
-%% divisor of latency on the first frame of every zone entry.
+%% divisor of latency on the first frame of every zone entry. At
+%% `cold_tick_divisor = 0` it never ticks at all, so this is the ONLY
+%% transition left and the whole thing rests on it (widgrensit/asobi#561).
+%%
+%% Nothing time-based has to be caught up here, and that is a property of
+%% `asobi_idle/1` rather than an omission: a zone is only demoted when it has
+%% no live entity timer and an empty respawn queue, so a dormant zone has no
+%% elapsed deadline to reconcile. What it can acquire while dormant - a spawn,
+%% a timer, an entity, an input, an effect - arrives as a message, and every
+%% one of those messages runs this. `asobi_zone_spawner:tick/2` and
+%% `asobi_entity_timer:tick/2` are both driven by the wall clock the resumed
+%% tick passes them, so a window that opened during the silence fires on the
+%% first tick after it rather than `cold_tick_divisor` ticks later.
 -spec warm_up(map()) -> map().
 warm_up(#{cold := true} = State) ->
     warm(State);
 warm_up(State) ->
     State.
+
+-doc """
+Tell the reaper this zone is still in use.
+
+Written straight into the manager's stamp table where the zone has one, which
+is every zone the manager started. An occupied zone does this on EVERY tick,
+and as a `gen_server` cast it made the zone manager a queue the whole world
+shared - the same process `ensure_zone/2` goes through on the join and
+crossing hot path, where a 1s timeout costs the crossing
+(widgrensit/asobi#559). The cast remains for a zone started outside the
+manager, which has no table to write to.
+""".
+-spec touch_manager(map()) -> ok.
+touch_manager(#{zone_stamp_tab := Tab, coords := Coords}) when Tab =/= undefined ->
+    asobi_zone_manager:stamp_active(Tab, Coords);
+touch_manager(#{zone_manager_pid := ZMPid, coords := Coords}) when is_pid(ZMPid) ->
+    asobi_zone_manager:touch_zone(ZMPid, Coords);
+touch_manager(_State) ->
+    ok.
 
 %% Emitted on the transition only, never per tick: a zone that is merely busy is
 %% the normal case and says nothing an operator can act on.
@@ -2886,6 +3005,27 @@ remove_from_grid(_Ids, undefined) ->
 remove_from_grid(Ids, Grid) ->
     remove_from_grid_do(Ids, Grid).
 
+%% Ids in `OldEntities` that `NewEntities` no longer has.
+%%
+%% A fold with `maps:is_key/2` rather than `maps:keys(Old) -- maps:keys(New)`
+%% (widgrensit/asobi#558). `--` is O(N*M): it rescans the right-hand list for
+%% every element of the left one, so with a spatial grid configured a zone
+%% holding N entities paid O(N^2) key comparisons EVERY tick to almost always
+%% produce `[]`. Measured on an inert 2,000-entity zone, `erlang:'--'/2` was
+%% 13% of the whole tick at ~500us a call. This is O(N) with O(1) lookups.
+-spec removed_ids(map(), map()) -> [term()].
+removed_ids(OldEntities, NewEntities) ->
+    maps:fold(
+        fun(Id, _Old, Acc) ->
+            case is_map_key(Id, NewEntities) of
+                true -> Acc;
+                false -> [Id | Acc]
+            end
+        end,
+        [],
+        OldEntities
+    ).
+
 -spec remove_from_grid_do([term()], asobi_spatial_grid:grid()) -> asobi_spatial_grid:grid().
 remove_from_grid_do([], Grid) ->
     Grid;
@@ -2897,26 +3037,21 @@ remove_from_grid_do([_ | Rest], Grid) ->
 sync_spatial_grid(_OldEntities, _NewEntities, undefined) ->
     undefined;
 sync_spatial_grid(OldEntities, NewEntities, Grid) when is_map(Grid) ->
-    %% Remove entities that no longer exist
-    Removed = maps:keys(OldEntities) -- maps:keys(NewEntities),
-    Grid1 = remove_from_grid_do(Removed, Grid),
+    Grid1 = remove_from_grid_do(removed_ids(OldEntities, NewEntities), Grid),
     %% Update/insert entities with changed or new positions
     maps:fold(
         fun
-            (Id, Entity, G) when is_map(Entity) ->
-                case entity_pos(Entity) of
-                    undefined ->
+            (Id, Entity, G) when is_binary(Id), is_map(Entity) ->
+                %% `{ok, Entity}` matches the bound entity, so an entity the
+                %% tick left alone settles in one pointer comparison rather
+                %% than two position extractions. Worth having only because a
+                %% tick can now preserve structural sharing - see apply_dirty/3
+                %% and widgrensit/asobi#557.
+                case maps:find(Id, OldEntities) of
+                    {ok, Entity} ->
                         G;
-                    Pos ->
-                        case maps:find(Id, OldEntities) of
-                            {ok, Old} when is_map(Old) ->
-                                case entity_pos(Old) of
-                                    Pos -> G;
-                                    _ -> asobi_spatial_grid:update(Id, Pos, G)
-                                end;
-                            _ ->
-                                asobi_spatial_grid:update(Id, Pos, G)
-                        end
+                    Found ->
+                        sync_moved_entity(Id, Entity, Found, G)
                 end;
             (_Id, _Entity, G) ->
                 G
@@ -2924,3 +3059,22 @@ sync_spatial_grid(OldEntities, NewEntities, Grid) when is_map(Grid) ->
         Grid1,
         NewEntities
     ).
+
+-spec sync_moved_entity(
+    binary(), map(), {ok, term()} | error, asobi_spatial_grid:grid()
+) -> asobi_spatial_grid:grid().
+sync_moved_entity(Id, Entity, Found, Grid) ->
+    case entity_pos(Entity) of
+        undefined ->
+            Grid;
+        Pos ->
+            case Found of
+                {ok, Old} when is_map(Old) ->
+                    case entity_pos(Old) of
+                        Pos -> Grid;
+                        _ -> asobi_spatial_grid:update(Id, Pos, Grid)
+                    end;
+                _ ->
+                    asobi_spatial_grid:update(Id, Pos, Grid)
+            end
+    end.

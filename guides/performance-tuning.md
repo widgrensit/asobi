@@ -119,6 +119,58 @@ spending most of a core on empty space and spending a tenth of it.
 Recorded in `docs/adr/0016-idle-zones-tick-at-the-cold-divisor.md`, which also
 says what it deliberately does not solve.
 
+### Telling asobi what changed
+
+An idle zone is cheap. A **populated** one has a different problem: its tick
+cost scales with how many entities it holds rather than with how many of them
+did anything. The entity map crosses the Lua bridge whole in both directions on
+every tick, and because the decode rebuilds every entity map, the delta diff and
+the spatial-grid sync then walk every field of every entity to discover that
+three NPCs moved.
+
+Say what changed and none of that happens:
+
+```lua
+function zone_tick(entities, zone_state)
+  local changed, removed = {}, {}
+  for id, e in pairs(entities) do
+    if e.target then
+      step(e)
+      changed[id] = e
+    end
+    if e.hp <= 0 then
+      removed[#removed + 1] = id
+    end
+  end
+  return entities, zone_state, false, { changed = changed, removed = removed }
+end
+```
+
+An Erlang game module returns the same fourth element as a map:
+`#{changed => #{Id => Entity}, removed => [Id]}`. Measured on one machine with
+an inert script moving three entities, under `lua_vm_mode = owned`:
+
+| entities | before | after |
+|----------|--------|-------|
+| 100 | 280us | 224us |
+| 500 | 1,773us | 1,152us |
+| 2,000 | 10,509us | 5,929us |
+
+The reductions the zone process itself burns per tick fall much further - 200k
+to 1.2k at 2,000 entities - because the decode used to run on the zone rather
+than in the VM.
+
+**The declaration is the truth.** An entity your script mutated and did not put
+in `changed` is not changed as far as asobi is concerned, and the next tick
+re-encodes asobi's map over the top of it, so the mutation is undone rather than
+merely invisible. That is the trade: it is opt-in per game for exactly this
+reason, and returning the ordinary two- or three-tuple keeps the
+full-comparison behaviour.
+
+What it does **not** remove is the encode in the other direction, which is still
+proportional to the entity count. See
+`docs/adr/0022-zone-tick-may-declare-what-changed.md`.
+
 **If your game drives work from `zone_tick` on a zone that holds nothing** - a
 wave spawner counting down between waves, weather, a zone-level timer - asobi
 cannot see it, and such a zone is demoted to a tenth of the rate it was written
@@ -154,6 +206,22 @@ returned value reads nothing. See
 
 `cold_tick_divisor = 1` disables the whole thing world-wide if you would rather
 not think about it.
+
+`cold_tick_divisor = 0` goes the other way: an idle zone is not ticked **at
+all**. It costs nothing at all until a message gives it work, and it also stops
+paying the full-sweep GC of a hibernate/wake cycle it would otherwise pay twice
+a second. Nothing time-based is lost by the silence - a zone is only demoted
+when it has no live entity timer and an empty respawn queue, and both the
+spawner and the timer wheel are driven by the wall clock the first tick after
+warm-up hands them, so a respawn window that opened while the zone was dormant
+fires on that tick rather than a divisor later. A zone that says it is `busy`
+is never idle, so a script driving wave logic from `zone_tick` keeps its full
+rate at 0 exactly as it does at 10.
+
+Worth turning on for a large lazy world where an operator keeps
+`max_active_zones` high and most loaded zones hold nothing: the residual cost
+of "loaded but idle" then scales with player activity rather than with map
+size. The default stays 10.
 
 What does happen automatically:
 

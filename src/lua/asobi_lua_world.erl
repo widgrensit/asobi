@@ -207,7 +207,8 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 %% exactly the write/read split here.
 -define(TEMPLATES_KEY, known).
 
--spec zone_tick(map(), term()) -> {map(), term()} | {map(), term(), boolean()}.
+-spec zone_tick(map(), term()) ->
+    {map(), term()} | {map(), term(), boolean()} | {map(), term(), boolean(), map()}.
 zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Pick up any lua_state updates that handle_input stashed earlier this
     %% tick. The dev-error rate-limit stamp must ride along too: asobi_zone's
@@ -265,6 +266,20 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                         zone_tick, [EncEntities, GS], LuaSt1, ?TICK_TIMEOUT
                     )
                 of
+                    {ok, [Ents1, ZS1, Busy, Dirty | _], LuaSt2} ->
+                        ZS = ZoneState#{lua_state => LuaSt2, game_state => ZS1},
+                        case decode_dirty(Dirty, LuaSt2) of
+                            undefined ->
+                                Ents2 = asobi_lua_api:atomize_entities(
+                                    decode_to_map(Ents1, LuaSt2)
+                                ),
+                                {Ents2, ZS, truthy(Busy)};
+                            DirtySet ->
+                                %% `Entities` - what asobi handed IN - rather
+                                %% than a decode of what came back. That is the
+                                %% point: see decode_dirty/2.
+                                {Entities, ZS, truthy(Busy), DirtySet}
+                        end;
                     {ok, [Ents1, ZS1, Busy | _], LuaSt2} ->
                         Ents2 = asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)),
                         {Ents2, ZoneState#{lua_state => LuaSt2, game_state => ZS1}, truthy(Busy)};
@@ -285,7 +300,67 @@ zone_tick(Entities, ZoneState) ->
     {Entities, ZoneState}.
 
 result_zone_state({_Entities, ZoneState}) -> ZoneState;
-result_zone_state({_Entities, ZoneState, _Busy}) -> ZoneState.
+result_zone_state({_Entities, ZoneState, _Busy}) -> ZoneState;
+result_zone_state({_Entities, ZoneState, _Busy, _Dirty}) -> ZoneState.
+
+-doc """
+Reads `zone_tick`'s optional fourth return value: what actually changed.
+
+```lua
+function zone_tick(entities, zone_state)
+  local changed, removed = {}, {}
+  for id, e in pairs(entities) do
+    if wants_to_move(e) then step(e); changed[id] = e end
+    if e.hp <= 0 then removed[#removed + 1] = id end
+  end
+  return entities, zone_state, false, { changed = changed, removed = removed }
+end
+```
+
+Declaring it is what lets this bridge stop decoding the whole entities table.
+Without it a populated zone round-trips every entity across the boundary in
+both directions on every tick regardless of how many actually changed - a zone
+with 500 NPCs of which 3 move pays for 500, twenty times a second, and pays
+again downstream because the decode rebuilds every entity map and destroys the
+structural sharing `compute_deltas/2` and `sync_spatial_grid/3` rely on
+(widgrensit/asobi#557). Measured on a 2,000-entity zone with an inert script
+under `owned`, the round trip was ~9.9ms per tick.
+
+**The declaration is the truth.** An entity the script mutated and did not put
+in `changed` is not changed as far as asobi is concerned, and the next tick
+re-encodes asobi's map over the top of it - so the mutation is not merely
+invisible, it is undone. That is inherent to any dirty contract and it is why
+this is opt-in per script rather than a mode.
+
+Anything that is not a Lua table means "no declaration" and today's semantics,
+which is also what a three-value return gives. Malformed halves are narrowed
+away in `asobi_zone:apply_dirty/3` rather than here, so an Erlang game module
+declaring the same thing meets the same bar.
+""".
+-spec decode_dirty(term(), dynamic()) -> map() | undefined.
+%% `nil`, `true`, a number, a string: not a declaration. Only a Lua table is,
+%% and a table reference is a tuple in both VM modes - so anything else means
+%% "no declaration" and the caller falls back to decoding the whole map.
+decode_dirty(Ref, LuaSt) when is_tuple(Ref) ->
+    Decoded = decode_to_map(Ref, LuaSt),
+    #{
+        changed => asobi_lua_api:atomize_entities(
+            as_entity_map(maps:get(~"changed", Decoded, #{}))
+        ),
+        removed => as_id_list(maps:get(~"removed", Decoded, []))
+    };
+decode_dirty(_Other, _LuaSt) ->
+    undefined.
+
+%% An empty Lua table decodes to `[]`, not `#{}` - there is nothing in it to
+%% tell a record from an array.
+-spec as_entity_map(term()) -> map().
+as_entity_map(M) when is_map(M) -> M;
+as_entity_map(_Other) -> #{}.
+
+-spec as_id_list(term()) -> [binary()].
+as_id_list(L) when is_list(L) -> [Id || Id <- L, is_binary(Id)];
+as_id_list(_Other) -> [].
 
 %% Lua truthiness, not Erlang's: `nil` and `false` are the only falsey values, so
 %% `return entities, zone_state, wave_countdown > 0` works and so does returning

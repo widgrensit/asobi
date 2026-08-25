@@ -49,7 +49,7 @@ lazy_zones              = true            -- optional, on-demand zone loading
 zone_idle_timeout       = 30000           -- optional, ms before idle zone is reaped
 max_active_zones        = 10000           -- optional, cap on concurrent zones
 spatial_grid_cell_size  = 64              -- optional, cell size for spatial grid indexing
-cold_tick_divisor       = 10              -- optional, tick rate divisor for cold (idle) zones
+cold_tick_divisor       = 10              -- optional, tick divisor for cold (idle) zones, 0 = never tick one
 border_band             = 0.15            -- optional, fraction of zone_size mirrored to neighbours (default 0 = off)
 empty_grace_ms          = 60000           -- optional, ms to keep an empty world alive before finishing
 player_ttl_ms           = 0               -- optional, 0=remove on disconnect, -1=keep forever, N=grace ms
@@ -365,7 +365,7 @@ read_match_globals(ScriptPath, St) ->
             Config3 = maybe_add_bots(Config2a, Bots, ScriptPath),
             Config4 = maybe_add_zone_config(Config3, LazyZones, ZoneIdleTimeout, MaxActiveZones),
             Config5 = maybe_add_int(Config4, spatial_grid_cell_size, SpatialGridCellSize),
-            Config6 = maybe_add_int(Config5, cold_tick_divisor, ColdTickDivisor),
+            Config6 = maybe_add_non_neg_int(Config5, cold_tick_divisor, ColdTickDivisor),
             Config6a = maybe_add_fraction(Config6, border_band, BorderBand),
             Config7 = maybe_add_int(Config6a, empty_grace_ms, EmptyGraceMs),
             Config8 = maybe_add_player_ttl(Config7, PlayerTtlMs),
