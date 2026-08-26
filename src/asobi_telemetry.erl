@@ -13,7 +13,8 @@
     matchmaker_deduped/2,
     matchmaker_removed/2,
     matchmaker_formed/3,
-    matchmaker_failed/2
+    matchmaker_failed/2,
+    matchmaker_dropped/2
 ]).
 -export([session_connected/1, session_disconnected/2]).
 -export([
@@ -95,6 +96,7 @@ events() ->
         [asobi, matchmaker, removed],
         [asobi, matchmaker, formed],
         [asobi, matchmaker, failed],
+        [asobi, matchmaker, dropped],
         [asobi, session, connected],
         [asobi, session, disconnected],
         [asobi, ws, connected],
@@ -332,6 +334,23 @@ matchmaker_deduped(PlayerId, Mode) ->
 matchmaker_removed(PlayerId, Reason) ->
     telemetry:execute([asobi, matchmaker, removed], #{count => 1}, #{
         player_id => PlayerId, reason => Reason
+    }).
+
+-doc """
+A ticket that was matched but could not be seated.
+
+Distinct from `[asobi, error]` on purpose: a player disconnecting while queued
+is routine, not a game-code fault, and on mobile it is the ordinary consequence
+of backgrounding the app or moving between networks. Counting it as an error
+would make the node's error rate track connection churn.
+
+`mode` is label-safe on the same grounds as the other matchmaker events;
+`reason` is a bounded atom.
+""".
+-spec matchmaker_dropped(binary(), atom()) -> ok.
+matchmaker_dropped(Mode, Reason) ->
+    telemetry:execute([asobi, matchmaker, dropped], #{count => 1}, #{
+        mode => Mode, reason => Reason
     }).
 
 -spec matchmaker_formed(binary(), pos_integer(), pos_integer()) -> ok.

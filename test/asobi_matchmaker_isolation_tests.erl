@@ -118,7 +118,11 @@ phantom_player_test_() ->
     ]}.
 
 with_world_server(Fun) ->
-    meck:new(asobi_world_server, [non_strict, no_link]),
+    %% `passthrough`, not `non_strict`: a non_strict mock accepts an expectation
+    %% for a function that does not exist, so a rename or an arity change would
+    %% break join_if_present/3 in production while these tests stayed green
+    %% against a stub of a function that is gone.
+    meck:new(asobi_world_server, [passthrough, no_link]),
     Self = self(),
     meck:expect(asobi_world_server, join, fun(_WorldPid, PlayerId) ->
         Self ! {joined, PlayerId},
@@ -141,7 +145,7 @@ offline_player_not_seated() ->
     with_world_server(fun() ->
         ?assertEqual(
             offline,
-            asobi_matchmaker:join_if_present(self(), ~"gone_p1", ~"w1")
+            asobi_matchmaker:join_if_present(self(), ~"gone_p1", ~"m1")
         ),
         ?assertNot(joined(~"gone_p1"))
     end).
@@ -150,18 +154,21 @@ offline_player_is_counted() ->
     meck:expect(asobi_presence, get_status, fun(_PlayerId) -> offline end),
     Handler = ?FUNCTION_NAME,
     Self = self(),
+    %% `[asobi, matchmaker, dropped]`, not `[asobi, error]`: disconnecting while
+    %% queued is routine on mobile, and counting it as an error would make the
+    %% node's error rate track connection churn.
     ok = telemetry:attach(
         Handler,
-        [asobi, error],
-        fun(_E, _M, Meta, _C) -> Self ! {game_error, Meta} end,
+        [asobi, matchmaker, dropped],
+        fun(_E, _M, Meta, _C) -> Self ! {dropped, Meta} end,
         undefined
     ),
     try
         with_world_server(fun() ->
-            offline = asobi_matchmaker:join_if_present(self(), ~"gone_p2", ~"w1")
+            offline = asobi_matchmaker:join_if_present(self(), ~"gone_p2", ~"m1")
         end),
         receive
-            {game_error, #{kind := join_no_live_session, details := #{source := matchmaker}}} -> ok
+            {dropped, #{mode := ~"m1", reason := no_live_session}} -> ok
         after 500 ->
             ?assert(false)
         end
@@ -172,6 +179,65 @@ offline_player_is_counted() ->
 online_player_seated() ->
     meck:expect(asobi_presence, get_status, fun(_PlayerId) -> online end),
     with_world_server(fun() ->
-        ?assertEqual(ok, asobi_matchmaker:join_if_present(self(), ~"live_p1", ~"w1")),
+        ?assertEqual(ok, asobi_matchmaker:join_if_present(self(), ~"live_p1", ~"m1")),
         ?assert(joined(~"live_p1"))
     end).
+
+%% The world is built BEFORE anyone joins, and asobi_world_server decides it is
+%% empty in exactly one place - handle_leave/2, reachable only from an explicit
+%% leave or a session DOWN. A world whose roster was never populated therefore
+%% never arms empty_grace and never reaches `finished`: it ticks its whole zone
+%% grid forever. Screening the departed players out of the join turns one
+%% unremovable seat into zero seats, which is the same terminal state - so the
+%% count has to be acted on.
+unoccupied_world_test_() ->
+    {setup, fun setup/0, fun cleanup/1, [
+        {"a world nobody was seated in is discarded", fun unoccupied_world_discarded/0},
+        {"a world with someone in it is kept", fun occupied_world_kept/0}
+    ]}.
+
+with_instance_sup(Fun) ->
+    meck:new(supervisor, [unstick, passthrough, no_link]),
+    Self = self(),
+    try
+        meck:expect(supervisor, terminate_child, fun
+            (asobi_world_instance_sup, Pid) ->
+                Self ! {terminated, Pid},
+                ok;
+            (Sup, Pid) ->
+                meck:passthrough([Sup, Pid])
+        end),
+        Fun()
+    after
+        meck:unload(supervisor)
+    end.
+
+terminated(Pid) ->
+    receive
+        {terminated, Pid} -> true
+    after 200 -> false
+    end.
+
+unoccupied_world_discarded() ->
+    Instance = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    with_instance_sup(fun() ->
+        ok = asobi_matchmaker:discard_unoccupied(0, Instance, ~"m1", ~"w1"),
+        ?assert(terminated(Instance))
+    end),
+    exit(Instance, kill).
+
+occupied_world_kept() ->
+    Instance = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    with_instance_sup(fun() ->
+        ok = asobi_matchmaker:discard_unoccupied(1, Instance, ~"m1", ~"w1"),
+        ?assertNot(terminated(Instance))
+    end),
+    exit(Instance, kill).

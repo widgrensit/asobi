@@ -347,10 +347,22 @@ otherwise has no way to discover.
 fillable(Mode, ModeConfig) ->
     case maps:get(type, ModeConfig, match) of
         world ->
-            ?LOG_WARNING(#{
-                msg => ~"bots are declared on a world-type mode; not filling",
-                mode => Mode
-            }),
+            %% Rate-limited, keyed on the mode: fill_mode/2 runs every
+            %% ?CHECK_INTERVAL for every mode with somebody queued, so an
+            %% unbounded warning here is one line every 8 seconds for as long
+            %% as the misconfiguration lasts. A log an operator learns to
+            %% filter has stopped working. Same shape as log_bot_not_added/3.
+            case asobi_script_log_limiter:allow({?MODULE, bots_on_world_mode, Mode}) of
+                {true, Dropped} ->
+                    ?LOG_WARNING(#{
+                        event => bots_on_world_mode,
+                        msg => ~"bots are declared on a world-type mode; not filling",
+                        mode => Mode,
+                        suppressed_since_last => Dropped
+                    });
+                false ->
+                    ok
+            end,
             false;
         _ ->
             true

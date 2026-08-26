@@ -12,7 +12,7 @@ spawns a match, and pushes `match.matched` to each player. A single
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -ifdef(TEST).
 -export([next_spawn_attempt/1, join_matched_players/3, tally/1, render/3, notify_expired/1]).
--export([join_if_present/3]).
+-export([join_if_present/3, discard_unoccupied/4]).
 -endif.
 
 -export_type([snapshot/0, mode_queue/0]).
@@ -618,29 +618,93 @@ The world then ticks forever around a player who is not there. This is the
 world-side twin of widgrensit/asobi#280, and the same root cause: nothing
 checked that the ticket's owner was still connected before forming.
 
-Checked here rather than refused in `asobi_world_server`, because a
-session-less join is legitimate for other callers by design
-(widgrensit/asobi#277 made `place_player/4` degrade rather than crash), and
-because this is the only production path that can reach the state: the WS
-handler uses `join/4` with its own session pid.
+Checked here rather than refused in `asobi_world_server:join/2`, because
+around twenty tests and the Erlang embedding path join a session-less player
+deliberately - `join/2` is the API for a host that is not driving a WS session.
+(Not, as an earlier draft of this comment claimed, because asobi#277 blessed
+the seat: #277 only stopped `monitor(process, undefined)` from crashing. It
+avoided a crash; it did not sanction the state.)
 
-A player who disconnects between this check and the join still lands in it -
-the window is one message rather than the whole queue wait, and
-`join_no_live_session` telemetry counts it.
+A player who disconnects between this check and the join still lands in it.
+The window is one message rather than the whole queue wait, and
+`join_no_live_session` counts it - but the consequence is undiminished, because
+one seated phantom keeps its world alive forever just as surely as a full group
+of them. Closing that needs a per-player terminus in `asobi_world_server`.
 """.
--spec join_if_present(pid(), binary(), term()) -> ok | offline | {error, term()}.
-join_if_present(WorldPid, PlayerId, WorldId) ->
+-spec join_if_present(pid(), binary(), binary()) -> ok | offline | {error, term()}.
+join_if_present(WorldPid, PlayerId, Mode) ->
     case asobi_presence:get_status(PlayerId) of
         offline ->
-            asobi_telemetry:game_error(join_no_live_session, #{
-                world_id => WorldId,
-                player_id => PlayerId,
-                source => matchmaker
-            }),
+            %% `[asobi, matchmaker, dropped]`, not `[asobi, error]`: this fires
+            %% on the EXPECTED path. A player disconnecting while queued is
+            %% routine on mobile, and putting it on the error surface would
+            %% make the node's error rate track connection churn. The world
+            %% server keeps `join_no_live_session` on `[asobi, error]` for the
+            %% residual race, which genuinely is anomalous now that the screen
+            %% exists - and the two rates answer different questions.
+            asobi_telemetry:matchmaker_dropped(Mode, no_live_session),
             offline;
         online ->
             asobi_world_server:join(WorldPid, PlayerId)
     end.
+
+%% Explicit recursion: `lists:foldl/3` erases the accumulator type, and the
+%% count is what decides whether the world lives. See docs/eqwalizer-idioms.md.
+-spec seat_group([term()], pid(), binary(), term(), [binary()], non_neg_integer()) ->
+    non_neg_integer().
+seat_group([], _WorldPid, _Mode, _WorldId, _Group, Seated) ->
+    Seated;
+seat_group([PlayerId | Rest], WorldPid, Mode, WorldId, Group, Seated) when is_binary(PlayerId) ->
+    JoinResult = join_if_present(WorldPid, PlayerId, Mode),
+    logger:notice(#{
+        msg => ~"player joined world",
+        player_id => PlayerId,
+        result => JoinResult
+    }),
+    asobi_presence:send(
+        PlayerId,
+        {match_event, matched, #{match_id => WorldId, mode => Mode, player_ids => Group}}
+    ),
+    seat_group(Rest, WorldPid, Mode, WorldId, Group, seated(JoinResult, Seated));
+seat_group([_ | Rest], WorldPid, Mode, WorldId, Group, Seated) ->
+    seat_group(Rest, WorldPid, Mode, WorldId, Group, Seated).
+
+-spec seated(term(), non_neg_integer()) -> non_neg_integer().
+seated(ok, Seated) -> Seated + 1;
+seated(_Other, Seated) -> Seated.
+
+-doc """
+Stop a world nobody was seated in.
+
+The world is built BEFORE anyone joins, and `asobi_world_server` decides it is
+empty in exactly one place - `handle_leave/2`, reachable only from an explicit
+leave or a session `DOWN`. So a world whose roster was never populated never
+arms `empty_grace` and never reaches `finished`: it ticks its whole zone grid
+forever. Screening the departed players out of the join (`join_if_present/3`)
+turns one unremovable seat into zero seats, which is the same terminal state.
+
+Hence the count. If the whole group went offline while queued, the world has
+no reason to exist and is torn down here, where the caller still holds the
+instance pid.
+
+**This does not cover the residual race**: a player who dies between the screen
+and the join is still seated with no session and no monitor, and one seated
+player is enough to keep the world alive forever. Closing that needs a terminus
+in `asobi_world_server` for a roster that empties without a leave, which is a
+change to world lifecycle for every caller and is not made here.
+""".
+-spec discard_unoccupied(non_neg_integer(), pid(), binary(), term()) -> ok.
+discard_unoccupied(0, InstancePid, Mode, WorldId) ->
+    logger:notice(#{
+        msg => ~"world had no live players to seat; discarding it",
+        mode => Mode,
+        world_id => WorldId
+    }),
+    asobi_telemetry:matchmaker_failed(Mode, 0),
+    _ = supervisor:terminate_child(asobi_world_instance_sup, InstancePid),
+    ok;
+discard_unoccupied(_Seated, _InstancePid, _Mode, _WorldId) ->
+    ok.
 
 %% Unlike spawn_match, world spawn is detached (spawn/1) to avoid blocking the
 %% matchmaker, so there is no clean handle to re-queue the group on failure.
@@ -690,25 +754,10 @@ spawn_world(Mode, ModeConfig, PlayerIds, Group, Rest, Failed) ->
                             }),
                             WorldInfo = asobi_world_server:get_info(WorldPid),
                             WorldId = maps:get(world_id, WorldInfo, undefined),
-                            lists:foreach(
-                                fun(PlayerId) when is_binary(PlayerId) ->
-                                    JoinResult = join_if_present(WorldPid, PlayerId, WorldId),
-                                    logger:notice(#{
-                                        msg => ~"player joined world",
-                                        player_id => PlayerId,
-                                        result => JoinResult
-                                    }),
-                                    asobi_presence:send(
-                                        PlayerId,
-                                        {match_event, matched, #{
-                                            match_id => WorldId,
-                                            mode => Mode,
-                                            player_ids => SpawnPlayerIds
-                                        }}
-                                    )
-                                end,
-                                SpawnPlayerIds
-                            );
+                            Seated = seat_group(
+                                SpawnPlayerIds, WorldPid, Mode, WorldId, SpawnPlayerIds, 0
+                            ),
+                            discard_unoccupied(Seated, InstancePid, Mode, WorldId);
                         {error, Reason} ->
                             logger:error(#{
                                 msg => ~"world spawn failed",
