@@ -472,7 +472,7 @@ running({call, From}, {use_veto, PlayerId, VoteId}, #{veto_tokens := Tokens} = S
         {_, 0} ->
             {keep_state_and_data, [{reply, From, {error, no_veto_tokens}}]};
         {VotePid, N} ->
-            case asobi_vote_server:cast_veto(VotePid, PlayerId) of
+            case call_vote(fun() -> asobi_vote_server:cast_veto(VotePid, PlayerId) end) of
                 ok ->
                     Tokens1 = Tokens#{PlayerId => N - 1},
                     {keep_state, State#{veto_tokens => Tokens1}, [{reply, From, ok}]};
@@ -660,7 +660,10 @@ terminate(_Reason, StateName, #{match_id := MatchId} = State) ->
 
 %% Rate-limited: input arrives per client per tick, so an unbounded log here
 %% would be a flood channel a client controls.
--spec log_dropped_input(binary(), binary(), atom()) -> ok.
+%% `term()` for the player id: both call sites take it straight off a client
+%% frame, and this is a log line - narrowing it to `binary()` would put a
+%% function_clause on the path that exists to record a dropped input.
+-spec log_dropped_input(binary(), term(), atom()) -> ok.
 log_dropped_input(MatchId, PlayerId, Reason) ->
     case asobi_script_log_limiter:allow({?MODULE, input_dropped, MatchId}) of
         {true, Dropped} ->
@@ -670,7 +673,8 @@ log_dropped_input(MatchId, PlayerId, Reason) ->
                 player_id => PlayerId,
                 reason => Reason,
                 suppressed_since_last => Dropped
-            });
+            }),
+            ok;
         false ->
             ok
     end.
@@ -965,7 +969,9 @@ handle_cast_vote(From, PlayerId, VoteId, OptionId, State) ->
         undefined ->
             {keep_state_and_data, [{reply, From, {error, vote_not_found}}]};
         VotePid ->
-            Result = asobi_vote_server:cast_vote(VotePid, PlayerId, OptionId),
+            Result = call_vote(fun() ->
+                asobi_vote_server:cast_vote(VotePid, PlayerId, OptionId)
+            end),
             {keep_state_and_data, [{reply, From, Result}]}
     end.
 
@@ -1068,9 +1074,16 @@ backup_state(MatchId, Status, State) ->
 recover_state(MatchId) ->
     try
         case ets:lookup(?STATE_TABLE, MatchId) of
-            [{MatchId, Status, SavedState}] ->
+            %% An ETS read is `term()`; the map guard is the boundary. A row
+            %% that is not a map is a corrupt crash-recovery entry, and
+            %% recovering nothing is better than restoring a shape the match
+            %% server will then index into.
+            [{MatchId, Status, SavedState}] when is_map(SavedState) ->
                 ets:delete(?STATE_TABLE, MatchId),
                 {ok, Status, SavedState#{input_queue => [], active_votes => #{}}};
+            [{MatchId, _Status, _SavedState}] ->
+                ets:delete(?STATE_TABLE, MatchId),
+                none;
             [] ->
                 none
         end
@@ -1245,3 +1258,23 @@ roster_emptied(#{players := Players}, true) ->
 
 generate_id() ->
     asobi_id:generate().
+
+%% A vote server that is resolving serves nothing and then stops, so a call
+%% landing in that window does not time out - it waits for the stop and then
+%% exits the CALLER with `{normal, {gen_statem, call, _}}`. The caller here is
+%% this server, and a compound exit reason is a crash to the supervisor: one
+%% player's ordinary `vote.cast` frame would take every player in the match
+%% down with it. `gen_statem:call/2` also defaults to `infinity`, so there is
+%% no timeout to save it.
+%%
+%% Mirrors `asobi_ws_handler:vote_call/1`, one layer down - that one only stops
+%% the client noticing, because the crash is here.
+-spec call_vote(fun(() -> term())) -> term().
+call_vote(Fun) ->
+    try
+        Fun()
+    catch
+        exit:{normal, _} -> {error, vote_closed};
+        exit:{noproc, _} -> {error, vote_closed};
+        exit:{shutdown, _} -> {error, vote_closed}
+    end.

@@ -81,10 +81,18 @@ enough voters participate. Use `default_votes` for absent players and
 
 ## Grace period
 
-Late votes arriving within 500ms after the window closes are still accepted
-to compensate for network latency.
+A late vote is accepted only if it is processed before `closed(enter, ...)`
+completes, and that callback ends in `{stop, normal, _}` - so the window is
+whatever is already in the mailbox, not the 500ms `?GRACE_MS` compares against.
+The clauses stay because that window is real and a vote landing in it should be
+counted rather than dropped; do not read `?GRACE_MS` as a duration anyone gets.
+
+A caller whose `cast_vote/3` is NOT processed in that window does not get an
+error - the server stops without answering, and `gen_statem:call/2` defaults to
+`infinity`, so the caller exits `{normal, {gen_statem, call, _}}`. Callers that
+are themselves servers must contain that; see `call_vote/1` in
+`asobi_match_server` and `asobi_world_server`.
 """.
--behaviour(gen_statem).
 
 -export([start_link/1, cast_vote/3, cast_veto/2, get_state/1]).
 -export([callback_mode/0, init/1, terminate/3]).

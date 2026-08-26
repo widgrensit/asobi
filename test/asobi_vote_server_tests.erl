@@ -60,7 +60,7 @@ vote_server_test_() ->
         {"hidden visibility hides tallies", fun hidden_visibility/0},
         {"live visibility shows tallies", fun live_visibility/0},
         {"ready_up closes when all voted", fun ready_up_close/0},
-        {"grace period accepts late vote", fun grace_period/0},
+        {"a late vote is still counted", fun late_vote_is_counted/0},
         {"quorum not met", fun quorum_not_met/0},
         {"delegation applies", fun delegation/0},
         {"default votes for absent voters", fun default_votes/0},
@@ -297,20 +297,26 @@ ready_up_close() ->
         ?assert(false)
     end.
 
-grace_period() ->
-    %% Grace period is checked in the closed state handler, but
-    %% resolve_and_stop runs on enter and stops the process immediately.
-    %% So the grace period only applies if votes arrive between the
-    %% state_timeout firing and the closed enter completing.
-    %% In practice this is a very tight window. Just verify that
-    %% a vote cast right at window boundary is accepted.
+%% A vote arriving late in the window is still counted, and the vote then
+%% resolves on expiry with both votes in the tally.
+%%
+%% This does NOT cover `?GRACE_MS`. `closed(enter, ...)` ends in
+%% `{stop, normal, _}`, so the grace clauses only see a vote already in the
+%% mailbox when that callback runs - a window nothing can aim at, and one this
+%% test never reliably hit.
+%%
+%% It used to sleep 180ms into a 200ms window, leaving 20ms of margin for the
+%% second vote. On a loaded box the sleep overshoots, the window closes first,
+%% and `total_votes` comes back 1: measured failing two runs in four on an
+%% unmodified checkout. The margin is now 800ms of a 1000ms window - the same
+%% property, without racing the deadline it is asserting inside.
+late_vote_is_counted() ->
     flush(),
-    Pid = start_vote(#{window_ms => 200}),
+    Pid = start_vote(#{window_ms => 1000}),
     unlink(Pid),
     Ref = monitor(process, Pid),
     ok = asobi_vote_server:cast_vote(Pid, ~"p1", ~"a"),
-    timer:sleep(180),
-    %% Vote right before window closes
+    timer:sleep(200),
     ok = asobi_vote_server:cast_vote(Pid, ~"p2", ~"b"),
     receive
         {'DOWN', Ref, process, Pid, normal} -> ok
