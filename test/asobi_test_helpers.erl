@@ -1,6 +1,8 @@
 -module(asobi_test_helpers).
 
 -export([start/1, unique_username/1, unique_id/1, binary_join/2]).
+-export([fake_session/1, fake_session/2, assert_no_session/1]).
+-export([with_session/2, with_session/3, release_session/2]).
 -export([http_routes/1, routes_missing_options/1, preflight_targets/1, sample_path/1]).
 
 -spec start(list()) -> list().
@@ -31,6 +33,193 @@ run concurrently with itself.
 unique_id(Prefix) ->
     Hex = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
     <<Prefix/binary, "_", Hex/binary>>.
+
+%% --- Player sessions ---
+
+-doc """
+A live, pg-registered session for a player.
+
+`asobi_world_server` and `asobi_match_server` both resolve a player's session
+through `pg:get_members(nova_scope, {player, PlayerId})`. With no member the
+pid is `undefined` and the caller degrades: no interest subscriptions, no
+monitor. A test that asserts on subscriptions therefore needs a real member,
+or it asserts on the degraded path without saying so.
+
+Hand-copied into five test modules before this lived here, in two variants
+that differed only in whether they forwarded messages.
+
+**`nova_scope` is shared by the whole run and `{player, Id}` is not
+namespaced**, so a module that leaves one of these alive lends it to every
+later test that happens to use the same id. That has now been found three
+times, most recently as a test that passed only in a full run because it
+borrowed another module's session and subscribed it to four zones.
+
+Prefer `with_session/2` - it releases in an `after`, so a failing assertion
+cannot strand the registration. Take the pid directly only where the test kills
+the session mid-body on purpose (the dominant shape in these suites, which
+`with_session/2` cannot express), and pair it with `release_session/2`.
+""".
+-spec fake_session(binary()) -> pid().
+fake_session(PlayerId) ->
+    fake_session(PlayerId, undefined).
+
+-doc """
+As `fake_session/1`, forwarding every message to `Owner` as `{PlayerId, Msg}`
+so a test can assert on actual delivery rather than on subscriber-map
+bookkeeping.
+""".
+-spec fake_session(binary(), pid() | undefined) -> pid().
+fake_session(PlayerId, Owner) ->
+    %% Labelled with the CALLER's frame, read from `self()` before the spawn.
+    %% `current_function` used to name the test module because the fun was
+    %% written there; extracting it here made every leaker report
+    %% `asobi_test_helpers`, which is the one answer `assert_no_session/1`
+    %% cannot use. `initial_call` never helped - it is `{erlang,apply,2}` for a
+    %% plain spawn and `{proc_lib,init_p,5}` for a real session.
+    Caller = caller_frame(),
+    Pid = spawn(fun() ->
+        %% Above the loop, not inside it: re-entering would re-apply the label
+        %% on every forwarded message, which for a zone session is once per
+        %% world.tick. Applied BY the spawned process, so it is not readable
+        %% the instant this returns - `assert_no_session/1`'s targets are
+        %% long-lived leakers, so that is fine, but a test of `who/1` must wait.
+        proc_lib:set_label({fake_session, PlayerId, Caller}),
+        session_loop(PlayerId, Owner)
+    end),
+    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
+    Pid.
+
+-spec caller_frame() -> {module(), atom(), arity(), term()} | unknown.
+caller_frame() ->
+    case erlang:process_info(self(), current_stacktrace) of
+        {current_stacktrace, Stack} -> first_foreign_frame(Stack);
+        _ -> unknown
+    end.
+
+-spec first_foreign_frame([term()]) -> {module(), atom(), arity(), term()} | unknown.
+first_foreign_frame([{M, F, A, Loc} | _]) when
+    is_atom(M), M =/= ?MODULE, is_atom(F), is_integer(A), is_list(Loc)
+->
+    {M, F, A, frame_line(Loc)};
+first_foreign_frame([_ | Rest]) ->
+    first_foreign_frame(Rest);
+first_foreign_frame([]) ->
+    unknown.
+
+-spec frame_line([term()]) -> pos_integer() | undefined.
+frame_line([{line, L} | _]) when is_integer(L), L > 0 -> L;
+frame_line([_ | Rest]) -> frame_line(Rest);
+frame_line([]) -> undefined.
+
+-spec session_loop(binary(), pid() | undefined) -> ok.
+session_loop(PlayerId, Owner) ->
+    receive
+        stop ->
+            ok;
+        Msg ->
+            forward(Owner, PlayerId, Msg),
+            session_loop(PlayerId, Owner)
+    end.
+
+-spec forward(pid() | undefined, binary(), term()) -> ok.
+forward(undefined, _PlayerId, _Msg) ->
+    ok;
+forward(Owner, PlayerId, Msg) ->
+    Owner ! {PlayerId, Msg},
+    ok.
+
+-doc """
+Run `Fun` with a session registered, and release it whatever happens.
+
+`fake_session/1,2` gives you a pid and leaves the pairing to discipline, which
+is how three of them ended up bound to `_`-prefixed variables and registered
+for the rest of the run. An `_` prefix says the author is discarding the pid;
+the pg group is not. Prefer these where the shape allows it, so the release is
+structural rather than remembered.
+""".
+-spec with_session(binary(), fun(() -> R)) -> R.
+with_session(PlayerId, Fun) ->
+    with_session(PlayerId, undefined, Fun).
+
+-spec with_session(binary(), pid() | undefined, fun(() -> R)) -> R.
+with_session(PlayerId, Owner, Fun) ->
+    Pid = fake_session(PlayerId, Owner),
+    try
+        Fun()
+    after
+        release_session(PlayerId, Pid)
+    end.
+
+-doc """
+Release a session: leave the group, stop the process, drain what it forwarded.
+
+`pg:leave/3` rather than relying on the process dying, because a killed pid
+lingers in the group for tens of milliseconds - long enough for an immediately
+following `assert_no_session/1` to fail naming a dead pid, and long enough for
+production code reading that group to get one.
+
+The drain matters because the owner is the SAME process for every test in a
+module: undrained `{PlayerId, Msg}` forwards outlive the test that caused them,
+and `received_entity/2`-style selective receives would happily satisfy
+themselves from a stale one if an id ever repeats.
+""".
+-spec release_session(binary(), pid()) -> ok.
+release_session(PlayerId, Pid) ->
+    %% `_ =` and not `ok =`: the dominant shape in these suites kills the
+    %% session mid-body on purpose to trigger a DOWN, so `not_joined` here is
+    %% ordinary rather than a double release.
+    _ = pg:leave(nova_scope, {player, PlayerId}, Pid),
+    Ref = monitor(process, Pid),
+    Pid ! stop,
+    receive
+        {'DOWN', Ref, process, Pid, _} -> ok
+    after 1_000 ->
+        demonitor(Ref, [flush]),
+        exit(Pid, kill)
+    end,
+    drain_forwarded(PlayerId).
+
+-spec drain_forwarded(binary()) -> ok.
+drain_forwarded(PlayerId) ->
+    receive
+        {PlayerId, _} -> drain_forwarded(PlayerId)
+    after 0 -> ok
+    end.
+
+-doc """
+Assert that nobody is registered as this player before the test relies on it.
+
+For the tests that want the SESSION-LESS path. Without this, a leftover
+session from another module silently turns that test into a different one -
+which is exactly how the bug this helper documents stayed hidden.
+""".
+-spec assert_no_session(binary()) -> ok.
+assert_no_session(PlayerId) ->
+    case pg:get_members(nova_scope, {player, PlayerId}) of
+        [] -> ok;
+        Members -> error({session_already_registered, PlayerId, [who(M) || M <- Members]})
+    end.
+
+%% In a full run the module that fails this assertion is the one that did
+%% nothing wrong, and a bare pid does not say who registered it - by the time
+%% anyone reads the output the process may be gone. Name the leaker.
+%% `proc_lib:get_label/1` is the useful half - see fake_session/2. It answers
+%% `undefined` for an unlabelled or dead pid rather than raising.
+%%
+%% `process_info/2` RAISES on a remote pid, and pg is a distributed registry:
+%% the day asobi is not single-node, an unguarded call here turns the leak
+%% report into a badarg that hides the leak it was written to find.
+%%
+%% Deliberately not `dictionary`, `messages` or `backtrace`: asobi_lua_world
+%% stores the whole zone state - Luerl VM included - in its process
+%% dictionary, so a leaked zone process would dump the entire scripting VM and
+%% every entity map into CI output. `current_function` is an MFA; arity, not
+%% arguments.
+-spec who(pid()) -> tuple().
+who(Pid) when node(Pid) =/= node() ->
+    {Pid, {remote, node(Pid)}};
+who(Pid) ->
+    {Pid, proc_lib:get_label(Pid), erlang:process_info(Pid, [current_function, registered_name])}.
 
 %% --- Router enumeration ---
 %%

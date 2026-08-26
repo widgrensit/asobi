@@ -115,14 +115,14 @@ default_prespawns_all() ->
 broadcast_interval_reaches_the_zone() ->
     Ctx = #{zone_mgr := Mgr} = start_world(#{broadcast_interval => 1}),
     {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
-    ?assertEqual(1, maps:get(broadcast_interval, sys:get_state(ZonePid))),
+    ?assertEqual(1, maps:get(broadcast_interval, zone_state(ZonePid))),
     stop_world(Ctx).
 
 %% The default is unchanged: a world that sets nothing runs on 3.
 broadcast_interval_defaults_to_three() ->
     Ctx = #{zone_mgr := Mgr} = start_world(),
     {ok, ZonePid} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
-    ?assertEqual(3, maps:get(broadcast_interval, sys:get_state(ZonePid))),
+    ?assertEqual(3, maps:get(broadcast_interval, zone_state(ZonePid))),
     stop_world(Ctx).
 
 %% lazy_zones=true means no zones spawned at startup
@@ -443,23 +443,51 @@ world_input_crossing_touches_only_ring_delta() ->
     %% just because it's in view) - lazy_zones=false pre-spawns the whole
     %% grid so every ring zone is subscribable at join time.
     Ctx = #{world_pid := Pid, zone_mgr := Mgr} = start_world(#{grid_size => 5}),
-    ?assertEqual(ok, asobi_world_server:join(Pid, ~"p1")),
-    timer:sleep(20),
-    %% Spawns at {100.0, 100.0} => zone {1,1}.
-    {ok, Z11} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
-    ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
-    {ok, Z00} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
-    ?assertEqual(1, asobi_zone:get_subscriber_count(Z00)),
-    {ok, Z30} = asobi_zone_manager:get_zone(Mgr, {3, 0}),
-    ?assertEqual(0, asobi_zone:get_subscriber_count(Z30)),
+    %% A pg-registered session, like every other test in this module that
+    %% asserts on subscriptions. `subscribe_interest_zones/4` resolves the
+    %% player through `find_player_pid/1`, which reads
+    %% `pg:get_members(nova_scope, {player, PlayerId})` - with no member the
+    %% pid is `undefined` and asobi_world_server skips the subscribe
+    %% entirely, so every count below is 0.
+    %%
+    %% Without this the test passed only in a full eunit run, by finding a
+    %% live process ANOTHER module had left registered under `{player,
+    %% <<"p1">>}` in the shared scope - so it was green for a reason that had
+    %% nothing to do with the ring diff it exists to prove, and red whenever
+    %% the module was run on its own. Hence the distinctive id: `p1` is what
+    %% made it borrowable.
+    Player = ~"ring275_p1",
+    SessionPid = asobi_test_helpers:fake_session(Player, self()),
+    %% The session and the world are released by the outer `after`, so it has
+    %% to open BEFORE the join and the asserts below - the first of which is
+    %% the one this test used to fail on. Releasing them only from a block the
+    %% failure jumps over would leak a pg-registered session and a ticking
+    %% world into the rest of the run, which is the class of contamination
+    %% this commit exists to remove.
+    try
+        ?assertEqual(ok, asobi_world_server:join(Pid, Player)),
+        timer:sleep(20),
+        %% Spawns at {100.0, 100.0} => zone {1,1}.
+        {ok, Z11} = asobi_zone_manager:get_zone(Mgr, {1, 1}),
+        ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
+        {ok, Z00} = asobi_zone_manager:get_zone(Mgr, {0, 0}),
+        ?assertEqual(1, asobi_zone:get_subscriber_count(Z00)),
+        {ok, Z30} = asobi_zone_manager:get_zone(Mgr, {3, 0}),
+        ?assertEqual(0, asobi_zone:get_subscriber_count(Z30)),
+        ring_delta_crossing(Mgr, Player, Z11, Z00, Z30)
+    after
+        asobi_test_helpers:release_session(Player, SessionPid),
+        stop_world(Ctx)
+    end.
 
-    %% Reaching the same end state doesn't prove the ring diff ran instead of
-    %% a full unsubscribe-everything/resubscribe-everything pass - both reach
-    %% identical final counts. Count the actual subscribe/unsubscribe calls:
-    %% only 3 zones left the ring and 3 entered it (not all 9), plus one more
-    %% unconditional subscribe to the destination zone itself (asobi#275: the
-    %% crossing player is always (re-)subscribed to the zone they land in,
-    %% even though it stayed in the ring and so is never in the ring diff).
+%% Reaching the same end state doesn't prove the ring diff ran instead of
+%% a full unsubscribe-everything/resubscribe-everything pass - both reach
+%% identical final counts. Count the actual subscribe/unsubscribe calls:
+%% only 3 zones left the ring and 3 entered it (not all 9), plus one more
+%% unconditional subscribe to the destination zone itself (asobi#275: the
+%% crossing player is always (re-)subscribed to the zone they land in,
+%% even though it stayed in the ring and so is never in the ring diff).
+ring_delta_crossing(Mgr, Player, Z11, Z00, Z30) ->
     Self = self(),
     meck:new(asobi_zone, [passthrough]),
     try
@@ -474,7 +502,7 @@ world_input_crossing_touches_only_ring_delta() ->
 
         %% x=225 clears zone {1,1}'s margin (edge at 200 + 15% of 100), landing
         %% in zone {2,1}.
-        asobi_zone:player_input(Z11, ~"p1", #{
+        asobi_zone:player_input(Z11, Player, #{
             ~"action" => ~"move", ~"x" => 225.0, ~"y" => 100.0
         }),
         timer:sleep(150),
@@ -494,8 +522,7 @@ world_input_crossing_touches_only_ring_delta() ->
         {ok, Z21} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
         ?assertEqual(1, asobi_zone:get_subscriber_count(Z21))
     after
-        meck:unload(asobi_zone),
-        stop_world(Ctx)
+        meck:unload(asobi_zone)
     end.
 
 count_messages(Tag) ->
@@ -503,24 +530,6 @@ count_messages(Tag) ->
         Tag -> 1 + count_messages(Tag)
     after 0 -> 0
     end.
-
-%% A live, pg-registered session for a player, so find_player_pid/1 and
-%% backfill_zone_subscribers/4 (both pg-based) resolve to a real process
-%% instead of silently falling through to not_loaded/self()-fallback
-%% behaviour. Forwards every asobi_message to Owner so a test can assert on
-%% actual delivery, not just zone subscriber-map bookkeeping.
-fake_session(PlayerId, Owner) ->
-    Pid = spawn(fun Loop() ->
-        receive
-            stop ->
-                ok;
-            Msg ->
-                Owner ! {PlayerId, Msg},
-                Loop()
-        end
-    end),
-    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
-    Pid.
 
 %% Blocks until PlayerId's forwarded messages mention EntityId in ANY of the
 %% three world.tick carriers, or the timeout elapses.
@@ -580,8 +589,8 @@ crossing_into_a_lazily_created_zone_backfills_stationary_neighbours() ->
         }),
     Ada = ~"bf275_ada",
     Bob = ~"bf275_bob",
-    AdaPid = fake_session(Ada, self()),
-    BobPid = fake_session(Bob, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
+    BobPid = asobi_test_helpers:fake_session(Bob, self()),
     try
         %% Ada joins and stays put. Spawns at {100.0,100.0} => zone {1,1};
         %% with view_radius=1 that ring already covers {2,1} - but {2,1} is
@@ -614,8 +623,8 @@ crossing_into_a_lazily_created_zone_backfills_stationary_neighbours() ->
         %% receives the crossing player's entity.
         ?assert(received_entity(Ada, Bob))
     after
-        exit(AdaPid, kill),
-        exit(BobPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
+        asobi_test_helpers:release_session(Bob, BobPid),
         stop_world(Ctx)
     end.
 
@@ -631,7 +640,7 @@ npc_crossing_into_an_unloaded_zone_creates_it_and_backfills() ->
             lazy_zones => true, grid_size => 5
         }),
     Ada = ~"npc271_ada",
-    AdaPid = fake_session(Ada, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
     try
         %% Ada joins at {100.0,100.0} => zone {1,1}; {2,1} is in her ring but
         %% not loaded, so her ring-subscribe to it no-ops.
@@ -650,7 +659,7 @@ npc_crossing_into_an_unloaded_zone_creates_it_and_backfills() ->
         ?assertMatch(#{subscribers := #{Ada := {AdaPid, _}}}, sys:get_state(Z21)),
         ?assert(received_entity(Ada, ~"npc271"))
     after
-        exit(AdaPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
         stop_world(Ctx)
     end.
 
@@ -667,7 +676,7 @@ script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
             lazy_zones => true, grid_size => 5
         }),
     Ada = ~"bf275_spawn_ada",
-    AdaPid = fake_session(Ada, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
     try
         ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),
         timer:sleep(20),
@@ -681,7 +690,7 @@ script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
         {ok, Z21} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
         ?assertMatch(#{subscribers := #{Ada := {AdaPid, _}}}, sys:get_state(Z21))
     after
-        exit(AdaPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
         stop_world(Ctx)
     end.
 
@@ -730,8 +739,8 @@ crossing_out_of_ring_removes_stationary_neighbour() ->
         }),
     Ada = ~"leave_ring_ada",
     Bob = ~"leave_ring_bob",
-    AdaPid = fake_session(Ada, self()),
-    BobPid = fake_session(Bob, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
+    BobPid = asobi_test_helpers:fake_session(Bob, self()),
     try
         %% Both spawn at {100.0, 100.0} => zone {1,1}.
         ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),
@@ -752,8 +761,8 @@ crossing_out_of_ring_removes_stationary_neighbour() ->
         ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
         ?assert(received_removal(Bob, Ada))
     after
-        exit(AdaPid, kill),
-        exit(BobPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
+        asobi_test_helpers:release_session(Bob, BobPid),
         stop_world(Ctx)
     end.
 
@@ -862,3 +871,11 @@ reap_first_zone_at(Target, Coords, {ok, ZonePid, _Status} = Result, Ctr) when Co
     end;
 reap_first_zone_at(_Target, _Coords, Result, _Ctr) ->
     Result.
+
+%% sys:get_state/1 is term(); a test reading a field out of a zone's state
+%% narrows first rather than indexing an unknown shape.
+-spec zone_state(pid()) -> map().
+zone_state(ZonePid) ->
+    case sys:get_state(ZonePid) of
+        State when is_map(State) -> State
+    end.
