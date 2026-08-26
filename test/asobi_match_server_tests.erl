@@ -457,11 +457,15 @@ reconnect_no_policy_errors() ->
 %% registered first is exactly that case.
 join_with_no_live_session_does_not_crash() ->
     Pid = start_match(#{min_players => 2, max_players => 2}),
-    ok = asobi_match_server:join(Pid, ~"no_session"),
+    %% Asserts the SESSION-LESS path, so it is only meaningful while nobody is
+    %% registered under this id - see the world-server twin, which shared this
+    %% literal until now.
+    ok = asobi_test_helpers:assert_no_session(~"no_session_match"),
+    ok = asobi_match_server:join(Pid, ~"no_session_match"),
     ?assert(is_process_alive(Pid)),
     ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
     {_StateName, #{
-        players := #{~"no_session" := #{session_pid := SessionPid, monitor_ref := MonRef}}
+        players := #{~"no_session_match" := #{session_pid := SessionPid, monitor_ref := MonRef}}
     }} = sys:get_state(Pid),
     ?assertEqual(undefined, SessionPid),
     ?assertEqual(undefined, MonRef),
@@ -527,10 +531,11 @@ failed_reconnect_leaves_grace_intact() ->
     ?assertEqual({error, no_live_session}, asobi_match_server:reconnect(Pid, PlayerId)),
     {_StateName, #{reconnect_state := #{disconnected := #{PlayerId := _}}}} = sys:get_state(Pid),
     catch pg:leave(nova_scope, {player, PlayerId}, SessionPid1),
-    _SessionPid2 = asobi_test_helpers:fake_session(PlayerId),
-    ?assertEqual(ok, asobi_match_server:reconnect(Pid, PlayerId)),
-    timer:sleep(30),
-    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    asobi_test_helpers:with_session(PlayerId, fun() ->
+        ?assertEqual(ok, asobi_match_server:reconnect(Pid, PlayerId)),
+        timer:sleep(30),
+        ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid)))
+    end),
     stop(Pid).
 
 %% Regression for widgrensit/asobi#285: waiting/3 had no clause for a
@@ -718,10 +723,11 @@ reconnect_while_paused_succeeds() ->
     timer:sleep(100),
     %% Grace active (see paused_down_starts_grace/0) - a real session
     %% arriving now must be able to reconnect before resume/1 is called.
-    _SessionPid2 = asobi_test_helpers:fake_session(PlayerId),
-    ?assertEqual(ok, gen_statem:call(Pid, {reconnect, PlayerId}, 2000)),
-    ?assertMatch(#{status := paused}, asobi_match_server:get_info(Pid)),
-    ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
+    asobi_test_helpers:with_session(PlayerId, fun() ->
+        ?assertEqual(ok, gen_statem:call(Pid, {reconnect, PlayerId}, 2000)),
+        ?assertMatch(#{status := paused}, asobi_match_server:get_info(Pid)),
+        ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid)))
+    end),
     stop(Pid).
 
 %% Regression for widgrensit/asobi#285: waiting/3 had no {call, reconnect}

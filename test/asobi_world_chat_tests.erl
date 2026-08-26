@@ -88,8 +88,30 @@ with_registered_player(Fun) ->
     try
         Fun()
     after
-        pg:leave(nova_scope, {player, ~"p1"}, self())
+        pg:leave(nova_scope, {player, ~"p1"}, self()),
+        leave_chat_channels()
     end.
+
+%% The bodies join this process to `{chat, ChannelId}` groups as a side effect
+%% of `player_joined/3`, and only leave them on the success path. World-scoped
+%% ids bound the damage, but the global tier deliberately carries NO world id
+%% (widgrensit/asobi#299) - `global:general` is the single most shared key in
+%% the system - so a failing assertion strands the eunit runner in it for the
+%% rest of the run, where nothing today would detect it.
+leave_chat_channels() ->
+    Self = self(),
+    lists:foreach(
+        fun
+            ({chat, _} = Group) ->
+                case lists:member(Self, pg:get_members(nova_scope, Group)) of
+                    true -> pg:leave(nova_scope, Group, Self);
+                    false -> ok
+                end;
+            (_Group) ->
+                ok
+        end,
+        pg:which_groups(nova_scope)
+    ).
 
 join_world_chat() ->
     with_registered_player(fun() ->

@@ -2,6 +2,7 @@
 
 -export([start/1, unique_username/1, unique_id/1, binary_join/2]).
 -export([fake_session/1, fake_session/2, unique_session/1, assert_no_session/1]).
+-export([with_session/2, with_session/3, with_unique_session/2]).
 -export([http_routes/1, routes_missing_options/1, preflight_targets/1, sample_path/1]).
 
 -spec start(list()) -> list().
@@ -86,6 +87,36 @@ forward(Owner, PlayerId, Msg) ->
     ok.
 
 -doc """
+Run `Fun` with a session registered, and release it whatever happens.
+
+`fake_session/1,2` gives you a pid and leaves the pairing to discipline, which
+is how three of them ended up bound to `_`-prefixed variables and registered
+for the rest of the run. An `_` prefix says the author is discarding the pid;
+the pg group is not. Prefer these where the shape allows it, so the release is
+structural rather than remembered.
+""".
+-spec with_session(binary(), fun(() -> R)) -> R.
+with_session(PlayerId, Fun) ->
+    with_session(PlayerId, undefined, Fun).
+
+-spec with_session(binary(), pid() | undefined, fun(() -> R)) -> R.
+with_session(PlayerId, Owner, Fun) ->
+    Pid = fake_session(PlayerId, Owner),
+    try
+        Fun()
+    after
+        exit(Pid, kill)
+    end.
+
+-doc """
+As `with_session/2` under an id nothing can collide with. `Fun` receives it.
+""".
+-spec with_unique_session(binary(), fun((binary()) -> R)) -> R.
+with_unique_session(Prefix, Fun) ->
+    PlayerId = unique_id(Prefix),
+    with_session(PlayerId, fun() -> Fun(PlayerId) end).
+
+-doc """
 A session under an id no other run or module can collide with.
 
 `unique_id/1` rather than a hand-picked name: a distinctive id works only
@@ -107,8 +138,15 @@ which is exactly how the bug this helper documents stayed hidden.
 assert_no_session(PlayerId) ->
     case pg:get_members(nova_scope, {player, PlayerId}) of
         [] -> ok;
-        Members -> error({session_already_registered, PlayerId, Members})
+        Members -> error({session_already_registered, PlayerId, [who(M) || M <- Members]})
     end.
+
+%% In a full run the module that fails this assertion is the one that did
+%% nothing wrong, and a bare pid does not say who registered it - by the time
+%% anyone reads the output the process may be gone. Name the leaker.
+-spec who(pid()) -> {pid(), term()}.
+who(Pid) ->
+    {Pid, erlang:process_info(Pid, [initial_call, current_function])}.
 
 %% --- Router enumeration ---
 %%

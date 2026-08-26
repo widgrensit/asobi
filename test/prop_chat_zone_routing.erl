@@ -240,14 +240,7 @@ ensure_listeners(Players, WorldId) ->
     maps:from_list([{P, ensure_listener(P, WorldId)} || P <- Players]).
 
 ensure_listener(P, _WorldId) ->
-    Pid = spawn(fun L() ->
-        receive
-            stop -> ok;
-            _ -> L()
-        end
-    end),
-    ok = pg:join(nova_scope, {player, P}, Pid),
-    Pid.
+    asobi_test_helpers:fake_session(P).
 
 cleanup_listeners(Listeners) ->
     maps:foreach(fun(_, Pid) -> catch exit(Pid, kill) end, Listeners),

@@ -462,7 +462,12 @@ join_three_sets_zone_pid() ->
 %% join/2 (test-only, no session registered) is exactly that case.
 join_with_no_live_session_does_not_crash() ->
     Ctx = #{world_pid := Pid, instance_pid := InstancePid} = start_world(),
-    PlayerId = ~"no_session",
+    %% This test asserts the SESSION-LESS path, so the assertion below is only
+    %% meaningful while nobody is registered under this id. A leftover session
+    %% from another module would silently turn it into a different test - and
+    %% the id was shared verbatim with asobi_match_server_tests until now.
+    PlayerId = ~"no_session_world",
+    ok = asobi_test_helpers:assert_no_session(PlayerId),
     ?assertEqual(ok, asobi_world_server:join(Pid, PlayerId)),
     ?assert(is_process_alive(Pid)),
     ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
@@ -512,9 +517,10 @@ failed_reconnect_leaves_grace_intact() ->
     timer:sleep(100),
     ?assertEqual({error, no_live_session}, asobi_world_server:reconnect(Pid, PlayerId)),
     {_StateName, #{reconnect_state := #{disconnected := #{PlayerId := _}}}} = sys:get_state(Pid),
-    _S2 = asobi_test_helpers:fake_session(PlayerId),
-    ?assertEqual(ok, asobi_world_server:reconnect(Pid, PlayerId)),
-    ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
+    asobi_test_helpers:with_session(PlayerId, fun() ->
+        ?assertEqual(ok, asobi_world_server:reconnect(Pid, PlayerId)),
+        ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid)))
+    end),
     stop_world(Ctx).
 
 %% --- listing_info/1 (pure projection, no world needed) ---
@@ -803,6 +809,10 @@ a_world_that_did_not_ask_is_not_persistent_test() ->
 
 %% sys:get_state/1 is term(); narrow before indexing rather than reading a
 %% field out of an unknown shape.
+%% `pid() | undefined` and not `pid()`: the caller hands this
+%% `asobi_world_instance:get_child/2`, which can answer `undefined`. The guard
+%% then makes that a loud function_clause rather than a defaulted read - what
+%% the spec must not do is claim an input the call site cannot guarantee.
 -spec zone_config(pid() | undefined) -> map().
 zone_config(ZoneManager) when is_pid(ZoneManager) ->
     case sys:get_state(ZoneManager) of
