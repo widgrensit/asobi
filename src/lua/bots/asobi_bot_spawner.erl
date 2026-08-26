@@ -298,7 +298,7 @@ fill_queue_with_bots() ->
 fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
     ModeConfig = mode_config(Mode),
     BotConfig = maps:get(bots, ModeConfig, #{}),
-    case maps:get(enabled, BotConfig, false) of
+    case maps:get(enabled, BotConfig, false) andalso fillable(Mode, ModeConfig) of
         true ->
             MinPlayers = bot_min_players(BotConfig),
             %% Never fill past max_players: a match_size=2/max_players=2
@@ -327,6 +327,34 @@ fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
     end;
 fill_mode(_, _) ->
     ok.
+
+-doc """
+Bots are match-only, and a world mode that declares them is a config error.
+
+`scan_groups/2` starts a bot process only for an `{asobi_match_server, _}` pg
+group, so a bot queued into a WORLD mode never gets a process and never
+registers under `{player, BotId}`. `asobi_world_server` then resolves it to
+`undefined`, seats it with no session and no monitor, and nothing can ever
+remove it - `find_player_by_pid/2` matches on the session pid, so no `DOWN`
+reaches it and `handle_leave/2` is unreachable. The world never empties.
+
+Filling was therefore never going to work on a world mode; it just failed
+silently and leaked a seat per bot. Refused loudly instead, because a game
+declaring `game_type = "world"` alongside a `bots` table has made a mistake it
+otherwise has no way to discover.
+""".
+-spec fillable(binary(), map()) -> boolean().
+fillable(Mode, ModeConfig) ->
+    case maps:get(type, ModeConfig, match) of
+        world ->
+            ?LOG_WARNING(#{
+                msg => ~"bots are declared on a world-type mode; not filling",
+                mode => Mode
+            }),
+            false;
+        _ ->
+            true
+    end.
 
 clamp_fill_target(Target) when Target > ?MAX_BOT_FILL ->
     ?LOG_WARNING(#{

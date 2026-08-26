@@ -882,6 +882,23 @@ handle_join(
                             MonRef =
                                 case PlayerPid of
                                     undefined ->
+                                        %% Counted, not just logged: a join
+                                        %% that yields zero interest
+                                        %% subscriptions is the "joined but
+                                        %% sees nothing" symptom, and an
+                                        %% operator needs a rate for it rather
+                                        %% than a line to grep. The matchmaker
+                                        %% screens for this before forming
+                                        %% (asobi_matchmaker:join_if_present/3);
+                                        %% what reaches here is the residual
+                                        %% race, so a non-zero rate is worth
+                                        %% knowing about.
+                                        asobi_telemetry:game_error(
+                                            join_no_live_session, #{
+                                                world_id => WorldId,
+                                                player_id => PlayerId
+                                            }
+                                        ),
                                         ?LOG_WARNING(#{
                                             event => join_no_live_session,
                                             world_id => WorldId,

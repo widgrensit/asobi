@@ -102,3 +102,76 @@ wait_gone(Pid, N) ->
             timer:sleep(5),
             wait_gone(Pid, N - 1)
     end.
+
+%% A player who disconnects between taking a ticket and the group forming used
+%% to be seated in the world anyway, with `session_pid => undefined` and no
+%% monitor - and could then never leave, because `find_player_by_pid/2` matches
+%% on `session_pid =:= Pid` and `undefined` is never a pid. No DOWN, so no
+%% `handle_leave/2`, so `map_size(Players)` never reached 0 and the world
+%% ticked forever around someone who was not there. World-side twin of
+%% widgrensit/asobi#280.
+phantom_player_test_() ->
+    {setup, fun setup/0, fun cleanup/1, [
+        {"an offline matched player is not seated", fun offline_player_not_seated/0},
+        {"an offline matched player is counted", fun offline_player_is_counted/0},
+        {"an online matched player is seated", fun online_player_seated/0}
+    ]}.
+
+with_world_server(Fun) ->
+    meck:new(asobi_world_server, [non_strict, no_link]),
+    Self = self(),
+    meck:expect(asobi_world_server, join, fun(_WorldPid, PlayerId) ->
+        Self ! {joined, PlayerId},
+        ok
+    end),
+    try
+        Fun()
+    after
+        meck:unload(asobi_world_server)
+    end.
+
+joined(PlayerId) ->
+    receive
+        {joined, PlayerId} -> true
+    after 100 -> false
+    end.
+
+offline_player_not_seated() ->
+    meck:expect(asobi_presence, get_status, fun(_PlayerId) -> offline end),
+    with_world_server(fun() ->
+        ?assertEqual(
+            offline,
+            asobi_matchmaker:join_if_present(self(), ~"gone_p1", ~"w1")
+        ),
+        ?assertNot(joined(~"gone_p1"))
+    end).
+
+offline_player_is_counted() ->
+    meck:expect(asobi_presence, get_status, fun(_PlayerId) -> offline end),
+    Handler = ?FUNCTION_NAME,
+    Self = self(),
+    ok = telemetry:attach(
+        Handler,
+        [asobi, error],
+        fun(_E, _M, Meta, _C) -> Self ! {game_error, Meta} end,
+        undefined
+    ),
+    try
+        with_world_server(fun() ->
+            offline = asobi_matchmaker:join_if_present(self(), ~"gone_p2", ~"w1")
+        end),
+        receive
+            {game_error, #{kind := join_no_live_session, details := #{source := matchmaker}}} -> ok
+        after 500 ->
+            ?assert(false)
+        end
+    after
+        telemetry:detach(Handler)
+    end.
+
+online_player_seated() ->
+    meck:expect(asobi_presence, get_status, fun(_PlayerId) -> online end),
+    with_world_server(fun() ->
+        ?assertEqual(ok, asobi_matchmaker:join_if_present(self(), ~"live_p1", ~"w1")),
+        ?assert(joined(~"live_p1"))
+    end).

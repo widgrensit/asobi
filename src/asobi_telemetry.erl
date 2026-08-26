@@ -47,7 +47,8 @@
     | no_effect_handler
     | bad_effects_return
     | bad_zone_busy
-    | bad_zone_dirty.
+    | bad_zone_dirty
+    | join_no_live_session.
 -export_type([game_error_kind/0]).
 -export([economy_transaction/4, store_purchase/3]).
 -export([chat_message_sent/2]).
