@@ -389,11 +389,18 @@ running({call, From}, {join, PlayerId, Ctx, require_session}, #{world_id := Worl
                 player_id => PlayerId
             }),
             {keep_state_and_data, [{reply, From, {error, no_live_session}}]};
-        _PlayerPid ->
-            handle_join(From, PlayerId, Ctx, State)
+        PlayerPid ->
+            %% Carried, not re-resolved. `handle_join/5` used to read the group
+            %% again to pick its monitor, with the game module's join hook and
+            %% `place_player/3` in between - so a session dying inside that hook
+            %% produced the very seat this clause exists to refuse. Monitoring
+            %% the pid we already checked makes the failure self-healing
+            %% instead: a monitor on a dead pid delivers `DOWN` immediately,
+            %% `find_player_by_pid/2` resolves it, and `handle_leave/2` runs.
+            handle_join(From, PlayerId, Ctx, State, PlayerPid)
     end;
 running({call, From}, {join, PlayerId, Ctx}, State) ->
-    handle_join(From, PlayerId, Ctx, State);
+    handle_join(From, PlayerId, Ctx, State, resolve);
 running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 running(cast, {move_player, PlayerId, NewPos, Entity}, State) ->
@@ -891,7 +898,9 @@ handle_join(
         max_players := Max,
         game_module := Mod,
         game_state := GS
-    } = State
+    } = State,
+
+    KnownPid
 ) ->
     case map_size(Players) >= Max of
         true ->
@@ -924,7 +933,7 @@ handle_join(
                             %% (its subscribe becomes a no-op); do the same
                             %% here rather than crashing on
                             %% monitor(process, undefined).
-                            PlayerPid = find_player_pid(PlayerId),
+                            PlayerPid = known_or_resolved(KnownPid, PlayerId),
                             MonRef =
                                 case PlayerPid of
                                     undefined ->
@@ -933,12 +942,12 @@ handle_join(
                                         %% subscriptions is the "joined but
                                         %% sees nothing" symptom, and an
                                         %% operator needs a rate for it rather
-                                        %% than a line to grep. The matchmaker
-                                        %% screens for this before forming
-                                        %% (asobi_matchmaker:join_if_present/3);
-                                        %% what reaches here is the residual
-                                        %% race, so a non-zero rate is worth
-                                        %% knowing about.
+                                        %% than a line to grep. Reached from
+                                        %% the plain `join/2`, which seats a
+                                        %% session-less player deliberately;
+                                        %% `join_if_session/2` refuses before
+                                        %% this point instead.
+                                        %%
                                         %% No `player_id` in the details. Every
                                         %% other game_error/2 site carries only
                                         %% module/world/coords, three consumers
@@ -1987,3 +1996,10 @@ handle_phase_events([{phase_ended, Name} | Rest], Mod, GS) ->
     handle_phase_events(Rest, Mod, GS1);
 handle_phase_events([_Event | Rest], Mod, GS) ->
     handle_phase_events(Rest, Mod, GS).
+
+%% `resolve` means "look it up now" - the ordinary `join/2` path. A pid means
+%% the caller already resolved it and is entitled to have that one monitored,
+%% which is what makes `join_if_session/2` free of a second read.
+-spec known_or_resolved(pid() | resolve, binary()) -> pid() | undefined.
+known_or_resolved(resolve, PlayerId) -> find_player_pid(PlayerId);
+known_or_resolved(KnownPid, _PlayerId) when is_pid(KnownPid) -> KnownPid.

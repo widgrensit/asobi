@@ -873,3 +873,53 @@ zone_config(ZoneManager) when is_pid(ZoneManager) ->
     case sys:get_state(ZoneManager) of
         #{zone_config := Config} when is_map(Config) -> Config
     end.
+
+%% widgrensit/asobi#569 code review: `join_if_session/2` resolved the session,
+%% then `handle_join/5` resolved it AGAIN to pick its monitor - with the game
+%% module's join hook and place_player/3 in between. A session dying inside
+%% that hook therefore produced the exact unremovable seat the clause exists to
+%% refuse, through the function documented as closing the window.
+%%
+%% Monitoring the pid already checked makes it self-healing: a monitor on a
+%% dead pid delivers DOWN immediately, so the seat does not outlive the session
+%% it was granted for.
+session_dying_inside_the_join_hook_does_not_strand_a_seat_test() ->
+    setup(),
+    try
+        dies_in_hook()
+    after
+        cleanup(ok)
+    end.
+
+dies_in_hook() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    try
+        PlayerId = ~"dies_in_hook",
+        SessionPid = fake_session(PlayerId),
+        meck:new(asobi_game_join, [passthrough, no_link]),
+        try
+            meck:expect(asobi_game_join, invoke, fun(Mod, P, C, GS) ->
+                exit(SessionPid, kill),
+                wait_until_gone(PlayerId, 50),
+                meck:passthrough([Mod, P, C, GS])
+            end),
+            ?assertEqual(ok, asobi_world_server:join_if_session(Pid, PlayerId))
+        after
+            meck:unload(asobi_game_join)
+        end,
+        timer:sleep(150),
+        ?assertEqual(0, maps:get(player_count, asobi_world_server:get_info(Pid)))
+    after
+        stop_world(Ctx)
+    end.
+
+wait_until_gone(_PlayerId, 0) ->
+    ok;
+wait_until_gone(PlayerId, N) ->
+    case pg:get_members(nova_scope, {player, PlayerId}) of
+        [] ->
+            ok;
+        _ ->
+            timer:sleep(5),
+            wait_until_gone(PlayerId, N - 1)
+    end.

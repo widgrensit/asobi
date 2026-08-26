@@ -625,11 +625,10 @@ deliberately - `join/2` is the API for a host that is not driving a WS session.
 the seat: #277 only stopped `monitor(process, undefined)` from crashing. It
 avoided a crash; it did not sanction the state.)
 
-A player who disconnects between this check and the join still lands in it.
-The window is one message rather than the whole queue wait, and
-`join_no_live_session` counts it - but the consequence is undiminished, because
-one seated phantom keeps its world alive forever just as surely as a full group
-of them. Closing that needs a per-player terminus in `asobi_world_server`.
+This screen buys exactly one thing now that `join_if_session/2` re-checks in
+the callback that seats: it keeps the ORDINARY case - a player who left the
+queue - off `[asobi, error]`, where it would make the node's error rate track
+connection churn. It is not what closes the window.
 """.
 -spec join_if_present(pid(), binary(), binary()) -> ok | offline | {error, term()}.
 join_if_present(WorldPid, PlayerId, Mode) ->
@@ -640,8 +639,8 @@ join_if_present(WorldPid, PlayerId, Mode) ->
             %% routine on mobile, and putting it on the error surface would
             %% make the node's error rate track connection churn. The world
             %% server keeps `join_no_live_session` on `[asobi, error]` for the
-            %% residual race, which genuinely is anomalous now that the screen
-            %% exists - and the two rates answer different questions.
+            %% plain `join/2` path, and the two rates answer different
+            %% questions.
             asobi_telemetry:matchmaker_dropped(Mode, no_live_session),
             offline;
         online ->
@@ -698,11 +697,11 @@ Hence the count. If the whole group went offline while queued, the world has
 no reason to exist and is torn down here, where the caller still holds the
 instance pid.
 
-**This does not cover the residual race**: a player who dies between the screen
-and the join is still seated with no session and no monitor, and one seated
-player is enough to keep the world alive forever. Closing that needs a terminus
-in `asobi_world_server` for a roster that empties without a leave, which is a
-change to world lifecycle for every caller and is not made here.
+**It counts this group only.** The world is discoverable and quick-play
+eligible from the moment it starts (`spawn_world/6` sets neither `listed` nor
+`quick_play`, and both default to true), so an unrelated player can join it
+while the seat loop is still running and is not counted here. Gating on the
+world's own roster rather than a local tally is the fix; it is not made here.
 """.
 -spec discard_unoccupied(non_neg_integer(), pid(), binary(), term()) -> ok.
 discard_unoccupied(0, InstancePid, Mode, WorldId) ->

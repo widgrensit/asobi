@@ -196,48 +196,56 @@ unoccupied_world_test_() ->
         {"a world with someone in it is kept", fun occupied_world_kept/0}
     ]}.
 
-with_instance_sup(Fun) ->
-    meck:new(supervisor, [unstick, passthrough, no_link]),
-    Self = self(),
-    try
-        meck:expect(supervisor, terminate_child, fun
-            (asobi_world_instance_sup, Pid) ->
-                Self ! {terminated, Pid},
-                ok;
-            (Sup, Pid) ->
-                meck:passthrough([Sup, Pid])
-        end),
-        Fun()
-    after
-        meck:unload(supervisor)
+%% A real `simple_one_for_one` supervisor, not a VM-wide meck of OTP's
+%% `supervisor`. The mocked version asserted only that `terminate_child/2` was
+%% CALLED - it stayed green if the sup atom were wrong, if the sup were not
+%% running, or if the instance survived, which is every way this can actually
+%% break. `meck:unload(supervisor)` also hard-purges a kernel module the whole
+%% eunit VM is using.
+ensure_pg() ->
+    case whereis(nova_scope) of
+        undefined -> pg:start_link(nova_scope);
+        _ -> ok
     end.
 
-terminated(Pid) ->
-    receive
-        {terminated, Pid} -> true
-    after 200 -> false
-    end.
+start_instance(Sup) ->
+    ensure_pg(),
+    {ok, InstancePid} = supervisor:start_child(Sup, [
+        #{
+            game_module => asobi_test_world_game,
+            grid_size => 1,
+            zone_size => 100,
+            tick_rate => 50,
+            max_players => 4,
+            view_radius => 1
+        }
+    ]),
+    InstancePid.
 
 unoccupied_world_discarded() ->
-    Instance = spawn(fun() ->
+    {ok, Sup} = asobi_world_instance_sup:start_link(),
+    unlink(Sup),
+    try
+        InstancePid = start_instance(Sup),
+        Ref = monitor(process, InstancePid),
+        ok = asobi_matchmaker:discard_unoccupied(0, InstancePid, ~"m1", ~"w1"),
         receive
-            stop -> ok
+            {'DOWN', Ref, process, InstancePid, _} -> ok
+        after 5_000 ->
+            erlang:error(instance_not_terminated)
         end
-    end),
-    with_instance_sup(fun() ->
-        ok = asobi_matchmaker:discard_unoccupied(0, Instance, ~"m1", ~"w1"),
-        ?assert(terminated(Instance))
-    end),
-    exit(Instance, kill).
+    after
+        exit(Sup, shutdown)
+    end.
 
 occupied_world_kept() ->
-    Instance = spawn(fun() ->
-        receive
-            stop -> ok
-        end
-    end),
-    with_instance_sup(fun() ->
-        ok = asobi_matchmaker:discard_unoccupied(1, Instance, ~"m1", ~"w1"),
-        ?assertNot(terminated(Instance))
-    end),
-    exit(Instance, kill).
+    {ok, Sup} = asobi_world_instance_sup:start_link(),
+    unlink(Sup),
+    try
+        InstancePid = start_instance(Sup),
+        ok = asobi_matchmaker:discard_unoccupied(1, InstancePid, ~"m1", ~"w1"),
+        timer:sleep(200),
+        ?assert(is_process_alive(InstancePid))
+    after
+        exit(Sup, shutdown)
+    end.
