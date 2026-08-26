@@ -407,8 +407,14 @@ resolve_and_stop(
     DurationMs = maps:get(closed_at, State1) - maps:get(opened_at, State1, 0),
     asobi_telemetry:vote_resolved(maps:get(vote_id, State1), DurationMs, Result),
     broadcast_vote_result(State1),
-    persist_vote(State1),
+    %% Above `persist_vote/1`, which is a synchronous Postgres write. The
+    %% client already has the result - `broadcast_vote_result/1` is a cast - so
+    %% leaving the match server behind the write meant the player knew the
+    %% outcome while the game logic that reacts to it had not been told, for as
+    %% long as the pool was contended. Both notifications are now ahead of the
+    %% write, and the write is the only thing that lingers.
     _ = notify_match(resolved, State1),
+    persist_vote(State1),
     {stop, normal, State1}.
 
 tally(~"plurality", Votes, Options, TieBreaker, _Weights) ->
