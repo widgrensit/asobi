@@ -215,16 +215,18 @@ vote_veto(_Config) ->
         match_pid => MatchPid,
         options => Options,
         eligible => [~"p1", ~"p2"],
-        window_ms => 5000,
+        %% 60000 like the other two close tests, not 5000: a veto and a window
+        %% expiry deliver a byte-identical `{'DOWN', _, _, _, normal}`, so a
+        %% 5000ms window under a 5000ms deadline means the fallback could
+        %% satisfy the assertion the veto is supposed to. What kept them apart
+        %% was that the expiry path runs `persist_vote/1` and the veto path
+        %% does not - an accident of latency, not a margin.
+        window_ms => 60000,
         veto_enabled => true
     }),
     Ref = monitor(process, VotePid),
     ok = asobi_vote_server:cast_veto(VotePid, ~"p1"),
-    receive
-        {'DOWN', Ref, process, VotePid, normal} -> ok
-    after 1000 ->
-        error(veto_did_not_stop)
-    end.
+    await_stop(Ref, VotePid, veto_did_not_stop).
 
 vote_veto_disabled(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
@@ -476,11 +478,7 @@ vote_window_ready_up(_Config) ->
     ?assert(is_process_alive(VotePid)),
     ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
     %% All voted — should close immediately
-    receive
-        {'DOWN', Ref, process, VotePid, normal} -> ok
-    after 1000 ->
-        error(ready_up_did_not_close)
-    end.
+    await_stop(Ref, VotePid, ready_up_did_not_close).
 
 vote_window_ready_up_timeout(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
@@ -523,11 +521,7 @@ vote_window_hybrid(_Config) ->
     ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
     ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
     %% All voted + min elapsed — should close
-    receive
-        {'DOWN', Ref, process, VotePid, normal} -> ok
-    after 1000 ->
-        error(hybrid_did_not_close)
-    end.
+    await_stop(Ref, VotePid, hybrid_did_not_close).
 
 vote_window_hybrid_min_enforced(_Config) ->
     Options = [
@@ -973,3 +967,31 @@ start_test_match() ->
     }),
     true = is_pid(Pid),
     {ok, Pid}.
+
+%% Wait for a vote server to stop after something closed it.
+%%
+%% Used by the three waits that had 1000ms where the rest of this suite uses
+%% 2000ms. That is the criterion - not DB exposure: `vote_veto/1` reaches
+%% `{stop_and_reply, normal, ...}` from `handle_veto/3`, which does no write at
+%% all. The other two go through `resolve_and_stop/1`, which runs
+%% `persist_vote/1` - a SYNCHRONOUS `asobi_repo:insert/1` - before
+%% `{stop, normal}`, on a pool every other suite in the run is also using.
+%% `vote_window_hybrid/1` was observed failing on roughly one full `rebar3 ct`
+%% in three or four while passing every time the suite ran alone.
+%%
+%% 5000 is an empirical multiple of the old value, NOT a derived bound. A real
+%% bound would be north of 20s: `minato_pool`'s checkout timeout is 5000ms and
+%% `minato_conn`'s query timeout is 15000ms, so a contended insert can block
+%% the vote server for both before it gives up. Do not read this number as
+%% "long enough for the write" - read it as "long enough that the flake has not
+%% been seen since", and if it returns, the answer is to take the write off the
+%% stop path rather than to raise this again.
+await_stop(Ref, VotePid, ErrorTag) ->
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok;
+        %% Report the real reason rather than burning the deadline and blaming
+        %% the close.
+        {'DOWN', Ref, process, VotePid, Reason} -> error({ErrorTag, Reason})
+    after 5000 ->
+        error(ErrorTag)
+    end.

@@ -79,10 +79,19 @@ enough voters participate. Use `default_votes` for absent players and
   is reached, the remaining time shrinks to 3 seconds (giving others a
   last chance). Resets if supermajority is lost.
 
-## Grace period
+## No grace period
 
-Late votes arriving within 500ms after the window closes are still accepted
-to compensate for network latency.
+A vote that reaches `closed` never processes another call: `closed(enter, ...)`
+resolves and returns `{stop, normal, _}`, and a `gen_statem` runs its enter
+callback before dispatching anything already queued - so a call sitting in the
+mailbox is never seen. There is no window, not even a tight one, which is why
+the clauses that used to implement `?GRACE_MS` are gone rather than documented.
+
+A caller whose `cast_vote/3` lands in that gap gets no error either: the server
+stops without replying, and `gen_statem:call/2` defaults to `infinity`, so the
+call unwinds as `{normal, {gen_statem, call, _}}` in the CALLER. `cast_vote/3`
+and `cast_veto/2` contain that here, so a caller which is itself a server does
+not die of its callee finishing.
 """.
 -behaviour(gen_statem).
 
@@ -90,7 +99,9 @@ to compensate for network latency.
 -export([callback_mode/0, init/1, terminate/3]).
 -export([open/3, closed/3]).
 
--define(GRACE_MS, 500).
+%% Bounded so a caller is never held through resolve_and_stop/1's synchronous
+%% write. See cast_vote/3.
+-define(CALL_TIMEOUT, 5_000).
 -define(DEFAULT_MAX_REVOTES, 3).
 -define(ADAPTIVE_SHRINK_MS, 3000).
 
@@ -101,20 +112,53 @@ to compensate for network latency.
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
 
--doc "Cast a vote. Replaces any previous vote by the same voter during the window.".
+-doc """
+Cast a vote. Replaces any previous vote by the same voter during the window.
+
+Contained here rather than at each caller, because what is being contained is
+this module's protocol: a resolving vote server serves nothing and then stops,
+so a call landing in that gap unwinds as `{normal, {gen_statem, call, _}}` in
+the caller. The callers are `asobi_match_server` and `asobi_world_server`,
+calling from inside their own callbacks - a compound exit reason is a crash to
+their supervisor, so one player's `vote.cast` frame took every player in the
+match down with it.
+
+Bounded rather than `infinity` for the other half of the same problem:
+`resolve_and_stop/1` holds the server through a synchronous Postgres write, and
+an unbounded call meant the CALLER froze for as long as that took - up to the
+pool's 5s checkout plus a 15s query. A frozen match is better than a dead one
+and worse than a refused vote.
+""".
 -spec cast_vote(pid(), binary(), binary() | [binary()]) -> ok | {error, term()}.
 cast_vote(Pid, VoterId, OptionId) ->
-    case gen_statem:call(Pid, {cast_vote, VoterId, OptionId}) of
-        ok -> ok;
-        {error, _} = Err -> Err
-    end.
+    call_vote(Pid, {cast_vote, VoterId, OptionId}).
 
--doc "Veto the vote (immediately cancels it). Only works if `veto_enabled` is true.".
+-doc """
+Veto the vote (immediately cancels it). Only works if `veto_enabled` is true.
+
+Contained and bounded like `cast_vote/3` - see there.
+""".
 -spec cast_veto(pid(), binary()) -> ok | {error, term()}.
 cast_veto(Pid, VoterId) ->
-    case gen_statem:call(Pid, {veto, VoterId}) of
+    call_vote(Pid, {veto, VoterId}).
+
+%% The exit is matched on its full `gen_statem:call` shape rather than on
+%% `{normal, _}`, so this cannot swallow an unrelated 2-tuple. A genuine crash
+%% in the vote server arrives as `{{badmatch, _}, {gen_statem, call, _}}`,
+%% matches nothing here, and still takes the caller down - which is what a real
+%% fault should do.
+-spec call_vote(pid(), term()) -> ok | {error, term()}.
+call_vote(Pid, Request) ->
+    try gen_statem:call(Pid, Request, ?CALL_TIMEOUT) of
         ok -> ok;
         {error, _} = Err -> Err
+    catch
+        exit:{Reason, {gen_statem, call, _}} when
+            Reason =:= normal; Reason =:= noproc; Reason =:= shutdown
+        ->
+            {error, vote_closed};
+        exit:{timeout, {gen_statem, call, _}} ->
+            {error, vote_busy}
     end.
 
 -doc "Return the current vote state including status, options, tallies (if live), and time remaining.".
@@ -213,15 +257,6 @@ open(state_timeout, window_expired, State) ->
     gen_statem:state_enter_result(atom()).
 closed(enter, _OldState, State) ->
     resolve_and_stop(State);
-closed({call, From}, {cast_vote, VoterId, OptionId}, State) ->
-    %% Grace period: accept if within GRACE_MS of window close
-    Now = erlang:system_time(millisecond),
-    OpenedAt = maps:get(opened_at, State),
-    WindowMs = maps:get(window_ms, State),
-    case Now - (OpenedAt + WindowMs) =< ?GRACE_MS of
-        true -> handle_cast_vote(From, VoterId, OptionId, State);
-        false -> {keep_state_and_data, [{reply, From, {error, vote_closed}}]}
-    end;
 closed({call, From}, get_state, State) ->
     {keep_state_and_data, [{reply, From, external_state(closed, State)}]};
 closed({call, From}, _, _State) ->
@@ -407,8 +442,14 @@ resolve_and_stop(
     DurationMs = maps:get(closed_at, State1) - maps:get(opened_at, State1, 0),
     asobi_telemetry:vote_resolved(maps:get(vote_id, State1), DurationMs, Result),
     broadcast_vote_result(State1),
-    persist_vote(State1),
+    %% Above `persist_vote/1`, which is a synchronous Postgres write. The
+    %% client already has the result - `broadcast_vote_result/1` is a cast - so
+    %% leaving the match server behind the write meant the player knew the
+    %% outcome while the game logic that reacts to it had not been told, for as
+    %% long as the pool was contended. Both notifications are now ahead of the
+    %% write, and the write is the only thing that lingers.
     _ = notify_match(resolved, State1),
+    persist_vote(State1),
     {stop, normal, State1}.
 
 tally(~"plurality", Votes, Options, TieBreaker, _Weights) ->
