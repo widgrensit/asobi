@@ -220,11 +220,7 @@ vote_veto(_Config) ->
     }),
     Ref = monitor(process, VotePid),
     ok = asobi_vote_server:cast_veto(VotePid, ~"p1"),
-    receive
-        {'DOWN', Ref, process, VotePid, normal} -> ok
-    after 1000 ->
-        error(veto_did_not_stop)
-    end.
+    await_stop(Ref, VotePid, veto_did_not_stop).
 
 vote_veto_disabled(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
@@ -476,11 +472,7 @@ vote_window_ready_up(_Config) ->
     ?assert(is_process_alive(VotePid)),
     ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
     %% All voted — should close immediately
-    receive
-        {'DOWN', Ref, process, VotePid, normal} -> ok
-    after 1000 ->
-        error(ready_up_did_not_close)
-    end.
+    await_stop(Ref, VotePid, ready_up_did_not_close).
 
 vote_window_ready_up_timeout(_Config) ->
     Options = [#{id => ~"opt_a", label => ~"A"}],
@@ -523,11 +515,7 @@ vote_window_hybrid(_Config) ->
     ok = asobi_vote_server:cast_vote(VotePid, ~"p1", ~"opt_a"),
     ok = asobi_vote_server:cast_vote(VotePid, ~"p2", ~"opt_b"),
     %% All voted + min elapsed — should close
-    receive
-        {'DOWN', Ref, process, VotePid, normal} -> ok
-    after 1000 ->
-        error(hybrid_did_not_close)
-    end.
+    await_stop(Ref, VotePid, hybrid_did_not_close).
 
 vote_window_hybrid_min_enforced(_Config) ->
     Options = [
@@ -973,3 +961,22 @@ start_test_match() ->
     }),
     true = is_pid(Pid),
     {ok, Pid}.
+
+%% Wait for a vote server to stop after something closed it.
+%%
+%% `resolve_and_stop/1` runs `persist_vote/1` before `{stop, normal}`, and that
+%% is a SYNCHRONOUS `asobi_repo:insert/1` - a real Postgres write on a pool
+%% every other suite in the run is also using. So the gap between the closing
+%% call returning and the DOWN arriving is a contended database round trip, not
+%% scheduling jitter.
+%%
+%% Three of these waits used 1000ms against the suite's own 2000ms norm, and
+%% `vote_window_hybrid/1` was observed failing on roughly one full `rebar3 ct`
+%% in three or four while passing every time the suite ran alone. The budget
+%% has to cover the write; it is not a guess about how fast the BEAM is.
+await_stop(Ref, VotePid, ErrorTag) ->
+    receive
+        {'DOWN', Ref, process, VotePid, normal} -> ok
+    after 5000 ->
+        error(ErrorTag)
+    end.
