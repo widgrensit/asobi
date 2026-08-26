@@ -474,3 +474,57 @@ added_bots() ->
             asobi_matchmaker
         )
     ].
+
+%% widgrensit/asobi#280 (world side): scan_groups/2 starts a bot process only
+%% for an {asobi_match_server, _} group, so a bot queued into a WORLD mode
+%% never registers under {player, BotId}. asobi_world_server then seats it with
+%% no session and no monitor, and nothing can ever remove it - the world never
+%% empties. Filling a world mode was never going to work; it leaked a seat per
+%% bot instead.
+world_mode_is_not_filled_test() ->
+    Modes = #{
+        ~"w" => #{type => world, bots => #{enabled => true, min_players => 4}}
+    },
+    meck:new(asobi_game_config, [passthrough, no_link]),
+    meck:new(asobi_matchmaker, [passthrough, no_link]),
+    Self = self(),
+    try
+        meck:expect(asobi_game_config, modes, fun() -> Modes end),
+        meck:expect(asobi_matchmaker, add, fun(BotId, _Params) ->
+            Self ! {queued, BotId},
+            {ok, BotId, #{}}
+        end),
+        asobi_bot_spawner:fill_mode(~"w", 1),
+        receive
+            {queued, _} -> ?assert(false)
+        after 100 -> ok
+        end
+    after
+        meck:unload(asobi_matchmaker),
+        meck:unload(asobi_game_config)
+    end.
+
+%% The same config on a match mode still fills, so the gate is on the mode
+%% type and not on bots generally.
+match_mode_is_still_filled_test() ->
+    Modes = #{
+        ~"m" => #{type => match, max_players => 4, bots => #{enabled => true, min_players => 2}}
+    },
+    meck:new(asobi_game_config, [passthrough, no_link]),
+    meck:new(asobi_matchmaker, [passthrough, no_link]),
+    Self = self(),
+    try
+        meck:expect(asobi_game_config, modes, fun() -> Modes end),
+        meck:expect(asobi_matchmaker, add, fun(BotId, _Params) ->
+            Self ! {queued, BotId},
+            {ok, BotId, #{}}
+        end),
+        asobi_bot_spawner:fill_mode(~"m", 1),
+        receive
+            {queued, _} -> ok
+        after 500 -> ?assert(false)
+        end
+    after
+        meck:unload(asobi_matchmaker),
+        meck:unload(asobi_game_config)
+    end.

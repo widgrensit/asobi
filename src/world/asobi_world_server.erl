@@ -13,6 +13,7 @@ transient matches use `asobi_match_server` instead.
 -export([
     start_link/1,
     join/2,
+    join_if_session/2,
     join/3,
     join/4,
     leave/2,
@@ -85,6 +86,36 @@ resync(Pid, PlayerId, Coords) ->
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
     case gen_statem:call(Pid, {join, PlayerId, #{}}) of
+        {ok, _ZonePid} -> ok;
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+As `join/2`, but refuse a player who has no live session.
+
+`join/2` resolves the session through `pg` and seats the player either way,
+which is deliberate: the Erlang embedding path and around twenty tests join a
+session-less player on purpose. But a player seated that way carries
+`session_pid => undefined` and no monitor, so `find_player_by_pid/2` - which
+matches on the session pid - can never resolve a `DOWN` to them,
+`handle_leave/2` is unreachable, and the roster never empties. The world ticks
+forever around someone who is not there.
+
+A caller that screens beforehand cannot close that on its own. The screen and
+the seat are two separate `pg` reads with the game's `join` hook,
+`place_player/3` and every other member's join in between - on a Lua world that
+is tens to hundreds of milliseconds, and the per-player `matched` frames the
+matchmaker sends tell an observer exactly when the next join begins. Checking
+HERE puts the read and the seat in the same callback, so there is no window at
+all.
+
+Refused before `asobi_game_join:invoke/4` and `place_player/3` for the same
+reason asobi#258 rolls those back together: a late refusal would leave the
+game module's join applied and the entity in the zone.
+""".
+-spec join_if_session(pid(), binary()) -> ok | {error, term()}.
+join_if_session(Pid, PlayerId) ->
+    case gen_statem:call(Pid, {join, PlayerId, #{}, require_session}) of
         {ok, _ZonePid} -> ok;
         {error, _} = Err -> Err
     end.
@@ -346,8 +377,30 @@ running(
     asobi_world_ticker:set_zone_manager(TickerPid, ZoneManagerPid, self()),
     asobi_telemetry:world_started(WorldId, maps:get(mode, State, undefined)),
     keep_state_and_data;
+running({call, From}, {join, PlayerId, Ctx, require_session}, #{world_id := WorldId} = State) when
+    is_binary(PlayerId)
+->
+    case find_player_pid(PlayerId) of
+        undefined ->
+            asobi_telemetry:game_error(join_no_live_session, #{world_id => WorldId}),
+            ?LOG_WARNING(#{
+                event => join_refused_no_live_session,
+                world_id => WorldId,
+                player_id => PlayerId
+            }),
+            {keep_state_and_data, [{reply, From, {error, no_live_session}}]};
+        PlayerPid ->
+            %% Carried, not re-resolved. `handle_join/5` used to read the group
+            %% again to pick its monitor, with the game module's join hook and
+            %% `place_player/3` in between - so a session dying inside that hook
+            %% produced the very seat this clause exists to refuse. Monitoring
+            %% the pid we already checked makes the failure self-healing
+            %% instead: a monitor on a dead pid delivers `DOWN` immediately,
+            %% `find_player_by_pid/2` resolves it, and `handle_leave/2` runs.
+            handle_join(From, PlayerId, Ctx, State, PlayerPid)
+    end;
 running({call, From}, {join, PlayerId, Ctx}, State) ->
-    handle_join(From, PlayerId, Ctx, State);
+    handle_join(From, PlayerId, Ctx, State, resolve);
 running(cast, {leave, PlayerId}, State) ->
     handle_leave(PlayerId, State);
 running(cast, {move_player, PlayerId, NewPos, Entity}, State) ->
@@ -845,7 +898,9 @@ handle_join(
         max_players := Max,
         game_module := Mod,
         game_state := GS
-    } = State
+    } = State,
+
+    KnownPid
 ) ->
     case map_size(Players) >= Max of
         true ->
@@ -878,10 +933,35 @@ handle_join(
                             %% (its subscribe becomes a no-op); do the same
                             %% here rather than crashing on
                             %% monitor(process, undefined).
-                            PlayerPid = find_player_pid(PlayerId),
+                            PlayerPid = known_or_resolved(KnownPid, PlayerId),
                             MonRef =
                                 case PlayerPid of
                                     undefined ->
+                                        %% Counted, not just logged: a join
+                                        %% that yields zero interest
+                                        %% subscriptions is the "joined but
+                                        %% sees nothing" symptom, and an
+                                        %% operator needs a rate for it rather
+                                        %% than a line to grep. Reached from
+                                        %% the plain `join/2`, which seats a
+                                        %% session-less player deliberately;
+                                        %% `join_if_session/2` refuses before
+                                        %% this point instead.
+                                        %%
+                                        %% No `player_id` in the details. Every
+                                        %% other game_error/2 site carries only
+                                        %% module/world/coords, three consumers
+                                        %% attach to this stream (one exports
+                                        %% to the SaaS control plane), and ADR
+                                        %% 0005 warns that a naive exporter
+                                        %% maps details to labels - which would
+                                        %% be per-player cardinality and a
+                                        %% pseudonymous id leaving the game
+                                        %% environment. The WARNING below has
+                                        %% the id for the operator.
+                                        asobi_telemetry:game_error(
+                                            join_no_live_session, #{world_id => WorldId}
+                                        ),
                                         ?LOG_WARNING(#{
                                             event => join_no_live_session,
                                             world_id => WorldId,
@@ -1916,3 +1996,10 @@ handle_phase_events([{phase_ended, Name} | Rest], Mod, GS) ->
     handle_phase_events(Rest, Mod, GS1);
 handle_phase_events([_Event | Rest], Mod, GS) ->
     handle_phase_events(Rest, Mod, GS).
+
+%% `resolve` means "look it up now" - the ordinary `join/2` path. A pid means
+%% the caller already resolved it and is entitled to have that one monitored,
+%% which is what makes `join_if_session/2` free of a second read.
+-spec known_or_resolved(pid() | resolve, binary()) -> pid() | undefined.
+known_or_resolved(resolve, PlayerId) -> find_player_pid(PlayerId);
+known_or_resolved(KnownPid, _PlayerId) when is_pid(KnownPid) -> KnownPid.
