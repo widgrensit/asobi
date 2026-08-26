@@ -2,7 +2,7 @@
 
 -export([start/1, unique_username/1, unique_id/1, binary_join/2]).
 -export([fake_session/1, fake_session/2, unique_session/1, assert_no_session/1]).
--export([with_session/2, with_session/3, with_unique_session/2]).
+-export([with_session/2, with_session/3, with_unique_session/2, release_session/2]).
 -export([http_routes/1, routes_missing_options/1, preflight_targets/1, sample_path/1]).
 
 -spec start(list()) -> list().
@@ -67,7 +67,15 @@ bookkeeping.
 """.
 -spec fake_session(binary(), pid() | undefined) -> pid().
 fake_session(PlayerId, Owner) ->
+    %% Labelled with the CALLER's frame, read from `self()` before the spawn.
+    %% `current_function` used to name the test module because the fun was
+    %% written there; extracting it here made every leaker report
+    %% `asobi_test_helpers`, which is the one answer `assert_no_session/1`
+    %% cannot use. `initial_call` never helped - it is `{erlang,apply,2}` for a
+    %% plain spawn and `{proc_lib,init_p,5}` for a real session.
+    Caller = caller_frame(),
     Pid = spawn(fun Loop() ->
+        proc_lib:set_label({fake_session, PlayerId, Caller}),
         receive
             stop ->
                 ok;
@@ -78,6 +86,28 @@ fake_session(PlayerId, Owner) ->
     end),
     ok = pg:join(nova_scope, {player, PlayerId}, Pid),
     Pid.
+
+-spec caller_frame() -> {module(), atom(), arity(), term()} | unknown.
+caller_frame() ->
+    case erlang:process_info(self(), current_stacktrace) of
+        {current_stacktrace, Stack} -> first_foreign_frame(Stack);
+        _ -> unknown
+    end.
+
+-spec first_foreign_frame([term()]) -> {module(), atom(), arity(), term()} | unknown.
+first_foreign_frame([{M, F, A, Loc} | _]) when
+    is_atom(M), M =/= ?MODULE, is_atom(F), is_integer(A), is_list(Loc)
+->
+    {M, F, A, frame_line(Loc)};
+first_foreign_frame([_ | Rest]) ->
+    first_foreign_frame(Rest);
+first_foreign_frame([]) ->
+    unknown.
+
+-spec frame_line([term()]) -> pos_integer() | undefined.
+frame_line([{line, L} | _]) when is_integer(L), L > 0 -> L;
+frame_line([_ | Rest]) -> frame_line(Rest);
+frame_line([]) -> undefined.
 
 -spec forward(pid() | undefined, binary(), term()) -> ok.
 forward(undefined, _PlayerId, _Msg) ->
@@ -105,7 +135,33 @@ with_session(PlayerId, Owner, Fun) ->
     try
         Fun()
     after
-        exit(Pid, kill)
+        release_session(PlayerId, Pid)
+    end.
+
+-doc """
+Release a session: leave the group, stop the process, drain what it forwarded.
+
+`pg:leave/3` rather than relying on the process dying, because a killed pid
+lingers in the group for tens of milliseconds - long enough for an immediately
+following `assert_no_session/1` to fail naming a dead pid, and long enough for
+production code reading that group to get one.
+
+The drain matters because the owner is the SAME process for every test in a
+module: undrained `{PlayerId, Msg}` forwards outlive the test that caused them,
+and `received_entity/2`-style selective receives would happily satisfy
+themselves from a stale one if an id ever repeats.
+""".
+-spec release_session(binary(), pid()) -> ok.
+release_session(PlayerId, Pid) ->
+    _ = pg:leave(nova_scope, {player, PlayerId}, Pid),
+    Pid ! stop,
+    drain_forwarded(PlayerId).
+
+-spec drain_forwarded(binary()) -> ok.
+drain_forwarded(PlayerId) ->
+    receive
+        {PlayerId, _} -> drain_forwarded(PlayerId)
+    after 0 -> ok
     end.
 
 -doc """
@@ -144,9 +200,23 @@ assert_no_session(PlayerId) ->
 %% In a full run the module that fails this assertion is the one that did
 %% nothing wrong, and a bare pid does not say who registered it - by the time
 %% anyone reads the output the process may be gone. Name the leaker.
--spec who(pid()) -> {pid(), term()}.
+%% `proc_lib:get_label/1` is the useful half - see fake_session/2. It answers
+%% `undefined` for an unlabelled or dead pid rather than raising.
+%%
+%% `process_info/2` RAISES on a remote pid, and pg is a distributed registry:
+%% the day asobi is not single-node, an unguarded call here turns the leak
+%% report into a badarg that hides the leak it was written to find.
+%%
+%% Deliberately not `dictionary`, `messages` or `backtrace`: asobi_lua_world
+%% stores the whole zone state - Luerl VM included - in its process
+%% dictionary, so a leaked zone process would dump the entire scripting VM and
+%% every entity map into CI output. `current_function` is an MFA; arity, not
+%% arguments.
+-spec who(pid()) -> tuple().
+who(Pid) when node(Pid) =/= node() ->
+    {Pid, {remote, node(Pid)}};
 who(Pid) ->
-    {Pid, erlang:process_info(Pid, [initial_call, current_function])}.
+    {Pid, proc_lib:get_label(Pid), erlang:process_info(Pid, [current_function, registered_name])}.
 
 %% --- Router enumeration ---
 %%

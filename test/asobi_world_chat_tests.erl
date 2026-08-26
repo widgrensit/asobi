@@ -96,22 +96,36 @@ with_registered_player(Fun) ->
 %% of `player_joined/3`, and only leave them on the success path. World-scoped
 %% ids bound the damage, but the global tier deliberately carries NO world id
 %% (widgrensit/asobi#299) - `global:general` is the single most shared key in
-%% the system - so a failing assertion strands the eunit runner in it for the
-%% rest of the run, where nothing today would detect it.
+%% the system.
+%%
+%% The strand lasts for the rest of this MODULE, not the whole run: the eunit
+%% runner is per module group and pg reaps its memberships when it dies. That
+%% is still worth closing - a membership from one test was measured visible in
+%% a later test of the same module - but the cross-MODULE vector is a spawned
+%% session outliving its creator, not this.
+%%
+%% Drains rather than leaving once. `pg:join` twice registers twice and one
+%% `pg:leave` removes one, and `global_chat_joined_and_left/0` deliberately
+%% joins `global:general` through two worlds - so a single leave would
+%% under-clean in exactly the case that motivates the sweep.
 leave_chat_channels() ->
     Self = self(),
     lists:foreach(
         fun
-            ({chat, _} = Group) ->
-                case lists:member(Self, pg:get_members(nova_scope, Group)) of
-                    true -> pg:leave(nova_scope, Group, Self);
-                    false -> ok
-                end;
-            (_Group) ->
-                ok
+            ({chat, _} = Group) -> drain_membership(Group, Self);
+            (_Group) -> ok
         end,
         pg:which_groups(nova_scope)
     ).
+
+drain_membership(Group, Self) ->
+    case lists:member(Self, pg:get_members(nova_scope, Group)) of
+        true ->
+            _ = pg:leave(nova_scope, Group, Self),
+            drain_membership(Group, Self);
+        false ->
+            ok
+    end.
 
 join_world_chat() ->
     with_registered_player(fun() ->
@@ -226,6 +240,11 @@ global_channels_test_() ->
 %% calling register_player/0 here - a player with no session must not join,
 %% leave, or move any channel using the calling process's own pid.
 no_live_session_does_not_join_as_caller() ->
+    %% Same class as the two #277/#280 twins: this asserts the SESSION-LESS
+    %% path, and `find_player_pid/1` takes the head of the group - so a leaked
+    %% session under this id would be joined instead, and the assertion would
+    %% still pass while the degraded path went untested.
+    ok = asobi_test_helpers:assert_no_session(~"ghost"),
     ChatState = asobi_world_chat:init(~"wc7", #{
         chat => #{world => true, zone => true, proximity => 1, grid_size => 5}
     }),

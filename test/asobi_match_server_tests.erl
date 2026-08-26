@@ -356,6 +356,11 @@ generate_id_format() ->
 %% --- Reconnect tests ---
 
 disconnect_starts_grace() ->
+    %% Unique id, not `p1`: this test registers a session in the shared
+    %% `nova_scope`, and it kills that session mid-body on purpose - so an
+    %% assertion failing before the kill leaves it registered. Under `p1`
+    %% that survivor is borrowable by any later test; under this id it is
+    %% inert.
     %% With a reconnect policy, killing the player session must NOT remove
     %% the player from the match — the grace timer holds them in place
     %% until reconnect/2 returns or grace expires.
@@ -371,8 +376,8 @@ disconnect_starts_grace() ->
             max_offline_total => infinity
         }
     }),
-    SessionPid = asobi_test_helpers:fake_session(~"p1"),
-    ok = asobi_match_server:join(Pid, ~"p1"),
+    SessionPid = asobi_test_helpers:fake_session(~"disconnect_starts_grace_p1"),
+    ok = asobi_match_server:join(Pid, ~"disconnect_starts_grace_p1"),
     timer:sleep(50),
     %% Match transitioned to running; player count is 1.
     ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid))),
@@ -384,13 +389,18 @@ disconnect_starts_grace() ->
     stop(Pid).
 
 disconnect_no_policy_leaves() ->
+    %% Unique id, not `p1`: this test registers a session in the shared
+    %% `nova_scope`, and it kills that session mid-body on purpose - so an
+    %% assertion failing before the kill leaves it registered. Under `p1`
+    %% that survivor is borrowable by any later test; under this id it is
+    %% inert.
     %% Without a reconnect policy, session DOWN goes through handle_leave —
     %% same as an explicit leave/2.
     Pid = start_match(#{min_players => 1, max_players => 2}),
     unlink(Pid),
     PidRef = monitor(process, Pid),
-    SessionPid = asobi_test_helpers:fake_session(~"p1"),
-    ok = asobi_match_server:join(Pid, ~"p1"),
+    SessionPid = asobi_test_helpers:fake_session(~"disconnect_no_policy_leaves_p1"),
+    ok = asobi_match_server:join(Pid, ~"disconnect_no_policy_leaves_p1"),
     timer:sleep(50),
 
     exit(SessionPid, kill),
@@ -402,6 +412,11 @@ disconnect_no_policy_leaves() ->
     end.
 
 reconnect_within_grace_keeps() ->
+    %% Unique id, not `p1`: this test registers a session in the shared
+    %% `nova_scope`, and it kills that session mid-body on purpose - so an
+    %% assertion failing before the kill leaves it registered. Under `p1`
+    %% that survivor is borrowable by any later test; under this id it is
+    %% inert.
     %% Disconnect → reconnect inside the grace window leaves the player
     %% counted and re-monitors the new session.
     Pid = start_match(#{
@@ -416,17 +431,17 @@ reconnect_within_grace_keeps() ->
             max_offline_total => infinity
         }
     }),
-    SessionPid1 = asobi_test_helpers:fake_session(~"p1"),
-    ok = asobi_match_server:join(Pid, ~"p1"),
+    SessionPid1 = asobi_test_helpers:fake_session(~"reconnect_within_grace_keeps_p1"),
+    ok = asobi_match_server:join(Pid, ~"reconnect_within_grace_keeps_p1"),
     timer:sleep(50),
 
     exit(SessionPid1, kill),
     timer:sleep(30),
     %% Replace the registered session with a fresh fake.
-    catch pg:leave(nova_scope, {player, ~"p1"}, SessionPid1),
-    SessionPid2 = asobi_test_helpers:fake_session(~"p1"),
+    catch pg:leave(nova_scope, {player, ~"reconnect_within_grace_keeps_p1"}, SessionPid1),
+    SessionPid2 = asobi_test_helpers:fake_session(~"reconnect_within_grace_keeps_p1"),
     try
-        ?assertEqual(ok, asobi_match_server:reconnect(Pid, ~"p1")),
+        ?assertEqual(ok, asobi_match_server:reconnect(Pid, ~"reconnect_within_grace_keeps_p1")),
         timer:sleep(30),
         ?assertEqual(1, maps:get(player_count, asobi_match_server:get_info(Pid)))
     after
@@ -439,12 +454,20 @@ reconnect_within_grace_keeps() ->
     end.
 
 reconnect_no_policy_errors() ->
+    %% Unique id, not `p1`: this test registers a session in the shared
+    %% `nova_scope`, and it kills that session mid-body on purpose - so an
+    %% assertion failing before the kill leaves it registered. Under `p1`
+    %% that survivor is borrowable by any later test; under this id it is
+    %% inert.
     Pid = start_match(#{min_players => 1, max_players => 2}),
-    SessionPid = asobi_test_helpers:fake_session(~"p1"),
+    SessionPid = asobi_test_helpers:fake_session(~"reconnect_no_policy_errors_p1"),
     try
-        ok = asobi_match_server:join(Pid, ~"p1"),
+        ok = asobi_match_server:join(Pid, ~"reconnect_no_policy_errors_p1"),
         timer:sleep(50),
-        ?assertMatch({error, no_reconnect_policy}, asobi_match_server:reconnect(Pid, ~"p1"))
+        ?assertMatch(
+            {error, no_reconnect_policy},
+            asobi_match_server:reconnect(Pid, ~"reconnect_no_policy_errors_p1")
+        )
     after
         exit(SessionPid, kill),
         stop(Pid)
