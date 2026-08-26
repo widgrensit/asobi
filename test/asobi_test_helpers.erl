@@ -1,8 +1,8 @@
 -module(asobi_test_helpers).
 
 -export([start/1, unique_username/1, unique_id/1, binary_join/2]).
--export([fake_session/1, fake_session/2, unique_session/1, assert_no_session/1]).
--export([with_session/2, with_session/3, with_unique_session/2, release_session/2]).
+-export([fake_session/1, fake_session/2, assert_no_session/1]).
+-export([with_session/2, with_session/3, release_session/2]).
 -export([http_routes/1, routes_missing_options/1, preflight_targets/1, sample_path/1]).
 
 -spec start(list()) -> list().
@@ -52,9 +52,12 @@ that differed only in whether they forwarded messages.
 namespaced**, so a module that leaves one of these alive lends it to every
 later test that happens to use the same id. That has now been found three
 times, most recently as a test that passed only in a full run because it
-borrowed another module's session and subscribed it to four zones. Prefer
-`unique_session/1`; if you must name the player, kill the session in an
-`after`.
+borrowed another module's session and subscribed it to four zones.
+
+Prefer `with_session/2` - it releases in an `after`, so a failing assertion
+cannot strand the registration. Take the pid directly only where the test kills
+the session mid-body on purpose (the dominant shape in these suites, which
+`with_session/2` cannot express), and pair it with `release_session/2`.
 """.
 -spec fake_session(binary()) -> pid().
 fake_session(PlayerId) ->
@@ -74,15 +77,14 @@ fake_session(PlayerId, Owner) ->
     %% cannot use. `initial_call` never helped - it is `{erlang,apply,2}` for a
     %% plain spawn and `{proc_lib,init_p,5}` for a real session.
     Caller = caller_frame(),
-    Pid = spawn(fun Loop() ->
+    Pid = spawn(fun() ->
+        %% Above the loop, not inside it: re-entering would re-apply the label
+        %% on every forwarded message, which for a zone session is once per
+        %% world.tick. Applied BY the spawned process, so it is not readable
+        %% the instant this returns - `assert_no_session/1`'s targets are
+        %% long-lived leakers, so that is fine, but a test of `who/1` must wait.
         proc_lib:set_label({fake_session, PlayerId, Caller}),
-        receive
-            stop ->
-                ok;
-            Msg ->
-                forward(Owner, PlayerId, Msg),
-                Loop()
-        end
+        session_loop(PlayerId, Owner)
     end),
     ok = pg:join(nova_scope, {player, PlayerId}, Pid),
     Pid.
@@ -108,6 +110,16 @@ first_foreign_frame([]) ->
 frame_line([{line, L} | _]) when is_integer(L), L > 0 -> L;
 frame_line([_ | Rest]) -> frame_line(Rest);
 frame_line([]) -> undefined.
+
+-spec session_loop(binary(), pid() | undefined) -> ok.
+session_loop(PlayerId, Owner) ->
+    receive
+        stop ->
+            ok;
+        Msg ->
+            forward(Owner, PlayerId, Msg),
+            session_loop(PlayerId, Owner)
+    end.
 
 -spec forward(pid() | undefined, binary(), term()) -> ok.
 forward(undefined, _PlayerId, _Msg) ->
@@ -153,8 +165,18 @@ themselves from a stale one if an id ever repeats.
 """.
 -spec release_session(binary(), pid()) -> ok.
 release_session(PlayerId, Pid) ->
+    %% `_ =` and not `ok =`: the dominant shape in these suites kills the
+    %% session mid-body on purpose to trigger a DOWN, so `not_joined` here is
+    %% ordinary rather than a double release.
     _ = pg:leave(nova_scope, {player, PlayerId}, Pid),
+    Ref = monitor(process, Pid),
     Pid ! stop,
+    receive
+        {'DOWN', Ref, process, Pid, _} -> ok
+    after 1_000 ->
+        demonitor(Ref, [flush]),
+        exit(Pid, kill)
+    end,
     drain_forwarded(PlayerId).
 
 -spec drain_forwarded(binary()) -> ok.
@@ -163,25 +185,6 @@ drain_forwarded(PlayerId) ->
         {PlayerId, _} -> drain_forwarded(PlayerId)
     after 0 -> ok
     end.
-
--doc """
-As `with_session/2` under an id nothing can collide with. `Fun` receives it.
-""".
--spec with_unique_session(binary(), fun((binary()) -> R)) -> R.
-with_unique_session(Prefix, Fun) ->
-    PlayerId = unique_id(Prefix),
-    with_session(PlayerId, fun() -> Fun(PlayerId) end).
-
--doc """
-A session under an id no other run or module can collide with.
-
-`unique_id/1` rather than a hand-picked name: a distinctive id works only
-until someone else picks it, which is the same guarantee `p1` had.
-""".
--spec unique_session(binary()) -> {binary(), pid()}.
-unique_session(Prefix) ->
-    PlayerId = unique_id(Prefix),
-    {PlayerId, fake_session(PlayerId)}.
 
 -doc """
 Assert that nobody is registered as this player before the test relies on it.

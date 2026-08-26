@@ -476,7 +476,7 @@ world_input_crossing_touches_only_ring_delta() ->
         ?assertEqual(0, asobi_zone:get_subscriber_count(Z30)),
         ring_delta_crossing(Mgr, Player, Z11, Z00, Z30)
     after
-        exit(SessionPid, kill),
+        asobi_test_helpers:release_session(Player, SessionPid),
         stop_world(Ctx)
     end.
 
@@ -623,8 +623,8 @@ crossing_into_a_lazily_created_zone_backfills_stationary_neighbours() ->
         %% receives the crossing player's entity.
         ?assert(received_entity(Ada, Bob))
     after
-        exit(AdaPid, kill),
-        exit(BobPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
+        asobi_test_helpers:release_session(Bob, BobPid),
         stop_world(Ctx)
     end.
 
@@ -659,7 +659,7 @@ npc_crossing_into_an_unloaded_zone_creates_it_and_backfills() ->
         ?assertMatch(#{subscribers := #{Ada := {AdaPid, _}}}, sys:get_state(Z21)),
         ?assert(received_entity(Ada, ~"npc271"))
     after
-        exit(AdaPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
         stop_world(Ctx)
     end.
 
@@ -690,7 +690,7 @@ script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
         {ok, Z21} = asobi_zone_manager:get_zone(Mgr, {2, 1}),
         ?assertMatch(#{subscribers := #{Ada := {AdaPid, _}}}, sys:get_state(Z21))
     after
-        exit(AdaPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
         stop_world(Ctx)
     end.
 
@@ -761,8 +761,8 @@ crossing_out_of_ring_removes_stationary_neighbour() ->
         ?assertEqual(1, asobi_zone:get_subscriber_count(Z11)),
         ?assert(received_removal(Bob, Ada))
     after
-        exit(AdaPid, kill),
-        exit(BobPid, kill),
+        asobi_test_helpers:release_session(Ada, AdaPid),
+        asobi_test_helpers:release_session(Bob, BobPid),
         stop_world(Ctx)
     end.
 

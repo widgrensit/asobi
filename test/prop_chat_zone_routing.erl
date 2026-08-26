@@ -237,13 +237,20 @@ positions_with_neighbors(Positions) ->
 ensure_listeners(Players, WorldId) ->
     %% One spawned process per player, registered in pg as the player's session.
     %% The world_chat module subscribes the pg-registered pid to channels.
-    maps:from_list([{P, ensure_listener(P, WorldId)} || P <- Players]).
+    _ = WorldId,
+    maps:from_list([{P, asobi_test_helpers:fake_session(P)} || P <- Players]).
 
-ensure_listener(P, _WorldId) ->
-    asobi_test_helpers:fake_session(P).
-
+%% `release_session/2` rather than `exit/2`: these ids are unnamespaced and the
+%% next PropEr iteration re-joins them, so a killed pid still sitting in the
+%% group is one the world can resolve. pg:leave/3 is synchronous.
 cleanup_listeners(Listeners) ->
-    maps:foreach(fun(_, Pid) -> catch exit(Pid, kill) end, Listeners),
+    maps:foreach(fun release_one/2, Listeners),
+    ok.
+
+-spec release_one(term(), term()) -> ok.
+release_one(PlayerId, Pid) when is_binary(PlayerId), is_pid(Pid) ->
+    asobi_test_helpers:release_session(PlayerId, Pid);
+release_one(_PlayerId, _Pid) ->
     ok.
 
 -spec narrow_list(term()) -> [term()].

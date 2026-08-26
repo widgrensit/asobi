@@ -73,16 +73,17 @@ cleanup(_) ->
     meck:unload(asobi_repo),
     ok.
 
-%% Registers THIS process (the eunit runner, alive for the whole run) under a
-%% shared-scope key, so leaving is not optional: `nova_scope` and `{player,
-%% Id}` are global across every module in the run, and a registration that
-%% outlives its test is lent to any later test using the same id. That is how
-%% asobi_world_zone_integration_tests came to pass only in a full run - it
-%% found a session it never created and subscribed it to four zones.
+%% Registers THIS process under a shared-scope key, so leaving is not optional:
+%% `nova_scope` and `{player, Id}` are global across every module in the run,
+%% and a registration that outlives its test is lent to any later test using
+%% the same id.
 %%
-%% Paired via `try ... after` rather than a trailing call: these tests assert
-%% in the middle, and a failing assertion used to skip the unregister and
-%% strand the runner in the group for the rest of the run.
+%% This module was NOT the donor for the zone-integration false pass - every
+%% `unregister_player()` here was paired, so a green run left nothing behind.
+%% That was `asobi_match_server_tests`, which had two `_`-prefixed sessions on
+%% the same id that were never killed at all. What this module had was the
+%% failure path: these tests assert in the middle, and a failing assertion
+%% skipped a trailing unregister. Hence `try ... after`.
 with_registered_player(Fun) ->
     ok = pg:join(nova_scope, {player, ~"p1"}, self()),
     try

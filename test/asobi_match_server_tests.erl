@@ -389,11 +389,6 @@ disconnect_starts_grace() ->
     stop(Pid).
 
 disconnect_no_policy_leaves() ->
-    %% Unique id, not `p1`: this test registers a session in the shared
-    %% `nova_scope`, and it kills that session mid-body on purpose - so an
-    %% assertion failing before the kill leaves it registered. Under `p1`
-    %% that survivor is borrowable by any later test; under this id it is
-    %% inert.
     %% Without a reconnect policy, session DOWN goes through handle_leave —
     %% same as an explicit leave/2.
     Pid = start_match(#{min_players => 1, max_players => 2}),
@@ -412,11 +407,6 @@ disconnect_no_policy_leaves() ->
     end.
 
 reconnect_within_grace_keeps() ->
-    %% Unique id, not `p1`: this test registers a session in the shared
-    %% `nova_scope`, and it kills that session mid-body on purpose - so an
-    %% assertion failing before the kill leaves it registered. Under `p1`
-    %% that survivor is borrowable by any later test; under this id it is
-    %% inert.
     %% Disconnect → reconnect inside the grace window leaves the player
     %% counted and re-monitors the new session.
     Pid = start_match(#{
@@ -454,11 +444,6 @@ reconnect_within_grace_keeps() ->
     end.
 
 reconnect_no_policy_errors() ->
-    %% Unique id, not `p1`: this test registers a session in the shared
-    %% `nova_scope`, and it kills that session mid-body on purpose - so an
-    %% assertion failing before the kill leaves it registered. Under `p1`
-    %% that survivor is borrowable by any later test; under this id it is
-    %% inert.
     Pid = start_match(#{min_players => 1, max_players => 2}),
     SessionPid = asobi_test_helpers:fake_session(~"reconnect_no_policy_errors_p1"),
     try

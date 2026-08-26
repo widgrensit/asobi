@@ -111,8 +111,29 @@ player_id() ->
 run_iteration(Ctx, Cmds) ->
     cleanup_world(Ctx),
     Final = lists:foldl(fun(C, S) -> step(C, Ctx, S) end, init_state(), Cmds),
-    timer:sleep(20),
-    check(Ctx, Final).
+    try
+        timer:sleep(20),
+        check(Ctx, Final)
+    after
+        %% The player ids are drawn from a fixed set of five, so a session left
+        %% alive here is still registered when the NEXT iteration joins the
+        %% same id - and `find_player_pid/1` takes the head of the group, so
+        %% the world would monitor a session this test no longer controls.
+        %% Nothing in `check/2` would notice: it compares player_count against
+        %% the model, and a disconnected player stays joined during grace.
+        release_sessions(Final)
+    end.
+
+%% `lists:foldl/3` erases the accumulator, so the model comes back `term()`.
+-spec release_sessions(term()) -> ok.
+release_sessions(#{sessions := Sessions}) when is_map(Sessions) ->
+    maps:foreach(fun release_one/2, Sessions).
+
+-spec release_one(term(), term()) -> ok.
+release_one(PlayerId, Pid) when is_binary(PlayerId), is_pid(Pid) ->
+    asobi_test_helpers:release_session(PlayerId, Pid);
+release_one(_PlayerId, _Pid) ->
+    ok.
 
 init_state() ->
     %% joined = players currently expected to be in the world (whether
