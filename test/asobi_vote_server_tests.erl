@@ -61,6 +61,11 @@ vote_server_test_() ->
         {"live visibility shows tallies", fun live_visibility/0},
         {"ready_up closes when all voted", fun ready_up_close/0},
         {"a late vote is still counted", fun late_vote_is_counted/0},
+        {"a dead vote server is closed, not fatal", fun dead_vote_server_is_closed_not_fatal/0},
+        {"a stopping vote server is closed, not fatal",
+            fun stopping_vote_server_is_closed_not_fatal/0},
+        {"a wedged vote server is busy, not a freeze",
+            fun wedged_vote_server_is_busy_not_a_freeze/0},
         {"quorum not met", fun quorum_not_met/0},
         {"delegation applies", fun delegation/0},
         {"default votes for absent voters", fun default_votes/0},
@@ -305,18 +310,17 @@ ready_up_close() ->
 %% mailbox when that callback runs - a window nothing can aim at, and one this
 %% test never reliably hit.
 %%
-%% It used to sleep 180ms into a 200ms window, leaving 20ms of margin for the
-%% second vote. On a loaded box the sleep overshoots, the window closes first,
-%% and `total_votes` comes back 1: measured failing two runs in four on an
-%% unmodified checkout. The margin is now 800ms of a 1000ms window - the same
-%% property, without racing the deadline it is asserting inside.
+%% It used to sleep 180ms into a 200ms window - 20ms of margin - and failed two
+%% runs in four on an unmodified checkout when the sleep overshot and the window
+%% closed first. 800ms into a 1000ms window keeps the vote genuinely late (80%
+%% in, as before) while giving it 200ms of margin instead of 20ms.
 late_vote_is_counted() ->
     flush(),
     Pid = start_vote(#{window_ms => 1000}),
     unlink(Pid),
     Ref = monitor(process, Pid),
     ok = asobi_vote_server:cast_vote(Pid, ~"p1", ~"a"),
-    timer:sleep(200),
+    timer:sleep(800),
     ok = asobi_vote_server:cast_vote(Pid, ~"p2", ~"b"),
     receive
         {'DOWN', Ref, process, Pid, normal} -> ok
@@ -510,3 +514,52 @@ flush() ->
         _ -> flush()
     after 0 -> ok
     end.
+
+%% widgrensit/asobi#570: a vote server that is gone, or that is resolving and
+%% about to stop, must not exit its caller. `gen_statem:call/2` raises
+%% `{noproc | normal, {gen_statem, call, _}}` in the CALLER, and the callers
+%% here are `asobi_match_server` and `asobi_world_server` calling from inside
+%% their own callbacks - a compound exit reason is a crash to their supervisor,
+%% so one player's `vote.cast` frame dropped every player in the match.
+%%
+%% Driven through a real `gen_statem:call` rather than a hand-raised exit, so
+%% these still fail if the wrapping shape ever changes.
+dead_vote_server_is_closed_not_fatal() ->
+    Pid = start_vote(#{window_ms => 60000}),
+    unlink(Pid),
+    Ref = monitor(process, Pid),
+    exit(Pid, kill),
+    receive
+        {'DOWN', Ref, process, Pid, killed} -> ok
+    after 2000 -> ?assert(false)
+    end,
+    ?assertEqual({error, vote_closed}, asobi_vote_server:cast_vote(Pid, ~"p1", ~"a")),
+    ?assertEqual({error, vote_closed}, asobi_vote_server:cast_veto(Pid, ~"p1")),
+    ?assert(is_process_alive(self())).
+
+%% A server that stops without replying - the resolving case - unwinds as
+%% `{normal, {gen_statem, call, _}}`.
+stopping_vote_server_is_closed_not_fatal() ->
+    Silent = spawn(fun() ->
+        receive
+            _ -> exit(normal)
+        end
+    end),
+    ?assertEqual({error, vote_closed}, asobi_vote_server:cast_vote(Silent, ~"p1", ~"a")),
+    ?assert(is_process_alive(self())).
+
+%% A caller is never held through resolve_and_stop/1's synchronous write: the
+%% call is bounded, so a wedged vote server costs one refused vote rather than
+%% freezing the whole match.
+wedged_vote_server_is_busy_not_a_freeze() ->
+    Wedged = spawn(fun() ->
+        receive
+            _ -> timer:sleep(30_000)
+        end
+    end),
+    Started = erlang:monotonic_time(millisecond),
+    Result = asobi_vote_server:cast_vote(Wedged, ~"p1", ~"a"),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
+    exit(Wedged, kill),
+    ?assertEqual({error, vote_busy}, Result),
+    ?assert(Elapsed < 10_000).

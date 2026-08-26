@@ -988,7 +988,10 @@ start_test_match() ->
 %% stop path rather than to raise this again.
 await_stop(Ref, VotePid, ErrorTag) ->
     receive
-        {'DOWN', Ref, process, VotePid, normal} -> ok
+        {'DOWN', Ref, process, VotePid, normal} -> ok;
+        %% Report the real reason rather than burning the deadline and blaming
+        %% the close.
+        {'DOWN', Ref, process, VotePid, Reason} -> error({ErrorTag, Reason})
     after 5000 ->
         error(ErrorTag)
     end.
