@@ -24,6 +24,8 @@ listings for both worlds and matches. Callers read the table directly
 """.
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0, find_or_create/1, find_or_create/2, cache_listing/3]).
 -export([find_or_create_match/2]).
 -export([init/1, handle_call/3, handle_cast/2]).
@@ -135,7 +137,20 @@ handle_call(_Other, _From, State) ->
 handle_cast({cache_listing, Key, Listing, ExpiresAt}, State) when
     is_tuple(Key), is_list(Listing), is_integer(ExpiresAt)
 ->
-    ets:insert(?LIST_CACHE_TAB, {Key, Listing, ExpiresAt}),
+    %% Every element checked here, once per cache fill, rather than on every
+    %% read: asobi_discovery:cache_lookup/2 promises [map()], and the elements
+    %% come from a ServerMod:listing_info/1 callback implemented outside this
+    %% module - including by extensions. A bad element refuses the write, so a
+    %% browse never serves a listing that is quietly short one world.
+    case lists:all(fun is_map/1, Listing) of
+        true ->
+            ets:insert(?LIST_CACHE_TAB, {Key, Listing, ExpiresAt});
+        false ->
+            ?LOG_WARNING(#{
+                msg => ~"discovery listing not cached: an entry is not a map",
+                key => Key
+            })
+    end,
     {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.

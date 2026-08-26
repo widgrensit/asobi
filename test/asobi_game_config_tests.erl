@@ -18,8 +18,27 @@ game_config_test_() ->
         {"a non-boolean operator guest_auth pins it off",
             fun non_boolean_operator_guest_auth_pins_off/0},
         {"a non-map operator env is ignored, not crashed on", fun non_map_operator_env_ignored/0},
+        {"a malformed operator mode still shadows the script's",
+            fun malformed_operator_mode_still_shadows/0},
         {"script modes resolve through asobi_game_modes", fun script_mode_resolves/0}
     ]}.
+
+%% asobi#435 tranche 3 re-narrowed env_modes/1 for the type checker, which
+%% dropped an operator entry this module cannot use BEFORE the merge - so the
+%% bundle's definition of that name went live instead. This module's guarantee
+%% is that no bundle reload can redefine or drop an operator mode, so a
+%% malformed one must still shadow, and still fail closed when resolved.
+malformed_operator_mode_still_shadows() ->
+    application:set_env(asobi, game_modes, #{~"arena" => [{module, operator_mod}]}),
+    ok = asobi_game_config:apply_config(#{
+        modes => #{~"arena" => #{module => script_mod, match_size => 8}}
+    }),
+    %% The mode fails closed either way. What must not happen is the SCRIPT's
+    %% definition going live under a name the operator pinned - that is the
+    %% guarantee, and re-narrowing env_modes/1 broke it by dropping the
+    %% operator's entry before the merge instead of after.
+    ?assertEqual(undefined, maps:get(~"arena", asobi_game_config:modes(), undefined)),
+    ?assertEqual({error, not_found}, asobi_game_modes:resolve_game_module(~"arena")).
 
 setup() ->
     Saved = [{Key, application:get_env(asobi, Key)} || Key <- keys()],

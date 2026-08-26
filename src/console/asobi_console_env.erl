@@ -64,13 +64,15 @@ resolve() ->
                 detail =>
                     ~"enabled but nothing could sign in - set ASOBI_OPS_SECRET_FILE (preferred) or ASOBI_OPS_SECRET, or provision ASOBI_OPS_TOKEN_SECRET and GAME_ID for the managed minted-token path",
                 effect => ~"the console stays off; the node is unaffected"
-            });
+            }),
+            ok;
         {true, true} ->
             ?LOG_NOTICE(#{
                 msg => ~"console_enabled",
                 path => ~"/console",
                 detail => ~"Shares the game port. Put it behind TLS and restrict who can reach it."
-            });
+            }),
+            ok;
         _ ->
             ok
     end.

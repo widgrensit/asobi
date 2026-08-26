@@ -98,15 +98,14 @@ live_boards() ->
 %% are already gone from.
 -spec evict_player(binary()) -> ok.
 evict_player(PlayerId) ->
-    lists:foreach(
-        fun(BoardId) ->
-            case whereis_board_optional(BoardId) of
-                {ok, Pid} -> gen_server:cast(Pid, {evict, PlayerId});
-                not_found -> ok
-            end
-        end,
-        live_boards()
-    ).
+    _ = [
+        case whereis_board_optional(BoardId) of
+            {ok, Pid} -> gen_server:cast(Pid, {evict, PlayerId});
+            not_found -> ok
+        end
+     || BoardId <- live_boards()
+    ],
+    ok.
 
 -spec validate_entries([term()]) -> [{binary(), number(), pos_integer()}].
 validate_entries(Entries) ->
@@ -164,7 +163,7 @@ handle_call({top, N}, _From, #{table := Table} = State) ->
     {reply, Entries, State};
 handle_call({rank, PlayerId}, _From, #{table := Table, player_index := Idx} = State) ->
     case ets:lookup(Idx, PlayerId) of
-        [{PlayerId, Score}] ->
+        [{PlayerId, Score}] when is_number(Score) ->
             Key = {-Score, PlayerId},
             Pos = count_before(Table, Key) + 1,
             {reply, {ok, Pos}, State};
@@ -173,7 +172,7 @@ handle_call({rank, PlayerId}, _From, #{table := Table, player_index := Idx} = St
     end;
 handle_call({around, PlayerId, N}, _From, #{table := Table, player_index := Idx} = State) ->
     case ets:lookup(Idx, PlayerId) of
-        [{PlayerId, Score}] ->
+        [{PlayerId, Score}] when is_number(Score) ->
             Key = {-Score, PlayerId},
             Entries = entries_around(Table, Key, N),
             {reply, Entries, State};
@@ -190,7 +189,7 @@ handle_cast(
     is_number(Score)
 ->
     case ets:lookup(Idx, PlayerId) of
-        [{PlayerId, OldScore}] ->
+        [{PlayerId, OldScore}] when is_number(OldScore) ->
             ets:delete(Table, {-OldScore, PlayerId});
         [] ->
             ok
@@ -202,8 +201,14 @@ handle_cast({evict, PlayerId}, #{table := Table, player_index := Idx, dirty := D
     is_binary(PlayerId)
 ->
     case ets:lookup(Idx, PlayerId) of
-        [{PlayerId, Score}] ->
+        [{PlayerId, Score}] when is_number(Score) ->
             ets:delete(Table, {-Score, PlayerId}),
+            ets:delete(Idx, PlayerId);
+        [{PlayerId, _Unusable}] ->
+            %% Unreachable today - both writers guard is_number - but this is
+            %% the erasure path (asobi_player_erase), and a board never re-reads
+            %% Postgres, so leaving the row would keep serving an erased player
+            %% from top/rank/around indefinitely.
             ets:delete(Idx, PlayerId);
         [] ->
             ok

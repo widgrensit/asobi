@@ -12,8 +12,37 @@
 controller_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         fun each_route_answers_its_family_not_found_when_disabled/0,
-        fun routes_reach_their_handler_when_enabled/0
+        fun routes_reach_their_handler_when_enabled/0,
+        fun a_malformed_binding_answers_the_same_on_every_handler/0
     ]}.
+
+%% asobi#435 tranche 3 added `when is_binary(Col), is_binary(Key)` to these
+%% handlers. guarded/2 checks whether storage is enabled; it does not catch, so
+%% a guard without a fallback clause turns a 404 into a 500 - and the first
+%% version of that change gave do_get_storage/1 a fallback and do_delete_storage/1
+%% only the guard.
+a_malformed_binding_answers_the_same_on_every_handler() ->
+    application:set_env(asobi, storage, true),
+    Req = #{
+        bindings => #{~"collection" => 123, ~"key" => ~"theme"},
+        json => #{~"value" => #{}},
+        qs => ~"",
+        auth_data => #{player_id => ?PID}
+    },
+    Handlers = [
+        {get, fun asobi_storage_controller:get_storage/1},
+        {put, fun asobi_storage_controller:put_storage/1},
+        {delete, fun asobi_storage_controller:delete_storage/1}
+    ],
+    Crashed = [Name || {Name, Fn} <- Handlers, crashes(Fn, Req)],
+    ?assertEqual([], Crashed).
+
+crashes(Fn, Req) ->
+    try Fn(Req) of
+        _ -> false
+    catch
+        _:_ -> true
+    end.
 
 setup() ->
     Was = application:get_env(asobi, storage),

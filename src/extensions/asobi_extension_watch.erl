@@ -22,7 +22,10 @@ It monitors rather than links: a monitor cannot influence what it watches.
 
 -spec start_link([asobi_extension:name()]) -> {ok, pid()} | {error, term()}.
 start_link(Names) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, Names, []).
+    case gen_server:start_link({local, ?MODULE}, ?MODULE, Names, []) of
+        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+        {error, _} = Error -> Error
+    end.
 
 %% Monitoring happens in handle_continue, not init: `which_children` is a call
 %% into the parent supervisor, and the parent is still inside its own init
@@ -51,12 +54,17 @@ handle_info({'DOWN', Ref, process, _Pid, Reason}, #{monitors := Monitors} = Stat
                 reason => Reason,
                 detail => ~"this extension is no longer running; the node is otherwise unaffected"
             }),
-            {noreply, State#{monitors => Rest}};
+            {noreply, State#{monitors => monitors(Rest)}};
         error ->
             {noreply, State}
     end;
 handle_info(_Message, State) ->
     {noreply, State}.
+
+%% The monitor map is this module's own, but maps:remove/2 answers a widened
+%% map. See docs/eqwalizer-idioms.md.
+-spec monitors(term()) -> #{reference() => atom()}.
+monitors(M) when is_map(M) -> #{R => N || R := N <- M, is_reference(R), is_atom(N)}.
 
 -spec handle_call(term(), gen_server:from(), state()) -> {reply, ok, state()}.
 handle_call(_Request, _From, State) ->

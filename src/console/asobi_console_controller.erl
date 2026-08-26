@@ -64,7 +64,7 @@ The binding is a map key, never a path segment joined onto a directory - see
 typo or a traversal attempt.
 """.
 -spec asset(cowboy_req:req()) -> response().
-asset(#{bindings := #{~"file" := Name}} = Req) ->
+asset(#{bindings := #{~"file" := Name}} = Req) when is_binary(Name) ->
     case asobi_console:enabled() andalso asobi_console:asset(Name) of
         {ok, Asset} -> serve(Asset, Req);
         _ -> {asobi_error, ~"console.not_found"}
@@ -132,7 +132,12 @@ login(Req) ->
 authenticate(#{json := #{~"secret" := Secret} = Body} = Req) ->
     case asobi_ops_auth:verify_secret(Secret) of
         true ->
-            {ok, Session} = asobi_console_session:create(maps:get(~"label", Body, ~"operator")),
+            %% asobi_console_session:label/1 already normalises every
+            %% non-binary, empty, over-long and non-printable label to
+            %% "operator"; a second copy here would only drift from it.
+            {ok, Session} = asobi_console_session:create(
+                maps:get(~"label", Body, ~"operator")
+            ),
             granted(Session, Req);
         false ->
             rejected(Req)
@@ -292,6 +297,6 @@ actor(#{display := Display, source := Source, caps := Caps, attested := Attested
 -spec version() -> binary().
 version() ->
     case application:get_key(asobi, vsn) of
-        {ok, Vsn} when is_list(Vsn) -> list_to_binary(Vsn);
+        {ok, Vsn} when is_list(Vsn) -> asobi_ops_features:vsn_binary(Vsn);
         _ -> ~"unknown"
     end.
