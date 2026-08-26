@@ -125,7 +125,7 @@ step({join, P}, #{world_pid := Pid}, #{joined := J, sessions := Ss} = S) ->
         true ->
             S;
         false ->
-            SessionPid = fake_session(P),
+            SessionPid = asobi_test_helpers:fake_session(P),
             case asobi_world_server:join(Pid, P) of
                 ok ->
                     S#{
@@ -149,7 +149,7 @@ step({disconnect, P}, _Ctx, #{joined := J, sessions := Ss} = S) ->
 step({reconnect, P}, #{world_pid := Pid}, #{joined := J, sessions := Ss} = S) ->
     case sets:is_element(P, J) andalso not maps:is_key(P, Ss) of
         true ->
-            SessionPid = fake_session(P),
+            SessionPid = asobi_test_helpers:fake_session(P),
             case asobi_world_server:reconnect(Pid, P) of
                 ok ->
                     S#{sessions => Ss#{P => SessionPid}};
@@ -204,16 +204,6 @@ start_world() ->
     timer:sleep(40),
     ServerPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
     #{instance_pid => InstancePid, world_pid => ServerPid}.
-
-fake_session(PlayerId) ->
-    Pid = spawn(fun L() ->
-        receive
-            stop -> ok;
-            _ -> L()
-        end
-    end),
-    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
-    Pid.
 
 -spec narrow_list(term()) -> [term()].
 narrow_list(L) when is_list(L) -> L.

@@ -73,90 +73,102 @@ cleanup(_) ->
     meck:unload(asobi_repo),
     ok.
 
-register_player() ->
-    pg:join(nova_scope, {player, ~"p1"}, self()).
-
-unregister_player() ->
-    pg:leave(nova_scope, {player, ~"p1"}, self()).
+%% Registers THIS process (the eunit runner, alive for the whole run) under a
+%% shared-scope key, so leaving is not optional: `nova_scope` and `{player,
+%% Id}` are global across every module in the run, and a registration that
+%% outlives its test is lent to any later test using the same id. That is how
+%% asobi_world_zone_integration_tests came to pass only in a full run - it
+%% found a session it never created and subscribed it to four zones.
+%%
+%% Paired via `try ... after` rather than a trailing call: these tests assert
+%% in the middle, and a failing assertion used to skip the unregister and
+%% strand the runner in the group for the rest of the run.
+with_registered_player(Fun) ->
+    ok = pg:join(nova_scope, {player, ~"p1"}, self()),
+    try
+        Fun()
+    after
+        pg:leave(nova_scope, {player, ~"p1"}, self())
+    end.
 
 join_world_chat() ->
-    register_player(),
-    ChatState = asobi_world_chat:init(~"wc1", #{chat => #{world => true}}),
-    asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState),
-    ChannelId = asobi_world_chat:channel_id(~"wc1", world, undefined),
-    Members = pg:get_members(nova_scope, {chat, ChannelId}),
-    ?assert(lists:member(self(), Members)),
-    unregister_player().
+    with_registered_player(fun() ->
+        ChatState = asobi_world_chat:init(~"wc1", #{chat => #{world => true}}),
+        asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState),
+        ChannelId = asobi_world_chat:channel_id(~"wc1", world, undefined),
+        Members = pg:get_members(nova_scope, {chat, ChannelId}),
+        ?assert(lists:member(self(), Members))
+    end).
 
 join_zone_chat() ->
-    register_player(),
-    ChatState = asobi_world_chat:init(~"wc2", #{chat => #{zone => true}}),
-    asobi_world_chat:player_joined(~"p1", {2, 3}, ChatState),
-    ChannelId = asobi_world_chat:channel_id(~"wc2", zone, {2, 3}),
-    Members = pg:get_members(nova_scope, {chat, ChannelId}),
-    ?assert(lists:member(self(), Members)),
-    unregister_player().
+    with_registered_player(fun() ->
+        ChatState = asobi_world_chat:init(~"wc2", #{chat => #{zone => true}}),
+        asobi_world_chat:player_joined(~"p1", {2, 3}, ChatState),
+        ChannelId = asobi_world_chat:channel_id(~"wc2", zone, {2, 3}),
+        Members = pg:get_members(nova_scope, {chat, ChannelId}),
+        ?assert(lists:member(self(), Members))
+    end).
 
 leave_cleans_up() ->
-    register_player(),
-    ChatState = asobi_world_chat:init(~"wc3", #{chat => #{world => true, zone => true}}),
-    asobi_world_chat:player_joined(~"p1", {1, 1}, ChatState),
-    asobi_world_chat:player_left(~"p1", {1, 1}, ChatState),
-    WorldChannel = asobi_world_chat:channel_id(~"wc3", world, undefined),
-    ZoneChannel = asobi_world_chat:channel_id(~"wc3", zone, {1, 1}),
-    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, WorldChannel}))),
-    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ZoneChannel}))),
-    unregister_player().
+    with_registered_player(fun() ->
+        ChatState = asobi_world_chat:init(~"wc3", #{chat => #{world => true, zone => true}}),
+        asobi_world_chat:player_joined(~"p1", {1, 1}, ChatState),
+        asobi_world_chat:player_left(~"p1", {1, 1}, ChatState),
+        WorldChannel = asobi_world_chat:channel_id(~"wc3", world, undefined),
+        ZoneChannel = asobi_world_chat:channel_id(~"wc3", zone, {1, 1}),
+        ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, WorldChannel}))),
+        ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ZoneChannel})))
+    end).
 
 zone_change_swaps_chat() ->
-    register_player(),
-    ChatState = asobi_world_chat:init(~"wc4", #{chat => #{zone => true, grid_size => 10}}),
-    asobi_world_chat:player_joined(~"p1", {1, 1}, ChatState),
-    OldChannel = asobi_world_chat:channel_id(~"wc4", zone, {1, 1}),
-    ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, OldChannel}))),
-    asobi_world_chat:player_zone_changed(~"p1", {1, 1}, {2, 2}, 10, ChatState),
-    NewChannel = asobi_world_chat:channel_id(~"wc4", zone, {2, 2}),
-    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, OldChannel}))),
-    ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, NewChannel}))),
-    unregister_player().
+    with_registered_player(fun() ->
+        ChatState = asobi_world_chat:init(~"wc4", #{chat => #{zone => true, grid_size => 10}}),
+        asobi_world_chat:player_joined(~"p1", {1, 1}, ChatState),
+        OldChannel = asobi_world_chat:channel_id(~"wc4", zone, {1, 1}),
+        ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, OldChannel}))),
+        asobi_world_chat:player_zone_changed(~"p1", {1, 1}, {2, 2}, 10, ChatState),
+        NewChannel = asobi_world_chat:channel_id(~"wc4", zone, {2, 2}),
+        ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, OldChannel}))),
+        ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, NewChannel})))
+    end).
 
 proximity_chat() ->
-    register_player(),
-    ChatState = asobi_world_chat:init(~"wc5", #{chat => #{proximity => 1, grid_size => 5}}),
-    asobi_world_chat:player_joined(~"p1", {2, 2}, ChatState),
-    Center = asobi_world_chat:channel_id(~"wc5", proximity, {2, 2}),
-    Corner = asobi_world_chat:channel_id(~"wc5", proximity, {1, 1}),
-    Far = asobi_world_chat:channel_id(~"wc5", proximity, {4, 4}),
-    ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, Center}))),
-    ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, Corner}))),
-    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, Far}))),
-    unregister_player().
+    with_registered_player(fun() ->
+        ChatState = asobi_world_chat:init(~"wc5", #{chat => #{proximity => 1, grid_size => 5}}),
+        asobi_world_chat:player_joined(~"p1", {2, 2}, ChatState),
+        Center = asobi_world_chat:channel_id(~"wc5", proximity, {2, 2}),
+        Corner = asobi_world_chat:channel_id(~"wc5", proximity, {1, 1}),
+        Far = asobi_world_chat:channel_id(~"wc5", proximity, {4, 4}),
+        ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, Center}))),
+        ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, Corner}))),
+        ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, Far})))
+    end).
 
 no_chat_config() ->
-    register_player(),
-    ChatState = asobi_world_chat:init(~"wc6", #{}),
-    asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState),
-    WorldChannel = asobi_world_chat:channel_id(~"wc6", world, undefined),
-    ZoneChannel = asobi_world_chat:channel_id(~"wc6", zone, {0, 0}),
-    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, WorldChannel}))),
-    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ZoneChannel}))),
-    unregister_player().
+    with_registered_player(fun() ->
+        ChatState = asobi_world_chat:init(~"wc6", #{}),
+        asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState),
+        WorldChannel = asobi_world_chat:channel_id(~"wc6", world, undefined),
+        ZoneChannel = asobi_world_chat:channel_id(~"wc6", zone, {0, 0}),
+        ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, WorldChannel}))),
+        ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ZoneChannel})))
+    end).
 
 %% #299: the global tier carries no world id, so two worlds of the same game
 %% resolve the same channel process.
 global_chat_joined_and_left() ->
-    register_player(),
-    ChatState = asobi_world_chat:init(~"wc8", #{chat => #{global => [~"general"]}}),
-    ChatState2 = asobi_world_chat:init(~"wc9", #{chat => #{global => [~"general"]}}),
-    ChannelId = asobi_world_chat:global_channel_id(~"general"),
-    ?assertEqual(~"global:general", ChannelId),
-    asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState),
-    ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, ChannelId}))),
-    asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState2),
-    asobi_world_chat:player_left(~"p1", {0, 0}, ChatState2),
-    asobi_world_chat:player_left(~"p1", {0, 0}, ChatState),
-    ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ChannelId}))),
-    unregister_player().
+    with_registered_player(fun() ->
+        ChatState = asobi_world_chat:init(~"wc8", #{chat => #{global => [~"general"]}}),
+        ChatState2 = asobi_world_chat:init(~"wc9", #{chat => #{global => [~"general"]}}),
+        ChannelId = asobi_world_chat:global_channel_id(~"general"),
+        ?assertEqual(~"global:general", ChannelId),
+        asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState),
+        ?assert(lists:member(self(), pg:get_members(nova_scope, {chat, ChannelId}))),
+        asobi_world_chat:player_joined(~"p1", {0, 0}, ChatState2),
+        asobi_world_chat:player_left(~"p1", {0, 0}, ChatState2),
+        asobi_world_chat:player_left(~"p1", {0, 0}, ChatState),
+        ?assertNot(lists:member(self(), pg:get_members(nova_scope, {chat, ChannelId})))
+    end).
 
 global_channels_test_() ->
     [

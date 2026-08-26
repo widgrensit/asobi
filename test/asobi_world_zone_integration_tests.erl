@@ -457,7 +457,7 @@ world_input_crossing_touches_only_ring_delta() ->
     %% the module was run on its own. Hence the distinctive id: `p1` is what
     %% made it borrowable.
     Player = ~"ring275_p1",
-    SessionPid = fake_session(Player, self()),
+    SessionPid = asobi_test_helpers:fake_session(Player, self()),
     %% The session and the world are released by the outer `after`, so it has
     %% to open BEFORE the join and the asserts below - the first of which is
     %% the one this test used to fail on. Releasing them only from a block the
@@ -531,24 +531,6 @@ count_messages(Tag) ->
     after 0 -> 0
     end.
 
-%% A live, pg-registered session for a player, so find_player_pid/1 and
-%% backfill_zone_subscribers/4 (both pg-based) resolve to a real process
-%% instead of silently falling through to not_loaded/self()-fallback
-%% behaviour. Forwards every asobi_message to Owner so a test can assert on
-%% actual delivery, not just zone subscriber-map bookkeeping.
-fake_session(PlayerId, Owner) ->
-    Pid = spawn(fun Loop() ->
-        receive
-            stop ->
-                ok;
-            Msg ->
-                Owner ! {PlayerId, Msg},
-                Loop()
-        end
-    end),
-    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
-    Pid.
-
 %% Blocks until PlayerId's forwarded messages mention EntityId in ANY of the
 %% three world.tick carriers, or the timeout elapses.
 %%
@@ -607,8 +589,8 @@ crossing_into_a_lazily_created_zone_backfills_stationary_neighbours() ->
         }),
     Ada = ~"bf275_ada",
     Bob = ~"bf275_bob",
-    AdaPid = fake_session(Ada, self()),
-    BobPid = fake_session(Bob, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
+    BobPid = asobi_test_helpers:fake_session(Bob, self()),
     try
         %% Ada joins and stays put. Spawns at {100.0,100.0} => zone {1,1};
         %% with view_radius=1 that ring already covers {2,1} - but {2,1} is
@@ -658,7 +640,7 @@ npc_crossing_into_an_unloaded_zone_creates_it_and_backfills() ->
             lazy_zones => true, grid_size => 5
         }),
     Ada = ~"npc271_ada",
-    AdaPid = fake_session(Ada, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
     try
         %% Ada joins at {100.0,100.0} => zone {1,1}; {2,1} is in her ring but
         %% not loaded, so her ring-subscribe to it no-ops.
@@ -694,7 +676,7 @@ script_spawn_into_a_lazily_created_zone_backfills_neighbours() ->
             lazy_zones => true, grid_size => 5
         }),
     Ada = ~"bf275_spawn_ada",
-    AdaPid = fake_session(Ada, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
     try
         ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),
         timer:sleep(20),
@@ -757,8 +739,8 @@ crossing_out_of_ring_removes_stationary_neighbour() ->
         }),
     Ada = ~"leave_ring_ada",
     Bob = ~"leave_ring_bob",
-    AdaPid = fake_session(Ada, self()),
-    BobPid = fake_session(Bob, self()),
+    AdaPid = asobi_test_helpers:fake_session(Ada, self()),
+    BobPid = asobi_test_helpers:fake_session(Bob, self()),
     try
         %% Both spawn at {100.0, 100.0} => zone {1,1}.
         ?assertEqual(ok, asobi_world_server:join(Pid, Ada)),

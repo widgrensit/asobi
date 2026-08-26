@@ -393,22 +393,12 @@ empty_phases_does_not_finish() ->
 %% Spawn a fake player session and register it in the pg group the world
 %% server monitors via find_player_pid/1. Killing this pid triggers the
 %% world_server's 'DOWN' handler.
-fake_session(PlayerId) ->
-    Pid = spawn(fun Loop() ->
-        receive
-            stop -> ok;
-            _ -> Loop()
-        end
-    end),
-    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
-    Pid.
-
 player_ttl_zero_removes_on_down() ->
     %% Default behavior: WS drop with no reconnect policy should fully clean
     %% up the player. Without this, the zone accumulates zombie entities.
     Ctx = #{world_pid := Pid} = start_world(),
     PlayerId = <<"ttl0">>,
-    SessionPid = fake_session(PlayerId),
+    SessionPid = asobi_test_helpers:fake_session(PlayerId),
     asobi_world_server:join(Pid, PlayerId),
     ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
     exit(SessionPid, kill),
@@ -421,7 +411,7 @@ player_ttl_minus_one_keeps_on_down() ->
     %% The game module manages reconnection state itself.
     Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => -1}),
     PlayerId = <<"ttlneg">>,
-    SessionPid = fake_session(PlayerId),
+    SessionPid = asobi_test_helpers:fake_session(PlayerId),
     asobi_world_server:join(Pid, PlayerId),
     ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
     exit(SessionPid, kill),
@@ -434,7 +424,7 @@ player_ttl_grace_starts_grace() ->
     %% grace flow; player count stays at 1 during the grace window.
     Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => 5_000}),
     PlayerId = <<"ttlgrace">>,
-    SessionPid = fake_session(PlayerId),
+    SessionPid = asobi_test_helpers:fake_session(PlayerId),
     asobi_world_server:join(Pid, PlayerId),
     ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
     exit(SessionPid, kill),
@@ -499,7 +489,7 @@ join_with_no_live_session_does_not_crash() ->
 reconnect_with_no_live_session_returns_error() ->
     Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => 5_000}),
     PlayerId = ~"reconnect_no_session",
-    SessionPid = fake_session(PlayerId),
+    SessionPid = asobi_test_helpers:fake_session(PlayerId),
     ?assertEqual(ok, asobi_world_server:join(Pid, PlayerId)),
     ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
     exit(SessionPid, kill),
@@ -516,13 +506,13 @@ reconnect_with_no_live_session_returns_error() ->
 failed_reconnect_leaves_grace_intact() ->
     Ctx = #{world_pid := Pid} = start_world(#{player_ttl_ms => 5_000}),
     PlayerId = ~"retry_after_no_session",
-    S1 = fake_session(PlayerId),
+    S1 = asobi_test_helpers:fake_session(PlayerId),
     ?assertEqual(ok, asobi_world_server:join(Pid, PlayerId)),
     exit(S1, kill),
     timer:sleep(100),
     ?assertEqual({error, no_live_session}, asobi_world_server:reconnect(Pid, PlayerId)),
     {_StateName, #{reconnect_state := #{disconnected := #{PlayerId := _}}}} = sys:get_state(Pid),
-    _S2 = fake_session(PlayerId),
+    _S2 = asobi_test_helpers:fake_session(PlayerId),
     ?assertEqual(ok, asobi_world_server:reconnect(Pid, PlayerId)),
     ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid))),
     stop_world(Ctx).
@@ -787,7 +777,7 @@ persistent_reaches_the_zone_config_test() ->
         #{instance_pid := InstancePid} = start_world(#{persistent => true}),
         try
             ZoneManager = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
-            #{zone_config := ZoneConfig} = sys:get_state(ZoneManager),
+            ZoneConfig = zone_config(ZoneManager),
             ?assertEqual(true, maps:get(persistence, ZoneConfig))
         after
             exit(InstancePid, shutdown)
@@ -802,11 +792,19 @@ a_world_that_did_not_ask_is_not_persistent_test() ->
         #{instance_pid := InstancePid} = start_world(),
         try
             ZoneManager = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
-            #{zone_config := ZoneConfig} = sys:get_state(ZoneManager),
+            ZoneConfig = zone_config(ZoneManager),
             ?assertEqual(false, maps:get(persistence, ZoneConfig))
         after
             exit(InstancePid, shutdown)
         end
     after
         cleanup(ok)
+    end.
+
+%% sys:get_state/1 is term(); narrow before indexing rather than reading a
+%% field out of an unknown shape.
+-spec zone_config(pid() | undefined) -> map().
+zone_config(ZoneManager) when is_pid(ZoneManager) ->
+    case sys:get_state(ZoneManager) of
+        #{zone_config := Config} when is_map(Config) -> Config
     end.
