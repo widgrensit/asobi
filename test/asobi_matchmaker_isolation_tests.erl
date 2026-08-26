@@ -124,7 +124,7 @@ with_world_server(Fun) ->
     %% against a stub of a function that is gone.
     meck:new(asobi_world_server, [passthrough, no_link]),
     Self = self(),
-    meck:expect(asobi_world_server, join, fun(_WorldPid, PlayerId) ->
+    meck:expect(asobi_world_server, join_if_session, fun(_WorldPid, PlayerId) ->
         Self ! {joined, PlayerId},
         ok
     end),

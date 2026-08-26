@@ -645,7 +645,18 @@ join_if_present(WorldPid, PlayerId, Mode) ->
             asobi_telemetry:matchmaker_dropped(Mode, no_live_session),
             offline;
         online ->
-            asobi_world_server:join(WorldPid, PlayerId)
+            %% `require_session` and not `join/2`: the screen above and the
+            %% seat are two separate pg reads, and everything between them -
+            %% the game's join hook, place_player/3, every other member's join
+            %% in this same gen_statem - is inside the window. The world server
+            %% re-checks in the callback that seats, so there is none.
+            case asobi_world_server:join_if_session(WorldPid, PlayerId) of
+                {error, no_live_session} ->
+                    asobi_telemetry:matchmaker_dropped(Mode, no_live_session),
+                    offline;
+                Other ->
+                    Other
+            end
     end.
 
 %% Explicit recursion: `lists:foldl/3` erases the accumulator type, and the
@@ -700,7 +711,7 @@ discard_unoccupied(0, InstancePid, Mode, WorldId) ->
         mode => Mode,
         world_id => WorldId
     }),
-    asobi_telemetry:matchmaker_failed(Mode, 0),
+    asobi_telemetry:matchmaker_dropped(Mode, unoccupied),
     _ = supervisor:terminate_child(asobi_world_instance_sup, InstancePid),
     ok;
 discard_unoccupied(_Seated, _InstancePid, _Mode, _WorldId) ->

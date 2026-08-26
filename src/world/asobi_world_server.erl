@@ -13,6 +13,7 @@ transient matches use `asobi_match_server` instead.
 -export([
     start_link/1,
     join/2,
+    join_if_session/2,
     join/3,
     join/4,
     leave/2,
@@ -85,6 +86,36 @@ resync(Pid, PlayerId, Coords) ->
 -spec join(pid(), binary()) -> ok | {error, term()}.
 join(Pid, PlayerId) ->
     case gen_statem:call(Pid, {join, PlayerId, #{}}) of
+        {ok, _ZonePid} -> ok;
+        {error, _} = Err -> Err
+    end.
+
+-doc """
+As `join/2`, but refuse a player who has no live session.
+
+`join/2` resolves the session through `pg` and seats the player either way,
+which is deliberate: the Erlang embedding path and around twenty tests join a
+session-less player on purpose. But a player seated that way carries
+`session_pid => undefined` and no monitor, so `find_player_by_pid/2` - which
+matches on the session pid - can never resolve a `DOWN` to them,
+`handle_leave/2` is unreachable, and the roster never empties. The world ticks
+forever around someone who is not there.
+
+A caller that screens beforehand cannot close that on its own. The screen and
+the seat are two separate `pg` reads with the game's `join` hook,
+`place_player/3` and every other member's join in between - on a Lua world that
+is tens to hundreds of milliseconds, and the per-player `matched` frames the
+matchmaker sends tell an observer exactly when the next join begins. Checking
+HERE puts the read and the seat in the same callback, so there is no window at
+all.
+
+Refused before `asobi_game_join:invoke/4` and `place_player/3` for the same
+reason asobi#258 rolls those back together: a late refusal would leave the
+game module's join applied and the entity in the zone.
+""".
+-spec join_if_session(pid(), binary()) -> ok | {error, term()}.
+join_if_session(Pid, PlayerId) ->
+    case gen_statem:call(Pid, {join, PlayerId, #{}, require_session}) of
         {ok, _ZonePid} -> ok;
         {error, _} = Err -> Err
     end.
@@ -346,6 +377,21 @@ running(
     asobi_world_ticker:set_zone_manager(TickerPid, ZoneManagerPid, self()),
     asobi_telemetry:world_started(WorldId, maps:get(mode, State, undefined)),
     keep_state_and_data;
+running({call, From}, {join, PlayerId, Ctx, require_session}, #{world_id := WorldId} = State) when
+    is_binary(PlayerId)
+->
+    case find_player_pid(PlayerId) of
+        undefined ->
+            asobi_telemetry:game_error(join_no_live_session, #{world_id => WorldId}),
+            ?LOG_WARNING(#{
+                event => join_refused_no_live_session,
+                world_id => WorldId,
+                player_id => PlayerId
+            }),
+            {keep_state_and_data, [{reply, From, {error, no_live_session}}]};
+        _PlayerPid ->
+            handle_join(From, PlayerId, Ctx, State)
+    end;
 running({call, From}, {join, PlayerId, Ctx}, State) ->
     handle_join(From, PlayerId, Ctx, State);
 running(cast, {leave, PlayerId}, State) ->
@@ -893,11 +939,19 @@ handle_join(
                                         %% what reaches here is the residual
                                         %% race, so a non-zero rate is worth
                                         %% knowing about.
+                                        %% No `player_id` in the details. Every
+                                        %% other game_error/2 site carries only
+                                        %% module/world/coords, three consumers
+                                        %% attach to this stream (one exports
+                                        %% to the SaaS control plane), and ADR
+                                        %% 0005 warns that a naive exporter
+                                        %% maps details to labels - which would
+                                        %% be per-player cardinality and a
+                                        %% pseudonymous id leaving the game
+                                        %% environment. The WARNING below has
+                                        %% the id for the operator.
                                         asobi_telemetry:game_error(
-                                            join_no_live_session, #{
-                                                world_id => WorldId,
-                                                player_id => PlayerId
-                                            }
+                                            join_no_live_session, #{world_id => WorldId}
                                         ),
                                         ?LOG_WARNING(#{
                                             event => join_no_live_session,

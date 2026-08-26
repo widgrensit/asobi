@@ -298,7 +298,12 @@ fill_queue_with_bots() ->
 fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
     ModeConfig = mode_config(Mode),
     BotConfig = maps:get(bots, ModeConfig, #{}),
-    case maps:get(enabled, BotConfig, false) andalso fillable(Mode, ModeConfig) of
+    %% `=:= true` rather than a bare `andalso`: a sys.config `game_modes` entry
+    %% is never shape-validated, so `bots => #{enabled => 1}` is reachable.
+    %% `andalso` raises badarg on it and the old `case` case_clause'd - either
+    %% way this gen_server dies every ?CHECK_INTERVAL and silently loses its
+    %% `known` state. Total is the right shape for operator-supplied config.
+    case maps:get(enabled, BotConfig, false) =:= true andalso fillable(Mode, ModeConfig) of
         true ->
             MinPlayers = bot_min_players(BotConfig),
             %% Never fill past max_players: a match_size=2/max_players=2

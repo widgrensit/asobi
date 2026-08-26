@@ -787,7 +787,7 @@ persistent_reaches_the_zone_config_test() ->
         #{instance_pid := InstancePid} = start_world(#{persistent => true}),
         try
             ZoneManager = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
-            #{zone_config := ZoneConfig} = sys:get_state(ZoneManager),
+            ZoneConfig = zone_config(ZoneManager),
             ?assertEqual(true, maps:get(persistence, ZoneConfig))
         after
             exit(InstancePid, shutdown)
@@ -802,11 +802,74 @@ a_world_that_did_not_ask_is_not_persistent_test() ->
         #{instance_pid := InstancePid} = start_world(),
         try
             ZoneManager = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
-            #{zone_config := ZoneConfig} = sys:get_state(ZoneManager),
+            ZoneConfig = zone_config(ZoneManager),
             ?assertEqual(false, maps:get(persistence, ZoneConfig))
         after
             exit(InstancePid, shutdown)
         end
     after
         cleanup(ok)
+    end.
+
+%% widgrensit/asobi#569 security review: a caller that screens for a live
+%% session before calling join/2 cannot close the window on its own - the
+%% screen and the seat are two separate pg reads with the game's join hook,
+%% place_player/3 and every other member's join in between. join/3 puts the
+%% read and the seat in the same callback.
+join_require_session_refuses_without_one_test() ->
+    setup(),
+    try
+        refuses_without_session()
+    after
+        cleanup(ok)
+    end.
+
+refuses_without_session() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    try
+        PlayerId = ~"require_session_absent",
+        %% Only meaningful while nobody holds this id in the shared scope.
+        [] = pg:get_members(nova_scope, {player, PlayerId}),
+        ?assertEqual(
+            {error, no_live_session},
+            asobi_world_server:join_if_session(Pid, PlayerId)
+        ),
+        %% Refused before the game module's join and place_player/3, so nothing
+        %% is left half-applied.
+        ?assertEqual(0, maps:get(player_count, asobi_world_server:get_info(Pid)))
+    after
+        stop_world(Ctx)
+    end.
+
+join_require_session_seats_with_one_test() ->
+    setup(),
+    try
+        seats_with_session()
+    after
+        cleanup(ok)
+    end.
+
+seats_with_session() ->
+    Ctx = #{world_pid := Pid} = start_world(),
+    try
+        PlayerId = ~"require_session_present",
+        SessionPid = fake_session(PlayerId),
+        try
+            ?assertEqual(ok, asobi_world_server:join_if_session(Pid, PlayerId)),
+            ?assertEqual(1, maps:get(player_count, asobi_world_server:get_info(Pid)))
+        after
+            exit(SessionPid, kill)
+        end
+    after
+        stop_world(Ctx)
+    end.
+
+%% sys:get_state/1 is term(); narrow before indexing rather than reading a
+%% field out of an unknown shape. `pid() | undefined` because the caller hands
+%% this `asobi_world_instance:get_child/2`, which can answer either - the guard
+%% then makes `undefined` a loud function_clause.
+-spec zone_config(pid() | undefined) -> map().
+zone_config(ZoneManager) when is_pid(ZoneManager) ->
+    case sys:get_state(ZoneManager) of
+        #{zone_config := Config} when is_map(Config) -> Config
     end.
