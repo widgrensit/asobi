@@ -117,11 +117,12 @@ handle_info({'DOWN', _, process, MatchPid, _}, #{match_pid := MatchPid} = State)
 handle_info(_, State) ->
     {noreply, State}.
 
-%% Spec'd against the presence contract rather than term(): these are named
-%% shapes core has to keep, not an ad-hoc guess at an internal protocol.
-%% Reshaping one means editing asobi_presence:message/0, which breaks
-%% dialyzer at the producing send/2 call.
--spec handle_presence_message(asobi_presence:message(), map()) ->
+%% `dynamic()` because a gen_server mailbox is a boundary: what arrives is
+%% `term()` and only the clause heads below decide what it was. The shapes those
+%% heads match are `t:asobi_presence:message/0` - named shapes core has to keep,
+%% not an ad-hoc guess at an internal protocol - and the contract is still
+%% enforced on the producing side, at the `asobi_presence:send/2` call.
+-spec handle_presence_message(dynamic(), map()) ->
     {noreply, map()} | {stop, term(), map()}.
 handle_presence_message({match_state, GameState}, State) when is_map(GameState) ->
     Phase = extract_phase(GameState),
@@ -215,9 +216,7 @@ run_think(BotId, GS, LuaSt, State) ->
         %% was never touched - if bots ever move to an owned VM (ADR 0015) a
         %% timeout kills that VM and this handle needs rebuilding, not keeping.
         {error, Reason} ->
-            {default_ai(BotId, GS), LuaSt, note_think_error(Reason, State)};
-        _ ->
-            {default_ai(BotId, GS), LuaSt, State}
+            {default_ai(BotId, GS), LuaSt, note_think_error(Reason, State)}
     end.
 
 %% No anchor: unlike a match or a zone, `game_state` on a bot is an Erlang term
