@@ -285,12 +285,15 @@ roughly 7 ms per MB, so a state that reaches tens of MB pushes a zone past its
 tick budget on its own - with no other symptom than CPU and, eventually, dead
 zones.
 
-Metadata is `#{script, kind, world_id | match_id, coords}`. `script` and `kind`
-(`zone | world | match`) are label-safe; the identifiers and `coords` are
-unbounded and must never be a label. One event is emitted per bridge *process*,
-so a world with a hundred live zones produces a hundred series - key them on
-`coords`, or the last zone to report overwrites every other one and the result
-reads as a single flapping gauge.
+Metadata is `#{script, kind, world_id | match_id | bot_id, coords}`. `script`
+and `kind` (`zone | world | match | bot`) are label-safe; the identifiers and
+`coords` are unbounded and must never be a label. One event is emitted per
+bridge *process*, so a world with a hundred live zones produces a hundred
+series - key them on `coords`, or the last zone to report overwrites every other
+one and the result reads as a single flapping gauge. A bot carries `bot_id` and
+`match_id` but is not separable that way: a bot id is minted per bot instance
+with a random discriminator and is never reused, so it is a correlation aid in a
+trace, never a label. Group a match's bots on `match_id`.
 
 Alert on the trend, not a threshold. A healthy zone's state is flat; one that
 climbs across a session is a script holding more alive between callbacks than

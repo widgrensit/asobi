@@ -87,6 +87,13 @@ The macros are not all in one place. Match budgets are `?*_TIMEOUT` in
 budget is a literal `50` at the call site in `asobi_bot.erl` rather than a
 macro. Grep for `asobi_lua_loader:call(` if you need the authoritative set.
 
+The budget bounds the callback, not the tick that carries it. The Luerl state is
+copied into the eval worker before the deadline is armed, at roughly 7 ms per
+MB, so a bridge holding a large state spends time on every tick that no budget
+in this table covers. That is what the adaptive collector and, for a bot,
+`max_bot_state_words` exist to bound - see
+[What a bot may keep](lua-bots.md#what-a-bot-may-keep).
+
 ## The anchors are written past `_G`'s metatable
 
 asobi holds Luerl references between callbacks, and Lua's root set is `_G`, the

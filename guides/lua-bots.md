@@ -153,7 +153,8 @@ plus the optional `names` list.
 
 Because a bot decides only from `state`, difficulty is a property of the
 script rather than a config knob: throttle a reaction delay or degrade target
-selection by keying per-bot state off `bot_id` in a module-level table.
+selection by keying per-bot state off `bot_id` in a module-level table. That
+table survives between calls - see [Timing and cooldowns](#timing-and-cooldowns).
 
 ### What a bot script gets
 
@@ -179,6 +180,13 @@ What is available:
 - The two arguments of `think(bot_id, state)`, plus whatever the script itself
   defines at the top level. `state` is the match state as broadcast to
   players, so a bot sees what a client sees and nothing more.
+- Whatever the script wrote to a global on an earlier call. A bot keeps one
+  Luerl state for its whole life, so a global assigned inside `think` is still
+  there on the next call - see [Timing and cooldowns](#timing-and-cooldowns).
+  A call that fails is the exception: a `think` that raises, times out or
+  overruns its heap is rolled back whole, so anything it assigned before the
+  failure is gone. A deterministic failure therefore repeats forever, because
+  every call re-runs from the same state and fails the same way.
 
 Anything else has to come through the match script: put the value in the state
 the match broadcasts and read it from `state`.
@@ -257,6 +265,130 @@ function wander()
     }
 end
 ```
+
+## Timing and cooldowns
+
+`think` runs on its own fixed 100 ms loop. That loop is independent of the
+mode's `tick_rate`, so a bot in a 50 ms mode is asked for input every second
+match tick, and "40 ticks" means 4 seconds of bot calls, not 4 seconds of match
+ticks. Nothing in the bot loop is driven by the match clock.
+
+A bot keeps one Luerl state for its whole life, so the plain way to time
+something is to count your own calls:
+
+```lua
+-- game/bots/patient.lua
+
+calls = 0
+next_action = {}
+
+function think(bot_id, state)
+    calls = calls + 1
+
+    if (next_action[bot_id] or 0) > calls then
+        return {}     -- still cooling down: send nothing this call
+    end
+
+    next_action[bot_id] = calls + 40   -- 40 calls at 100 ms = 4 seconds
+    return fire(bot_id, state)
+end
+```
+
+`next_action` is keyed on `bot_id` because every bot in the mode runs this same
+script, but each one is its own process with its own Luerl state, so the table
+holds a single entry in practice. Key it anyway: it is what makes the script
+read correctly, and it is the shape you want if you ever fold two bots into one
+process.
+
+Returning `{}` is how a bot declines to act, and `return nil` does the same. A
+bare `return`, or falling off the end of `think`, does **not**: those return no
+values at all, which the platform reads as "this call produced no input" and
+answers with the built-in default AI. The bot then chases and shoots. Write
+`return {}` when you mean "do nothing this call".
+
+An empty input still goes through `handle_input` while the match is running, so
+a match script that treats an empty input as a real one will see it - guard on
+the keys you care about rather than on the input being non-empty. In `waiting`
+and in `paused` the match server drops input instead, and a bot's loop runs in
+all three states.
+
+### Timing against the match clock instead
+
+Counting bot calls times the bot. When the cooldown is a *game rule* - a weapon
+that fires once every 4 seconds, whoever is holding it - time it against the
+match, not against `think`, so a bot and a human get the same rule. Broadcast a
+counter from the match script and read it from `state`:
+
+```lua
+-- game/match.lua
+function init(config)
+    return { tick_count = 0, players = {} }
+end
+
+function tick(state)
+    state.tick_count = state.tick_count + 1
+    return state
+end
+
+function get_state(player_id, state)
+    return { players = state.players, tick_count = state.tick_count }
+end
+```
+
+```lua
+-- game/bots/patient.lua
+
+next_action = {}
+
+function think(bot_id, state)
+    local now = state.tick_count or 0
+    if (next_action[bot_id] or 0) > now then return {} end
+    next_action[bot_id] = now + 80    -- 80 match ticks at 50 ms = 4 seconds
+    return fire(bot_id, state)
+end
+```
+
+`get_state` is the part that matters. A bot reads the broadcast state and
+nothing else, so a counter the match keeps but leaves out of `get_state` is
+`nil` in `think`, and both ways of handling that fail quietly. Written as above,
+`state.tick_count or 0` pins `now` at 0, the cooldown never expires and the bot
+goes silent for the rest of the match. Written without the `or 0`, comparing a
+number with `nil` raises, which costs the call and drops the bot to the default
+AI - silent to the client, and logged once a minute as
+`bot_think_error_falling_back_to_default_ai`. Broadcast the counter.
+
+This reads the same clock a human's input is judged against, and it survives a
+match that pauses or changes tick rate. It is also the honest place for a rule
+the server enforces: the match script should reject an early action whoever
+sent it, and then the bot's cooldown is an optimisation rather than the
+enforcement.
+
+`os.clock()` is available and returns node uptime in seconds as a float, which
+works for a delta between two calls. It is not a date and not per-match; prefer
+one of the two counters above.
+
+Each `think` call is budgeted at 50 ms of wall clock, so a cooldown implemented
+by blocking inside `think` is a call the platform kills and replaces with the
+default AI. Return early instead.
+
+### What a bot may keep
+
+Persistence is not a licence to hoard. The state a bot carries between calls is
+copied into every `think` call, so a script that keeps a large table alive makes
+every one of its own ticks more expensive - and Lua collection reclaims garbage,
+not what is still reachable, so nothing shrinks a table your script is holding.
+
+There is a ceiling. Past 10 MB of Luerl state, roughly 1.25 M words, the
+platform reloads the script and the bot starts again from the state it loads
+with: globals gone, cooldowns reset. That is logged as
+`bot_lua_state_reloaded` with the size that tripped it. Override the ceiling
+with `{asobi, [{max_bot_state_words, N}]}` if a mode genuinely needs a larger
+one.
+
+A cooldown table is nowhere near this: the examples above hold one integer per
+bot. What reaches the ceiling is a script accumulating history - appending every
+tick's `state` to a list, keeping a trail of positions with no bound. Keep a
+window, not a log.
 
 ## Multiple bot types
 
