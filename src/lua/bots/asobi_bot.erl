@@ -16,6 +16,15 @@ Both state strategies arrive as `{match_state, map()}`. Under
 `state_strategy = "shared"` the match server still encodes once for the whole
 roster, and `asobi_presence:send_match_state/3` hands the bot the term behind
 that frame rather than the frame, so a bot decodes nothing per tick.
+
+The Luerl state is threaded across ticks, so a bot script's globals persist
+between `think` calls the way a match script's do. Before that they did not:
+the state `think` returned was dropped and the next tick re-entered the script
+as loaded, which made a per-bot cooldown table reset every 100 ms and its guard
+fire on every tick. Persisting it means a bot now pays the same per-tick cost a
+match bridge does - the copy into the bounded call grows with what the script
+keeps alive - so `asobi_lua_loader:collect_state/1` runs before each call on
+the same adaptive schedule.
 """.
 
 -behaviour(gen_server).
@@ -66,15 +75,16 @@ init(#{match_pid := MatchPid, bot_id := BotId, lua_script := LuaScript}) ->
         match_pid => MatchPid,
         bot_id => BotId,
         lua_state => LuaSt,
+        lua_script => LuaScript,
         game_state => #{},
         phase => playing
     }}.
 
 -spec handle_info(term(), map()) -> {noreply, map()} | {stop, term(), map()}.
 handle_info(tick, #{phase := playing} = State) ->
-    send_input(State),
+    State1 = send_input(State),
     erlang:send_after(?TICK_INTERVAL, self(), tick),
-    {noreply, State};
+    {noreply, State1};
 handle_info(tick, State) ->
     erlang:send_after(?TICK_INTERVAL, self(), tick),
     {noreply, State};
@@ -145,24 +155,50 @@ terminate(_, _) ->
 %% persistently-broken script is visible without spamming logs.
 -define(THINK_LOG_INTERVAL_MS, 60000).
 
-send_input(#{lua_state := undefined, bot_id := BotId, match_pid := MatchPid, game_state := GS}) ->
-    Input = default_ai(BotId, GS),
-    asobi_match_server:handle_input(MatchPid, BotId, Input);
 send_input(
-    #{lua_state := LuaSt, bot_id := BotId, match_pid := MatchPid, game_state := GS} = State
+    #{lua_state := undefined, bot_id := BotId, match_pid := MatchPid, game_state := GS} = State
 ) ->
+    Input = default_ai(BotId, GS),
+    asobi_match_server:handle_input(MatchPid, BotId, Input),
+    State;
+send_input(#{lua_state := _} = State0) ->
+    #{lua_state := LuaSt, bot_id := BotId, match_pid := MatchPid, game_state := GS} =
+        State = collect(State0),
     {EncGS, LuaSt1} = asobi_lua_loader:encode(GS, LuaSt),
-    Input =
+    {Input, LuaSt3} =
         case asobi_lua_loader:call(think, [BotId, EncGS], LuaSt1, 50) of
             {ok, [Result | _], LuaSt2} ->
-                decode_result(Result, LuaSt2);
+                {decode_result(Result, LuaSt2), LuaSt2};
+            %% A `think` that returns nothing still ran, and may have written a
+            %% counter this bot needs on the next call. Keep its state; only the
+            %% input falls back.
+            {ok, [], LuaSt2} ->
+                {default_ai(BotId, GS), LuaSt2};
             {error, Reason} ->
                 maybe_log_think_error(BotId, Reason, State),
-                default_ai(BotId, GS);
+                {default_ai(BotId, GS), LuaSt};
             _ ->
-                default_ai(BotId, GS)
+                {default_ai(BotId, GS), LuaSt}
         end,
-    asobi_match_server:handle_input(MatchPid, BotId, Input).
+    asobi_match_server:handle_input(MatchPid, BotId, Input),
+    State#{lua_state => LuaSt3}.
+
+%% The collector needs no anchor here. `game_state` on a bot is the Erlang term
+%% the match broadcast, re-encoded every tick, so unlike a match or a zone the
+%% bot holds no Luerl reference across `think` calls - and passing that Erlang
+%% map to `collect_state/1` as the anchor would root a non-Luerl value in `_G`.
+%% Hence the purpose-built map rather than the bot's own state.
+collect(#{lua_state := LuaSt} = State) ->
+    Probe = maps:merge(
+        #{
+            lua_state => LuaSt,
+            script => maps:get(lua_script, State, undefined),
+            lua_bridge => #{kind => bot, bot_id => maps:get(bot_id, State, undefined)}
+        },
+        maps:with([lua_gc], State)
+    ),
+    #{lua_state := LuaSt1, lua_gc := Gc} = asobi_lua_loader:collect_state(Probe),
+    State#{lua_state => LuaSt1, lua_gc => Gc}.
 
 -spec maybe_log_think_error(binary(), term(), map()) -> ok.
 maybe_log_think_error(BotId, Reason, _State) ->

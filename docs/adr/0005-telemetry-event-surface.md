@@ -134,11 +134,11 @@ building an exporter safely - not a step to defer until after one is built.
 
 - measurements `#{words, bytes, count}` - the size of the Luerl state behind
   one Lua bridge. Metadata is `#{script, kind}` on every emitter, plus
-  `world_id` on a zone or a world and `match_id` on a match, plus `coords` on
-  a zone only. `script` (one per loaded game script, fixed at deploy) and
-  `kind` (`zone | world | match`, a fixed enum) are label-safe; `world_id`,
-  `match_id` and `coords` are unbounded on the same grounds as
-  `[asobi, zone, opened]`'s and are never a label. **Every value may be
+  `world_id` on a zone or a world, `match_id` on a match and `bot_id` on a bot,
+  plus `coords` on a zone only. `script` (one per loaded game script, fixed at
+  deploy) and `kind` (`zone | world | match | bot`, a fixed enum) are
+  label-safe; `world_id`, `match_id`, `bot_id` and `coords` are unbounded on the
+  same grounds as `[asobi, zone, opened]`'s and are never a label. **Every value may be
   `undefined`, and the key set differs by `kind`, so a handler must be total
   over it** - `telemetry` detaches a handler that raises, permanently, taking
   every other asobi metric on that attachment with it. Added by asobi#536.
@@ -148,7 +148,10 @@ building an exporter safely - not a step to defer until after one is built.
   worse than no metric. The identity is stamped at
   `asobi_lua_world:init_zone_state/2` and its two siblings rather than derived
   by the collector, which runs inside the bridge process and knows nothing
-  about the grid.
+  about the grid. `kind => bot` was added when `asobi_bot` started threading its
+  Luerl state across ticks: a bot that remembers is a bot whose state can grow,
+  which is exactly what this gauge exists to make visible. A match filled with
+  eight scripted bots is eight more series.
 - Sampled on **wall clock**, roughly once a second per bridge, overridable with
   `asobi_lua.state_sample_interval_ms`. A per-tick counter would be a rate that
   varies with the world's tick rate and multiplies by live zone count, which is

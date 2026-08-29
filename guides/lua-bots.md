@@ -153,7 +153,8 @@ plus the optional `names` list.
 
 Because a bot decides only from `state`, difficulty is a property of the
 script rather than a config knob: throttle a reaction delay or degrade target
-selection by keying per-bot state off `bot_id` in a module-level table.
+selection by keying per-bot state off `bot_id` in a module-level table. That
+table survives between calls - see [Timing and cooldowns](#timing-and-cooldowns).
 
 ### What a bot script gets
 
@@ -179,6 +180,9 @@ What is available:
 - The two arguments of `think(bot_id, state)`, plus whatever the script itself
   defines at the top level. `state` is the match state as broadcast to
   players, so a bot sees what a client sees and nothing more.
+- Whatever the script wrote to a global on an earlier call. A bot keeps one
+  Luerl state for its whole life, so a global assigned inside `think` is still
+  there on the next call - see [Timing and cooldowns](#timing-and-cooldowns).
 
 Anything else has to come through the match script: put the value in the state
 the match broadcasts and read it from `state`.
@@ -257,6 +261,104 @@ function wander()
     }
 end
 ```
+
+## Timing and cooldowns
+
+`think` runs on its own fixed 100 ms loop. That loop is independent of the
+mode's `tick_rate`, so a bot in a 50 ms mode is asked for input every second
+match tick, and "40 ticks" means 4 seconds of bot calls, not 4 seconds of match
+ticks. Nothing in the bot loop is driven by the match clock.
+
+A bot keeps one Luerl state for its whole life, so the plain way to time
+something is to count your own calls:
+
+```lua
+-- game/bots/patient.lua
+
+calls = 0
+next_action = {}
+
+function think(bot_id, state)
+    calls = calls + 1
+
+    if (next_action[bot_id] or 0) > calls then
+        return {}     -- still cooling down: send nothing this call
+    end
+
+    next_action[bot_id] = calls + 40   -- 40 calls at 100 ms = 4 seconds
+    return fire(bot_id, state)
+end
+```
+
+`next_action` is keyed on `bot_id` because every bot in the mode runs this same
+script, but each one is its own process with its own Luerl state, so the table
+holds a single entry in practice. Key it anyway: it is what makes the script
+read correctly, and it is the shape you want if you ever fold two bots into one
+process.
+
+Returning `{}` is how a bot declines to act. It still goes through
+`handle_input`, so a match script that treats an empty input as a real one will
+see it - guard on the keys you care about rather than on the input being
+non-empty.
+
+### Timing against the match clock instead
+
+Counting bot calls times the bot. When the cooldown is a *game rule* - a weapon
+that fires once every 4 seconds, whoever is holding it - time it against the
+match, not against `think`, so a bot and a human get the same rule. Broadcast a
+counter from the match script and read it from `state`:
+
+```lua
+-- game/match.lua
+function init(config)
+    return { tick_count = 0, players = {} }
+end
+
+function tick(state)
+    state.tick_count = state.tick_count + 1
+    return state
+end
+
+function get_state(player_id, state)
+    return { players = state.players, tick_count = state.tick_count }
+end
+```
+
+```lua
+-- game/bots/patient.lua
+
+next_action = {}
+
+function think(bot_id, state)
+    local now = state.tick_count or 0
+    if (next_action[bot_id] or 0) > now then return {} end
+    next_action[bot_id] = now + 80    -- 80 match ticks at 50 ms = 4 seconds
+    return fire(bot_id, state)
+end
+```
+
+`get_state` is the part that matters. A bot reads the broadcast state and
+nothing else, so a counter the match keeps but leaves out of `get_state` is
+`nil` in `think`, and both ways of handling that fail quietly. Written as above,
+`state.tick_count or 0` pins `now` at 0, the cooldown never expires and the bot
+goes silent for the rest of the match. Written without the `or 0`, comparing a
+number with `nil` raises, which costs the call and drops the bot to the default
+AI - silent to the client, and logged once a minute as
+`bot_think_error_falling_back_to_default_ai`. Broadcast the counter.
+
+This reads the same clock a human's input is judged against, and it survives a
+match that pauses or changes tick rate. It is also the honest place for a rule
+the server enforces: the match script should reject an early action whoever
+sent it, and then the bot's cooldown is an optimisation rather than the
+enforcement.
+
+`os.clock()` is available and returns node uptime in seconds as a float, which
+works for a delta between two calls. It is not a date and not per-match; prefer
+one of the two counters above.
+
+Each `think` call is budgeted at 50 ms of wall clock, so a cooldown implemented
+by blocking inside `think` is a call the platform kills and replaces with the
+default AI. Return early instead.
 
 ## Multiple bot types
 
