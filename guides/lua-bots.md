@@ -183,6 +183,10 @@ What is available:
 - Whatever the script wrote to a global on an earlier call. A bot keeps one
   Luerl state for its whole life, so a global assigned inside `think` is still
   there on the next call - see [Timing and cooldowns](#timing-and-cooldowns).
+  A call that fails is the exception: a `think` that raises, times out or
+  overruns its heap is rolled back whole, so anything it assigned before the
+  failure is gone. A deterministic failure therefore repeats forever, because
+  every call re-runs from the same state and fails the same way.
 
 Anything else has to come through the match script: put the value in the state
 the match broadcasts and read it from `state`.
@@ -296,10 +300,17 @@ holds a single entry in practice. Key it anyway: it is what makes the script
 read correctly, and it is the shape you want if you ever fold two bots into one
 process.
 
-Returning `{}` is how a bot declines to act. It still goes through
-`handle_input`, so a match script that treats an empty input as a real one will
-see it - guard on the keys you care about rather than on the input being
-non-empty.
+Returning `{}` is how a bot declines to act, and `return nil` does the same. A
+bare `return`, or falling off the end of `think`, does **not**: those return no
+values at all, which the platform reads as "this call produced no input" and
+answers with the built-in default AI. The bot then chases and shoots. Write
+`return {}` when you mean "do nothing this call".
+
+An empty input still goes through `handle_input` while the match is running, so
+a match script that treats an empty input as a real one will see it - guard on
+the keys you care about rather than on the input being non-empty. In `waiting`
+and in `paused` the match server drops input instead, and a bot's loop runs in
+all three states.
 
 ### Timing against the match clock instead
 
@@ -359,6 +370,25 @@ one of the two counters above.
 Each `think` call is budgeted at 50 ms of wall clock, so a cooldown implemented
 by blocking inside `think` is a call the platform kills and replaces with the
 default AI. Return early instead.
+
+### What a bot may keep
+
+Persistence is not a licence to hoard. The state a bot carries between calls is
+copied into every `think` call, so a script that keeps a large table alive makes
+every one of its own ticks more expensive - and Lua collection reclaims garbage,
+not what is still reachable, so nothing shrinks a table your script is holding.
+
+There is a ceiling. Past 10 MB of Luerl state, roughly 1.25 M words, the
+platform reloads the script and the bot starts again from the state it loads
+with: globals gone, cooldowns reset. That is logged as
+`bot_lua_state_reloaded` with the size that tripped it. Override the ceiling
+with `{asobi, [{max_bot_state_words, N}]}` if a mode genuinely needs a larger
+one.
+
+A cooldown table is nowhere near this: the examples above hold one integer per
+bot. What reaches the ceiling is a script accumulating history - appending every
+tick's `state` to a list, keeping a trail of positions with no bound. Keep a
+window, not a log.
 
 ## Multiple bot types
 

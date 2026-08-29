@@ -17,12 +17,17 @@
 bot_state_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
         {"a bot script's globals survive across think calls", fun globals_persist/0},
-        {"a per-bot cooldown gates input as the guide describes", fun cooldown_gates_input/0}
+        {"a per-bot cooldown gates input as the guide describes", fun cooldown_gates_input/0},
+        {"a bare `return` keeps state and falls back only on the input",
+            fun bare_return_keeps_state/0},
+        {"a state past the ceiling is reloaded and its globals are gone",
+            fun oversized_state_reloads/0},
+        {"a self-referencing table costs the tick, not the bot", fun cyclic_result_survives/0},
+        {"a returned function never reaches the match script", fun callable_input_dropped/0}
     ]}.
 
 setup() ->
-    _ = asobi_bot_input_game:log(),
-    true = ets:delete_all_objects(asobi_bot_input_log),
+    ok = asobi_bot_input_game:reset(),
     case ets:whereis(asobi_match_state) of
         undefined -> ets:new(asobi_match_state, [named_table, public, set]);
         _ -> ok
@@ -51,8 +56,7 @@ globals_persist() ->
         """
     ),
     Ns = run_bot(Script, ~"bot_Counter", fun(Inputs) -> length(Inputs) >= 3 end, ~"n"),
-    ?assertMatch([_, _, _ | _], Ns),
-    ?assertEqual(lists:sublist([1, 2, 3], 3), lists:sublist(Ns, 3)).
+    ?assertEqual([1, 2, 3], lists:sublist(Ns, 3)).
 
 cooldown_gates_input() ->
     %% The pattern guides/lua-bots.md documents: remember the last tick this
@@ -76,6 +80,97 @@ cooldown_gates_input() ->
     ),
     %% Every fourth call, not every call.
     ?assertEqual([1, 4, 7], lists:sublist(Fired, 3)).
+
+bare_return_keeps_state() ->
+    %% `return {}` is one value and takes the ordinary path; only a bare `return`
+    %% yields none. Without the {ok, [], _} clause the odd call's increment is
+    %% rolled back and `calls` never reaches an even number.
+    Script = temp_script(
+        ~"""
+        calls = 0
+        function think(_bot, _state)
+            calls = calls + 1
+            if calls % 2 == 1 then return end
+            return { n = calls }
+        end
+        """
+    ),
+    Ns = run_bot(Script, ~"bot_Bare", fun(Inputs) -> length(Inputs) >= 7 end, ~"n"),
+    ?assertEqual([2, 4, 6], lists:sublist(Ns, 3)).
+
+oversized_state_reloads() ->
+    %% Luerl collects garbage, not what a script keeps live, so a hoarding script
+    %% grows without bound and the collector gives up on it. Past the ceiling the
+    %% script is reloaded, which is observable as `calls` restarting from 1.
+    application:set_env(asobi, max_bot_state_words, 6000),
+    Script = temp_script(
+        ~"""
+        calls = 0
+        hoard = {}
+        function think(_bot, _state)
+            calls = calls + 1
+            for i = 1, 50 do
+                hoard[#hoard + 1] = { i, i, i, i }
+            end
+            return { n = calls }
+        end
+        """
+    ),
+    try
+        Ns = run_bot(Script, ~"bot_Hoarder", fun(Inputs) -> length(Inputs) >= 8 end, ~"n"),
+        ?assert(lists:max(Ns) < length(Ns))
+    after
+        application:unset_env(asobi, max_bot_state_words)
+    end.
+
+cyclic_result_survives() ->
+    %% luerl:decode/2 raises on a table that references itself. Uncaught that
+    %% kills a `temporary` child and the match loses the bot for good, so the
+    %% bot must stay alive and keep sending.
+    Script = temp_script(
+        ~"""
+        calls = 0
+        function think(_bot, _state)
+            calls = calls + 1
+            local t = { n = calls }
+            t.self = t
+            return t
+        end
+        """
+    ),
+    MatchPid = start_match(),
+    BotPid = start_bot(MatchPid, ~"bot_Cyclic", Script),
+    try
+        wait_until(fun() -> length(asobi_bot_input_game:inputs()) >= 3 end),
+        ?assert(is_process_alive(BotPid))
+    after
+        stop_process(BotPid),
+        stop_process(MatchPid),
+        file:delete(Script)
+    end.
+
+callable_input_dropped() ->
+    %% An input crosses into the match script's own Luerl state, so it carries
+    %% only what a client could have sent.
+    Script = temp_script(
+        ~"""
+        function think(_bot, _state)
+            return { shoot = true, aim = { x = 1 }, evil = function() return 1 end }
+        end
+        """
+    ),
+    MatchPid = start_match(),
+    BotPid = start_bot(MatchPid, ~"bot_Callable", Script),
+    try
+        wait_until(fun() -> asobi_bot_input_game:inputs() =/= [] end),
+        [Input | _] = asobi_bot_input_game:inputs(),
+        %% The nested table survives - a bot may send what a player can.
+        ?assertEqual([~"aim", ~"shoot"], lists:sort(maps:keys(Input)))
+    after
+        stop_process(BotPid),
+        stop_process(MatchPid),
+        file:delete(Script)
+    end.
 
 %% --- helpers ---
 

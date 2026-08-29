@@ -1,20 +1,26 @@
 -module(asobi_bot_input_game).
+-moduledoc """
+Records every input the match server accepts, so a test can read what a bot
+actually sent, tick by tick.
+
+The table is ETS rather than the process dictionary because the match server
+runs in a different process from the test that reads it.
+""".
+
 -behaviour(asobi_match).
 
-%% Records every input the match server accepts into a public ETS table so a
-%% test can read what a bot actually sent, tick by tick.
-
 -export([init/1, join/2, leave/2, handle_input/3, tick/1, get_state/2]).
--export([log/0, inputs/0]).
+-export([reset/0, inputs/0]).
 
 -define(LOG, asobi_bot_input_log).
 
--spec log() -> ets:table().
-log() ->
+-spec reset() -> ok.
+reset() ->
     case ets:whereis(?LOG) of
         undefined -> ets:new(?LOG, [named_table, public, ordered_set]);
-        Tid -> Tid
-    end.
+        _ -> ets:delete_all_objects(?LOG)
+    end,
+    ok.
 
 -spec inputs() -> [map()].
 inputs() ->

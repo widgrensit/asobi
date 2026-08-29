@@ -710,8 +710,9 @@ collector would free the tables underneath it and the next `luerl:decode/2`
 on it would crash. It is rooted in a global for the duration of the collection
 and unrooted again straight after, so a script never observes the anchor.
 
-Bookkeeping is kept under `lua_gc` in the same map. Set
-`{asobi, [{lua_gc, false}]}` to turn the collector off entirely.
+Bookkeeping is kept under `lua_gc` in the same map, including `words` - the
+size of the state this call measured, for a bridge that enforces a ceiling of
+its own. Set `{asobi, [{lua_gc, false}]}` to turn the collector off entirely.
 """.
 -spec collect_state(map()) -> map().
 collect_state(#{lua_state := St} = State) ->
@@ -720,7 +721,12 @@ collect_state(#{lua_state := St} = State) ->
     Gc1 = report_state_size(Words, State, Gc0),
     Anchor = maps:get(game_state, State, nil),
     {St1, Gc2} = maybe_gc(St, Anchor, Words, Gc1),
-    State#{lua_state => St1, lua_gc => Gc2};
+    %% `words` is the size measured *before* this collection, which is the
+    %% number a caller enforcing a ceiling wants: it is what the last callback
+    %% was handed and what the next one will be handed if nothing was reclaimed.
+    %% `undefined` when the measurement was unavailable, so a caller acting on
+    %% it must guard on the integer.
+    State#{lua_state => St1, lua_gc => Gc2#{words => Words}};
 collect_state(State) ->
     State.
 
