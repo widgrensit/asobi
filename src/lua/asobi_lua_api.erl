@@ -44,6 +44,14 @@ game.storage.get(collection, key)
 game.storage.set(collection, key, value)
 game.storage.player_get(player_id, collection, key)
 game.storage.player_set(player_id, collection, key, value)
+game.storage.update(collection, key, ops)        -- atomic, operator-based merge
+game.storage.player_update(player_id, collection, key, ops)
+
+-- Node-local KV, scoped to this world/match (in memory, TTL'd, lost on restart)
+game.kv.get(collection, key)
+game.kv.set(collection, key, value[, ttl_seconds])
+game.kv.merge(collection, key, ops[, ttl_seconds])   -- atomic, returns the merged value
+game.kv.delete(collection, key)
 
 -- Chat
 game.chat.send(channel_id, sender_id, content)
@@ -205,6 +213,13 @@ core_surface(Ctx) ->
         {[~"game", ~"storage", ~"set"], write, fun_storage_set()},
         {[~"game", ~"storage", ~"player_get"], none, fun_storage_player_get()},
         {[~"game", ~"storage", ~"player_set"], write, fun_storage_player_set()},
+        {[~"game", ~"storage", ~"update"], write, fun_storage_update()},
+        {[~"game", ~"storage", ~"player_update"], write, fun_storage_player_update()},
+        %% Node-local KV
+        {[~"game", ~"kv", ~"get"], none, fun_kv_get(Ctx)},
+        {[~"game", ~"kv", ~"set"], write, fun_kv_set(Ctx)},
+        {[~"game", ~"kv", ~"merge"], write, fun_kv_merge(Ctx)},
+        {[~"game", ~"kv", ~"delete"], write, fun_kv_delete(Ctx)},
         %% Chat
         {[~"game", ~"chat", ~"send"], write, fun_chat_send()},
         %% Spatial
@@ -917,6 +932,141 @@ fun_storage_player_set() ->
         end
     end.
 
+%% widgrensit/asobi#572: an atomic, server-side update, so two zones that both
+%% hold an entity across a seam cannot lose each other's writes. Still two
+%% round trips to the database, so this suits a per-kill or per-threshold write
+%% rather than a per-hit one - `game.kv` is the per-hit answer.
+fun_storage_update() ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [Collection, Key, Ops] when
+                is_binary(Collection), is_binary(Key), is_map(Ops)
+            ->
+                wrap_result(storage_update_ops(Collection, Key, undefined, Ops), St);
+            _ ->
+                error_result(~"update requires (collection, key, ops)", St)
+        end
+    end.
+
+fun_storage_player_update() ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [PlayerId, Collection, Key, Ops] when
+                is_binary(PlayerId), is_binary(Collection), is_binary(Key), is_map(Ops)
+            ->
+                wrap_result(storage_update_ops(Collection, Key, PlayerId, Ops), St);
+            _ ->
+                error_result(
+                    ~"player_update requires (player_id, collection, key, ops)", St
+                )
+        end
+    end.
+
+%% --- Node-local KV ---
+%%
+%% Scoped to the calling VM's world or match, not global like game.storage: the
+%% state this exists for belongs to one world's entities, and two worlds running
+%% the same mode script would otherwise collide on the same collection and key
+%% with no way for either to notice.
+
+fun_kv_get(Ctx) ->
+    with_kv_scope(Ctx, ~"get requires (collection, key)", fun(Scope, Args, St) ->
+        case Args of
+            [Collection, Key] when is_binary(Collection), is_binary(Key) ->
+                case asobi_kv:get(Scope, Collection, Key) of
+                    {ok, Value} -> {ok, wrap_result({ok, Value}, St)};
+                    not_found -> {ok, ok_result(nil, St)}
+                end;
+            _ ->
+                bad_args
+        end
+    end).
+
+fun_kv_set(Ctx) ->
+    with_kv_scope(Ctx, ~"set requires (collection, key, value[, ttl_seconds])", fun(
+        Scope, Args, St
+    ) ->
+        case Args of
+            [Collection, Key, Value | Rest] when is_binary(Collection), is_binary(Key) ->
+                %% A table, not a scalar. Everything here is merged field by
+                %% field, so a scalar has nowhere to go - and coercing one to an
+                %% empty table would store nothing and say it worked.
+                case to_storage_value(Value) of
+                    Stored when is_map(Stored) ->
+                        Result =
+                            case ttl_arg(Rest) of
+                                undefined -> asobi_kv:set(Scope, Collection, Key, Stored);
+                                Ttl -> asobi_kv:set(Scope, Collection, Key, Stored, Ttl)
+                            end,
+                        {ok, wrap_result(unit(Result), St)};
+                    _ ->
+                        {ok, error_result(~"kv.set value must be a table", St)}
+                end;
+            _ ->
+                bad_args
+        end
+    end).
+
+fun_kv_merge(Ctx) ->
+    with_kv_scope(Ctx, ~"merge requires (collection, key, ops[, ttl_seconds])", fun(
+        Scope, Args, St
+    ) ->
+        case Args of
+            [Collection, Key, Ops | Rest] when
+                is_binary(Collection), is_binary(Key), is_map(Ops)
+            ->
+                Result =
+                    case ttl_arg(Rest) of
+                        undefined -> asobi_kv:merge(Scope, Collection, Key, Ops);
+                        Ttl -> asobi_kv:merge(Scope, Collection, Key, Ops, Ttl)
+                    end,
+                {ok, wrap_result(Result, St)};
+            _ ->
+                bad_args
+        end
+    end).
+
+fun_kv_delete(Ctx) ->
+    with_kv_scope(Ctx, ~"delete requires (collection, key)", fun(Scope, Args, St) ->
+        case Args of
+            [Collection, Key] when is_binary(Collection), is_binary(Key) ->
+                {ok, wrap_result(unit(asobi_kv:delete(Scope, Collection, Key)), St)};
+            _ ->
+                bad_args
+        end
+    end).
+
+%% Every game.kv binding needs the same two things - a scope, and a decode of
+%% its arguments - and answers the same way when either is missing.
+-spec with_kv_scope(map(), binary(), fun()) -> function().
+with_kv_scope(Ctx, Usage, Body) ->
+    case kv_scope(Ctx) of
+        undefined ->
+            fun(_, St) -> error_result(~"kv not available (no world or match context)", St) end;
+        Scope ->
+            fun(Args, St) ->
+                case Body(Scope, decode_args(Args, St), St) of
+                    {ok, Reply} -> Reply;
+                    bad_args -> error_result(Usage, St)
+                end
+            end
+    end.
+
+-spec kv_scope(map()) -> binary() | undefined.
+kv_scope(Ctx) ->
+    case maps:get(match_id, Ctx, undefined) of
+        Id when is_binary(Id) -> Id;
+        _ -> undefined
+    end.
+
+-spec ttl_arg([term()]) -> pos_integer() | undefined.
+ttl_arg([N | _]) when is_number(N), N > 0 -> trunc(N);
+ttl_arg(_) -> undefined.
+
+-spec unit(ok | {error, term()}) -> {ok, true} | {error, term()}.
+unit(ok) -> {ok, true};
+unit({error, _} = Err) -> Err.
+
 %% --- Chat ---
 
 fun_chat_send() ->
@@ -1615,6 +1765,105 @@ storage_set(Collection, Key, PlayerId, Value) ->
             storage_insert(Collection, Key, PlayerId, Value);
         {error, _} = Err ->
             Err
+    end.
+
+%% An atomic operator merge on one storage row (widgrensit/asobi#572).
+%%
+%% `storage_set/4` is a read-modify-write across two statements with nothing
+%% between them, so two writers racing on one key silently lose a write - and
+%% for the case this exists for, concurrent writers are the normal case, not an
+%% edge one: an entity crossing a seam is legitimately held by two zones at
+%% once until it is `rehome_margin` past the boundary, and both tick.
+%%
+%% The fix is the `version` column the schema already carries. The UPDATE is
+%% conditional on the version that was read, so a racing writer's update matches
+%% zero rows instead of overwriting; that re-reads and re-applies. The operators
+%% are commutative (m:asobi_merge_ops), so re-applying to the newer value is
+%% correct rather than merely safe.
+%%
+%% Bounded rather than unbounded: this runs inside a callback with a millisecond
+%% budget, so a hot key answers `storage_conflict` and lets the script decide,
+%% instead of spinning the zone.
+-define(STORAGE_UPDATE_ATTEMPTS, 5).
+
+-spec storage_update_ops(binary(), binary(), binary() | undefined, map()) ->
+    {ok, term()} | {error, term()}.
+storage_update_ops(Collection, Key, PlayerId, Ops) ->
+    storage_update_ops(Collection, Key, PlayerId, Ops, ?STORAGE_UPDATE_ATTEMPTS).
+
+-spec storage_update_ops(binary(), binary(), binary() | undefined, map(), non_neg_integer()) ->
+    {ok, term()} | {error, term()}.
+storage_update_ops(_Collection, _Key, _PlayerId, _Ops, 0) ->
+    {error, storage_conflict};
+storage_update_ops(Collection, Key, PlayerId, Ops, Attempts) ->
+    case storage_find(Collection, Key, PlayerId) of
+        {ok, Doc} ->
+            case asobi_merge_ops:apply_ops(storage_value(Doc), Ops) of
+                {ok, Merged} ->
+                    case storage_cas(Collection, Key, PlayerId, Doc, Merged) of
+                        ok ->
+                            {ok, Merged};
+                        stale ->
+                            storage_update_ops(Collection, Key, PlayerId, Ops, Attempts - 1);
+                        {error, _} = Err ->
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, not_found} ->
+            case asobi_merge_ops:apply_ops(#{}, Ops) of
+                {ok, Merged} ->
+                    case storage_insert(Collection, Key, PlayerId, Merged) of
+                        {ok, _} ->
+                            {ok, Merged};
+                        %% Lost the race to create the row. The other writer's
+                        %% row is now there to merge into.
+                        {error, _} ->
+                            storage_update_ops(Collection, Key, PlayerId, Ops, Attempts - 1)
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% Scoped exactly like storage_find/3 - collection, key and the player
+%% namespace - plus the version that was read. Anything else would be a
+%% cross-namespace write; see maybe_filter_player/2.
+-spec storage_cas(binary(), binary(), binary() | undefined, map(), map()) ->
+    ok | stale | {error, term()}.
+storage_cas(Collection, Key, PlayerId, Doc, Merged) ->
+    Version = storage_version(Doc),
+    Q0 = kura_query:from(asobi_storage),
+    Q1 = kura_query:where(Q0, {collection, Collection}),
+    Q2 = kura_query:where(Q1, {key, Key}),
+    Q3 = maybe_filter_player(Q2, PlayerId),
+    Q4 = kura_query:where(Q3, {version, Version}),
+    Updates = #{
+        value => Merged,
+        version => Version + 1,
+        updated_at => calendar:universal_time()
+    },
+    case asobi_repo:update_all(Q4, Updates) of
+        {ok, 0} -> stale;
+        {ok, _} -> ok;
+        {error, _} = Err -> Err
+    end.
+
+-spec storage_value(map()) -> map().
+storage_value(Doc) ->
+    case maps:get(value, Doc, #{}) of
+        V when is_map(V) -> V;
+        _ -> #{}
+    end.
+
+-spec storage_version(map()) -> integer().
+storage_version(Doc) ->
+    case maps:get(version, Doc, 1) of
+        V when is_integer(V) -> V;
+        _ -> 1
     end.
 
 -spec storage_find(binary(), binary(), binary() | undefined) ->

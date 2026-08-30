@@ -64,6 +64,7 @@ children(_Engine) ->
         chat_sup(),
         tournament_sup(),
         presence_spec(),
+        kv_spec(),
         guest_reaper_spec(),
         console_session_spec(),
         lua_game_config_spec(),
@@ -239,6 +240,15 @@ presence_spec() ->
     #{
         id => asobi_presence,
         start => {asobi_presence, start_link, []}
+    }.
+
+%% Owns the `game.kv` table. Nothing else depends on it being up - reads fall
+%% through to a miss and writes answer `kv_unavailable` - so it needs no
+%% ordering against its siblings.
+kv_spec() ->
+    #{
+        id => asobi_kv,
+        start => {asobi_kv, start_link, []}
     }.
 
 oidc_providers_spec() ->
