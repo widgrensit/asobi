@@ -958,14 +958,29 @@ terrain_provider(_) ->
 on_zone_loaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
     case asobi_lua_loader:call(on_zone_loaded, [CX, CY, GS], LuaSt, ?ZONE_LIFECYCLE_TIMEOUT) of
         {ok, [ZS, GS1 | _], LuaSt1} ->
-            ZoneState = decode_to_map(ZS, LuaSt1),
+            ZoneState = seed_zone_state(decode_to_map(ZS, LuaSt1)),
             {ok, ZoneState, State#{lua_state => LuaSt1, game_state => GS1}};
         {ok, [ZS | _], LuaSt1} ->
-            ZoneState = decode_to_map(ZS, LuaSt1),
+            ZoneState = seed_zone_state(decode_to_map(ZS, LuaSt1)),
             {ok, ZoneState, State#{lua_state => LuaSt1}};
         {error, _} ->
             {ok, #{}, State}
     end.
+
+%% The table the world script returns is what the ZONE script should find in
+%% its own `game_state` - that is the whole point of the hook, and a zone
+%% script has no other way to read it. `init_zone_state/2` builds the zone VM's
+%% game_state out of the `game_state` key of the zone_state it is handed
+%% (restore_game_state/2, the snapshot-restore path), so the seed rides in
+%% under the same key rather than as loose top-level keys the zone VM would
+%% never look at.
+%%
+%% An empty table is no seed at all, and stays one: wrapping it would hand the
+%% zone a `game_state` of `{}` and defeat the `if game_state == nil` guard
+%% every zone script opens with.
+-spec seed_zone_state(map()) -> map().
+seed_zone_state(ZoneState) when map_size(ZoneState) =:= 0 -> #{};
+seed_zone_state(ZoneState) -> #{~"game_state" => ZoneState}.
 
 -spec on_zone_unloaded({integer(), integer()}, map()) -> {ok, map()}.
 on_zone_unloaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->

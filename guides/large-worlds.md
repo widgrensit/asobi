@@ -202,18 +202,49 @@ see [Clustering](clustering.md#what-is-per-node).
 ## Zone lifecycle callbacks
 
 A world script can react to zones loading and unloading. Both callbacks are
-optional.
+optional. They run in the world VM, not the zone's, so they see the world's
+state and share the world's 200 ms callback budget.
+
+`on_zone_loaded` is the seam for lazy loading: a zone created on demand has no
+zone_state of its own, and this is where it gets one. The table it returns is
+the `zone_state` argument the zone's own `zone_tick` is handed, from that
+zone's very first tick - so this is where a zone learns its coordinates, its
+biome, or anything else that is a function of where it is.
 
 ```lua
 function on_zone_loaded(cx, cy, state)
-    local zone_state = { biome = "plains" }
+    local zone_state = { biome = "plains", cx = cx, cy = cy }
     return zone_state, state
+end
+
+function zone_tick(entities, zone_state)
+    -- zone_state.biome is "plains" on the first tick after a lazy load
+    return entities, zone_state
 end
 
 function on_zone_unloaded(cx, cy, state)
     return state
 end
 ```
+
+When it runs, and when it does not:
+
+- Only for a zone loaded on demand. A zone pre-spawned at world start already
+  carries the zone_state `generate_world` built for it.
+- Only when there is nothing to restore. In a `persistent` world a zone that
+  has a snapshot loads it, and the hook does not run - restoring and seeding
+  the same zone would throw away what it was holding.
+- Returning an empty table means "no seed", and the zone starts with a
+  `zone_state` of `nil` exactly as it did before. That keeps the usual
+  `if zone_state == nil then` initialisation guard working.
+- The zone does not tick until the callback answers, so a zone never runs with
+  the blank state the callback exists to fill in. A callback that does not
+  answer within a second is given up on, the zone starts blank, and asobi logs
+  `zone_seed_timeout`.
+
+`on_zone_unloaded` runs when the zone process for those coordinates is gone -
+reaped for idleness, or crashed. It does not run when the whole world shuts
+down: the world is going away with it.
 
 In Erlang:
 
