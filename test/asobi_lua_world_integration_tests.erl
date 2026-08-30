@@ -237,7 +237,7 @@ lua_on_zone_loaded_seeds_a_lazy_zone_test_() ->
         },
         InstancePid = start_world(Config),
         try
-            WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
+            WorldPid = child_pid(InstancePid, asobi_world_server),
             ZoneManagerPid = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
             ok = asobi_world_server:join(WorldPid, ~"p1"),
             {ok, ZonePid} = poll_until(
@@ -257,6 +257,14 @@ lua_on_zone_loaded_seeds_a_lazy_zone_test_() ->
             exit(InstancePid, shutdown)
         end
     end}.
+
+%% get_child/2 answers `undefined | pid()`; a test that is about to call the
+%% child has already failed if it is not there.
+-spec child_pid(pid(), atom()) -> pid().
+child_pid(InstancePid, Id) ->
+    case asobi_world_instance:get_child(InstancePid, Id) of
+        Pid when is_pid(Pid) -> Pid
+    end.
 
 -spec poll_until(fun(() -> T), fun((T) -> boolean()), non_neg_integer()) -> T.
 poll_until(Get, _Done, TimeoutMs) when TimeoutMs =< 0 ->
