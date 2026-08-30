@@ -126,7 +126,9 @@ So a persistent world gets the zone back as it was. A non-persistent one gets
 back only "what was true here" - the `zone_state` your `on_zone_loaded` or
 `zone_tick` last left - and re-spawns the rest. That is enough for content that
 is a pure function of its coordinates; it is not enough for a damaged NPC or a
-half-looted container, and those need `persistent = true`.
+half-looted container, and those need `persistent = true` - or a tier that is
+not zone-scoped at all, which is
+[State that outlives a zone](#state-that-outlives-a-zone).
 
 The in-memory `zone_state` set is capped at `max_active_zones` entries and
 dies with the world. Past the cap a parked zone comes back blank, and asobi
