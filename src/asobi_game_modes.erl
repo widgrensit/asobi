@@ -156,6 +156,7 @@ world_config_1(Mode, ModeConfig) ->
                         %% script asked for.
                         lazy_zones,
                         zone_idle_timeout,
+                        zone_park_on_idle,
                         max_active_zones,
                         spatial_grid_cell_size,
                         cold_tick_divisor,

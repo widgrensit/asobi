@@ -353,6 +353,7 @@ game.zone.spawn(template_id, x, y)                    -- true | false
 game.zone.spawn(template_id, x, y, overrides)         -- true | false
 game.zone.despawn(entity_id)                          -- true
 game.zone.apply(entity_id, event)                     -- true | false
+game.zone.park()                                      -- true
 game.terrain.get_chunk(cx, cy)                        -- { ok = data }
 game.terrain.preload(coords_list)                     -- true
 ```
@@ -368,6 +369,14 @@ only affect what `neighbours_radius`/`neighbours_rect` would have shown you.
 The owning zone runs the event through its own `handle_effects(effects,
 entities)` on its next tick. A script that calls `apply` without defining
 `handle_effects` gets a rate-limited error and dropped effects.
+
+`park` asks the zone to stop after this tick even though it still holds
+entities - the thing the idle reaper will not do on its own. `true` means
+"asked": it is a cast, like every `game.zone.*` call, because this runs inside
+the zone's own tick. It is declined outright while anyone is subscribed to the
+zone, and asobi logs when it is. What a parked zone gets back when it next
+loads depends on `persistent` - see
+[Large worlds](large-worlds.md#stopping-a-zone-that-still-holds-something).
 
 `terrain.preload` takes a list of tables carrying `cx`/`cy` (or `x`/`y`).
 Entries it cannot read are skipped rather than raising.

@@ -7,7 +7,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 """.
 -behaviour(gen_server).
 
--export([start_link/1, reap/1]).
+-export([start_link/1, reap/1, park/1]).
 -export([zone_state_loaded/2]).
 -export([tick/2, player_input/3, player_input/4, add_entity/3, remove_entity/2]).
 -export([spawn_entity/3, spawn_entity/4, spawn_entities/2, despawn_entity/2]).
@@ -91,6 +91,28 @@ start_link(Config) ->
 -spec reap(pid()) -> ok.
 reap(Pid) ->
     gen_server:cast(Pid, reap).
+
+-doc """
+Stop this zone even though it still holds entities, because the game module
+says it is done with it.
+
+The distinction from `reap/1` is who is asking. `reap/1` is the manager acting
+on its own idle stamp, which can lag real occupancy, so a populated zone
+declines it - see handle_cast(reap, ...). This is the game module's own
+decision about its own zone, so a populated zone accepts it.
+
+What survives depends on the world. A `persistent` world snapshots everything
+the zone holds on the way out (terminate/2) and a later load brings it all
+back. A non-persistent world keeps the zone's `zone_state` in the manager and
+drops the entities - which is the trade the caller is making, and the reason
+this is not something asobi does on its own.
+
+Declined while anyone is subscribed: those players are watching this zone and
+would silently stop seeing it. Take them elsewhere first.
+""".
+-spec park(pid()) -> ok.
+park(Pid) ->
+    gen_server:cast(Pid, park).
 
 -doc """
 The world's answer to this zone's seed request: the zone_state
@@ -327,6 +349,9 @@ init(Config) ->
             %% only then: a pre-warmed zone already carries the zone_state
             %% generate_world/2 built for it. See seed_request/1.
             zone_seed_hook => maps:get(zone_seed_hook, Config, false),
+            %% `zone_park_on_idle`: let the idle reaper take this zone even
+            %% when it holds entities. Off by default - see the reap clauses.
+            park_on_idle => maps:get(park_on_idle, Config, false),
             zone_size => ZoneSize,
             grid_size => GridSize,
             rehome_margin => RehomeMargin,
@@ -447,7 +472,7 @@ init(Config) ->
 %% `init_zone_state` sees the seeded state rather than a blank map.
 -spec handle_continue(init_zone_state, map()) -> {noreply, map()}.
 handle_continue(init_zone_state, State0) ->
-    State = maybe_restore_from_snapshot(State0),
+    State = index_restored_entities(maybe_restore_from_snapshot(State0)),
     case seed_request(State) of
         {sent, State1} -> {noreply, State1};
         none -> {noreply, build_zone_state(State)}
@@ -526,6 +551,14 @@ build_zone_state(State) ->
 %% in the DB snapshot, so we load it whenever zone_state is blank. A pre-spawned
 %% zone arrives with a non-blank zone_state from Config and skips the DB.
 %% init_zone_state then rebuilds the runtime from the restored zone_state.
+%%
+%% The snapshot's entities are loaded here too (widgrensit/asobi#573). Until a
+%% zone could be stopped while it still held something, they were always empty
+%% on this path - the only zone that could stop was one holding nothing - and
+%% the world server's own restore_entities/4 covered the world-restart case.
+%% Now that `park/1` and `zone_park_on_idle` can stop a populated zone, the
+%% zone that next occupies these coords is the one that has to bring them back,
+%% or the snapshot is written and never read.
 -spec maybe_restore_from_snapshot(map()) -> map().
 maybe_restore_from_snapshot(
     #{
@@ -540,6 +573,9 @@ maybe_restore_from_snapshot(
         {ok, Snapshot} ->
             State#{
                 zone_state => maps:get(zone_state, Snapshot, #{}),
+                entities => restore_entities(
+                    maps:get(entities, Snapshot, #{}), maps:get(entities, State)
+                ),
                 spawner => restore_spawner(maps:get(spawner_state, Snapshot, #{}), Templates),
                 entity_timers => asobi_entity_timer:deserialise(
                     maps:get(entity_timers, Snapshot, #{})
@@ -573,6 +609,29 @@ safe_load_snapshot(WorldId, Coords) ->
     catch
         Class:Reason -> {error, {Class, Reason}}
     end.
+
+%% Whatever a zone starts life holding - the ETS crash backup, or the snapshot
+%% restored above - has to be in the spatial grid before the first tick.
+%% sync_spatial_grid/3 is a diff against the previous tick, so an entity that
+%% was there at start and never moves is never added by it: for a world with a
+%% `spatial_grid_cell_size`, restored scenery would be invisible to every
+%% game.spatial query for as long as it stayed still.
+-spec index_restored_entities(map()) -> map().
+index_restored_entities(#{spatial_grid := undefined} = State) ->
+    State;
+index_restored_entities(#{spatial_grid := Grid, entities := Entities} = State) ->
+    State#{spatial_grid => reindex_clamped(maps:to_list(Entities), Grid)}.
+
+%% The ETS crash backup is fresher than any DB row - it is written every 20
+%% ticks and only survives a stop that did NOT run terminate/2 - so anything it
+%% recovered wins outright.
+-spec restore_entities(term(), map()) -> map().
+restore_entities(_Snapshotted, Recovered) when map_size(Recovered) > 0 ->
+    Recovered;
+restore_entities(Snapshotted, _Recovered) when is_map(Snapshotted) ->
+    Snapshotted;
+restore_entities(_Snapshotted, Recovered) ->
+    Recovered.
 
 -spec restore_spawner(map(), map()) -> asobi_zone_spawner:state().
 restore_spawner(SpawnerState, Templates) when is_map(SpawnerState), map_size(SpawnerState) > 0 ->
@@ -685,6 +744,33 @@ handle_cast(reap, #{entities := Entities} = State) when map_size(Entities) =:= 0
     %% Graceful stop so terminate/2 writes a final snapshot. Transient restart
     %% means a normal stop is not respawned.
     {stop, normal, State};
+%% `zone_park_on_idle`. The default refusal below is right when the only thing
+%% asking is a stamp that can lag real occupancy - but it also means a zone
+%% that has ever been visited holds whatever the script spawned in it and is
+%% therefore never idle-reapable, so `zone_idle_timeout` is dead for any world
+%% whose zones contain scenery, and its Lua VM lives forever
+%% (widgrensit/asobi#573). A world that opts in says its zones can be stopped
+%% populated; a `persistent` world gets them all back from the snapshot, a
+%% non-persistent one gets its zone_state back and re-spawns the rest.
+%%
+%% Still not while anyone is subscribed, and still not mid-`script_busy`: those
+%% two refusals are about this zone being in use right now, which opting in
+%% does not change.
+handle_cast(reap, #{park_on_idle := true, subscribers := Subs} = State) when
+    map_size(Subs) =:= 0
+->
+    case maps:get(script_busy, State, false) of
+        false ->
+            {stop, normal, park_zone_state(State)};
+        true ->
+            touch_manager(State),
+            {noreply, State}
+    end;
+handle_cast(park, #{subscribers := Subs} = State) when map_size(Subs) > 0 ->
+    log_park_declined(State),
+    {noreply, State};
+handle_cast(park, State) ->
+    {stop, normal, park_zone_state(State)};
 handle_cast(reap, State) ->
     %% asobi#283: the manager decides to reap from its own last-active
     %% bookkeeping, which can lag real occupancy - release_zone backdates it
@@ -1705,6 +1791,7 @@ reject_log_key({WorldId, Coords}) -> {WorldId, Coords, input_rejected}.
 bad_batch_log_key({WorldId, Coords}) -> {WorldId, Coords, batch_contract}.
 unknown_outcome_log_key({WorldId, Coords}) -> {WorldId, Coords, unknown_outcome}.
 no_input_handler_log_key({WorldId, Coords}) -> {WorldId, Coords, no_input_handler}.
+park_declined_log_key({WorldId, Coords}) -> {WorldId, Coords, park_declined}.
 effect_log_key({WorldId, Coords}, Kind) -> {WorldId, Coords, Kind}.
 
 %% Same split as log_no_input_handler/2: the telemetry is unconditional and only
@@ -2684,6 +2771,53 @@ maybe_final_snapshot(#{persistence := true} = State) ->
 maybe_final_snapshot(_) ->
     ok.
 
+%% Hand this zone's zone_state to the manager so the zone that next occupies
+%% these coords starts from it instead of blank.
+%%
+%% Only for a non-persistent world. A persistent one writes the whole zone -
+%% entities, timers, spawner and all - to its snapshot in terminate/2, and a
+%% stashed zone_state would then be worse than nothing: the restore path
+%% (maybe_restore_from_snapshot/1) only runs for a zone whose zone_state is
+%% blank, so seeding one from here would suppress the snapshot load entirely.
+%%
+%% Sent before the stop rather than from terminate/2 so it is ordered ahead of
+%% the manager's DOWN for this zone: same sender, same destination, so the cast
+%% cannot overtake or be overtaken, and the coords cannot be re-created from a
+%% stale-empty parked set.
+-spec park_zone_state(map()) -> map().
+park_zone_state(#{persistence := true} = State) ->
+    State;
+park_zone_state(
+    #{
+        zone_manager_pid := ZMPid,
+        game_module := GameMod,
+        coords := Coords,
+        zone_state := ZoneState
+    } = State
+) when is_pid(ZMPid) ->
+    case call_optional(GameMod, dump_zone_state, [ZoneState], ZoneState) of
+        Dumped when is_map(Dumped), map_size(Dumped) > 0 ->
+            asobi_zone_manager:park_state(ZMPid, Coords, Dumped);
+        _ ->
+            ok
+    end,
+    State;
+park_zone_state(State) ->
+    State.
+
+log_park_declined(#{world_id := WorldId, coords := Coords}) ->
+    case asobi_script_log_limiter:allow(park_declined_log_key({WorldId, Coords})) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg => ~"zone park declined: players are still subscribed to this zone",
+                world_id => WorldId,
+                coords => Coords,
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end.
+
 %% --- Zone State Backup/Recovery ---
 
 %% Every limiter key this zone can mint. forget/1 deletes an exact key, so a
@@ -2696,6 +2830,7 @@ forget_log_keys(WorldId, Coords) ->
     asobi_script_log_limiter:forget(bad_batch_log_key(Zone)),
     asobi_script_log_limiter:forget(unknown_outcome_log_key(Zone)),
     asobi_script_log_limiter:forget(no_input_handler_log_key(Zone)),
+    asobi_script_log_limiter:forget(park_declined_log_key(Zone)),
     asobi_script_log_limiter:forget(effect_log_key(Zone, effect_queue_full)),
     asobi_script_log_limiter:forget(effect_log_key(Zone, no_effect_handler)),
     asobi_script_log_limiter:forget(effect_log_key(Zone, bad_effects_return)),

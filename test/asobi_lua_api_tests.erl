@@ -82,6 +82,8 @@ api_test_() ->
         {"game.zone.spawn with overrides and a typo'd template_id returns false",
             fun zone_spawn_unknown_template_with_overrides/0},
         {"game.zone.despawn calls zone", fun zone_despawn/0},
+        {"game.zone.park asks the zone to stop", fun zone_park/0},
+        {"game.zone.park errors without zone context", fun zone_park_no_zone/0},
         {"game.spatial.query_radius zone-based", fun spatial_zone_query_radius/0},
         {"game.spatial.query_rect zone-based", fun spatial_zone_query_rect/0},
         {"game.spatial.query_rect errors without zone", fun spatial_query_rect_no_zone/0},
@@ -201,6 +203,7 @@ setup() ->
     meck:expect(asobi_zone, spawn_entity, fun(_, _, _) -> ok end),
     meck:expect(asobi_zone, spawn_entity, fun(_, _, _, _) -> ok end),
     meck:expect(asobi_zone, despawn_entity, fun(_, _) -> ok end),
+    meck:expect(asobi_zone, park, fun(_) -> ok end),
     meck:expect(asobi_zone, query_radius, fun(_, _, _) ->
         [{~"e1", {5.0, 5.0}}, {~"e2", {3.0, 4.0}}]
     end),
@@ -688,6 +691,18 @@ zone_despawn() ->
     Code = "return game.zone.despawn('entity-123')",
     {ok, [true | _], _} = eval(Code, St),
     ?assert(meck:called(asobi_zone, despawn_entity, '_')).
+
+%% widgrensit/asobi#573. `true` means "asked": this runs inside the zone's own
+%% tick, so it is a cast like every other game.zone.* call.
+zone_park() ->
+    St = install_api_with_zone(),
+    {ok, [true | _], _} = eval("return game.zone.park()", St),
+    ?assert(meck:called(asobi_zone, park, '_')).
+
+zone_park_no_zone() ->
+    St = install_api_world(),
+    {ok, [Result | _], _} = eval("return game.zone.park().error", St),
+    ?assert(is_binary(Result)).
 
 %% widgrensit/asobi#544. The caller is zone (1,1) of a 5x5 grid of 100-unit
 %% zones; (2,1) touches it and publishes a pirate just past the seam.

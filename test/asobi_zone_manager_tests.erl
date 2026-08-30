@@ -81,8 +81,49 @@ zone_manager_test_() ->
         {"a new zone is announced to the ticker", fun zone_open_announced_to_ticker/0},
         {"stamping a dead table does not crash the zone", fun stamp_on_dead_table/0},
         {"stamping without a table reports rather than pretends", fun stamp_without_table/0},
-        {"a junk stamp key is dropped, not fatal", fun junk_stamp_key_dropped/0}
+        {"a junk stamp key is dropped, not fatal", fun junk_stamp_key_dropped/0},
+        {"a parked zone_state seeds the next zone at those coords",
+            fun parked_state_seeds_next_zone/0},
+        {"a parked zone_state is consumed, not kept", fun parked_state_is_consumed/0},
+        {"a parked zone_state beyond the cap is dropped", fun parked_state_cap/0}
     ]}.
+
+%% widgrensit/asobi#573: for a non-persistent world this is the only place a
+%% zone can leave "what was true here" that outlives its process.
+parked_state_seeds_next_zone() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    asobi_zone_manager:park_state(Mgr, {1, 2}, #{seeded => parked}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 2}),
+    ?assertEqual(parked, maps:get(seeded, zone_zone_state(ZonePid))),
+    stop_manager(Ctx).
+
+parked_state_is_consumed() ->
+    Ctx = #{mgr := Mgr} = start_manager(),
+    asobi_zone_manager:park_state(Mgr, {1, 2}, #{seeded => parked}),
+    {ok, ZonePid, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 2}),
+    gen_server:stop(ZonePid),
+    timer:sleep(20),
+    {ok, ZonePid2, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 2}),
+    ?assertEqual(0, map_size(zone_zone_state(ZonePid2))),
+    stop_manager(Ctx).
+
+%% A 2000x2000 grid has four million coords and the node does not have four
+%% million zone_states of memory, so the set is capped.
+parked_state_cap() ->
+    Ctx = #{mgr := Mgr} = start_manager(#{max_parked_states => 1}),
+    asobi_zone_manager:park_state(Mgr, {1, 2}, #{seeded => kept}),
+    asobi_zone_manager:park_state(Mgr, {2, 2}, #{seeded => dropped}),
+    {ok, Kept, created} = asobi_zone_manager:ensure_zone(Mgr, {1, 2}),
+    {ok, Dropped, created} = asobi_zone_manager:ensure_zone(Mgr, {2, 2}),
+    ?assertEqual(kept, maps:get(seeded, zone_zone_state(Kept))),
+    ?assertEqual(0, map_size(zone_zone_state(Dropped))),
+    stop_manager(Ctx).
+
+-spec zone_zone_state(pid()) -> map().
+zone_zone_state(ZonePid) ->
+    case sys:get_state(ZonePid) of
+        #{zone_state := ZS} when is_map(ZS) -> ZS
+    end.
 
 %% --- #313: zone lifecycle telemetry ---
 %%
