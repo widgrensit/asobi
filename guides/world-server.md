@@ -396,6 +396,7 @@ version they are facts of the deployment rather than knobs.
 | `lazy_zones` | `grid_size > 100` | Spawn a zone on first use rather than pre-spawning the grid |
 | `max_active_zones` | 10,000 | See [Large worlds](large-worlds.md) for what happens at that ceiling |
 | `zone_idle_timeout` | 30,000 | Milliseconds an empty zone lingers before it is released |
+| `zone_park_on_idle` | `false` | Let that reaper stop a zone that still holds entities. See [Large worlds](large-worlds.md#stopping-a-zone-that-still-holds-something) |
 | `spatial_grid_cell_size` | unset | Cell side for the in-zone spatial index. Unset means no index is built |
 | `cold_tick_divisor` | 10 | Ticks between ticks of a zone with nothing to simulate; `1` ticks it every tick, `0` never ticks it - see [Performance tuning](performance-tuning.md) |
 | `border_band` | 0 | Fraction of `zone_size` published to neighbours - see [Seeing across a seam](#seeing-across-a-seam) |

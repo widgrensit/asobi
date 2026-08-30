@@ -17,6 +17,7 @@ Hot-path lookups go through ETS directly, bypassing the gen_server.
 -export([stamp_active/2]).
 -export([get_active_zones/1, zone_terminated/3, pre_warm/1]).
 -export([register_zone/3, set_zone_config/2, set_initial_zone_states/2]).
+-export([park_state/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -include_lib("kernel/include/logger.hrl").
@@ -184,6 +185,27 @@ set_zone_config(Ref, Config) ->
     ok = gen_server:call(Ref, {set_zone_config, Config}).
 
 -doc """
+Hold a parked zone's `zone_state` for whichever zone next occupies these
+coords.
+
+For non-persistent worlds only - a persistent one has the whole zone in its
+snapshot, and `asobi_zone:park_zone_state/1` does not call this for it. This is
+the "somewhere to leave what was true here" a script otherwise has to build an
+extension for (widgrensit/asobi#573).
+
+Consumed on the next start for those coords and dropped, so a zone that comes
+back and is parked again re-stores; nothing accumulates for coords that are
+live. The set is capped (`max_parked_states`, defaulting to
+`max_active_zones`) because a large grid has far more coords than a node has
+memory - past the cap the state is dropped and logged rather than kept.
+""".
+-spec park_state(pid() | atom(), {integer(), integer()}, map()) -> ok.
+park_state(Ref, {X, Y} = Coords, ZoneState) when
+    is_integer(X), is_integer(Y), is_map(ZoneState)
+->
+    gen_server:cast(Ref, {park_state, Coords, ZoneState}).
+
+-doc """
 Provide per-coord initial zone_state. Used to thread per-zone state from
 `GameMod:generate_world/2` (e.g. lua_state for the asobi_lua_world bridge,
 or station/planet seeds for sc_game) through to each zone's init. Without
@@ -237,6 +259,10 @@ init(Opts) ->
         zone_size => maps:get(zone_size, Opts),
         zone_config => maps:get(zone_config, Opts, #{}),
         initial_zone_states => maps:get(initial_zone_states, Opts, #{}),
+        parked_states => #{},
+        max_parked_states => maps:get(
+            max_parked_states, Opts, maps:get(max_active_zones, Opts, ?DEFAULT_MAX_ACTIVE)
+        ),
         reap_ref => ReapRef
     }}.
 
@@ -329,6 +355,23 @@ handle_cast(
     Stale = erlang:monotonic_time(millisecond) - Timeout - 1,
     ets:insert(StampTab, {Coords, Stale}),
     {noreply, State};
+handle_cast(
+    {park_state, Coords, ZoneState},
+    #{parked_states := Parked, max_parked_states := Max, world_id := WorldId} = State
+) when is_map(ZoneState) ->
+    case map_size(Parked) >= Max andalso not is_map_key(Coords, Parked) of
+        true ->
+            ?LOG_WARNING(#{
+                event => parked_zone_state_dropped,
+                world_id => WorldId,
+                coords => Coords,
+                max_parked_states => Max,
+                msg => ~"parked zone_state set is full; this zone comes back blank"
+            }),
+            {noreply, State};
+        false ->
+            {noreply, State#{parked_states => Parked#{Coords => ZoneState}}}
+    end;
 handle_cast({zone_terminated, Coords, ZonePid}, #{ets_tab := Tab} = State) ->
     %% Only clean up if this coords still maps to the pid that terminated -
     %% a reaped zone's slot may already have been recreated.
@@ -400,6 +443,7 @@ start_zone(
         max_active_zones := MaxActive,
         zone_config := BaseConfig,
         initial_zone_states := InitialStates,
+        parked_states := Parked,
         world_id := WorldId
     } = State
 ) ->
@@ -414,8 +458,11 @@ start_zone(
                 zone_stamp_tab => StampTab,
                 zone_seed_hook => Origin =:= lazy
             },
+            %% A parked state wins over the world-generation one: it is what
+            %% these coords were last holding, and generate_world/2's is only
+            %% the state they started life with.
             Config =
-                case maps:get(Coords, InitialStates, undefined) of
+                case maps:get(Coords, Parked, maps:get(Coords, InitialStates, undefined)) of
                     undefined -> Config0;
                     ZS when is_map(ZS) -> Config0#{zone_state => ZS};
                     _ -> Config0
@@ -428,7 +475,11 @@ start_zone(
                     MonRef = monitor(process, Pid),
                     touch(Coords, State),
                     State1 = State#{
-                        zone_monitors => Monitors#{MonRef => Coords, Coords => MonRef}
+                        zone_monitors => Monitors#{MonRef => Coords, Coords => MonRef},
+                        %% Consumed, not kept: the live zone owns this state
+                        %% now, and holding a stale copy would resurrect it if
+                        %% the zone later died without parking.
+                        parked_states => maps:remove(Coords, Parked)
                     },
                     {ok, Pid, State1};
                 {error, _} = Err ->

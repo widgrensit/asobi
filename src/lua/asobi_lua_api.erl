@@ -67,6 +67,7 @@ game.zone.spawn(template_id, x, y)              -- false if template_id is unkno
 game.zone.spawn(template_id, x, y, overrides)   -- false if template_id is unknown
 game.zone.despawn(entity_id)
 game.zone.apply(entity_id, event)               -- ask the owning neighbour zone to act; false if unseen
+game.zone.park()                                -- stop this zone after the tick, keeping what it holds
 
 -- Terrain (world mode only, requires terrain_store_pid in context)
 game.terrain.get_chunk(cx, cy)                   -- get compressed chunk data
@@ -218,6 +219,7 @@ core_surface(Ctx) ->
         {[~"game", ~"zone", ~"spawn"], zone_effect(Ctx), fun_zone_spawn(Ctx)},
         {[~"game", ~"zone", ~"despawn"], zone_effect(Ctx), fun_zone_despawn(Ctx)},
         {[~"game", ~"zone", ~"apply"], zone_effect(Ctx), fun_zone_apply(Ctx)},
+        {[~"game", ~"zone", ~"park"], zone_effect(Ctx), fun_zone_park(Ctx)},
         %% Terrain
         {[~"game", ~"terrain", ~"get_chunk"], none, fun_terrain_get_chunk(Ctx)},
         {[~"game", ~"terrain", ~"preload"], terrain_effect(Ctx), fun_terrain_preload(Ctx)}
@@ -1524,6 +1526,19 @@ fun_zone_despawn(#{zone_pid := ZonePid}) ->
     end;
 fun_zone_despawn(_) ->
     fun(_, St) -> error_result(~"zone.despawn not available (no zone context)", St) end.
+
+%% A cast, like every other game.zone.* call: this closure runs inside the zone
+%% process's own tick, so asking the zone a question synchronously would
+%% deadlock it. So `true` means "asked", not "stopped" - the zone finishes this
+%% tick first, and declines outright if anyone is still subscribed (it logs when
+%% it does).
+fun_zone_park(#{zone_pid := ZonePid}) ->
+    fun(_Args, St) ->
+        asobi_zone:park(ZonePid),
+        {[true], St}
+    end;
+fun_zone_park(_) ->
+    fun(_, St) -> error_result(~"zone.park not available (no zone context)", St) end.
 
 %% --- Terrain ---
 

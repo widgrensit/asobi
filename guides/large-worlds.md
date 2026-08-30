@@ -85,14 +85,52 @@ it and re-touches its own timer; only an empty zone stops. A join or crossing
 that finds its zone reaped between resolving the pid and placing the player
 transparently starts a replacement zone and places them there.
 
-Zone state is **not** snapshotted on the way out. Zone persistence exists in
-the zone process but no configuration path reaches it, so entities in a
-reaped zone are gone. Do not design a world that depends on a zone's contents
-surviving the players leaving it - write anything durable to your own tables
-from a callback.
+### Stopping a zone that still holds something
 
-`persistent = true` in a mode's config does one reachable thing today: it keeps
-an emptied world alive instead of finishing it.
+The default refusal is right when the only thing asking is an idle stamp, which
+can lag real occupancy. But it also means a zone that has ever been visited
+holds whatever the script spawned in it and is therefore never idle-reapable,
+so its Lua VM lives for as long as the world does. For a map whose zones
+contain scenery, `zone_idle_timeout` is dead by default.
+
+Two ways to stop one:
+
+```lua
+-- The zone decides, from its own tick.
+function zone_tick(entities, zone_state)
+    if nobody_is_watching() then
+        game.zone.park()
+    end
+    return entities, zone_state
+end
+```
+
+```lua
+-- Or let the reaper do it: an idle zone stops even holding entities.
+zone_park_on_idle = true
+```
+
+Both are the game saying it is safe, so both stop a populated zone - which the
+manager's own reap sweep still will not. Neither takes a zone out from under
+players: a zone with subscribers declines a park and logs it.
+
+What comes back depends on `persistent`:
+
+| | `persistent = true` | `persistent = false` |
+|---|---|---|
+| Entities | Restored from the zone's snapshot | Gone |
+| Spawner state, entity timers, tick | Restored | Gone |
+| `zone_state` | Restored | Restored, from memory, until the world ends |
+
+So a persistent world gets the zone back as it was. A non-persistent one gets
+back only "what was true here" - the `zone_state` your `on_zone_loaded` or
+`zone_tick` last left - and re-spawns the rest. That is enough for content that
+is a pure function of its coordinates; it is not enough for a damaged NPC or a
+half-looted container, and those need `persistent = true`.
+
+The in-memory `zone_state` set is capped at `max_active_zones` entries and
+dies with the world. Past the cap a parked zone comes back blank, and asobi
+logs `parked_zone_state_dropped`.
 
 ## Terrain data
 
@@ -268,7 +306,8 @@ In Erlang:
 | `view_radius` | `1` | Zone radius a player subscribes to. 0 means own zone only. |
 | `tick_rate` | `50` | Milliseconds per world tick. |
 | `max_players` | `500`, but `match_size` in a Lua script | Players per world. |
-| `persistent` | `false` | Keep an emptied world alive instead of finishing it. |
+| `persistent` | `false` | Snapshot zones to the database, and keep an emptied world alive instead of finishing it. |
+| `zone_park_on_idle` | `false` | Let the idle reaper stop a zone that still holds entities. |
 
 ## Scaling guidelines
 

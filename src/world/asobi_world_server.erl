@@ -723,6 +723,10 @@ configure_zone_manager(
         world_server_pid => self(),
         spawn_templates => Templates,
         persistence => Persistence,
+        %% widgrensit/asobi#573: opt in to the idle reaper taking a zone that
+        %% still holds entities. Off by default, because for a world that did
+        %% not ask for it that is data loss.
+        park_on_idle => maps:get(zone_park_on_idle, Config, false),
         snapshot_interval => maps:get(snapshot_interval, Config, 600),
         %% Default 3, so at the 50ms tick_rate deltas go out every 150ms even
         %% though the sim runs at tick_rate; a mode sets `broadcast_interval` to

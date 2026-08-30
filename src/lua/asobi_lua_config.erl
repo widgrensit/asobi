@@ -47,6 +47,7 @@ view_radius             = 0               -- optional, zone radius a player subs
 persistent              = false           -- optional, snapshot zones to DB across restarts
 lazy_zones              = true            -- optional, on-demand zone loading
 zone_idle_timeout       = 30000           -- optional, ms before idle zone is reaped
+zone_park_on_idle       = false           -- optional, let the reaper take a zone that still holds entities
 max_active_zones        = 10000           -- optional, cap on concurrent zones
 spatial_grid_cell_size  = 64              -- optional, cell size for spatial grid indexing
 cold_tick_divisor       = 10              -- optional, tick divisor for cold (idle) zones, 0 = never tick one
@@ -340,6 +341,7 @@ read_match_globals(ScriptPath, St) ->
     QuickPlay = read_global_bool_strict(~"quick_play", ScriptPath, St),
     LazyZones = read_global_bool(~"lazy_zones", St),
     ZoneIdleTimeout = read_global_int(~"zone_idle_timeout", St),
+    ZonePark = read_global_bool(~"zone_park_on_idle", St),
     MaxActiveZones = read_global_int(~"max_active_zones", St),
     SpatialGridCellSize = read_global_int(~"spatial_grid_cell_size", St),
     ColdTickDivisor = read_global_int(~"cold_tick_divisor", St),
@@ -363,7 +365,9 @@ read_match_globals(ScriptPath, St) ->
             Config2 = maybe_add_strategy(Config1, Strategy),
             Config2a = maybe_add_state_strategy(Config2, StateStrategy),
             Config3 = maybe_add_bots(Config2a, Bots, ScriptPath),
-            Config4 = maybe_add_zone_config(Config3, LazyZones, ZoneIdleTimeout, MaxActiveZones),
+            Config4 = maybe_add_zone_config(
+                Config3, LazyZones, ZoneIdleTimeout, MaxActiveZones, ZonePark
+            ),
             Config5 = maybe_add_int(Config4, spatial_grid_cell_size, SpatialGridCellSize),
             Config6 = maybe_add_non_neg_int(Config5, cold_tick_divisor, ColdTickDivisor),
             Config6a = maybe_add_fraction(Config6, border_band, BorderBand),
@@ -411,7 +415,7 @@ maybe_add_state_strategy(Config, ~"shared") ->
 maybe_add_state_strategy(Config, _) ->
     Config.
 
-maybe_add_zone_config(Config, LazyZones, ZoneIdleTimeout, MaxActiveZones) ->
+maybe_add_zone_config(Config, LazyZones, ZoneIdleTimeout, MaxActiveZones, ZonePark) ->
     Config1 =
         case LazyZones of
             true -> Config#{lazy_zones => true};
@@ -423,9 +427,15 @@ maybe_add_zone_config(Config, LazyZones, ZoneIdleTimeout, MaxActiveZones) ->
             ZIT when is_integer(ZIT), ZIT > 0 -> Config1#{zone_idle_timeout => ZIT};
             _ -> Config1
         end,
-    case MaxActiveZones of
-        MAZ when is_integer(MAZ), MAZ > 0 -> Config2#{max_active_zones => MAZ};
-        _ -> Config2
+    Config3 =
+        case MaxActiveZones of
+            MAZ when is_integer(MAZ), MAZ > 0 -> Config2#{max_active_zones => MAZ};
+            _ -> Config2
+        end,
+    case ZonePark of
+        true -> Config3#{zone_park_on_idle => true};
+        false -> Config3#{zone_park_on_idle => false};
+        undefined -> Config3
     end.
 
 maybe_add_int(Config, _Key, undefined) ->
