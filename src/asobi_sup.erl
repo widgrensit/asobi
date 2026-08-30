@@ -1,6 +1,8 @@
 -module(asobi_sup).
 -behaviour(supervisor).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0]).
 -export([init/1]).
 -ifdef(TEST).
@@ -64,6 +66,7 @@ children(_Engine) ->
         chat_sup(),
         tournament_sup(),
         presence_spec(),
+        kv_spec(),
         guest_reaper_spec(),
         console_session_spec(),
         lua_game_config_spec(),
@@ -241,6 +244,15 @@ presence_spec() ->
         start => {asobi_presence, start_link, []}
     }.
 
+%% Owns the `game.kv` table. Nothing else depends on it being up - reads fall
+%% through to a miss and writes answer `kv_unavailable` - so it needs no
+%% ordering against its siblings.
+kv_spec() ->
+    #{
+        id => asobi_kv,
+        start => {asobi_kv, start_link, []}
+    }.
+
 oidc_providers_spec() ->
     #{
         id => asobi_oidc_providers,
@@ -393,14 +405,77 @@ register_limiters() ->
                     O when is_map(O) -> O;
                     _ -> #{}
                 end,
-            Opts = maps:merge(DefaultOpts, Overrides),
             Name = limiter_name(Group),
-            seki:new_limiter(Name, Opts)
+            case limiter_opts(maps:merge(DefaultOpts, Overrides)) of
+                invalid ->
+                    ?LOG_WARNING(#{
+                        event => rate_limit_override_rejected,
+                        group => Group,
+                        msg => ~"rate_limits override is not a valid limiter; using the default"
+                    }),
+                    start_limiter(Group, Name, limiter_opts(DefaultOpts));
+                Opts ->
+                    start_limiter(Group, Name, Opts)
+            end
         end,
         Defaults
     ),
     asobi_script_log_limiter:init_table(),
     ignore.
+
+%% The `invalid` clause is unreachable for the defaults above - they are
+%% literals that validate - but limiter_opts/1 cannot say so, and asserting it
+%% would turn a future typo in the defaults into a crash at boot. Loud instead:
+%% a limiter that quietly never started is a limiter that never limits.
+-spec start_limiter(atom(), atom(), seki:limiter_opts() | invalid) -> ok.
+start_limiter(Group, _Name, invalid) ->
+    ?LOG_ERROR(#{
+        event => rate_limit_default_invalid,
+        group => Group,
+        msg => ~"built-in rate limiter default is not a valid limiter; none started for this group"
+    }),
+    ok;
+start_limiter(_Group, Name, Opts) ->
+    _ = seki:new_limiter(Name, Opts),
+    ok.
+
+%% The overrides come out of `rate_limits` in sys.config, so the merged map is
+%% `#{term() => term()}` however carefully the defaults above are written.
+%% Narrowed by validating rather than by asserting: a deployment that writes a
+%% string where a number goes should get the default limiter and a log line,
+%% not a limiter that silently never limits.
+-spec limiter_opts(map()) -> seki:limiter_opts() | invalid.
+limiter_opts(Merged) ->
+    case
+        {
+            limiter_algorithm(maps:get(algorithm, Merged, undefined)),
+            pos_int(maps:get(limit, Merged, undefined)),
+            pos_int(maps:get(window, Merged, undefined))
+        }
+    of
+        {A, L, W} when A =/= undefined, L =/= undefined, W =/= undefined ->
+            maybe_burst(#{algorithm => A, limit => L, window => W}, Merged);
+        _ ->
+            invalid
+    end.
+
+-spec limiter_algorithm(term()) -> seki:algorithm() | undefined.
+limiter_algorithm(token_bucket) -> token_bucket;
+limiter_algorithm(sliding_window) -> sliding_window;
+limiter_algorithm(gcra) -> gcra;
+limiter_algorithm(leaky_bucket) -> leaky_bucket;
+limiter_algorithm(_) -> undefined.
+
+-spec pos_int(term()) -> pos_integer() | undefined.
+pos_int(N) when is_integer(N), N > 0 -> N;
+pos_int(_) -> undefined.
+
+-spec maybe_burst(seki:limiter_opts(), map()) -> seki:limiter_opts().
+maybe_burst(Opts, Merged) ->
+    case pos_int(maps:get(burst, Merged, undefined)) of
+        undefined -> Opts;
+        Burst -> Opts#{burst => Burst}
+    end.
 
 limiter_name(auth) -> asobi_auth_limiter;
 limiter_name(register) -> asobi_register_limiter;

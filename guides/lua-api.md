@@ -12,7 +12,7 @@ into a sandboxed VM with **no `game` table at all** - see
 There are two return conventions and you have to know which one you are
 looking at.
 
-The persistence-style calls - `economy.*`, `storage.*`,
+The persistence-style calls - `economy.*`, `storage.*`, `kv.*`,
 `leaderboard.top/rank/around`, `terrain.get_chunk`, `notify`, `notify_many` -
 return a wrapped table. Index into `.ok`:
 
@@ -219,8 +219,10 @@ to you.
 ```lua
 game.storage.get(collection, key)
 game.storage.set(collection, key, value)
+game.storage.update(collection, key, ops)
 game.storage.player_get(player_id, collection, key)
 game.storage.player_set(player_id, collection, key, value)
+game.storage.player_update(player_id, collection, key, ops)
 ```
 
 Two distinct namespaces, not one with an optional owner. `get`/`set` write
@@ -232,6 +234,104 @@ are hard-scoped to per-player rows, so nothing a client sends can read or
 overwrite what `game.storage.set` wrote. That makes it the right place for
 server-authoritative configuration and the wrong place for anything a client
 needs to fetch directly.
+
+### set loses concurrent writes; update does not
+
+`set` reads the row and then writes it, and nothing holds the two together. Two
+writers racing on one key therefore lose a write, silently. That is fine for
+"save the sector's config at boot" and wrong for anything two zones can touch.
+
+`update` applies [merge operators](#merge-operators) server-side, conditional on
+the version it read. A racing writer's update matches no rows, and this re-reads
+and re-applies - which is correct rather than merely safe, because the operators
+are order-independent. After five attempts on a genuinely hot key it answers
+`{ error = "storage_conflict" }` instead of spinning a zone that has a
+millisecond budget.
+
+```lua
+local r = game.storage.update("ships", ship_id, {
+  hull  = { incr = -40 },
+  kills = { incr = 1 },
+  dead  = { latch = true },
+})
+if r.ok.hull <= 0 then ... end
+```
+
+It is still a database round trip inside a callback, so it suits a per-kill or
+per-threshold write. For a per-hit one, use `game.kv`.
+
+## Node-local KV
+
+```lua
+game.kv.get(collection, key)
+game.kv.set(collection, key, value)
+game.kv.set(collection, key, value, ttl_seconds)
+game.kv.merge(collection, key, ops)
+game.kv.merge(collection, key, ops, ttl_seconds)
+game.kv.delete(collection, key)
+```
+
+State that has to outlive the zone holding it, at tick rate. An entity that
+crosses the map - a freighter on a trade route, a patrol - has state that is
+neither recomputable nor zone-scoped: hull points, "this one is already dead",
+"it has shed 4 of its 10 containers". The zone's entity map goes with the zone
+and a table in the zone's VM goes with the VM, so neither works.
+
+- **In memory, on one node.** Lost on restart, never replicated. A world lives
+  on one node, so this is per world in practice - but say it out loud in your
+  design. Anything that must survive a deploy belongs in `game.storage`.
+- **Scoped to the calling world or match.** Two worlds running the same mode
+  script cannot collide on the same collection and key.
+- **Reads are free.** `get` reads shared memory from the calling process, with
+  no message round trip, so a tick can read state without paying for it.
+- **Merges are atomic.** Every write is serialised, so a read-modify-write
+  cannot interleave, and `merge` answers with the merged value - the caller
+  usually needs to know whether that was the hit that killed it.
+- **TTL'd.** Every write refreshes the entry's expiry, so state in active use
+  never ages out; an entry nothing has touched for an hour is swept. Pass
+  `ttl_seconds` for a different lifetime.
+
+```lua
+function handle_effects(effects, entities)
+  for _, e in ipairs(effects) do
+    local r = game.kv.merge("ships", e.target, {
+      hull = { incr = -e.damage },
+      dead = { latch = e.damage >= 999 },
+    })
+    if r.ok.hull <= 0 then game.zone.despawn(e.target) end
+  end
+  return entities
+end
+```
+
+`set` takes a table, not a scalar: everything here merges field by field.
+
+### Merge operators
+
+`game.kv.merge` and `game.storage.update` take the same shape - a table of
+field names to a table naming exactly one operator:
+
+| Operator | Does | Order-independent |
+|---|---|---|
+| `set` | Replaces the field | **No** - last writer wins |
+| `set_if_absent` | Writes only if the field is missing | Yes |
+| `incr` | Adds a number (negative to subtract) | Yes |
+| `min` | Keeps the lower of the two | Yes |
+| `max` | Keeps the higher of the two | Yes |
+| `latch` | Boolean OR: once true, stays true | Yes |
+
+Order-independence is the point. An entity crossing a zone boundary is
+legitimately held by two zones at once until it is `rehome_margin` past the
+seam, and both tick - two schedulers, no ordering between them. Every operator
+above except `set` gives the same answer whichever lands first, so neither zone
+needs a lock, a version, or a re-read. `set` is honest about being
+last-writer-wins; put it on a field only one writer owns.
+
+Anything else is an error naming the field: an unknown operator, a bare value
+(`{ hull = 40 }` rather than `{ hull = { set = 40 } }`), two operators in one
+field, or an operator applied to the wrong type. A bare value is deliberately
+*not* treated as `set` - it would read exactly like a working merge and lose
+writes.
 
 ## Chat
 

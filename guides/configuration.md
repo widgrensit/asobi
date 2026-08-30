@@ -845,6 +845,21 @@ to the console, which is off until asked for.
 
 It has no environment variable; set it in `sys.config`.
 
+### Node-local KV
+
+`game.kv` is a separate, in-memory tier for state that has to outlive a zone at
+tick rate - see [Lua API](lua-api.md#node-local-kv). It is not part of the
+storage subsystem and is not switched off with it: it touches no database and
+serves no route.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `kv_ttl_seconds` | `3600` | How long an untouched `game.kv` entry lives. Every write refreshes it, so state in active use never ages out |
+| `kv_max_keys` | `100000` | Cap on distinct keys per node. Past it a new key is refused and asobi logs `kv_full`; an existing key stays writable |
+
+Both are per node and take effect on the next write, so a running node can be
+retuned without a restart.
+
 ## Vote templates
 
 Reusable vote configurations, merged with the per-vote config from your game

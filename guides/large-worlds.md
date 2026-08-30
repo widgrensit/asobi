@@ -126,7 +126,9 @@ So a persistent world gets the zone back as it was. A non-persistent one gets
 back only "what was true here" - the `zone_state` your `on_zone_loaded` or
 `zone_tick` last left - and re-spawns the rest. That is enough for content that
 is a pure function of its coordinates; it is not enough for a damaged NPC or a
-half-looted container, and those need `persistent = true`.
+half-looted container, and those need `persistent = true` - or a tier that is
+not zone-scoped at all, which is
+[State that outlives a zone](#state-that-outlives-a-zone).
 
 The in-memory `zone_state` set is capped at `max_active_zones` entries and
 dies with the world. Past the cap a parked zone comes back blank, and asobi
@@ -236,6 +238,33 @@ The terrain store is an ETS-backed cache that lazy-loads chunks from the
 provider. It starts automatically when the game returns a terrain provider, and
 caches each chunk after first load. It is per node, like every other cache -
 see [Clustering](clustering.md#what-is-per-node).
+
+## State that outlives a zone
+
+An entity that crosses the map - a freighter on a trade route, a patrol, a
+convoy - has state that is neither recomputable nor zone-scoped. Position can be
+made a pure function of a clock and needs no storage at all; hull points, "this
+one is already dead", "it has shed 4 of its 10 containers" cannot.
+
+Neither place a zone script already has works for it. The zone's entity map goes
+with the zone. A table in the zone's Lua VM is one copy per zone and goes with
+the VM. And an entity crossing a seam is legitimately held by two zones at once
+until it is `rehome_margin` past the boundary, so both tick and both can write
+to it - two schedulers, no ordering between them.
+
+Two tiers, and the difference that matters is what survives a node restart:
+
+| | `game.kv` | `game.storage.update` |
+|---|---|---|
+| Where | Node memory, scoped to this world | Database, global |
+| Survives a restart | **No** | Yes |
+| Cost per write | A message to one process | Two database round trips |
+| Concurrent writers | Atomic merge | Atomic merge, version-checked |
+| Use it for | Per-hit damage, per-tick accumulation | Per-kill, per-threshold |
+
+Both take the same order-independent [merge
+operators](lua-api.md#merge-operators), so two zones can each apply what they
+saw with no lock and no lost write.
 
 ## Zone lifecycle callbacks
 

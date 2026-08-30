@@ -38,6 +38,7 @@ Three things live here, and only here:
     [~"game", ~"economy"],
     [~"game", ~"leaderboard"],
     [~"game", ~"storage"],
+    [~"game", ~"kv"],
     [~"game", ~"chat"],
     [~"game", ~"spatial"],
     [~"game", ~"zone"],
