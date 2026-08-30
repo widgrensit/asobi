@@ -1,7 +1,13 @@
 -module(asobi_world_callbacks_tests).
 -include_lib("eunit/include/eunit.hrl").
 
-%% Verify the new optional callbacks are defined in the behaviour
+%% Verify the new optional callbacks are defined in the behaviour.
+%%
+%% Membership in behaviour_info/1 only says the declaration exists - it says
+%% nothing about whether asobi ever calls it, which is how on_zone_loaded/2
+%% stayed dead through three of these (widgrensit/asobi#574). The dispatch is
+%% tested in asobi_zone_lifecycle_hooks_tests and, end to end through a Lua
+%% world, in asobi_lua_world_integration_tests.
 
 terrain_provider_callback_defined_test() ->
     Callbacks = asobi_world:behaviour_info(callbacks),

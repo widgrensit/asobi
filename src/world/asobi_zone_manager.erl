@@ -241,19 +241,27 @@ init(Opts) ->
     }}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
-handle_call({ensure_zone, Coords}, _From, #{ets_tab := Tab} = State) ->
+%% Guarded like `revive_zone` below rather than trusting the payload: this
+%% manager is `transient` under a ONE_FOR_ALL supervisor, so a function_clause
+%% here takes the zone supervisor, the ticker, the world server and every zone
+%% with it. A caller that sends nonsense gets an error, not a dead world.
+handle_call({ensure_zone, {ZX, ZY} = Coords}, _From, #{ets_tab := Tab} = State) when
+    is_integer(ZX), is_integer(ZY)
+->
     case ets:lookup(Tab, Coords) of
         [{Coords, Pid}] ->
             touch(Coords, State),
             {reply, {ok, Pid, existing}, State};
         [] ->
-            case start_zone(Coords, State) of
+            case start_zone(Coords, lazy, State) of
                 {ok, Pid, State1} ->
                     {reply, {ok, Pid, created}, State1};
                 {error, Reason} ->
                     {reply, {error, Reason}, State}
             end
     end;
+handle_call({ensure_zone, _Coords}, _From, State) ->
+    {reply, {error, invalid_coords}, State};
 handle_call({revive_zone, {ZX, ZY} = Coords, DeadPid}, _From, #{ets_tab := Tab} = State) when
     is_integer(ZX), is_integer(ZY), is_pid(DeadPid)
 ->
@@ -261,7 +269,7 @@ handle_call({revive_zone, {ZX, ZY} = Coords, DeadPid}, _From, #{ets_tab := Tab} 
         [{Coords, DeadPid}] ->
             case await_zone_down(Coords, DeadPid, State) of
                 {ok, State1} ->
-                    case start_zone(Coords, State1) of
+                    case start_zone(Coords, lazy, State1) of
                         {ok, Pid, State2} -> {reply, {ok, Pid, created}, State2};
                         {error, Reason} -> {reply, {error, Reason}, State1}
                     end;
@@ -272,7 +280,7 @@ handle_call({revive_zone, {ZX, ZY} = Coords, DeadPid}, _From, #{ets_tab := Tab} 
             touch(Coords, State),
             {reply, {ok, Pid, existing}, State};
         [] ->
-            case start_zone(Coords, State) of
+            case start_zone(Coords, lazy, State) of
                 {ok, Pid, State1} -> {reply, {ok, Pid, created}, State1};
                 {error, Reason} -> {reply, {error, Reason}, State}
             end
@@ -375,8 +383,15 @@ terminate(_Reason, #{ets_tab := Tab, stamp_tab := StampTab}) ->
 
 %% --- Internal ---
 
+%% `Origin` is what tells the new zone whether to ask the world for a
+%% zone_state: `lazy` means nobody has built one for these coords, `prewarm`
+%% means generate_world/2 already did (set_initial_zone_states/2). See
+%% asobi_zone's seed_request/1 and widgrensit/asobi#574.
+-spec start_zone({integer(), integer()}, lazy | prewarm, map()) ->
+    {ok, pid(), map()} | {error, term()}.
 start_zone(
     Coords,
+    Origin,
     #{
         ets_tab := Tab,
         stamp_tab := StampTab,
@@ -394,7 +409,11 @@ start_zone(
         false ->
             %% Handed to the zone so it can stamp itself active without a cast
             %% at the manager - see stamp_active/2.
-            Config0 = BaseConfig#{coords => Coords, zone_stamp_tab => StampTab},
+            Config0 = BaseConfig#{
+                coords => Coords,
+                zone_stamp_tab => StampTab,
+                zone_seed_hook => Origin =:= lazy
+            },
             Config =
                 case maps:get(Coords, InitialStates, undefined) of
                     undefined -> Config0;
@@ -431,8 +450,11 @@ cleanup_zone(
     %% being there - a live-zone gauge built from opened minus closed would go
     %% negative otherwise.
     case ets:member(Tab, Coords) of
-        true -> asobi_telemetry:zone_closed(WorldId, Coords);
-        false -> ok
+        true ->
+            asobi_telemetry:zone_closed(WorldId, Coords),
+            notify_zone_unloaded(Coords, State);
+        false ->
+            ok
     end,
     %% The zone's own terminate/2 clears this too, but it does not run when the
     %% zone is killed rather than stopped - and a stale band row keeps a dead
@@ -535,6 +557,25 @@ reap_expired([Coords | Rest], Tab, State) ->
 touch(Coords, #{stamp_tab := StampTab}) ->
     stamp_active(StampTab, Coords).
 
+%% `c:asobi_world:on_zone_unloaded/2`, dispatched from here rather than from the
+%% zone's own terminate/2 because this is the one place that sees a reaped zone
+%% and a crashed one alike - terminate/2 does not run on a kill. Gated on the
+%% ETS row the same way the close telemetry is, so the double-call paths
+%% (a DOWN racing await_zone_down/3) deliver one unload, not two.
+%%
+%% Nothing fires on world teardown: the instance supervisor stops this manager
+%% before the zone supervisor, so the zones' DOWNs are never processed. A game
+%% that needs to persist on world end has on_world_recovered/2's counterpart in
+%% the world server's own terminate, not this.
+-spec notify_zone_unloaded({integer(), integer()}, map()) -> ok.
+notify_zone_unloaded(Coords, #{zone_config := ZoneConfig}) ->
+    case maps:get(world_server_pid, ZoneConfig, undefined) of
+        WSPid when is_pid(WSPid) -> asobi_world_server:zone_unloaded(WSPid, Coords);
+        _ -> ok
+    end;
+notify_zone_unloaded(_Coords, _State) ->
+    ok.
+
 %% The ticker owns its own active set rather than re-reading this manager's
 %% table every tick (widgrensit/asobi#560), so a zone has to be handed to it
 %% when it opens. Removal needs no counterpart: the ticker monitors what it is
@@ -578,7 +619,7 @@ prewarm_zones([Coords | Rest], #{ets_tab := Tab} = State) ->
             [{_, _}] ->
                 State;
             [] ->
-                case start_zone(Coords, State) of
+                case start_zone(Coords, prewarm, State) of
                     {ok, _Pid, S1} -> S1;
                     {error, _} -> State
                 end

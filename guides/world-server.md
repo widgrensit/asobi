@@ -219,7 +219,7 @@ end
 | `spawn_templates(config)` | no | See [Spawn templates](#spawn-templates) |
 | `phases(config)` | no | See [Phases](phases.md) |
 | `on_phase_started(name, state)` / `on_phase_ended(name, state)` | no | Phase transitions |
-| `on_zone_loaded(cx, cy, state)` / `on_zone_unloaded(cx, cy, state)` | no | See [Large worlds](large-worlds.md) |
+| `on_zone_loaded(cx, cy, state)` / `on_zone_unloaded(cx, cy, state)` | no | Seeds a lazily-loaded zone's `zone_state`. See [Large worlds](large-worlds.md#zone-lifecycle-callbacks) |
 | `terrain_provider(config)` | no | See [Large worlds](large-worlds.md) |
 | `on_world_recovered(snapshot, state)` | no | The world process restarted and a snapshot was recovered |
 

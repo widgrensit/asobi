@@ -295,11 +295,31 @@ not only the ones that changed.
 -callback terrain_provider(Config :: map()) ->
     {Module :: module(), ProviderArgs :: map()} | none.
 
--doc "Optional: a zone was lazily loaded.".
+-doc """
+Optional: a zone was lazily loaded. `ZoneState` becomes that zone's
+`zone_state`, before its first tick and before `init_zone_state/2` builds any
+per-zone runtime from it.
+
+Runs in the world server, against the world's game state - so for a Lua game it
+runs in the world VM, on the world's budget.
+
+Only for a zone created on demand, and only when it has nothing to restore: a
+pre-spawned zone already carries what `generate_world/2` built for it, and a
+persistent zone with a snapshot has already loaded it. Seeding either would
+discard state the game did not ask to lose.
+
+The zone declines to tick until this answers, so it never runs against the
+blank `zone_state` this callback exists to fill in. See
+`guides/large-worlds.md`.
+""".
 -callback on_zone_loaded(Coords :: {integer(), integer()}, GameState :: term()) ->
     {ok, ZoneState :: map(), GameState1 :: term()}.
 
--doc "Optional: a zone was unloaded.".
+-doc """
+Optional: the zone process for these coords is gone - reaped for idleness, or
+crashed. Not called on world teardown, where the world's own state is going
+away too.
+""".
 -callback on_zone_unloaded(Coords :: {integer(), integer()}, GameState :: term()) ->
     {ok, GameState1 :: term()}.
 

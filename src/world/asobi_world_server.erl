@@ -27,6 +27,7 @@ transient matches use `asobi_match_server` instead.
 -export_type([listing/0]).
 -export([spawn_at/3, spawn_at/4]).
 -export([zone_created/3]).
+-export([zone_loaded/3, zone_unloaded/2]).
 -export([reconnect/2]).
 -export([resync/3]).
 -export([start_vote/2, cast_vote/4, use_veto/3]).
@@ -125,6 +126,28 @@ already covered those coords (widgrensit/asobi#275).
 -spec zone_created(pid(), {integer(), integer()}, pid()) -> ok.
 zone_created(Pid, Coords, ZonePid) when is_pid(ZonePid) ->
     gen_statem:cast(Pid, {zone_created, Coords, ZonePid}).
+
+-doc """
+A lazily-created zone asking for the zone_state `c:asobi_world:on_zone_loaded/2`
+builds for its coords, answered with `asobi_zone:zone_state_loaded/2`.
+
+Cast rather than call in both directions: the world server calls into a zone it
+has just had created (`asobi_zone:sync/1` on the join path), so a blocking call
+the other way deadlocks. See `asobi_zone`'s seed_request/1.
+""".
+-spec zone_loaded(pid(), {integer(), integer()}, pid()) -> ok.
+zone_loaded(Pid, Coords, ZonePid) when is_pid(ZonePid) ->
+    gen_statem:cast(Pid, {zone_loaded, Coords, ZonePid}).
+
+-doc """
+The zone process for these coords is gone - reaped, parked, stopped with the
+world, or crashed - so `c:asobi_world:on_zone_unloaded/2` can update the world's
+game state. Sent by `asobi_zone_manager` as it cleans the coords up, which is
+the one place that sees an orderly stop and a crash alike.
+""".
+-spec zone_unloaded(pid(), {integer(), integer()}) -> ok.
+zone_unloaded(Pid, Coords) ->
+    gen_statem:cast(Pid, {zone_unloaded, Coords}).
 
 -spec move_player(pid(), binary(), {number(), number()}) -> ok.
 move_player(Pid, PlayerId, NewPos) ->
@@ -321,6 +344,16 @@ loading(cast, {move_player, _PlayerId, _NewPos, _Entity}, _State) ->
     {keep_state_and_data, [postpone]};
 loading(cast, {zone_created, _Coords, _ZonePid}, _State) ->
     {keep_state_and_data, [postpone]};
+%% Postponed rather than dropped: the zone that sent this is not ticking until
+%% it gets an answer, and dropping it would cost it the whole seed deadline.
+%% Loading is bounded by generate_world/2, so the wait is short.
+loading(cast, {zone_loaded, _Coords, _ZonePid}, _State) ->
+    {keep_state_and_data, [postpone]};
+%% Not postponed: a zone that came and went before the world finished loading
+%% has nothing for the game state to reconcile, and postponing would deliver an
+%% unload for a zone the game was never told had loaded.
+loading(cast, {zone_unloaded, _Coords}, _State) ->
+    keep_state_and_data;
 %% A world script broadcasting during generate_world/init reaches the world
 %% server while it is still loading. Without this clause that is a
 %% function_clause and the world dies before it ever runs.
@@ -363,6 +396,28 @@ running(cast, {zone_created, {ZX, ZY} = Coords, ZonePid}, #{player_zones := Play
 %% it. loading/3 postpones this same cast unguarded, so a malformed one is
 %% buffered and only detonates on entry to running.
 running(cast, {zone_created, _Coords, _ZonePid}, _State) ->
+    keep_state_and_data;
+running(
+    cast,
+    {zone_loaded, {ZX, ZY} = Coords, ZonePid},
+    #{game_module := Mod, game_state := GS} = State
+) when is_integer(ZX), is_integer(ZY), is_pid(ZonePid) ->
+    {ZoneState, GS1} = call_on_zone_loaded(Mod, Coords, GS, State),
+    asobi_zone:zone_state_loaded(ZonePid, ZoneState),
+    {keep_state, State#{game_state => GS1}};
+%% Still answered. A zone waiting on a seed it will never get stops ticking for
+%% the whole deadline, so a payload that misses the guards costs a second of
+%% that zone's life rather than nothing.
+running(cast, {zone_loaded, _Coords, ZonePid}, _State) when is_pid(ZonePid) ->
+    asobi_zone:zone_state_loaded(ZonePid, #{}),
+    keep_state_and_data;
+running(cast, {zone_loaded, _Coords, _ZonePid}, _State) ->
+    keep_state_and_data;
+running(
+    cast, {zone_unloaded, {ZX, ZY} = Coords}, #{game_module := Mod, game_state := GS} = State
+) when is_integer(ZX), is_integer(ZY) ->
+    {keep_state, State#{game_state => call_on_zone_unloaded(Mod, Coords, GS)}};
+running(cast, {zone_unloaded, _Coords}, _State) ->
     keep_state_and_data;
 %% Guards narrow both cast arguments rather than trusting the sender. The ws
 %% handler validates the frame before it gets here, so this is defence in depth,
@@ -1826,6 +1881,55 @@ resolve_siblings(#{instance_sup := InstanceSup}) ->
     TickerPid = asobi_world_instance:get_child(InstanceSup, asobi_world_ticker),
     ZoneManagerPid = asobi_world_instance:get_child(InstanceSup, asobi_zone_manager),
     {ZoneSupPid, TickerPid, ZoneManagerPid}.
+
+%% --- Internal: Zone lifecycle ---
+
+%% Both hooks run the game module in this process, so a game module that raises
+%% would take the world server with it - and this instance is one_for_all, so
+%% that is every zone, the ticker and the manager, for one bad coords. A lazy
+%% load is triggered by whichever player happened to walk that way, so the blast
+%% radius would be arbitrary. Caught, logged, and the zone starts blank.
+-spec call_on_zone_loaded(module(), {integer(), integer()}, term(), map()) -> {map(), term()}.
+call_on_zone_loaded(Mod, Coords, GS, State) ->
+    case erlang:function_exported(Mod, on_zone_loaded, 2) of
+        false ->
+            {#{}, GS};
+        true ->
+            try Mod:on_zone_loaded(Coords, GS) of
+                {ok, ZoneState, GS1} when is_map(ZoneState) ->
+                    {ZoneState, GS1};
+                Other ->
+                    log_zone_hook_error(on_zone_loaded, Coords, {bad_return, Other}, State),
+                    {#{}, GS}
+            catch
+                Class:Reason:Stack ->
+                    log_zone_hook_error(on_zone_loaded, Coords, {Class, Reason, Stack}, State),
+                    {#{}, GS}
+            end
+    end.
+
+-spec call_on_zone_unloaded(module(), {integer(), integer()}, term()) -> term().
+call_on_zone_unloaded(Mod, Coords, GS) ->
+    case erlang:function_exported(Mod, on_zone_unloaded, 2) of
+        false ->
+            GS;
+        true ->
+            try Mod:on_zone_unloaded(Coords, GS) of
+                {ok, GS1} -> GS1;
+                _Other -> GS
+            catch
+                _Class:_Reason -> GS
+            end
+    end.
+
+log_zone_hook_error(Hook, Coords, Reason, State) ->
+    ?LOG_ERROR(#{
+        event => zone_lifecycle_hook_failed,
+        world_id => maps:get(world_id, State, undefined),
+        hook => Hook,
+        coords => Coords,
+        reason => Reason
+    }).
 
 %% --- Internal: Phases ---
 

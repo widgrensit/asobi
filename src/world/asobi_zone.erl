@@ -8,6 +8,7 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 -behaviour(gen_server).
 
 -export([start_link/1, reap/1]).
+-export([zone_state_loaded/2]).
 -export([tick/2, player_input/3, player_input/4, add_entity/3, remove_entity/2]).
 -export([spawn_entity/3, spawn_entity/4, spawn_entities/2, despawn_entity/2]).
 -export([subscribe/2, unsubscribe/2, resync/2]).
@@ -63,6 +64,13 @@ via `asobi_spatial`. Zones are created and reaped lazily as players move.
 %% the manager is saturated - in which case the NPC waits in this zone for a
 %% later tick rather than the zone stalling behind a 5s gen_server default.
 -define(ENSURE_ZONE_TIMEOUT, 1_000).
+%% How long a lazily-created zone waits for the world's `on_zone_loaded/2`
+%% answer before giving up and starting blank. The callback itself is budgeted
+%% at 200 ms in the world VM (asobi_lua_world's ?ZONE_LIFECYCLE_TIMEOUT); the
+%% rest is the world server's mailbox on a busy world. A zone that gives up
+%% logs and ticks - a world that stops opening zones because one script hung
+%% is a worse failure than one blank zone.
+-define(ZONE_SEED_DEADLINE, 1_000).
 %% How long a zone stays on the text wire before trying the binary one again, and
 %% the ceiling the doubling stops at. Read from the environment at zone start so a
 %% deployment whose games legitimately produce short-lived unencodable entities can
@@ -83,6 +91,17 @@ start_link(Config) ->
 -spec reap(pid()) -> ok.
 reap(Pid) ->
     gen_server:cast(Pid, reap).
+
+-doc """
+The world's answer to this zone's seed request: the zone_state
+`c:asobi_world:on_zone_loaded/2` built for these coords.
+
+Only `asobi_world_server` sends this, and only in reply to the cast
+`seed_request/1` makes. See there for why the round trip is asynchronous.
+""".
+-spec zone_state_loaded(pid(), map()) -> ok.
+zone_state_loaded(Pid, ZoneState) when is_map(ZoneState) ->
+    gen_server:cast(Pid, {zone_state_loaded, ZoneState}).
 
 -spec tick(pid(), non_neg_integer()) -> ok.
 tick(Pid, TickN) ->
@@ -304,6 +323,10 @@ init(Config) ->
             %% See touch_manager/1.
             zone_stamp_tab => maps:get(zone_stamp_tab, Config, undefined),
             terrain_store_pid => TerrainStorePid,
+            %% Set by asobi_zone_manager for a zone it started on demand, and
+            %% only then: a pre-warmed zone already carries the zone_state
+            %% generate_world/2 built for it. See seed_request/1.
+            zone_seed_hook => maps:get(zone_seed_hook, Config, false),
             zone_size => ZoneSize,
             grid_size => GridSize,
             rehome_margin => RehomeMargin,
@@ -418,9 +441,60 @@ init(Config) ->
 %% Build the zone's runtime state in the zone process (so a per-zone VM binds
 %% to self()), regardless of how the zone was created — pre-spawned, lazy, or
 %% recovered. Game modules without the callback keep their zone_state as-is.
+%%
+%% A lazily-created zone with nothing to restore asks the world for its
+%% zone_state first (seed_request/1) and finishes on the answer, so
+%% `init_zone_state` sees the seeded state rather than a blank map.
 -spec handle_continue(init_zone_state, map()) -> {noreply, map()}.
 handle_continue(init_zone_state, State0) ->
     State = maybe_restore_from_snapshot(State0),
+    case seed_request(State) of
+        {sent, State1} -> {noreply, State1};
+        none -> {noreply, build_zone_state(State)}
+    end.
+
+%% Ask the world server to run `c:asobi_world:on_zone_loaded/2` for these coords.
+%%
+%% The callback runs against the world's game state, which only the world server
+%% holds - for `asobi_lua_world` that is the world VM, and its 200 ms budget is
+%% documented as a world-VM budget. So the zone cannot run it itself, and it
+%% cannot *call* the world server either: the world server synchronously calls
+%% into a zone it has just had created (`asobi_zone:sync/1` on the join path),
+%% so a blocking call the other way deadlocks both for the length of two
+%% timeouts, on every join that opens a zone.
+%%
+%% The round trip is therefore two casts, and the zone declines to tick until
+%% the answer lands or `?ZONE_SEED_DEADLINE` passes. That is what "before the
+%% first tick" costs when the state has to come from another process.
+%%
+%% Only for a zone the manager started on demand (`zone_seed_hook`) that has
+%% nothing restored: a pre-warmed zone arrives with the zone_state
+%% `generate_world/2` built, and a persistent zone with a snapshot has already
+%% loaded it. Seeding either would overwrite state the game did not ask to lose.
+-spec seed_request(map()) -> {sent, map()} | none.
+seed_request(
+    #{
+        zone_seed_hook := true,
+        zone_state := ZoneState,
+        game_module := GameMod,
+        world_server_pid := WorldServerPid,
+        coords := Coords
+    } = State
+) when map_size(ZoneState) =:= 0, is_pid(WorldServerPid) ->
+    _ = code:ensure_loaded(GameMod),
+    case erlang:function_exported(GameMod, on_zone_loaded, 2) of
+        true ->
+            asobi_world_server:zone_loaded(WorldServerPid, Coords, self()),
+            TRef = erlang:send_after(?ZONE_SEED_DEADLINE, self(), zone_seed_deadline),
+            {sent, State#{zone_seed => TRef}};
+        false ->
+            none
+    end;
+seed_request(_State) ->
+    none.
+
+-spec build_zone_state(map()) -> map().
+build_zone_state(State) ->
     #{
         game_module := GameMod,
         world_id := WorldId,
@@ -443,7 +517,7 @@ handle_continue(init_zone_state, State0) ->
         border_tab => maps:get(border_tab, State, undefined)
     },
     ZoneState1 = call_optional(GameMod, init_zone_state, [ZoneConfig, ZoneState], ZoneState),
-    {noreply, State#{zone_state => ZoneState1}}.
+    State#{zone_state => ZoneState1}.
 
 %% Lazy zones (and idle-reaped ones) start with a blank zone_state. For a
 %% persistent world, recover the last snapshot here, in the zone process, so
@@ -565,6 +639,26 @@ handle_call(_Request, _From, State) ->
 
 -spec handle_cast(term(), map()) ->
     {noreply, map()} | {noreply, map(), hibernate} | {stop, normal, map()}.
+%% The world's answer to seed_request/1. `zone_seed` present is what says this
+%% zone asked and has not been answered - a second answer (a duplicated cast, or
+%% one arriving after the deadline already gave up) must not rebuild a zone_state
+%% the game has been mutating since, so it is dropped.
+handle_cast({zone_state_loaded, ZoneState}, #{zone_seed := TRef} = State) when
+    is_map(ZoneState)
+->
+    _ = erlang:cancel_timer(TRef),
+    State1 = maps:remove(zone_seed, State#{zone_state => ZoneState}),
+    {noreply, build_zone_state(State1)};
+handle_cast({zone_state_loaded, _ZoneState}, State) ->
+    {noreply, State};
+%% A zone that has not been seeded yet has no zone_state and, for a game with a
+%% per-zone VM, no VM either - init_zone_state has not run. Ticking it would run
+%% the game's spawner and handle_effects against exactly the blank state
+%% on_zone_loaded/2 exists to fill in, which is the bug (widgrensit/asobi#574),
+%% so drop the tick and stay active. The deadline below bounds this.
+handle_cast({tick, _TickN}, #{zone_seed := _} = State) ->
+    touch_manager(State),
+    {noreply, State};
 handle_cast(reap, #{entities := Entities, script_busy := true} = State) when
     map_size(Entities) =:= 0
 ->
@@ -756,6 +850,22 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 -spec handle_info(term(), map()) -> {noreply, map()} | {stop, term(), map()}.
+%% The world never answered seed_request/1 - it is overloaded, its script hung,
+%% or the game module's on_zone_loaded/2 crashed the callback out. Start blank
+%% and tick: a zone that never ticks is invisible to everyone in it, which is
+%% worse than a zone whose script has to cope with an empty zone_state. Loud,
+%% because a game relying on the seed will now be wrong.
+handle_info(zone_seed_deadline, #{zone_seed := _, coords := Coords} = State) ->
+    ?LOG_WARNING(#{
+        event => zone_seed_timeout,
+        world_id => maps:get(world_id, State, undefined),
+        coords => Coords,
+        timeout_ms => ?ZONE_SEED_DEADLINE,
+        msg => ~"on_zone_loaded/2 did not answer in time; the zone starts blank"
+    }),
+    {noreply, build_zone_state(maps:remove(zone_seed, State))};
+handle_info(zone_seed_deadline, State) ->
+    {noreply, State};
 handle_info({'DOWN', _Ref, process, DownPid, _Reason}, #{subscribers := Subs} = State) ->
     Subs1 = maps:filter(
         fun(_PlayerId, {Pid, _MonRef}) -> Pid =/= DownPid end,

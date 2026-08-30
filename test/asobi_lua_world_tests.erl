@@ -604,8 +604,38 @@ on_zone_loaded_returns_zone_state_test() ->
     try
         {ok, S0} = asobi_lua_world:init(#{lua_script => Path}),
         {ok, ZoneState, _S1} = asobi_lua_world:on_zone_loaded({3, 4}, S0),
-        ?assertEqual(3, maps:get(~"cx", ZoneState)),
-        ?assertEqual(4, maps:get(~"cy", ZoneState))
+        %% Nested under `game_state`, which is the key init_zone_state/2 builds
+        %% the zone VM's game_state out of - a flat table would reach the zone
+        %% and then be invisible to its script.
+        Seed = maps:get(~"game_state", ZoneState),
+        ?assertEqual(3, maps:get(~"cx", Seed)),
+        ?assertEqual(4, maps:get(~"cy", Seed))
+    after
+        file:delete(Path)
+    end.
+
+%% A world script whose on_zone_loaded returns nothing must not hand the zone a
+%% game_state of {}: every zone script opens with `if game_state == nil`.
+on_zone_loaded_empty_return_is_no_seed_test() ->
+    Path = world_temp_script(
+        ~"""
+        match_size = 1
+        max_players = 1
+        game_type = "world"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function on_zone_loaded(_, _, s) return {}, s end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_world:init(#{lua_script => Path}),
+        ?assertMatch({ok, #{}, _}, asobi_lua_world:on_zone_loaded({3, 4}, S0)),
+        {ok, ZoneState, _} = asobi_lua_world:on_zone_loaded({3, 4}, S0),
+        ?assertEqual(0, map_size(ZoneState))
     after
         file:delete(Path)
     end.

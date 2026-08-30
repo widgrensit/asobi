@@ -222,6 +222,42 @@ defined_callback_error_emits_game_error_test_() ->
         end
     end}.
 
+%% widgrensit/asobi#574: the whole chain, through the real world instance - a
+%% lazily-created zone asks the world server, the world VM runs
+%% `on_zone_loaded`, and what it returns is the `zone_state` the ZONE script
+%% is handed on its first tick. Asserting on the zone's Lua-visible state
+%% rather than on the bridge function is the point: the bridge was always
+%% callable, it was just never reached.
+lua_on_zone_loaded_seeds_a_lazy_zone_test_() ->
+    {timeout, 10, fun() ->
+        Config = (world_config(fixture("zone_seed_world.lua")))#{
+            grid_size => 3,
+            zone_size => 100,
+            lazy_zones => true
+        },
+        InstancePid = start_world(Config),
+        try
+            WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
+            ZoneManagerPid = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
+            ok = asobi_world_server:join(WorldPid, ~"p1"),
+            {ok, ZonePid} = poll_until(
+                fun() -> asobi_zone_manager:get_zone(ZoneManagerPid, {1, 1}) end,
+                fun(R) -> R =/= not_loaded end,
+                2000
+            ),
+            Marker = poll_until(
+                fun() -> maps:get(~"marker", asobi_zone:get_entities(ZonePid), undefined) end,
+                fun(E) -> is_map(E) end,
+                2000
+            ),
+            ?assertMatch(#{biome := ~"plains"}, Marker),
+            ?assertEqual(1, maps:get(cx, Marker)),
+            ?assertEqual(1, maps:get(cy, Marker))
+        after
+            exit(InstancePid, shutdown)
+        end
+    end}.
+
 -spec poll_until(fun(() -> T), fun((T) -> boolean()), non_neg_integer()) -> T.
 poll_until(Get, _Done, TimeoutMs) when TimeoutMs =< 0 ->
     Get();
