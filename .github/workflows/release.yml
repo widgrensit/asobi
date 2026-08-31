@@ -15,6 +15,6 @@ concurrency:
 
 jobs:
   release:
-    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.8
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.2.3
     permissions:
       contents: write
