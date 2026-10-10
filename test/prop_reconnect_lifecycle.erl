@@ -111,8 +111,29 @@ player_id() ->
 run_iteration(Ctx, Cmds) ->
     cleanup_world(Ctx),
     Final = lists:foldl(fun(C, S) -> step(C, Ctx, S) end, init_state(), Cmds),
-    timer:sleep(20),
-    check(Ctx, Final).
+    try
+        timer:sleep(20),
+        check(Ctx, Final)
+    after
+        %% The player ids are drawn from a fixed set of five, so a session left
+        %% alive here is still registered when the NEXT iteration joins the
+        %% same id - and `find_player_pid/1` takes the head of the group, so
+        %% the world would monitor a session this test no longer controls.
+        %% Nothing in `check/2` would notice: it compares player_count against
+        %% the model, and a disconnected player stays joined during grace.
+        release_sessions(Final)
+    end.
+
+%% `lists:foldl/3` erases the accumulator, so the model comes back `term()`.
+-spec release_sessions(term()) -> ok.
+release_sessions(#{sessions := Sessions}) when is_map(Sessions) ->
+    maps:foreach(fun release_one/2, Sessions).
+
+-spec release_one(term(), term()) -> ok.
+release_one(PlayerId, Pid) when is_binary(PlayerId), is_pid(Pid) ->
+    asobi_test_helpers:release_session(PlayerId, Pid);
+release_one(_PlayerId, _Pid) ->
+    ok.
 
 init_state() ->
     %% joined = players currently expected to be in the world (whether
@@ -125,7 +146,7 @@ step({join, P}, #{world_pid := Pid}, #{joined := J, sessions := Ss} = S) ->
         true ->
             S;
         false ->
-            SessionPid = fake_session(P),
+            SessionPid = asobi_test_helpers:fake_session(P),
             case asobi_world_server:join(Pid, P) of
                 ok ->
                     S#{
@@ -149,7 +170,7 @@ step({disconnect, P}, _Ctx, #{joined := J, sessions := Ss} = S) ->
 step({reconnect, P}, #{world_pid := Pid}, #{joined := J, sessions := Ss} = S) ->
     case sets:is_element(P, J) andalso not maps:is_key(P, Ss) of
         true ->
-            SessionPid = fake_session(P),
+            SessionPid = asobi_test_helpers:fake_session(P),
             case asobi_world_server:reconnect(Pid, P) of
                 ok ->
                     S#{sessions => Ss#{P => SessionPid}};
@@ -204,16 +225,6 @@ start_world() ->
     timer:sleep(40),
     ServerPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
     #{instance_pid => InstancePid, world_pid => ServerPid}.
-
-fake_session(PlayerId) ->
-    Pid = spawn(fun L() ->
-        receive
-            stop -> ok;
-            _ -> L()
-        end
-    end),
-    ok = pg:join(nova_scope, {player, PlayerId}, Pid),
-    Pid.
 
 -spec narrow_list(term()) -> [term()].
 narrow_list(L) when is_list(L) -> L.
