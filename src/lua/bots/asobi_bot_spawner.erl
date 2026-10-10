@@ -298,7 +298,12 @@ fill_queue_with_bots() ->
 fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
     ModeConfig = mode_config(Mode),
     BotConfig = maps:get(bots, ModeConfig, #{}),
-    case maps:get(enabled, BotConfig, false) of
+    %% `=:= true` rather than a bare `andalso`: a sys.config `game_modes` entry
+    %% is never shape-validated, so `bots => #{enabled => 1}` is reachable.
+    %% `andalso` raises badarg on it and the old `case` case_clause'd - either
+    %% way this gen_server dies every ?CHECK_INTERVAL and silently loses its
+    %% `known` state. Total is the right shape for operator-supplied config.
+    case maps:get(enabled, BotConfig, false) =:= true andalso fillable(Mode, ModeConfig) of
         true ->
             MinPlayers = bot_min_players(BotConfig),
             %% Never fill past max_players: a match_size=2/max_players=2
@@ -327,6 +332,46 @@ fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
     end;
 fill_mode(_, _) ->
     ok.
+
+-doc """
+Bots are match-only, and a world mode that declares them is a config error.
+
+`scan_groups/2` starts a bot process only for an `{asobi_match_server, _}` pg
+group, so a bot queued into a WORLD mode never gets a process and never
+registers under `{player, BotId}`. `asobi_world_server` then resolves it to
+`undefined`, seats it with no session and no monitor, and nothing can ever
+remove it - `find_player_by_pid/2` matches on the session pid, so no `DOWN`
+reaches it and `handle_leave/2` is unreachable. The world never empties.
+
+Filling was therefore never going to work on a world mode; it just failed
+silently and leaked a seat per bot. Refused loudly instead, because a game
+declaring `game_type = "world"` alongside a `bots` table has made a mistake it
+otherwise has no way to discover.
+""".
+-spec fillable(binary(), map()) -> boolean().
+fillable(Mode, ModeConfig) ->
+    case maps:get(type, ModeConfig, match) of
+        world ->
+            %% Rate-limited, keyed on the mode: fill_mode/2 runs every
+            %% ?CHECK_INTERVAL for every mode with somebody queued, so an
+            %% unbounded warning here is one line every 8 seconds for as long
+            %% as the misconfiguration lasts. A log an operator learns to
+            %% filter has stopped working. Same shape as log_bot_not_added/3.
+            case asobi_script_log_limiter:allow({?MODULE, bots_on_world_mode, Mode}) of
+                {true, Dropped} ->
+                    ?LOG_WARNING(#{
+                        event => bots_on_world_mode,
+                        msg => ~"bots are declared on a world-type mode; not filling",
+                        mode => Mode,
+                        suppressed_since_last => Dropped
+                    });
+                false ->
+                    ok
+            end,
+            false;
+        _ ->
+            true
+    end.
 
 clamp_fill_target(Target) when Target > ?MAX_BOT_FILL ->
     ?LOG_WARNING(#{
