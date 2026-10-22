@@ -333,7 +333,7 @@ plus a `reason` field.
 | `not_eligible` | `ws.request_failed` | The voter is not in the eligible or spectator pool |
 | `invalid_option` | `ws.request_failed` | `option_id` is not one of the vote's options |
 | `rate_limited` | `rate_limited` | `max_revotes` changes already used |
-| `vote_closed` | `ws.request_failed` | The window and its 500ms grace period have passed |
+| `vote_closed` | `ws.request_failed` | The vote has already resolved |
 | `veto_disabled` | `ws.request_failed` | `veto_enabled` is false for this vote |
 | `no_veto_tokens` | `ws.request_failed` | The player has spent every veto token |
 
@@ -342,10 +342,16 @@ session's `match_pid`, and joining a world sets `world_pid` instead, so a world
 vote can be started and broadcast but not cast from a client today. This is the
 same defect class as the Lua config above. Report both if they block you.
 
-### Grace period
+### No grace period
 
-Votes arriving within 500ms of the window closing are still accepted, to absorb
-network latency.
+A vote resolves and stops in one step, so there is no window in which a closed
+vote still accepts anything. A cast that arrives after the vote resolved gets
+`vote_closed`.
+
+Earlier versions of this guide promised a 500ms grace to absorb network
+latency. The server never delivered it - the code implementing it could not be
+reached - so it is retracted rather than documented. If you need late votes to
+count, widen `window_ms`.
 
 ## Server push frames
 

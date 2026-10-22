@@ -660,7 +660,10 @@ terminate(_Reason, StateName, #{match_id := MatchId} = State) ->
 
 %% Rate-limited: input arrives per client per tick, so an unbounded log here
 %% would be a flood channel a client controls.
--spec log_dropped_input(binary(), binary(), atom()) -> ok.
+%% `term()` for the player id: both call sites take it straight off a client
+%% frame, and this is a log line - narrowing it to `binary()` would put a
+%% function_clause on the path that exists to record a dropped input.
+-spec log_dropped_input(binary(), term(), atom()) -> ok.
 log_dropped_input(MatchId, PlayerId, Reason) ->
     case asobi_script_log_limiter:allow({?MODULE, input_dropped, MatchId}) of
         {true, Dropped} ->
@@ -670,7 +673,8 @@ log_dropped_input(MatchId, PlayerId, Reason) ->
                 player_id => PlayerId,
                 reason => Reason,
                 suppressed_since_last => Dropped
-            });
+            }),
+            ok;
         false ->
             ok
     end.
@@ -1068,9 +1072,16 @@ backup_state(MatchId, Status, State) ->
 recover_state(MatchId) ->
     try
         case ets:lookup(?STATE_TABLE, MatchId) of
-            [{MatchId, Status, SavedState}] ->
+            %% An ETS read is `term()`; the map guard is the boundary. A row
+            %% that is not a map is a corrupt crash-recovery entry, and
+            %% recovering nothing is better than restoring a shape the match
+            %% server will then index into.
+            [{MatchId, Status, SavedState}] when is_map(SavedState) ->
                 ets:delete(?STATE_TABLE, MatchId),
                 {ok, Status, SavedState#{input_queue => [], active_votes => #{}}};
+            [{MatchId, _Status, _SavedState}] ->
+                ets:delete(?STATE_TABLE, MatchId),
+                none;
             [] ->
                 none
         end
