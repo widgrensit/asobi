@@ -213,8 +213,16 @@ asobi.match.started              asobi.match.finished
 asobi.match.player_joined        asobi.match.player_left
 asobi.matchmaker.queued          asobi.matchmaker.removed
 asobi.matchmaker.deduped         asobi.matchmaker.formed
-asobi.matchmaker.failed
+asobi.matchmaker.failed          asobi.matchmaker.dropped
 ```
+
+`dropped{reason=no_live_session}` counts tickets that were matched but could
+not be seated because the player had disconnected while queued. It is
+deliberately NOT on `[asobi, error]`: on mobile that is the ordinary
+consequence of backgrounding the app or moving between networks, and counting
+it as an error would make the node's error rate track connection churn. A
+rising rate means players are abandoning the queue - look at wait times, not at
+the game.
 
 Queue depth is the number worth watching, and in a cluster it is per-node -
 each node's matchmaker holds its own tickets, so a fleet-wide total is a sum
