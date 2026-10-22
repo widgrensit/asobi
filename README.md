@@ -8,14 +8,14 @@
 <h1 align="center">asobi</h1>
 
 <p align="center">
-  <b>Multiplayer game backend on Erlang/OTP. Hot-reloadable, Apache-2.</b>
+  <b>Multiplayer game backend on Erlang/OTP. Hot-reloadable, source-available.</b>
 </p>
 
 <p align="center">
   <a href="https://hex.pm/packages/asobi"><img alt="Hex.pm" src="https://img.shields.io/hexpm/v/asobi.svg"></a>
   <a href="https://hexdocs.pm/asobi"><img alt="Hexdocs" src="https://img.shields.io/badge/hex-docs-green"></a>
   <a href="https://github.com/widgrensit/asobi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/widgrensit/asobi/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-PolyForm%20Perimeter%201.0.1-blue.svg"></a>
 </p>
 
 <p align="center">
@@ -162,7 +162,7 @@ for the "if asobi disappears tomorrow" runbook.
 
 ## Run it yourself, or use the cloud
 
-asobi is Apache-2 and self-hostable. One Docker container runs the full
+asobi is source-available and self-hostable. One Docker container runs the full
 stack; see [`docker-compose.example.yml`](docker-compose.example.yml) for
 a production-shaped setup with Postgres.
 
@@ -193,7 +193,7 @@ than clustering a single match across hosts. The full list of what is
 per-node is in [Clustering](guides/clustering.md).
 
 **What happens if asobi disappears?**
-Apache-2, single-binary deploy, Postgres backing store. Nothing in your
+Source-available, single-binary deploy, Postgres backing store. Nothing in your
 stack is load-bearing on us. See [guides/exit.md](guides/exit.md).
 
 ## Contributing
@@ -203,4 +203,4 @@ checklist, and test matrix. Security issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+asobi is [PolyForm Perimeter 1.0.1](https://polyformproject.org/licenses/perimeter/1.0.1) - source-available, non-compete. Use it, modify it, self-host it, and build games on it freely; the one thing you may not do is provide a product that competes with asobi. See [LICENSE](LICENSE).
