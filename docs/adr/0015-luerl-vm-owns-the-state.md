@@ -146,6 +146,10 @@ small message to the process that owns the state.**
      the FSM and never persists it; matches are ephemeral by design. A killed
      match VM is a lost match. Today a runaway callback in a match costs one
      tick.
+     **Amended 2026-11-05:** that holds only for a failure that does not repeat. A tick that
+     fails on every call keeps the match frozen on its last good state, so the
+     Lua match bridge now finishes the match once the streak passes
+     `match_tick_failure_ms`.
 6. Selectable by config and **defaulting off** for at least one release, so the
    old path stays available while the new one takes real traffic.
 

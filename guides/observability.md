@@ -302,7 +302,8 @@ flapping gauge. A bot is the one bridge with no groupable identity of its own:
 its id carries a random discriminator, is never reused, and must not be keyed
 on. Group a match's bots on `match_id`. asobi also logs `lua_state_large` once per excursion past
 `state_warn_words` (~100 MB by default), for operators without a metrics
-pipeline attached.
+pipeline attached. A Lua match whose `tick` fails on every call for longer
+than `match_tick_failure_ms` logs `lua_match_tick_wedged` once and finishes.
 
 ### Gameplay systems
 

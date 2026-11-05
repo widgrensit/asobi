@@ -951,3 +951,150 @@ match_bridge_identity() ->
     Config = #{lua_script => fixture("test_match.lua"), match_id => ~"match-7"},
     {ok, State} = asobi_lua_match:init(Config),
     ?assertEqual(#{kind => match, match_id => ~"match-7"}, maps:get(lua_bridge, State)).
+
+%% --- A tick that fails on every call finishes the match ---
+%%
+%% A failing tick keeps the pre-tick state, so a deterministic failure repeats
+%% forever and the match broadcasts the same frozen state until every player
+%% gives up. Past a minimum streak spanning `match_tick_failure_ms` the bridge
+%% finishes the match instead. The window is 1ms here so the tests only have to
+%% wait out the count; each tick sleeps past it.
+
+tick_wedge_test_() ->
+    {foreach, fun tick_wedge_setup/0, fun tick_wedge_cleanup/1, [
+        {"a tick that keeps failing finishes the match", fun wedged_tick_finishes/0},
+        {"fewer failures than the minimum keep the match running", fun wedge_needs_min_failures/0},
+        {"failures inside the window keep the match running", fun wedge_needs_window/0},
+        {"a successful tick resets the streak", fun wedge_reset_by_success/0},
+        {"a hot reload resets the streak", fun wedge_reset_by_reload/0},
+        {"match_tick_failure_ms = 0 never finishes the match", fun wedge_disabled/0},
+        {"a wedged tick finishes the match under the owned vm", fun wedged_tick_finishes_owned/0}
+    ]}.
+
+-define(WEDGE_KEYS, [match_tick_failure_ms, reload_poll_interval_ms, lua_vm_mode]).
+
+tick_wedge_setup() ->
+    Prev = [{K, application:get_env(asobi, K)} || K <- ?WEDGE_KEYS],
+    application:set_env(asobi, match_tick_failure_ms, 1),
+    application:set_env(asobi, reload_poll_interval_ms, 0),
+    Prev.
+
+tick_wedge_cleanup(Prev) ->
+    lists:foreach(
+        fun
+            ({K, {ok, V}}) -> application:set_env(asobi, K, V);
+            ({K, undefined}) -> application:unset_env(asobi, K)
+        end,
+        Prev
+    ).
+
+-define(ALWAYS_FAILS,
+    ~"""
+    match_size = 1
+    function init(_) return { n = 0 } end
+    function join(id, s) return s end
+    function leave(id, s) return s end
+    function handle_input(_, _, s) return s end
+    function tick(s) error('boom') end
+    function get_state(_, s) return s end
+    """
+).
+
+with_match(Code, Fun) ->
+    Path = temp_script(Code),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, S1} = asobi_lua_match:join(~"p1", S0),
+        try
+            Fun(Path, S1)
+        after
+            stop_vm(maps:get(lua_state, S1))
+        end
+    after
+        file:delete(Path)
+    end.
+
+stop_vm(LuaSt) ->
+    case asobi_lua_vm:is_handle(LuaSt) of
+        true -> asobi_lua_vm:stop(LuaSt);
+        false -> ok
+    end.
+
+slow_tick(State) ->
+    timer:sleep(2),
+    asobi_lua_match:tick(State).
+
+slow_ticks_ok(0, State) ->
+    State;
+slow_ticks_ok(N, State) ->
+    {ok, State1} = slow_tick(State),
+    slow_ticks_ok(N - 1, State1).
+
+wedged_tick_finishes() ->
+    with_match(?ALWAYS_FAILS, fun(_Path, S) ->
+        S1 = slow_ticks_ok(2, S),
+        ?assertMatch(
+            {finished, #{status := ~"error", reason := ~"tick_failed"}, _}, slow_tick(S1)
+        )
+    end).
+
+wedge_needs_min_failures() ->
+    with_match(?ALWAYS_FAILS, fun(_Path, S) ->
+        ?assertMatch(#{tick_failures := #{count := 2}}, slow_ticks_ok(2, S))
+    end).
+
+wedge_needs_window() ->
+    application:set_env(asobi, match_tick_failure_ms, 60_000),
+    with_match(?ALWAYS_FAILS, fun(_Path, S) ->
+        ?assertMatch(#{tick_failures := #{count := 10}}, slow_ticks_ok(10, S))
+    end).
+
+wedge_reset_by_success() ->
+    %% The pass flag rides in game state via handle_input: a failed tick
+    %% reverts the whole Lua state, so a script-local counter would never move.
+    Code =
+        ~"""
+        match_size = 1
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) s.pass = true; return s end
+        function tick(s)
+            if s.pass then s.pass = nil; return s end
+            error('boom')
+        end
+        function get_state(_, s) return s end
+        """,
+    with_match(Code, fun(_Path, S) ->
+        S2 = slow_ticks_ok(2, S),
+        {ok, S2a} = asobi_lua_match:handle_input(~"p1", #{}, S2),
+        {ok, S3} = slow_tick(S2a),
+        ?assertNot(maps:is_key(tick_failures, S3)),
+        S5 = slow_ticks_ok(2, S3),
+        ?assertMatch({finished, #{status := ~"error"}, _}, slow_tick(S5))
+    end).
+
+wedge_reset_by_reload() ->
+    with_match(?ALWAYS_FAILS, fun(Path, S) ->
+        S2 = slow_ticks_ok(2, S),
+        write_script(Path, <<(?ALWAYS_FAILS)/binary, "\n-- reloaded\n">>),
+        bump_mtime(Path),
+        {ok, S3} = slow_tick(S2),
+        ?assertMatch(#{tick_failures := #{count := 1}}, S3),
+        S4 = slow_ticks_ok(1, S3),
+        ?assertMatch({finished, #{status := ~"error"}, _}, slow_tick(S4))
+    end).
+
+wedge_disabled() ->
+    application:set_env(asobi, match_tick_failure_ms, 0),
+    with_match(?ALWAYS_FAILS, fun(_Path, S) ->
+        ?assertMatch(#{tick_failures := #{count := 10}}, slow_ticks_ok(10, S))
+    end).
+
+wedged_tick_finishes_owned() ->
+    application:set_env(asobi, lua_vm_mode, owned),
+    with_match(?ALWAYS_FAILS, fun(_Path, S) ->
+        ?assert(asobi_lua_vm:is_handle(maps:get(lua_state, S))),
+        S1 = slow_ticks_ok(2, S),
+        ?assertMatch({finished, #{status := ~"error"}, _}, slow_tick(S1))
+    end).

@@ -495,7 +495,7 @@ which one receives the probe, so a healthy canary means at least one is alive.
 
 ## Tuning knobs
 
-All five go under `{asobi, [...]}`; an existing `{asobi_lua, [...]}` block also
+They all go under `{asobi, [...]}`; an existing `{asobi_lua, [...]}` block also
 still works, see
 [Which application key](configuration.md#which-application-key).
 
@@ -508,6 +508,7 @@ still works, see
 | `lua_gc` | `true` | Whether asobi periodically collects each Lua state. Luerl never collects one on its own, and asobi encodes fresh tables into it on every tick, so with this off a zone's Lua memory grows for as long as anyone is in it. The interval is not configurable: it adapts to how long a collection actually takes, weighed against the per-callback copy it saves, because Luerl's collector cost grows faster than linearly in what the script keeps alive between callbacks. Set it to `false` only to diagnose a problem with the collector itself. See [Performance tuning](performance-tuning.md#lua-memory) |
 | `state_warn_words` | `12_500_000` | Size, in Erlang words (~100 MB), at which asobi logs `lua_state_large` once for a Lua state. A state that big costs ~700 ms per callback in copying alone, but what counts as too big depends on your tick budget - 100 MB is catastrophic at 80 Hz and merely expensive at 2 Hz - so tune it to the world rather than leaving it at a number chosen for someone else's. `0` silences the warning; the `[asobi, lua, state]` metric is unaffected either way |
 | `state_sample_interval_ms` | `1000` | How often each Lua bridge emits `[asobi, lua, state]`. One event per second per bridge, so a world with a hundred live zones is a hundred events per second - lower it only if you are chasing something, raise it if that is more than your sink wants. `0` means **every tick**, not off: at 80 Hz across a hundred zones that is 8000 events a second. Unlike `state_warn_words`, there is no value that disables it. See [Observability](observability.md) |
+| `match_tick_failure_ms` | `5000` | How long a Lua match's `tick` may fail on every call before asobi finishes the match. A failing tick keeps the previous state, so a failure the script cannot get past repeats on every tick and players see a frozen match that never ends. Once `tick` has failed at least 3 times in a row over at least this many milliseconds, the match finishes with `{"status": "error", "reason": "tick_failed"}` and asobi logs `lua_match_tick_wedged` once. A successful tick or a successful hot reload starts the count again. `0` disables it. Read when each match starts |
 
 ```erlang
 %% sys.config
@@ -520,9 +521,10 @@ still works, see
 ].
 ```
 
-All but `config_watch_interval` are read per call, not at boot, so changing
-one through `application:set_env/3` takes effect without a restart.
-`config_watch_interval` is read once, when the watcher starts. In a Docker
+All but `config_watch_interval` and `match_tick_failure_ms` are read per call,
+not at boot, so changing one through `application:set_env/3` takes effect
+without a restart. `config_watch_interval` is read once, when the watcher
+starts, and `match_tick_failure_ms` once per match, when it starts. In a Docker
 deploy, `ASOBI_LUA_RELOAD=off` in the container environment is the usual route.
 
 ## Validating Lua scripts in CI
