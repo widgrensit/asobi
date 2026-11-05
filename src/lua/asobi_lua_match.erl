@@ -61,6 +61,12 @@ function on_phase_ended(phase_name, state)   -- return updated state
 -define(VOTE_TIMEOUT, 200).
 -define(PHASE_TIMEOUT, 200).
 
+%% Both bounds are needed: tick_rate varies per mode and a timed-out tick is
+%% TICK_TIMEOUT slower than a normal one, so neither a count nor a duration
+%% alone means the same thing everywhere.
+-define(MIN_TICK_FAILURES, 3).
+-define(DEFAULT_TICK_FAILURE_MS, 5000).
+
 -spec init(map()) -> {ok, map()}.
 init(Config) ->
     ScriptPath =
@@ -89,6 +95,7 @@ init(Config) ->
                         game_state => GameState,
                         script => ScriptPath,
                         script_mtime => filelib:last_modified(ScriptPath),
+                        tick_failure_ms => tick_failure_ms(),
                         lua_bridge => #{
                             kind => match,
                             match_id => maps:get(match_id, Config, undefined)
@@ -242,21 +249,72 @@ tick(State0) ->
     %% of the callback, so the copy asobi_lua_loader:call/4 makes is of the
     %% collected state and a failing tick still gets its state collected.
     #{lua_state := LuaSt, game_state := GS} =
-        State = asobi_lua_loader:collect_state(asobi_lua_reload:maybe_hot_reload(State0)),
+        State = reset_streak_on_reload(
+            asobi_lua_loader:collect_state(asobi_lua_reload:maybe_hot_reload(State0))
+        ),
     case asobi_lua_loader:call(tick, [GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             Finished = is_finished(GS1, LuaSt1),
-            State1 = State#{lua_state => LuaSt1, game_state => GS1},
+            State1 = maps:remove(tick_failures, State#{lua_state => LuaSt1, game_state => GS1}),
             case Finished of
                 {true, Result} -> {finished, Result, State1};
                 false -> {ok, State1}
             end;
-        {error, timeout} ->
-            log_match_lua_error(error, tick, timeout, State),
-            {ok, State};
         {error, Reason} ->
             log_match_lua_error(error, tick, Reason, State),
-            {ok, State}
+            tick_failed(Reason, State)
+    end.
+
+%% A fix hot-reloaded into a wedged match deserves a fresh window rather than
+%% inheriting the streak the old script built up.
+-spec reset_streak_on_reload(map()) -> map().
+reset_streak_on_reload(#{just_reloaded := true} = State) ->
+    maps:remove(tick_failures, State);
+reset_streak_on_reload(State) ->
+    State.
+
+-spec tick_failed(term(), map()) -> {ok, map()} | {finished, map(), map()}.
+tick_failed(Reason, State) ->
+    Now = erlang:monotonic_time(millisecond),
+    #{count := Count, since := Since} =
+        Streak =
+        case maps:get(tick_failures, State, undefined) of
+            #{count := C} = S -> S#{count := C + 1};
+            undefined -> #{count => 1, since => Now}
+        end,
+    State1 = State#{tick_failures => Streak},
+    Window = maps:get(tick_failure_ms, State, ?DEFAULT_TICK_FAILURE_MS),
+    case wedged(Count, Now - Since, Window) of
+        false ->
+            {ok, State1};
+        true ->
+            %% Outside asobi_script_log_limiter on purpose: the per-tick line
+            %% for this key is the one most likely to be suppressed right now,
+            %% and this fires at most once per match.
+            ?LOG_ERROR(#{
+                event => lua_match_tick_wedged,
+                msg => ~"lua tick failed on every tick for too long, finishing the match",
+                script => asobi_lua_game_error:script_basename(
+                    maps:get(script, State, ~"<unknown>")
+                ),
+                match_id => maps:get(match_id, maps:get(lua_bridge, State, #{}), undefined),
+                failures => Count,
+                duration_ms => Now - Since,
+                reason_class => asobi_lua_game_error:reason_class(Reason),
+                detail => asobi_lua_game_error:format_reason(Reason)
+            }),
+            {finished, #{status => ~"error", reason => ~"tick_failed"}, State1}
+    end.
+
+-spec wedged(pos_integer(), integer(), non_neg_integer()) -> boolean().
+wedged(_Count, _Elapsed, 0) -> false;
+wedged(Count, Elapsed, Window) -> Count >= ?MIN_TICK_FAILURES andalso Elapsed >= Window.
+
+-spec tick_failure_ms() -> non_neg_integer().
+tick_failure_ms() ->
+    case asobi_lua_env:get_env(match_tick_failure_ms) of
+        {ok, N} when is_integer(N), N >= 0 -> N;
+        _ -> ?DEFAULT_TICK_FAILURE_MS
     end.
 
 -spec get_state(binary(), map()) -> map().
