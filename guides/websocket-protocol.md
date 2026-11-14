@@ -506,6 +506,13 @@ every other player in the match takes the loss; declare `losers: []` to
 score a co-op run where nobody loses. `rating` and `rating_deviation` are
 not maintained by asobi.
 
+When asobi ends the match itself rather than your game, `result.status` says
+why: `cancelled` (the match was cancelled after it started), `phases_complete` (the last
+[phase](phases.md) ended) or `error` (a Lua `tick` failed on every call for
+too long, with `reason: "tick_failed"`, see
+[Lua scripting](lua-scripting.md#a-tick-that-never-recovers)). Avoid a
+`status` key of your own if clients need to tell these apart.
+
 ### `match.leave`
 
 Leave the current match.

@@ -582,6 +582,22 @@ seconds per script and callback. A gap in the log is not the failure stopping;
 `suppressed_since_last` tells you what it really was. The telemetry counter
 behind it is not rate limited, so a dashboard sees the true rate.
 
+### A tick that never recovers
+
+A match whose `tick` fails on every call is not left running frozen. Once it
+has failed at least 3 times in a row over 5 seconds, the match finishes and
+players receive `match.finished` with this result:
+
+```json
+{"status": "error", "reason": "tick_failed"}
+```
+
+The server logs `lua_match_tick_wedged` once, with the last failure's
+`reason_class` and `detail`. A successful tick or a successful hot reload
+starts the count again, so a fix pushed while the match is still running gets a fresh window.
+Self-hosters can change the window with `match_tick_failure_ms`, see
+[Self-hosting](self-hosting.md#tuning-knobs).
+
 ### Pushing errors to the client during development
 
 Set `ASOBI_DEV_ERRORS=true` (`1` also works) on the container, or
